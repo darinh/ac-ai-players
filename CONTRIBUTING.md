@@ -10,6 +10,10 @@ mostly docs. Code lives in two future places:
 Until those exist, "contributing" means improving the plan: docs, ADRs,
 research findings, and answers to open questions.
 
+For hands-on ACE investigation, use
+[`docs/local-install.md`](docs/local-install.md) to get a working
+upstream ACE server on a Windows 11 dev box.
+
 ## Ground rules
 
 - **Prefer small PRs.** One doc change, one ADR, one research finding per PR.

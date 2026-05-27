@@ -1,0 +1,77 @@
+# AGENTS.md — `ac-ai-players`
+
+Guidance for AI agents (Copilot CLI, Anvil, Claude, etc.) working
+in this repo. Auto-loaded by Copilot CLI from the repo root and
+cwd. Keep this file short; deeper context lives in linked docs.
+
+## What this repo is
+
+A docs-only planning repo for ACE AI Players — a project to add
+NPC-bot players to an Asheron's Call Emulator (ACE) server. The
+shipped code lives in the fork repo `darinh/ACE-bots`. Until M0
+fully closes, this repo holds milestones, ADRs, research notes,
+and the public roadmap.
+
+See [`README.md`](README.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for the project overview, status, and contributor ground rules.
+
+## House style (match this or docs will feel off)
+
+- Plain, direct prose. No marketing voice. No hype. No emoji.
+- Short sentences. Cross-link related docs via relative paths.
+- "Bots are bots, not agents." LLMs only at the Social layer.
+
+## Branch workflow (MANDATORY for Medium and Large tasks)
+
+**Rule:** For any Medium or Large task in this repo, you MUST
+invoke the `create-new-branch` skill before making any code
+changes. Do NOT run a bare `git checkout -b` — even if your agent
+framework's branch-check step (e.g. Anvil step 0b) suggests it.
+The skill replaces that step.
+
+Why this is mandatory, not advisory:
+- Worktrees keep the main checkout untouched between tasks.
+- Branch naming and `.gitignore` hygiene are handled in one place.
+- The agent's working directory is moved to the worktree, so a
+  session interruption leaves recoverable state on disk.
+
+How:
+
+1. The skill lives at
+   [`.github/skills/create-new-branch/SKILL.md`](.github/skills/create-new-branch/SKILL.md).
+2. Inputs: `task_id` (required, slugified Anvil task-id);
+   `base_branch` (optional — see below).
+3. The skill creates `.worktrees/<task-id>/` on branch
+   `anvil/<task-id>`, then `/cwd`s the agent into it.
+
+When the branch is merged, delete the worktree (use `-d`, not
+`-D`, to protect against accidental loss of unmerged work):
+
+```sh
+git worktree remove .worktrees/<task-id>
+git branch -d anvil/<task-id>
+```
+
+A `cleanup-merged-worktree` skill will automate this once it
+exists.
+
+Small tasks (typo, one-liner, doc tweak) may commit directly on
+the current branch — the worktree overhead is not worth it. Use
+your judgment but err on the side of using the skill.
+
+## GitHub Actions hygiene
+
+- Pin third-party actions to full 40-char commit SHAs (not
+  floating tags like `@v4`); add an inline `# v4` comment.
+- When a workflow declares an explicit `permissions:` block AND
+  uses `actions/checkout`, it must grant `contents: read` —
+  otherwise the checkout fails.
+
+## Related instruction files
+
+- This file (`AGENTS.md`) — primary, auto-loaded.
+- [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
+  — repo-wide Copilot instructions (currently absent; add if
+  needed).
+- [`.github/instructions/`](.github/instructions) — path-scoped
+  instructions (currently absent).

@@ -142,3 +142,7 @@ Everything else lives outside the fork.
 - [`archetypes.md`](archetypes.md) — personality templates
 - [`research/ace-investigation.md`](research/ace-investigation.md) — what we
   need to learn about ACE before forking
+- [`adr/0003-botcreature-not-botplayer.md`](adr/0003-botcreature-not-botplayer.md)
+  — bots subclass `Creature`, not `Player`
+- [`adr/0004-bot-tick-via-monster-tick.md`](adr/0004-bot-tick-via-monster-tick.md)
+  — bots tick on the per-landblock `Monster_Tick` scheduler

@@ -26,17 +26,17 @@ feel inhabited when only a handful of humans are logged in.
 
 ## Status
 
-Planning. No code yet. We're answering open questions about how to extend
-[ACEmulator/ACE](https://github.com/ACEmulator/ACE) before forking anything.
+**M0:** complete. Q1–Q5 research issues ([#1](https://github.com/darinh/ac-ai-players/issues/1)–[#5](https://github.com/darinh/ac-ai-players/issues/5)) closed; 6 ADRs landed at [`docs/adr/`](docs/adr/); one-page fork plan at [`docs/ace-fork-plan.md`](docs/ace-fork-plan.md).
 
-See [`roadmap/milestones.md`](roadmap/milestones.md) for the plan,
-[`roadmap/m0-checklist.md`](roadmap/m0-checklist.md) for what's left in
-the current milestone, and
-[`docs/research/ace-investigation.md`](docs/research/ace-investigation.md)
-for the questions we need to answer first. The final M0 deliverable —
-the one-page summary of what we change in our ACE fork — lives at
-[`docs/ace-fork-plan.md`](docs/ace-fork-plan.md) (stub until Q1–Q5 are
-answered).
+**M1:** spike shipped on the personal fork branch (`botplayer-spike`), not yet merged upstream and not yet public. Live on a private Windows-service deployment. Shipped capabilities tracked in issues [#6](https://github.com/darinh/ac-ai-players/issues/6)–[#15](https://github.com/darinh/ac-ai-players/issues/15): bot spawning + `/spawnbot`, `/botdirector` command surface, per-archetype chat/greetings/tells/emotes, persistence with auto-save, hot-reload of bot data, auto-spawn-from-roster on world-open, heritage-based name generator, `/botdirector follow`, greeter mute, Windows-service deployment via NSSM.
+
+**Open architectural reversal in progress:** the M1 spike implemented bots as `BotCreature : Creature` per [ADR-0003](docs/adr/0003-botcreature-not-botplayer.md). That ADR is being superseded by [ADR-0007](docs/adr/0007-bots-as-player-not-creature.md) — bots become `BotPlayer : Player` so they aggro mobs and interact with NPCs as real players do. Migration epic tracked in the GitHub issues.
+
+**M2 backlog:** issues [#16](https://github.com/darinh/ac-ai-players/issues/16)–[#20](https://github.com/darinh/ac-ai-players/issues/20) — pathfinding planner (blocking), walk-to-point, attack-monster, HP/stam/mana awareness, death + lifestone respawn.
+
+See [`roadmap/milestones.md`](roadmap/milestones.md) for the milestone plan, [`roadmap/m0-checklist.md`](roadmap/m0-checklist.md) for M0 closeout state, and [`docs/research/ace-investigation.md`](docs/research/ace-investigation.md) for the M0 research findings.
+
+Want to run ACE locally to follow along? See [`docs/local-install.md`](docs/local-install.md) for a verified Windows 11 setup procedure.
 
 ## Repository map
 
@@ -52,6 +52,7 @@ docs/
   archetypes.md                          # Personality templates
   brain-providers.md                     # Local/API/scripted pluggability
   ace-fork-plan.md                       # M0 final deliverable: what we fork and why
+  local-install.md                       # How to run upstream ACE locally on Windows 11
   glossary.md                            # Project-specific terms
   adr/
     README.md                            # How and when to write an ADR

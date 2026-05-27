@@ -50,3 +50,25 @@ _(Add a line per ADR as they land.)_
   Define "minimal fork" as: every change to the ACE fork must be
   defensible as an upstreamable PR, with a written upstream
   justification in the PR description.
+- [`0003-botcreature-not-botplayer.md`](0003-botcreature-not-botplayer.md)
+  — **Superseded by [0007](0007-bots-as-player-not-creature.md).**
+  Originally proposed subclassing `Creature` to avoid `Session`
+  coupling. Reversed when the user directive forced bots to be real
+  players (mob aggro, NPC interaction).
+- [`0004-bot-tick-via-monster-tick.md`](0004-bot-tick-via-monster-tick.md)
+  — Proposed. Bots tick on the existing per-landblock `Monster_Tick`
+  scheduler; brain work is async-by-contract. (May be revisited
+  when ADR-0007 migration lands — `Player` ticks differently than
+  `Creature`.)
+- [`0005-pathfinding-reuse-and-build.md`](0005-pathfinding-reuse-and-build.md)
+  — Proposed. Reuse ACE motion and collision primitives; build our own
+  LOS+waypoint planner; defer navmesh until M7 if needed.
+- [`0006-chat-via-creature-broadcast.md`](0006-chat-via-creature-broadcast.md)
+  — Proposed. Bots speak via `EnqueueBroadcast(GameMessageHearSpeech)`
+  directly; inbound /tell handled by a guid shim in the tell handler.
+- [`0007-bots-as-player-not-creature.md`](0007-bots-as-player-not-creature.md)
+  — Proposed. Reverses ADR-0003. Bots subclass `Player` using the
+  character-create constructor (`Player(Weenie, ObjectGuid, accountId)`)
+  with a `NullSession` no-op to absorb `Session.Network.EnqueueSend(...)`
+  calls. Driver: bots must aggro mobs and interact with NPCs as real
+  players do.

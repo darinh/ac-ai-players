@@ -22,6 +22,12 @@ The planning docs for the project, grouped by topic. Start with
   exactly what we change in our ACE fork (M0 final deliverable; stub
   until Q1–Q5 are answered).
 
+## How-to
+
+- [`local-install.md`](local-install.md) — get an upstream ACE server
+  running on a Windows 11 developer box so you can investigate the
+  codebase against a live server.
+
 ## Research
 
 - [`research/ace-investigation.md`](research/ace-investigation.md) — the
