@@ -1,0 +1,10 @@
+# Default owner for everything. Add others as the project grows.
+*       @darinh
+
+# Docs sub-areas (placeholders for when collaborators show up).
+/docs/                 @darinh
+/docs/adr/             @darinh
+/docs/research/        @darinh
+/roadmap/              @darinh
+/archetypes/           @darinh
+/.github/              @darinh

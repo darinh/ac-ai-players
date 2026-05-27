@@ -1,0 +1,58 @@
+# Labels we use in this repo. Apply with a labels-sync action when one
+# exists; for now, create these manually in the repo settings.
+
+- name: research-question
+  color: "0e8a16"
+  description: "A specific question to answer before we can make a design decision."
+
+- name: adr
+  color: "5319e7"
+  description: "An architectural decision worth recording."
+
+- name: archetype
+  color: "fbca04"
+  description: "A new or changed bot archetype."
+
+- name: bug
+  color: "d73a4a"
+  description: "Something in the docs or repo is wrong, broken, or inconsistent."
+
+- name: docs
+  color: "0075ca"
+  description: "Documentation changes only."
+
+- name: motor
+  color: "c2e0c6"
+  description: "Motor layer: movement, combat mechanics, world interaction."
+
+- name: tactical
+  color: "bfd4f2"
+  description: "Tactical layer: short-horizon decisions."
+
+- name: social
+  color: "f9d0c4"
+  description: "Social layer: chat, identity, memory of other characters."
+
+- name: director
+  color: "d4c5f9"
+  description: "BotDirector / bubble model / spawning."
+
+- name: brain
+  color: "fef2c0"
+  description: "Brain providers, routing, model selection."
+
+- name: ace-fork
+  color: "006b75"
+  description: "Touches the planned ACE fork."
+
+- name: blocked
+  color: "b60205"
+  description: "Waiting on an upstream decision, research finding, or ADR."
+
+- name: good-first-issue
+  color: "7057ff"
+  description: "A reasonable place for a new contributor to start."
+
+- name: help-wanted
+  color: "008672"
+  description: "Specifically looking for someone to pick this up."
