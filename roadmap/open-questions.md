@@ -30,10 +30,15 @@ Grouped by area.
     Migration in progress.
 - **Threading model.** One thread per landblock? One thread per bot? Async
   on a shared pool? Depends on Q2.
-  - **Resolved** by
+  - **Initially resolved** by
     [`../docs/adr/0004-bot-tick-via-monster-tick.md`](../docs/adr/0004-bot-tick-via-monster-tick.md):
     bots tick on the per-landblock `Monster_Tick` scheduler; brain work
     is async-by-contract.
+  - **Superseded** by
+    [`../docs/adr/0008-bot-tick-via-player-tick.md`](../docs/adr/0008-bot-tick-via-player-tick.md):
+    `Player` ticks via `Player_Tick`, not `Monster_Tick`. Bots get a
+    new `OnBrainTick` virtual hook at the end of `Player.Player_Tick`.
+    Async-by-contract carries forward unchanged. Follows from ADR-0007.
 - **How invasive is "minimal diff"?** We say "minimize the ACE fork". Define
   it. Lines of code? Number of touched files? "Could upstream accept it as
   a PR"? The last one is the strictest and probably the right bar.

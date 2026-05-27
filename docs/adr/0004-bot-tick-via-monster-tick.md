@@ -1,10 +1,18 @@
 # 0004. Bots tick on the existing per-landblock `Monster_Tick` scheduler
 
-- **Status:** Proposed
+- **Status:** Superseded by [ADR-0008](0008-bot-tick-via-player-tick.md)
 - **Date:** 2026-05-27
 - **Deciders:** @darinh
 - **Supersedes:** _(none)_
-- **Superseded by:** _(none)_
+- **Superseded by:** [`0008-bot-tick-via-player-tick.md`](0008-bot-tick-via-player-tick.md)
+
+> **Note (2026-05-27):** This ADR's premise — that bots subclass
+> `Creature` and therefore tick via `Monster_Tick` — was invalidated
+> by [ADR-0007](0007-bots-as-player-not-creature.md), which moves
+> bots to `Player`. [ADR-0008](0008-bot-tick-via-player-tick.md)
+> defines the replacement tick mechanism via `Player_Tick`. The
+> reasoning below (especially Options B–D and the async-by-contract
+> rule) remains relevant; ADR-0008 carries forward most of it.
 
 ## Context
 

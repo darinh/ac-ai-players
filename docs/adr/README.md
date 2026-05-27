@@ -56,10 +56,11 @@ _(Add a line per ADR as they land.)_
   coupling. Reversed when the user directive forced bots to be real
   players (mob aggro, NPC interaction).
 - [`0004-bot-tick-via-monster-tick.md`](0004-bot-tick-via-monster-tick.md)
-  — Proposed. Bots tick on the existing per-landblock `Monster_Tick`
-  scheduler; brain work is async-by-contract. (May be revisited
-  when ADR-0007 migration lands — `Player` ticks differently than
-  `Creature`.)
+  — **Superseded by [0008](0008-bot-tick-via-player-tick.md).**
+  Originally proposed ticking bots via the per-landblock
+  `Monster_Tick` scheduler. Superseded because ADR-0007 moves bots
+  from `Creature` to `Player`, and `Player` ticks via
+  `Player_Tick`, not `Monster_Tick`.
 - [`0005-pathfinding-reuse-and-build.md`](0005-pathfinding-reuse-and-build.md)
   — Proposed. Reuse ACE motion and collision primitives; build our own
   LOS+waypoint planner; defer navmesh until M7 if needed.
@@ -72,3 +73,8 @@ _(Add a line per ADR as they land.)_
   with a `NullSession` no-op to absorb `Session.Network.EnqueueSend(...)`
   calls. Driver: bots must aggro mobs and interact with NPCs as real
   players do.
+- [`0008-bot-tick-via-player-tick.md`](0008-bot-tick-via-player-tick.md)
+  — Proposed. Bots tick via a new `OnBrainTick` virtual hook at the
+  end of `Player.Player_Tick`. Supersedes ADR-0004 (which assumed
+  the `Monster_Tick` scheduler that no longer applies under
+  ADR-0007). Brain work remains async-by-contract.
