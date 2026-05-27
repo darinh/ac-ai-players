@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "matcher": "bash|powershell",
+        "bash": "bash .github/hooks/scripts/intercept-git-branch.sh",
+        "powershell": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github\\hooks\\scripts\\intercept-git-branch.ps1",
+        "cwd": ".",
+        "timeoutSec": 5
+      }
+    ]
+  }
+}

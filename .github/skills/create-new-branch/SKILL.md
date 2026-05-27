@@ -19,6 +19,16 @@ user-invocable: true
 Create a git branch inside an isolated worktree under
 `.worktrees/<task-id>/`. The branch is named `anvil/<task-id>`.
 
+> **Hard enforcement.** This repo ships a `preToolUse` hook at
+> `.github/hooks/enforce-worktree-branching.json` that intercepts
+> bare `git checkout -b/-B <name>` and `git switch -c/-C <name>`
+> (including `--create`, `--force-create`, attached-arg `-bfoo`,
+> and `git -c x=y checkout -b foo`) and denies them with a reason
+> that points back to this skill. You normally don't have to think
+> about the hook — just invoke this skill when you need a new
+> branch and the hook stays quiet. The hook is the safety net for
+> the times the convention slips.
+
 ## When to use this skill
 
 - At the start of any Medium or Large task (Anvil sizing).
