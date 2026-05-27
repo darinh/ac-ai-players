@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Open questions
+    url: https://github.com/darinh/ac-ai-players/blob/main/roadmap/open-questions.md
+    about: Check the open questions list before filing — your topic may already be tracked.
+  - name: Milestones
+    url: https://github.com/darinh/ac-ai-players/blob/main/roadmap/milestones.md
+    about: See what's planned and in what order before proposing new work.
