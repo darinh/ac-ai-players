@@ -35,8 +35,7 @@ the current milestone, and
 [`docs/research/ace-investigation.md`](docs/research/ace-investigation.md)
 for the questions we need to answer first. The final M0 deliverable —
 the one-page summary of what we change in our ACE fork — lives at
-[`docs/ace-fork-plan.md`](docs/ace-fork-plan.md) (stub until Q1–Q5 are
-answered).
+[`docs/ace-fork-plan.md`](docs/ace-fork-plan.md).
 
 Want to run ACE locally to follow along with the investigation? See
 [`docs/local-install.md`](docs/local-install.md) for a verified

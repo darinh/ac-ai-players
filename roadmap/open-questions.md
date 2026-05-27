@@ -14,15 +14,44 @@ Grouped by area.
   move to sidecar before M5". Is that right, or should we eat the complexity
   early and go sidecar from M1? Risk of starting in-process: every brain
   bug is now a server-crash bug.
+  - **Resolved** by
+    [`../docs/adr/0001-start-in-process-then-sidecar.md`](../docs/adr/0001-start-in-process-then-sidecar.md):
+    in-process for M1–M4, split before M5.
 - **BotPlayer vs. souped-up Creature.** Subclass `Player` (gets us free
   player-like behavior, drags in session assumptions) vs. extend `Creature`
-  (cleaner separation, but we re-implement a lot). Answered by Q1 in
-  [`../docs/research/ace-investigation.md`](../docs/research/ace-investigation.md).
+  (cleaner separation, but we re-implement a lot).
+  - **Resolved** by
+    [`../docs/adr/0003-botcreature-not-botplayer.md`](../docs/adr/0003-botcreature-not-botplayer.md):
+    `BotCreature : Creature`.
 - **Threading model.** One thread per landblock? One thread per bot? Async
   on a shared pool? Depends on Q2.
+  - **Resolved** by
+    [`../docs/adr/0004-bot-tick-via-monster-tick.md`](../docs/adr/0004-bot-tick-via-monster-tick.md):
+    bots tick on the per-landblock `Monster_Tick` scheduler; brain work
+    is async-by-contract.
 - **How invasive is "minimal diff"?** We say "minimize the ACE fork". Define
   it. Lines of code? Number of touched files? "Could upstream accept it as
   a PR"? The last one is the strictest and probably the right bar.
+  - **Resolved** by
+    [`../docs/adr/0002-minimal-fork-bar.md`](../docs/adr/0002-minimal-fork-bar.md):
+    upstreamable-PR bar.
+- **Pathfinding reuse vs. replacement.** ACE has no pathfinder today
+  (Q4). Reuse motion+collision and write our own planner, or import
+  Recast/Detour?
+  - **Resolved** by
+    [`../docs/adr/0005-pathfinding-reuse-and-build.md`](../docs/adr/0005-pathfinding-reuse-and-build.md):
+    reuse motion+collision, build LOS+waypoint planner; reserve
+    Recast/Detour for M7 if needed.
+- **Chat hook strategy.** Have bots speak via Player chat methods
+  (session-coupled) or directly via the underlying broadcast
+  primitives?
+  - **Resolved** by
+    [`../docs/adr/0006-chat-via-creature-broadcast.md`](../docs/adr/0006-chat-via-creature-broadcast.md):
+    `BotCreature` calls `EnqueueBroadcast(GameMessageHearSpeech)`
+    directly; inbound /tell handled by guid shim.
+- **`Character.is_Bot` persistence shape.** Q5 lands a provisional
+  answer (new BIT column on `Character`, default 0). To be reified as
+  a separate ADR before M6 starts.
 
 ## BotDirector
 

@@ -124,7 +124,11 @@ in Holtburg yesterday is the same Helpful Vet today.
   cross-world movement) or only spawn/despawn?
 - What's the right "feels alive" target population for, say, Holtburg with
   3 humans online vs. 20?
-- Anti-griefing: should bots avoid known PK hotspots if their archetype
-  doesn't expect PK?
-
 See [`../roadmap/open-questions.md`](../roadmap/open-questions.md).
+
+## See also
+
+- [`architecture.md`](architecture.md) — the overall layered design
+- [`adr/0005-pathfinding-reuse-and-build.md`](adr/0005-pathfinding-reuse-and-build.md)
+  — the Motor-layer pathfinding decision (relevant to in-world bot
+  movement after spawn)

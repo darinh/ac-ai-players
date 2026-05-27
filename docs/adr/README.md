@@ -50,3 +50,16 @@ _(Add a line per ADR as they land.)_
   Define "minimal fork" as: every change to the ACE fork must be
   defensible as an upstreamable PR, with a written upstream
   justification in the PR description.
+- [`0003-botcreature-not-botplayer.md`](0003-botcreature-not-botplayer.md)
+  — Proposed. Subclass `Creature`, not `Player`, for in-server bots.
+  Avoids `Session` coupling and the pervasive `Player.Session.Network`
+  surface.
+- [`0004-bot-tick-via-monster-tick.md`](0004-bot-tick-via-monster-tick.md)
+  — Proposed. Bots tick on the existing per-landblock `Monster_Tick`
+  scheduler; brain work is async-by-contract.
+- [`0005-pathfinding-reuse-and-build.md`](0005-pathfinding-reuse-and-build.md)
+  — Proposed. Reuse ACE motion and collision primitives; build our own
+  LOS+waypoint planner; defer navmesh until M7 if needed.
+- [`0006-chat-via-creature-broadcast.md`](0006-chat-via-creature-broadcast.md)
+  — Proposed. Bots speak via `EnqueueBroadcast(GameMessageHearSpeech)`
+  directly; inbound /tell handled by a guid shim in the tell handler.

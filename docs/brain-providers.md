@@ -152,6 +152,13 @@ routing:
   inject NPC-like commentary? (Probably no — too easy to break immersion.)
 - Should bots ever generate *actions* via LLM, or strictly chat? (Default:
   strictly chat for v1; revisit when tactical layer feels limiting.)
-- How aggressively can we cache without bots sounding like cardboard cutouts?
-
 See [`../roadmap/open-questions.md`](../roadmap/open-questions.md).
+
+## See also
+
+- [`architecture.md`](architecture.md) — the Social layer and its
+  process boundary
+- [`adr/0001-start-in-process-then-sidecar.md`](adr/0001-start-in-process-then-sidecar.md)
+  — when the sidecar split happens
+- [`adr/0006-chat-via-creature-broadcast.md`](adr/0006-chat-via-creature-broadcast.md)
+  — how bot-uttered chat reaches players (and how /tell reaches bots)
