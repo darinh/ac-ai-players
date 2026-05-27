@@ -1,0 +1,30 @@
+name: Sync labels
+
+# Keeps the repository's labels in sync with .github/labels.yml. That file
+# is the source of truth; this workflow applies it.
+#
+# Runs on push to main when labels.yml or this workflow changes, and on
+# manual dispatch. Does not delete labels not in the config — removals
+# should be done by hand to avoid surprises.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.yml
+      - .github/workflows/labels-sync.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: EndBug/label-sync@52074158190acb45f3077f9099fea818aa43f97a # v2 (v2.3.3)
+        with:
+          config-file: .github/labels.yml
+          delete-other-labels: false

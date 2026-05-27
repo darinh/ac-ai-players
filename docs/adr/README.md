@@ -43,4 +43,10 @@ Don't write one for:
 
 _(Add a line per ADR as they land.)_
 
-- _none yet_
+- [`0001-start-in-process-then-sidecar.md`](0001-start-in-process-then-sidecar.md)
+  — Proposed. Run BotBrain in-process with ACE for M1–M4; split the
+  Social layer into a sidecar before M5.
+- [`0002-minimal-fork-bar.md`](0002-minimal-fork-bar.md) — Proposed.
+  Define "minimal fork" as: every change to the ACE fork must be
+  defensible as an upstreamable PR, with a written upstream
+  justification in the PR description.

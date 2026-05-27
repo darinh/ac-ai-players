@@ -1,5 +1,14 @@
 # Architecture
 
+## Contents
+
+- [High-level](#high-level)
+- [The layers, and why each one exists](#the-layers-and-why-each-one-exists)
+- [Per-bot state](#per-bot-state)
+- [Process boundaries](#process-boundaries)
+- [Where the ACE fork actually changes](#where-the-ace-fork-actually-changes)
+- [See also](#see-also)
+
 ## High-level
 
 ```
@@ -124,6 +133,10 @@ Everything else lives outside the fork.
 
 ## See also
 
+- [`ace-fork-plan.md`](ace-fork-plan.md) — the concrete one-pager of what
+  we change in ACE (M0 final deliverable)
+- [`architecture-diagrams.md`](architecture-diagrams.md) — Mermaid
+  diagrams supporting the prose above
 - [`bot-director.md`](bot-director.md) — bubble spawn model
 - [`brain-providers.md`](brain-providers.md) — pluggable LLM backends
 - [`archetypes.md`](archetypes.md) — personality templates

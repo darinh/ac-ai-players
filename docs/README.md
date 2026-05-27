@@ -7,12 +7,20 @@ The planning docs for the project, grouped by topic. Start with
 
 - [`architecture.md`](architecture.md) — the three-layer model (Motor /
   Tactical / Social), the BotDirector, and how the pieces fit together.
+- [`architecture-diagrams.md`](architecture-diagrams.md) — Mermaid
+  diagrams supporting `architecture.md`.
 - [`bot-director.md`](bot-director.md) — the bubble model for spawning
   and despawning bots around human players.
 - [`brain-providers.md`](brain-providers.md) — how we talk to LLMs
   (hosted, local, scripted) and route between them.
 - [`archetypes.md`](archetypes.md) — the recipe-card model for bot
   variety and the starter archetype list.
+
+## Plans
+
+- [`ace-fork-plan.md`](ace-fork-plan.md) — the one-page summary of
+  exactly what we change in our ACE fork (M0 final deliverable; stub
+  until Q1–Q5 are answered).
 
 ## Research
 

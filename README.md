@@ -29,28 +29,55 @@ feel inhabited when only a handful of humans are logged in.
 Planning. No code yet. We're answering open questions about how to extend
 [ACEmulator/ACE](https://github.com/ACEmulator/ACE) before forking anything.
 
-See [`roadmap/milestones.md`](roadmap/milestones.md) for the plan and
+See [`roadmap/milestones.md`](roadmap/milestones.md) for the plan,
+[`roadmap/m0-checklist.md`](roadmap/m0-checklist.md) for what's left in
+the current milestone, and
 [`docs/research/ace-investigation.md`](docs/research/ace-investigation.md)
-for the questions we need to answer first.
+for the questions we need to answer first. The final M0 deliverable —
+the one-page summary of what we change in our ACE fork — lives at
+[`docs/ace-fork-plan.md`](docs/ace-fork-plan.md) (stub until Q1–Q5 are
+answered).
 
 ## Repository map
 
 ```
 PLAN.md                                  # Progress tracker for repo population
 README.md                                # This file
+CONTRIBUTING.md                          # How to propose docs/ADRs/archetypes
 docs/
+  README.md                              # Index of all design docs
   architecture.md                        # Layered brain design
+  architecture-diagrams.md               # Mermaid diagrams for the architecture
   bot-director.md                        # Spawn/despawn bubble model
   archetypes.md                          # Personality templates
   brain-providers.md                     # Local/API/scripted pluggability
+  ace-fork-plan.md                       # M0 final deliverable: what we fork and why
+  glossary.md                            # Project-specific terms
+  adr/
+    README.md                            # How and when to write an ADR
+    template.md                          # ADR template
+    0001-start-in-process-then-sidecar.md
+    0002-minimal-fork-bar.md
   research/
     ace-investigation.md                 # Open questions about ACE codebase
     related-work.md                      # WoW playerbots, other MMO precedents
 roadmap/
   milestones.md                          # M0 through M7
+  m0-checklist.md                        # M0 work items
   open-questions.md                      # Things still TBD
+archetypes/
+  README.md                              # How to add an archetype (YAML schema is illustrative for now)
+  *.yaml                                 # Per-archetype stubs (buffbot, helpful_vet, newbie, trade_spammer)
 .github/
+  CODEOWNERS
+  PULL_REQUEST_TEMPLATE.md
+  labels.yml                             # Labels we use (synced by .github/workflows/labels-sync.yml)
+  workflows/
+    labels-sync.yml                      # Applies labels.yml to the repo
   ISSUE_TEMPLATE/
-    milestone.md
     research-question.md
+    adr-proposal.md
+    archetype-proposal.md
+    bug.md
+    config.yml
 ```
