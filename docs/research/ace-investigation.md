@@ -108,6 +108,12 @@ For each question:
 3. Note unknowns and any follow-up questions.
 4. Close with a short summary that the architecture docs can reference.
 
+A running local ACE server makes these questions much easier to answer
+— you can read the source, set breakpoints, watch the log, and inspect
+the database while the world is live. See
+[`../local-install.md`](../local-install.md) for the verified setup
+procedure.
+
 We do **not** fork ACE until Q1–Q3 are answered. Q4 and Q5 can be answered
 in parallel with early M2/M3 work.
 

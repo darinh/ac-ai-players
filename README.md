@@ -38,6 +38,10 @@ the one-page summary of what we change in our ACE fork — lives at
 [`docs/ace-fork-plan.md`](docs/ace-fork-plan.md) (stub until Q1–Q5 are
 answered).
 
+Want to run ACE locally to follow along with the investigation? See
+[`docs/local-install.md`](docs/local-install.md) for a verified
+Windows 11 setup procedure.
+
 ## Repository map
 
 ```
@@ -52,6 +56,7 @@ docs/
   archetypes.md                          # Personality templates
   brain-providers.md                     # Local/API/scripted pluggability
   ace-fork-plan.md                       # M0 final deliverable: what we fork and why
+  local-install.md                       # How to run upstream ACE locally on Windows 11
   glossary.md                            # Project-specific terms
   adr/
     README.md                            # How and when to write an ADR
