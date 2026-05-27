@@ -30,17 +30,20 @@ remove as the research forces):
 
 - [x] ADR-0001 — in-process for M1–M4, sidecar before M5 (proposed):
       [`../docs/adr/0001-start-in-process-then-sidecar.md`](../docs/adr/0001-start-in-process-then-sidecar.md)
-- [x] ADR-0003 — BotCreature, not BotPlayer:
+- [x] ADR-0002 — "minimal fork" definition (proposed):
+      [`../docs/adr/0002-minimal-fork-bar.md`](../docs/adr/0002-minimal-fork-bar.md)
+- [x] ADR-0003 — BotCreature, not BotPlayer (~~proposed~~ **superseded by ADR-0007**):
       [`../docs/adr/0003-botcreature-not-botplayer.md`](../docs/adr/0003-botcreature-not-botplayer.md)
-- [x] ADR-0004 — bot tick on `Monster_Tick`:
+- [x] ADR-0004 — bot tick on `Monster_Tick` (proposed; may be superseded
+      when ADR-0007 migration lands):
       [`../docs/adr/0004-bot-tick-via-monster-tick.md`](../docs/adr/0004-bot-tick-via-monster-tick.md)
 - [x] ADR-0005 — pathfinding: reuse motion + build planner:
       [`../docs/adr/0005-pathfinding-reuse-and-build.md`](../docs/adr/0005-pathfinding-reuse-and-build.md)
 - [x] ADR-0006 — chat via `EnqueueBroadcast`; inbound /tell shim:
       [`../docs/adr/0006-chat-via-creature-broadcast.md`](../docs/adr/0006-chat-via-creature-broadcast.md)
-- [x] ADR-0002 — "minimal fork" definition (proposed):
-      [`../docs/adr/0002-minimal-fork-bar.md`](../docs/adr/0002-minimal-fork-bar.md)
-- [ ] ADR — `Character.is_Bot` persistence shape (deferred to pre-M6)
+- [x] ADR-0007 — bots subclass `Player`, not `Creature` (proposed, reverses ADR-0003):
+      [`../docs/adr/0007-bots-as-player-not-creature.md`](../docs/adr/0007-bots-as-player-not-creature.md)
+- [ ] ADR — `Character.is_Bot` persistence shape (deferred to pre-M6 — see [#24](https://github.com/darinh/ac-ai-players/issues/24))
 
 ## Docs updated to reflect findings
 
@@ -54,6 +57,9 @@ remove as the research forces):
       discovered during Q3 (via ADR-0006 cross-references)
 - [x] `roadmap/open-questions.md` items that were resolved are annotated
       inline with a "Resolved by …" link to the ADR
+- [ ] `docs/ace-fork-plan.md` and `docs/architecture.md` updated to
+      reflect ADR-0007 (BotPlayer not BotCreature) — tracked in the
+      bots-as-real-players migration epic, lands with the implementation
 
 ## Final deliverable
 
@@ -61,8 +67,12 @@ The success criterion for M0: "We can describe, on one page, exactly what
 we are going to change in our ACE fork and why."
 
 - [x] That one-pager exists at `docs/ace-fork-plan.md`
-- [ ] It is reviewed and accepted in a PR
+- [x] It was reviewed via the Anvil adversarial-review pass on commit
+      `730cb57` (gpt-5.3-codex). PR-shape review is preserved in the
+      session ledger; no GitHub PR was opened because the work landed
+      directly via the M0 reconciliation branch.
 - [x] It is referenced from `docs/architecture.md` and `README.md`
 
-Only when every box above is checked do we open the ACE fork repo and
-start M1.
+M0 is closed. M1 spike has shipped (see issues [#6](https://github.com/darinh/ac-ai-players/issues/6)–[#15](https://github.com/darinh/ac-ai-players/issues/15)).
+The ace-fork-plan one-pager will be revised under ADR-0007 to reflect
+the BotPlayer reversal.

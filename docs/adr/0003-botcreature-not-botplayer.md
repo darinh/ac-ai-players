@@ -1,10 +1,20 @@
 # 0003. Subclass `Creature`, not `Player`, for in-server bots
 
-- **Status:** Proposed
+- **Status:** Superseded by [ADR-0007](0007-bots-as-player-not-creature.md)
 - **Date:** 2026-05-27
 - **Deciders:** @darinh
 - **Supersedes:** _(none)_
-- **Superseded by:** _(none)_
+- **Superseded by:** [0007](0007-bots-as-player-not-creature.md)
+
+> **Note (2026-05-30):** This ADR is superseded by
+> [ADR-0007](0007-bots-as-player-not-creature.md). The user directive
+> that bots must "aggro mobs and interact with NPCs as real players"
+> requires the `Player` path. ADR-0007 also corrects an oversight in
+> this ADR: `Player` has a second constructor —
+> `Player(Weenie, ObjectGuid, uint accountId)` — that does not take a
+> `Session`, which was the basis for the "session coupling is
+> unavoidable" reasoning below. The reasoning here is preserved as
+> historical context.
 
 ## Context
 

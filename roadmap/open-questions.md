@@ -20,9 +20,14 @@ Grouped by area.
 - **BotPlayer vs. souped-up Creature.** Subclass `Player` (gets us free
   player-like behavior, drags in session assumptions) vs. extend `Creature`
   (cleaner separation, but we re-implement a lot).
-  - **Resolved** by
+  - **Initially resolved** by
     [`../docs/adr/0003-botcreature-not-botplayer.md`](../docs/adr/0003-botcreature-not-botplayer.md):
     `BotCreature : Creature`.
+  - **Reversed** by
+    [`../docs/adr/0007-bots-as-player-not-creature.md`](../docs/adr/0007-bots-as-player-not-creature.md):
+    `BotPlayer : Player` with a `NullSession` no-op. Driver: bots
+    must aggro mobs and interact with NPCs as real players do.
+    Migration in progress.
 - **Threading model.** One thread per landblock? One thread per bot? Async
   on a shared pool? Depends on Q2.
   - **Resolved** by
