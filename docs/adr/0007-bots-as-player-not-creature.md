@@ -354,7 +354,8 @@ Adapted from the rubber-duck review:
 - Related doc(s):
   - [0003-botcreature-not-botplayer.md](0003-botcreature-not-botplayer.md) (superseded)
   - [0002-minimal-fork-bar.md](0002-minimal-fork-bar.md) (explicitly relaxed for this decision)
-  - [0004-bot-tick-via-monster-tick.md](0004-bot-tick-via-monster-tick.md) (may need superseding by ADR-0008)
+  - [0004-bot-tick-via-monster-tick.md](0004-bot-tick-via-monster-tick.md) (superseded by [ADR-0008](0008-bot-tick-via-player-tick.md))
+  - [0008-bot-tick-via-player-tick.md](0008-bot-tick-via-player-tick.md) (the replacement tick mechanism)
   - [`../ace-fork-plan.md`](../ace-fork-plan.md) (needs update)
   - [`../architecture.md`](../architecture.md) (needs re-alignment)
   - [`../research/ace-investigation.md`](../research/ace-investigation.md) Q1
