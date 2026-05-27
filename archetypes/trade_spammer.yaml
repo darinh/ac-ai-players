@@ -1,0 +1,42 @@
+# Illustrative only — schema not locked. See ../docs/archetypes.md.
+id: trade_spammer
+display_name: "Trade Spammer"
+display_name_pool:
+  - "WTS_Everything"
+  - "MarketMagnate"
+  - "DerethTrader"
+  - "PriceCheckPlz"
+
+description: >
+  Marketplace fixture. Spams WTS/WTB lines on a timer. Mostly scripted
+  with a configurable item/price list.
+
+level_range: [40, 126]
+gear_tier: any
+preferred_zones:
+  - marketplace
+  - trade_hub
+spawn_weight: 0.8
+
+movement_profile: stationary
+combat_profile: never
+goals:
+  - shout_trade_offers
+group_behavior: solo
+
+schedule:
+  hangout_pct: 1.0
+
+brain_preference: scripted_only
+chat_propensity: 1.0
+shout_cooldown_seconds: 90
+respond_to_questions: true
+
+fallback_lines:
+  shout:
+    - "WTS PEERLESS HEALING POTION PST"
+    - "WTB MAJOR DEFENDER ANY ARMOR PST"
+    - "WTS GSA, BEST OFFER"
+  on_price_check:
+    - "market rate, friend"
+    - "name your price"

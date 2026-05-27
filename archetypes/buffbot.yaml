@@ -1,0 +1,45 @@
+# Illustrative only — schema not locked. See ../docs/archetypes.md.
+id: buffbot
+display_name: "Buffbot"
+display_name_pool:
+  - "BuffsRUs"
+  - "FreeBuffs"
+  - "ItemEnchanter"
+  - "SelfBuffs4Tips"
+
+description: >
+  Stationary in town, casts beneficial spells on anyone who greets them.
+  Trivially cheap to run; no LLM required.
+
+level_range: [100, 126]
+gear_tier: spellcaster
+preferred_zones:
+  - starter_town
+  - bank
+  - lifestone
+spawn_weight: 0.5
+
+movement_profile: stationary
+combat_profile: never
+goals:
+  - stand_at_buff_spot
+  - cast_buffs_on_request
+group_behavior: solo
+
+schedule:
+  hangout_pct: 1.0
+
+brain_preference: scripted_only
+chat_propensity: 0.2
+respond_to_questions: true
+
+fallback_lines:
+  greeting:
+    - "buffs available, just ask"
+    - "tips appreciated, not required"
+  on_help_request:
+    - "sure, hold still"
+    - "one moment"
+  on_tip:
+    - "thanks!"
+    - "appreciated, friend"

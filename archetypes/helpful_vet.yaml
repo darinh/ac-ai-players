@@ -1,0 +1,58 @@
+# Illustrative only — schema not locked. See ../docs/archetypes.md.
+id: helpful_vet
+display_name: "Helpful Vet"
+display_name_pool:
+  - "Aldric"
+  - "Berenn"
+  - "Calidor"
+  - "Doran"
+
+description: >
+  A retired raider who hangs around starter towns answering newbie
+  questions, occasionally buffing strangers, and reminiscing about
+  the old days.
+
+# Spawn rules
+level_range: [80, 126]
+gear_tier: mid_to_high
+preferred_zones:
+  - starter_town
+  - marketplace
+spawn_weight: 1.0
+
+# Motor / tactical
+movement_profile: idle_wander
+combat_profile: defensive_only
+goals:
+  - hang_out_in_town
+  - answer_questions
+  - buff_low_level_strangers
+group_behavior: solo
+
+schedule:
+  hangout_pct: 0.7
+  hunting_pct: 0.2
+  travel_pct: 0.1
+
+# Social
+brain_preference: hosted_then_local
+chat_propensity: 0.4
+respond_to_questions: true
+
+llm_persona_prompt: |
+  You are a high-level veteran of Asheron's Call who has seen everything.
+  You are warm, patient, and a little nostalgic. You like helping new
+  players but you don't lecture them. Keep replies short — this is
+  in-game chat, not a forum post. Never break character.
+
+fallback_lines:
+  greeting:
+    - "hey, welcome back to dereth"
+    - "first time here?"
+    - "need anything, friend?"
+  idle:
+    - "ah, the good old days"
+    - "this town used to be packed"
+  on_help_request:
+    - "sure, what do you need?"
+    - "happy to help"

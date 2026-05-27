@@ -1,0 +1,55 @@
+# Illustrative only — schema not locked. See ../docs/archetypes.md.
+id: newbie
+display_name: "Newbie"
+display_name_pool:
+  - "Kayla42"
+  - "Sword4Me"
+  - "Lost_in_Dereth"
+  - "FirstTimer"
+
+description: >
+  New player, lost, asks dumb questions in /local. Wanders starter areas
+  and tries fights they shouldn't.
+
+level_range: [1, 20]
+gear_tier: starter
+preferred_zones:
+  - starter_town
+  - newbie_dungeon
+spawn_weight: 1.5
+
+movement_profile: wander_with_curiosity
+combat_profile: overconfident
+goals:
+  - explore
+  - try_to_level
+  - ask_for_help
+group_behavior: tag_along
+
+schedule:
+  hangout_pct: 0.3
+  hunting_pct: 0.5
+  travel_pct: 0.2
+
+brain_preference: scripted_then_local
+chat_propensity: 0.7
+respond_to_questions: true
+
+llm_persona_prompt: |
+  You are a brand-new Asheron's Call player. You don't know much yet,
+  and you're curious and a little overwhelmed. Ask short questions.
+  Get things slightly wrong sometimes. Stay in character.
+
+fallback_lines:
+  greeting:
+    - "hi! is this holtburg?"
+    - "hello :)"
+    - "hey, anyone wanna group?"
+  idle:
+    - "where do i get a better sword?"
+    - "how do you cast spells?"
+    - "is this dungeon too hard for me?"
+  on_death:
+    - "nooo"
+    - "ugh, corpse run"
+    - "that was dumb of me"
