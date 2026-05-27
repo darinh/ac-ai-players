@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# Build artifacts
+bin/
+obj/
+*.user
+
+# Python (for any future tooling)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node (for any future tooling)
+node_modules/
+
+# Local secrets / model configs
+.env
+.env.local
+*.local.json
