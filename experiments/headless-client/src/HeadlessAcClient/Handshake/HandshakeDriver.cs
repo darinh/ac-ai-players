@@ -31,7 +31,7 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    private const int ObserveSeconds = 30;
+    private const int ObserveSeconds = 65;
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -104,7 +104,7 @@ internal sealed class HandshakeDriver : IDisposable
             // EncryptedChecksum packet should now verify.
             var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
             int packetsObserved = await ObservePostHandshakePackets(
-                recvBuf, ObserveSeconds, cryptoRecv, ct).ConfigureAwait(false);
+                recvBuf, ObserveSeconds, cryptoRecv, connectReq.ClientId, ct).ConfigureAwait(false);
 
             return new HandshakeResult(
                 connectReq.ServerTime,
@@ -214,13 +214,22 @@ internal sealed class HandshakeDriver : IDisposable
         return PacketHeader.HeaderSize + bodyLen;
     }
 
-    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, CancellationToken ct)
+    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, uint assignedClientId, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         var count = 0;
         var crcPass = 0;
         var crcFail = 0;
-        Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s ...");
+        uint lastReceivedSeq = 0;
+        var sendBuf = new byte[64]; // bare ack/timesync is tiny (20-byte header + ≤16 bytes optional)
+        var acksSent = 0;
+        var timeSyncsSent = 0;
+        // Per ConnectRequest body, this is our index in NetworkManager.sessionMap.
+        // Server's NetworkManager.ProcessPacket (line 147-156) uses it to find our
+        // session. Setting Header.Id wrong = silent drop.
+        ushort myClientId = (ushort)assignedClientId;
+
+        Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
             var remaining = deadline - DateTime.UtcNow;
@@ -257,6 +266,46 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   optional: AckSequence={pkt.Optional.AckSequence}");
                 foreach (var (fh, data) in pkt.Fragments)
                     Console.WriteLine($"[observe]   {fh} payload[{data.Length}]: {Hex(data.AsSpan(0, Math.Min(data.Length, 32)))}{(data.Length > 32 ? " ..." : "")}");
+
+                if (!verified)
+                    continue;
+
+                // Mirror NetworkSession.HandlePacket line 495: track highest
+                // received sequence, skipping Seq=0 and bare AckSequence-only.
+                if (pkt.Header.Sequence != 0 && pkt.Header.Flags != PacketHeaderFlags.AckSequence)
+                {
+                    if (pkt.Header.Sequence > lastReceivedSeq)
+                        lastReceivedSeq = pkt.Header.Sequence;
+
+                    // Ack every sequenced inbound packet. Bare AckSequence is
+                    // sent unencrypted at Sequence=0 (mirrors server line 742-743
+                    // "AckSequence-only doesn't advance sequence").
+                    var ack = new OutboundPacket();
+                    ack.AddAckSequence(lastReceivedSeq);
+                    var ackLen = ack.Pack(sendBuf, myClientId, sequence: 0, iteration: 1,
+                                          encrypt: false, cryptoSend: null);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ackLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    acksSent++;
+                    Console.WriteLine($"[observe]   -> sent Ack({lastReceivedSeq}) [{ackLen} bytes] to {_serverPort0}");
+                }
+
+                // Reply to TimeSync. Server ignores the inbound timestamp value
+                // (NetworkSession line 472-477 "Do something with this...") so
+                // echoing the server's value is sufficient. Sent unencrypted at
+                // Sequence=0 to avoid burning a cryptoSend slot before we have
+                // real game traffic.
+                if (pkt.Header.HasFlag(PacketHeaderFlags.TimeSync))
+                {
+                    var ts = new OutboundPacket();
+                    ts.AddTimeSync(pkt.Optional.TimeSync);
+                    var tsLen = ts.Pack(sendBuf, myClientId, sequence: 0, iteration: 1,
+                                        encrypt: false, cryptoSend: null);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, tsLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    timeSyncsSent++;
+                    Console.WriteLine($"[observe]   -> sent TimeSync({pkt.Optional.TimeSync:R}) [{tsLen} bytes]");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -264,7 +313,8 @@ internal sealed class HandshakeDriver : IDisposable
                 break;
             }
         }
-        Console.WriteLine($"[observe] total post-handshake packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
+        Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes");
         return count;
     }
 
