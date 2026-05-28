@@ -21,6 +21,7 @@ internal enum GameMessageOpcode : uint
     UpdatePosition           = 0xF748,
     SetState                 = 0xF74B,
     Motion                   = 0xF74C,
+    ObjectDelete             = 0xF747,
     GameEvent                = 0xF7B0,
     CharacterEnterWorldServerReady = 0xF7DF,
     ServerMessage            = 0xF7E0,

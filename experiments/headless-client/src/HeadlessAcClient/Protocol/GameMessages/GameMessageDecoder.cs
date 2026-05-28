@@ -50,11 +50,30 @@ internal static class GameMessageDecoder
             GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
             GameMessageOpcode.UpdatePosition => DecodeUpdatePosition(payload),
             GameMessageOpcode.Motion => DecodeMotion(payload),
+            GameMessageOpcode.ObjectDelete => DecodeObjectDelete(payload),
             GameMessageOpcode.SetState => DecodeSetState(payload),
             GameMessageOpcode.HearSpeech => DecodeHearSpeech(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
             _ => null,
         };
+    }
+
+    private static ObjectDeleteMessage? DecodeObjectDelete(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            // 4B opcode + 4B guid + 2B instSeq + 2B align pad = 12B.
+            // We only consume 10B (the trailing pad is ignored).
+            if (p.Length < ObjectDeleteMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var guid    = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var instSeq = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor));
+            return new ObjectDeleteMessage(guid, instSeq);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static SetStateMessage? DecodeSetState(ReadOnlySpan<byte> p)

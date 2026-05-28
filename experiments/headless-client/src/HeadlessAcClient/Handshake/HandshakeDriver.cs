@@ -392,12 +392,19 @@ internal sealed class HandshakeDriver : IDisposable
                     var decoded = GameMessageDecoder.Decode(assembled);
                     var opcode = GameMessageDecoder.PeekOpcode(assembled);
 
+                    // Snapshot whether an ObjectDelete target was
+                    // present in WorldState BEFORE Apply runs, so the
+                    // observer log can distinguish "removed" from
+                    // "noop on unknown guid".
+                    var preDeletePresent = decoded is ObjectDeleteMessage odPre
+                        && worldState.TryGet(odPre.Guid) is not null;
+
                     // Feed the world-state accumulator BEFORE the
                     // logging switch. Apply is a no-op for message
                     // types it doesn't recognize (CharacterList,
                     // ServerName, GameEvent envelopes, etc.) so it's
                     // safe to call unconditionally here.
-                    worldState.Apply(decoded);
+                    var applied = worldState.Apply(decoded);
 
                     switch (decoded)
                     {
@@ -499,6 +506,16 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine(
                                 $"[observe]   -> SetState: guid=0x{ss.Guid:X8} state=0x{ss.State:X8} " +
                                 $"seq=(inst={ss.InstanceSequence},state={ss.StateSequence})");
+                            break;
+                        case ObjectDeleteMessage od:
+                            var deleteVerdict = !preDeletePresent
+                                ? "noop (unknown guid)"
+                                : applied
+                                    ? "removed"
+                                    : "dropped (stale instSeq or self)";
+                            Console.WriteLine(
+                                $"[observe]   -> ObjectDelete: guid=0x{od.Guid:X8} " +
+                                $"instSeq={od.InstanceSequence} [{deleteVerdict}]");
                             break;
                         case HearSpeechMessage hs:
                             var hsPreview = hs.Message.Length > 80 ? hs.Message.Substring(0, 80) + "..." : hs.Message;

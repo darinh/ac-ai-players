@@ -27,9 +27,6 @@
 //     server-issued PlayerCreate) routes correctly.
 //
 // What's intentionally NOT here yet (Phase 5+):
-//   - DeleteObject / RemoveObject decoder — stale objects
-//     accumulate until then. Acceptable for short academy
-//     captures.
 //   - Spatial query API (EnumerateNearby) — defer until tactics
 //     actually need it. Naive Vector3.Distance across CellIds
 //     is wrong; doing it properly requires landblock
@@ -120,6 +117,7 @@ internal sealed class WorldState
         return decoded switch
         {
             ObjectCreateMessage oc            => ApplyObjectCreate(oc),
+            ObjectDeleteMessage od            => ApplyObjectDelete(od),
             UpdatePositionMessage up          => ApplyUpdatePosition(up),
             MotionMessage mm                  => ApplyMotion(mm),
             SetStateMessage ss                => ApplySetState(ss),
@@ -132,6 +130,45 @@ internal sealed class WorldState
     private bool ApplyPlayerCreate(PlayerCreateMessage pc)
     {
         SetSelf(pc.Guid);
+        return true;
+    }
+
+    /// <summary>
+    /// Remove an object from the world snapshot. Stale-delete
+    /// protection: drops the message if the incoming instance
+    /// sequence is STRICTLY OLDER than the snapshot's current
+    /// SeqInstance (wrap-aware). This handles the race where a
+    /// respawn (new instance epoch) arrives before a stale
+    /// delete from the previous epoch.
+    ///
+    /// If we never saw an ObjectCreate for this guid, the
+    /// delete is a no-op (returns false). This is the common
+    /// case where the bot enters the world after an object's
+    /// brief lifetime, and the server flushes a delete for an
+    /// object we never observed.
+    ///
+    /// Self-guid protection: refuse to delete our own player
+    /// snapshot. A server-sent ObjectDelete for SelfGuid would
+    /// indicate logout, which we model elsewhere — never wipe
+    /// SelfGuid mid-session via the routine delete path.
+    /// </summary>
+    private bool ApplyObjectDelete(ObjectDeleteMessage od)
+    {
+        if (!_objects.TryGetValue(od.Guid, out var snap))
+            return false;
+
+        if (snap.SeqInstance is ushort cur
+            && SequenceCompare.IsStrictlyNewer(cur, od.InstanceSequence))
+            return false;
+
+        if (SelfGuid is uint selfGuid && selfGuid == od.Guid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] ignoring ObjectDelete for SelfGuid 0x{od.Guid:X8}");
+            return false;
+        }
+
+        _objects.Remove(od.Guid);
         return true;
     }
 
