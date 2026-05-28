@@ -449,6 +449,14 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"rot=({upm.Rotation.W:F3},{upm.Rotation.X:F3},{upm.Rotation.Y:F3},{upm.Rotation.Z:F3})" +
                                 $"{vel}{plc} flags=0x{(uint)upm.Flags:X2} seq=(inst={upm.InstanceSequence},pos={upm.PositionSequence},tp={upm.TeleportSequence},fp={upm.ForcePositionSequence})");
                             break;
+                        case MotionMessage mm:
+                            Console.WriteLine(
+                                $"[observe]   -> Motion: guid=0x{mm.Guid:X8} type={mm.MovementType} " +
+                                $"flags={mm.MotionFlags} style=0x{mm.CurrentStyle:X4} " +
+                                $"autonomous={mm.IsAutonomous} " +
+                                $"seq=(inst={mm.InstanceSequence},mov={mm.MovementSequence},srv={mm.ServerControlSequence}) " +
+                                $"body[{mm.BodyBytes.Length}]");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;

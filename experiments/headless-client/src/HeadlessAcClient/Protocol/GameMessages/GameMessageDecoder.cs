@@ -49,9 +49,44 @@ internal static class GameMessageDecoder
             GameMessageOpcode.ObjectCreate => ObjectCreateDecoder.Decode(payload),
             GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
             GameMessageOpcode.UpdatePosition => DecodeUpdatePosition(payload),
+            GameMessageOpcode.Motion => DecodeMotion(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
             _ => null,
         };
+    }
+
+    private static MotionMessage? DecodeMotion(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < MotionMessage.HeaderSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var guid     = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var instSeq  = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var movSeq   = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var srvCtl   = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var autoByte = p[cursor]; cursor += 1;
+
+            // writer.Align() pads the stream length to the next
+            // 4-byte multiple. After the prior writes, the payload
+            // offset is 15 (opcode 4 + body 11). Align to 16.
+            var pad = (4 - (cursor % 4)) % 4;
+            cursor += pad;
+            if (p.Length - cursor < 4) return null;
+
+            var mt    = (MovementType)p[cursor]; cursor += 1;
+            var mf    = (MotionFlags)p[cursor]; cursor += 1;
+            var style = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+
+            var body = p.Slice(cursor).ToArray();
+            return new MotionMessage(
+                guid, instSeq, movSeq, srvCtl,
+                autoByte != 0, mt, mf, style, body);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static UpdatePositionMessage? DecodeUpdatePosition(ReadOnlySpan<byte> p)
