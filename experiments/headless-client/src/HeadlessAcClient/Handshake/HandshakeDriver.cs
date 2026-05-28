@@ -457,6 +457,16 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"seq=(inst={mm.InstanceSequence},mov={mm.MovementSequence},srv={mm.ServerControlSequence}) " +
                                 $"body[{mm.BodyBytes.Length}]");
                             break;
+                        case SetStateMessage ss:
+                            Console.WriteLine(
+                                $"[observe]   -> SetState: guid=0x{ss.Guid:X8} state=0x{ss.State:X8} " +
+                                $"seq=(inst={ss.InstanceSequence},state={ss.StateSequence})");
+                            break;
+                        case HearSpeechMessage hs:
+                            var hsPreview = hs.Message.Length > 80 ? hs.Message.Substring(0, 80) + "..." : hs.Message;
+                            Console.WriteLine(
+                                $"[observe]   -> HearSpeech: <{hs.SenderName}> (0x{hs.SenderId:X8}, chatType=0x{hs.ChatMessageType:X}): \"{hsPreview}\"");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;

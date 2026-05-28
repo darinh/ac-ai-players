@@ -12,12 +12,14 @@ internal enum GameMessageOpcode : uint
 {
     // Phase 2/3 server → client
     PrivateUpdatePropertyInt = 0x02CD,
+    HearSpeech               = 0x02BB,
     CharacterCreateResponse  = 0xF643,
     CharacterList            = 0xF658,
     CharacterError           = 0xF659,
     ObjectCreate             = 0xF745,
     PlayerCreate             = 0xF746,
     UpdatePosition           = 0xF748,
+    SetState                 = 0xF74B,
     Motion                   = 0xF74C,
     GameEvent                = 0xF7B0,
     CharacterEnterWorldServerReady = 0xF7DF,

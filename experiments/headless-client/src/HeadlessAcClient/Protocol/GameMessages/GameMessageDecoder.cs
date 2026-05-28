@@ -50,9 +50,47 @@ internal static class GameMessageDecoder
             GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
             GameMessageOpcode.UpdatePosition => DecodeUpdatePosition(payload),
             GameMessageOpcode.Motion => DecodeMotion(payload),
+            GameMessageOpcode.SetState => DecodeSetState(payload),
+            GameMessageOpcode.HearSpeech => DecodeHearSpeech(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
             _ => null,
         };
+    }
+
+    private static SetStateMessage? DecodeSetState(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < SetStateMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var guid    = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var state   = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var instSeq = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var stSeq   = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor));
+            return new SetStateMessage(guid, state, instSeq, stSeq);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static HearSpeechMessage? DecodeHearSpeech(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            var cursor = sizeof(uint); // skip opcode
+            var msg    = AcStrings.ReadString16L(p, ref cursor);
+            var sender = AcStrings.ReadString16L(p, ref cursor);
+            if (p.Length - cursor < 8) return null;
+            var senderId = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var chatType = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor));
+            return new HearSpeechMessage(msg, sender, senderId, chatType);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static MotionMessage? DecodeMotion(ReadOnlySpan<byte> p)
