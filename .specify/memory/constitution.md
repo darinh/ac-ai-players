@@ -1,15 +1,21 @@
-# ac-ai-players Constitution
+# ac-ai-players Constitution (DRAFT — awaiting user ratification)
+
+> **Status:** Draft authored by Anvil 2026-05-28. **Not ratified.** No
+> agent (including Anvil) may treat this document as binding until the
+> human user reviews and accepts it. The Anvil agent committed an
+> earlier version as "ratified v1.0.0" — that was an error and is
+> being walked back here.
 
 The Pilot Track is building Pilot-01, the first autonomous AI player
 for Asheron's Call. Code ships on the `darinh/ACE-bots` fork on
 branch `botplayer-spike`. Plans, ADRs, specs, and research live in
 this repo (`darinh/ac-ai-players`).
 
-This constitution governs every spec, plan, task, and code change
-produced under the Pilot Track. It supersedes ad-hoc agent
-behaviour. Every spec-kit command — `/speckit.specify`,
-`/speckit.plan`, `/speckit.tasks`, `/speckit.implement` — must read
-this file first and conform to it.
+This document is a **proposed** constitution to govern every spec,
+plan, task, and code change produced under the Pilot Track. The user
+may edit, reject, or replace any principle below. Nothing here is in
+effect until the user explicitly accepts it (and an "accepted-by"
+line is added to the change log).
 
 ## Core Principles
 
@@ -203,12 +209,15 @@ conflict — do not work around it.
 
 ## Change log
 
-- **2026-05-28** — Ratified. Sourced from the user's directives
-  this session ("no guessing," "multi-LLM accountability,"
+- **2026-05-28** — **Drafted** by Anvil. Sourced from the user's
+  directives this session ("no guessing," "multi-LLM accountability,"
   "everything as a GitHub issue," "use spec-kit"), the existing
   [`AGENTS.md`](../../AGENTS.md), the Pilot Track docs in
   [`docs/pilot/`](../../docs/pilot/), and the canonical AC
   mechanics in
   [`docs/research/ac-mechanics-textbook.md`](../../docs/research/ac-mechanics-textbook.md).
+  **The previous commit asserted this was ratified v1.0.0; that was
+  incorrect — the user has not ratified anything.** Awaiting user
+  review and explicit acceptance.
 
-**Version**: 1.0.0 | **Ratified**: 2026-05-28 | **Last Amended**: 2026-05-28
+**Version**: 0.1.0-draft | **Drafted**: 2026-05-28 | **Ratified**: — | **Accepted-by**: —
