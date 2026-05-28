@@ -177,10 +177,8 @@ internal sealed record MotionBody(
 {
     public override string ToString() => MovementType switch
     {
-        Protocol.GameMessages.MovementType.Invalid =>
-            $"Invalid(flags=0x{(uint)(Invalid?.State.Flags ?? 0):X2} " +
-            $"numCmds={Invalid?.State.NumCommands ?? 0} " +
-            $"sticky={(Invalid?.StickyObjectGuid is uint s ? $"0x{s:X8}" : "-")})",
+        Protocol.GameMessages.MovementType.Invalid when Invalid is { } iv =>
+            FormatInvalid(iv),
         Protocol.GameMessages.MovementType.MoveToObject when MoveToObject is { } m =>
             $"MoveToObject(target=0x{m.TargetGuid:X8} " +
             $"origin=({m.Origin.Position.X:F2},{m.Origin.Position.Y:F2},{m.Origin.Position.Z:F2}) " +
@@ -194,6 +192,31 @@ internal sealed record MotionBody(
             $"TurnToHeading(heading={t.Parameters.DesiredHeading:F2} speed={t.Parameters.Speed:F2})",
         _ => $"{MovementType}",
     };
+
+    // MovementType.Invalid is the wire byte for raw client-initiated
+    // motion broadcasts (despite the name — see ACE.Entity.Enum.MovementTypes.cs
+    // for the "Invalid was named in ACLogView" comment). The body is an
+    // InterpretedMotionState carrying the actual command (WalkForward,
+    // RunForward, sidesteps, turns, stop). Surface those fields so
+    // motion broadcasts are self-documenting in run logs.
+    private static string FormatInvalid(MovementInvalidBody iv)
+    {
+        var s = iv.State;
+        var sb = new System.Text.StringBuilder();
+        sb.Append("Invalid(flags=0x").Append(((uint)s.Flags).ToString("X2"))
+          .Append(" numCmds=").Append(s.NumCommands);
+        if (s.CurrentStyle    is ushort cs)  sb.Append(" style=0x").Append(cs.ToString("X4"));
+        if (s.ForwardCommand  is ushort fwd) sb.Append(" fwd=0x").Append(fwd.ToString("X4"));
+        if (s.ForwardSpeed    is float fs)   sb.Append(" fwdSpd=").Append(fs.ToString("F2"));
+        if (s.SidestepCommand is ushort sd)  sb.Append(" side=0x").Append(sd.ToString("X4"));
+        if (s.SidestepSpeed   is float ss)   sb.Append(" sideSpd=").Append(ss.ToString("F2"));
+        if (s.TurnCommand     is ushort tn)  sb.Append(" turn=0x").Append(tn.ToString("X4"));
+        if (s.TurnSpeed       is float ts)   sb.Append(" turnSpd=").Append(ts.ToString("F2"));
+        sb.Append(" sticky=");
+        sb.Append(iv.StickyObjectGuid is uint g ? $"0x{g:X8}" : "-");
+        sb.Append(')');
+        return sb.ToString();
+    }
 }
 
 internal static class MotionBodyDecoder

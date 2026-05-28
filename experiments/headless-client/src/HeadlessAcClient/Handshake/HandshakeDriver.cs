@@ -304,28 +304,39 @@ internal sealed class HandshakeDriver : IDisposable
         // (!Teleporting) and we observe nothing.
         int loginCompletePacketIndex = -1;
         int autonomousPositionPacketIndex = -1;
-        int moveToStateStartPacketIndex = -1;
         const int PostLoginCompleteGracePackets = 30;
         const int PostAutonomousPositionGracePackets = 30;
-        const int PostMoveStartGracePackets = 40;
 
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a "Bruised Apple" snapshot is in range (stationary
         // floor item, unambiguous demo target). If present, we REPLACE
         // (not duplicate) the vanilla AP with one whose rotation faces
         // the apple, then use the same rotation in MoveToState START.
-        // Stop trigger: EITHER the grace window expires (authoritative)
-        // OR observed distance drops below MotionStopRadius (opportunistic).
-        // Per rubber-duck on Phase 6: distance-based stop is opportunistic
-        // because Player.OnMoveToState is gated by !FastTick for NPK chars
-        // so we may not get a continuous UpdatePosition stream — relying
-        // solely on distance could miss the stop entirely.
+        //
+        // Phase 6b — the actual translation. Server-side, Player.OnMoveToState
+        // short-circuits on !FastTick (true for NPK headless char), so
+        // the MoveToState broadcast alone never advances our position.
+        // BUT Player.UpdatePlayerPosition(RequestedLocation) runs each
+        // tick regardless of FastTick, and GameActionAutonomousPosition.Handle
+        // sets RequestedLocation. So we step the bot toward the target
+        // by sending periodic AP packets ourselves. Real clients send AP
+        // every ~1s while moving; we use a faster 4 Hz cadence so the
+        // bot can cover ~5-10u within our 60s observation window.
         WorldObjectSnapshot? motionTarget = null;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
+        DateTime?            motionStartedAt = null;
+        DateTime             nextWalkTickAt = DateTime.UtcNow;
+        Vector3?             lastSentWaypointPos = null;
+        int                  walkTickAps = 0;
+        uint                 motionLockedCellId = 0;
+        bool                 motionDone = false;
         const string         MotionTargetName = "Bruised Apple";
         const float          MotionStopRadius = 2.0f;
         const float          MotionSearchRadius = 30f;
+        const int            WalkTickIntervalMs = 250;
+        const float          WalkSpeedUnitsPerSec = 2.5f;
+        const int            MotionWallClockTimeoutSec = 30;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
@@ -351,8 +362,16 @@ internal sealed class HandshakeDriver : IDisposable
         {
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero) break;
+            // Phase 6b — wake the loop either when a packet arrives OR
+            // when the next walk-tick is due, whichever is sooner. If we
+            // only blocked on packets, walking would stall between
+            // arrivals on quiet links.
+            var timeUntilWalkTick = nextWalkTickAt - DateTime.UtcNow;
+            if (timeUntilWalkTick < TimeSpan.Zero) timeUntilWalkTick = TimeSpan.Zero;
+            var waitMs = Math.Max(1, (int)Math.Min(remaining.TotalMilliseconds,
+                                                    timeUntilWalkTick.TotalMilliseconds));
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(remaining);
+            cts.CancelAfter(TimeSpan.FromMilliseconds(waitMs));
             try
             {
                 var ep = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
@@ -883,7 +902,15 @@ internal sealed class HandshakeDriver : IDisposable
                     moveCell != 0)
                 {
                     moveToStateStartSent = true;
-                    moveToStateStartPacketIndex = count;
+                    // Phase 6b — capture motion-start state so walk-tick
+                    // can begin stepping. nextWalkTickAt is set NOW so
+                    // the first walk-tick AP fires on the very next
+                    // loop iteration (no extra grace window — we already
+                    // waited for AP-grace, which is enough for the
+                    // server to consume the initial AP).
+                    motionStartedAt = DateTime.UtcNow;
+                    motionLockedCellId = moveCell;
+                    nextWalkTickAt = DateTime.UtcNow.AddMilliseconds(WalkTickIntervalMs);
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
@@ -945,15 +972,22 @@ internal sealed class HandshakeDriver : IDisposable
                 // recorded intent keeps drifting and the next
                 // movement command may be misinterpreted.
                 //
-                // Phase 6: stop fires when EITHER (a) the grace
-                // window expires (authoritative — always works even
-                // for NPK !FastTick chars where UpdatePosition may
-                // not stream back), OR (b) observed distance to the
-                // locked target drops below MotionStopRadius
-                // (opportunistic — fires only if Self position
-                // actually updates during motion). Whichever first.
-                var stopByGrace = moveToStateStartPacketIndex >= 0 &&
-                                  (count - moveToStateStartPacketIndex) >= PostMoveStartGracePackets;
+                // Phase 6b: stop fires when ANY of:
+                //   (a) walk-tick set motionDone (target reached,
+                //       cell-crossing detected, target lost, wall-
+                //       clock timeout).
+                //   (b) observed distance to target dropped below
+                //       MotionStopRadius (race condition: walk-tick
+                //       hasn't picked this up yet).
+                //   (c) wall-clock since motion started > timeout
+                //       (defensive; walk-tick will normally beat us
+                //       here but doesn't fire if no packets arrive).
+                // STOP pos uses lastSentWaypointPos (our most recent
+                // walked-to intent) rather than stopSelf.Position
+                // because GameActionMoveToState.Handle also calls
+                // SetRequestedLocation with the packet's pos, and we
+                // don't want STOP to overwrite the walk-tick's last
+                // forward step with a stale snapshot.
                 var stopByDistance = false;
                 float stopByDistanceCurr = float.NaN;
                 if (motionTarget is not null &&
@@ -964,9 +998,11 @@ internal sealed class HandshakeDriver : IDisposable
                     stopByDistance = true;
                     stopByDistanceCurr = (float)Math.Sqrt(d2curr);
                 }
+                var stopByTimeout = motionStartedAt is DateTime stopStartTs &&
+                                    (DateTime.UtcNow - stopStartTs).TotalSeconds > MotionWallClockTimeoutSec;
                 if (moveToStateStartSent &&
                     !moveToStateStopSent &&
-                    (stopByGrace || stopByDistance) &&
+                    (motionDone || stopByDistance || stopByTimeout) &&
                     worldState.Self is WorldObjectSnapshot stopSelf &&
                     stopSelf.CellId is uint stopCell &&
                     stopCell != 0)
@@ -977,12 +1013,16 @@ internal sealed class HandshakeDriver : IDisposable
 
                     var motion = RawMotionStatePayload.Stop(MotionStance.NonCombat);
 
+                    // Prefer our most recent walked-to intent over the
+                    // (possibly stale) self snapshot for STOP's pos.
+                    var stopPos = lastSentWaypointPos ?? stopSelf.Position;
+
                     var msBuf = new byte[GameActionMoveToStateMessage.CalcPackedSize(motion.Flags)];
                     var msLen = GameActionMoveToStateMessage.Pack(
                         msBuf,
                         motion,
                         cellId: stopCell,
-                        pos:    stopSelf.Position,
+                        pos:    stopPos,
                         rot:    stopSelf.Rotation,
                         instanceSequence:      stopSelf.SeqInstance      ?? 0,
                         serverControlSequence: stopSelf.SeqServerControl ?? 0,
@@ -1004,12 +1044,16 @@ internal sealed class HandshakeDriver : IDisposable
                                            encrypt: true, cryptoSend: cryptoSend);
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    var trigger = motionDone
+                        ? "walk-done"
+                        : (stopByDistance ? $"distance({stopByDistanceCurr:F2}u)" : "wall-clock-timeout");
                     Console.WriteLine(
                         $"[observe]   -> PHASE5B STOP: GameActionMoveToState " +
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand) " +
                         $"cmd=Invalid (stop) " +
-                        $"cell=0x{stopCell:X8} xyz=({stopSelf.Position.X:F2},{stopSelf.Position.Y:F2},{stopSelf.Position.Z:F2}) " +
-                        $"trigger={(stopByDistance ? $"distance({stopByDistanceCurr:F2}u)" : "grace-window")} " +
+                        $"cell=0x{stopCell:X8} stopPos=({stopPos.X:F2},{stopPos.Y:F2},{stopPos.Z:F2}) " +
+                        $"posSource={(lastSentWaypointPos is null ? "self-snap" : "last-waypoint")} " +
+                        $"trigger={trigger} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }
 
@@ -1023,8 +1067,136 @@ internal sealed class HandshakeDriver : IDisposable
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("[observe] observation window elapsed");
-                break;
+                // Either the outer cancellation token fired, the
+                // observation deadline passed, or the walk-tick timer
+                // expired. Distinguish so we don't exit on tick-wake.
+                if (ct.IsCancellationRequested)
+                    break;
+                if (DateTime.UtcNow >= deadline)
+                {
+                    Console.WriteLine("[observe] observation window elapsed");
+                    break;
+                }
+                // Otherwise: walk-tick wake. Fall through to the
+                // walk-tick block below and continue the loop.
+            }
+
+            // Phase 6b — walk-tick. Runs both on packet wake AND on
+            // tick-only wake. Reschedules the next tick, then (if a
+            // target is locked and the motion is still in progress)
+            // sends one stepped AP packet toward the target. Server-
+            // side, this hits Player.SetRequestedLocation, which
+            // Player_Tick.UpdatePlayerPosition picks up regardless
+            // of FastTick — so this is what actually moves the bot.
+            if (DateTime.UtcNow >= nextWalkTickAt)
+            {
+                nextWalkTickAt = DateTime.UtcNow.AddMilliseconds(WalkTickIntervalMs);
+
+                // Wall-clock safety stop — independent of all other
+                // gates, prevents a runaway walk if something else
+                // wedges (lost echoes, server stall, etc.).
+                if (!motionDone &&
+                    motionStartedAt is DateTime startedAt &&
+                    (DateTime.UtcNow - startedAt).TotalSeconds > MotionWallClockTimeoutSec)
+                {
+                    motionDone = true;
+                    Console.WriteLine($"[motion] walk-tick: wall-clock timeout {MotionWallClockTimeoutSec}s elapsed — stopping");
+                }
+
+                if (!motionDone &&
+                    moveToStateStartSent && !moveToStateStopSent &&
+                    motionTarget is not null &&
+                    motionRotation is Quaternion lockedRot &&
+                    worldState.Self is WorldObjectSnapshot walkSelf &&
+                    walkSelf.CellId is uint walkCell)
+                {
+                    if (walkCell != motionLockedCellId)
+                    {
+                        // Cell crossings out of scope for Phase 6b
+                        // (target apple is in same cell as bot).
+                        motionDone = true;
+                        Console.WriteLine($"[motion] walk-tick: self cell changed (was 0x{motionLockedCellId:X8} now 0x{walkCell:X8}) — stopping (cell crossings are Phase 6c work)");
+                    }
+                    else
+                    {
+                        var liveTarget = worldState.WithinRadius(walkSelf, 999f)
+                            .FirstOrDefault(s => s.Guid == motionTarget.Guid);
+                        if (liveTarget is null)
+                        {
+                            motionDone = true;
+                            Console.WriteLine($"[motion] walk-tick: target 0x{motionTarget.Guid:X8} disappeared from world snapshot — stopping");
+                        }
+                        else
+                        {
+                            // Step in XY only; preserve self Z so we don't
+                            // get flagged by Player_Tick's z-jump hacking
+                            // check, and don't try to chase the apple's
+                            // floor Z (~0.9) when we're at 0.0.
+                            var dx = liveTarget.Position.X - walkSelf.Position.X;
+                            var dy = liveTarget.Position.Y - walkSelf.Position.Y;
+                            var lenXY = MathF.Sqrt(dx * dx + dy * dy);
+                            if (lenXY <= MotionStopRadius)
+                            {
+                                motionDone = true;
+                                Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {MotionStopRadius:F2}u) — stopping");
+                            }
+                            else if (lenXY < 1e-4f)
+                            {
+                                motionDone = true;
+                                Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
+                            }
+                            else
+                            {
+                                var dt = WalkTickIntervalMs / 1000f;
+                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, lenXY - MotionStopRadius);
+                                var stepX = dx / lenXY * stepLen;
+                                var stepY = dy / lenXY * stepLen;
+                                var newPos = new Vector3(
+                                    walkSelf.Position.X + stepX,
+                                    walkSelf.Position.Y + stepY,
+                                    walkSelf.Position.Z);
+
+                                var packetSeq = nextOutboundPacketSequence++;
+                                var fragSeq   = nextOutboundFragmentSequence++;
+
+                                var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                var apLen = GameActionAutonomousPositionMessage.Pack(
+                                    apBuf,
+                                    cellId: motionLockedCellId,
+                                    pos:    newPos,
+                                    rot:    lockedRot,
+                                    instanceSequence:      walkSelf.SeqInstance      ?? 0,
+                                    serverControlSequence: walkSelf.SeqServerControl ?? 0,
+                                    teleportSequence:      walkSelf.SeqTeleport      ?? 0,
+                                    forcePositionSequence: walkSelf.SeqForcePosition ?? 0,
+                                    contact: true);
+
+                                var msg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    msg.AddAckSequence(lastReceivedSeq);
+                                msg.AddBlobFragment(
+                                    fragSequence: fragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: apBuf.AsSpan(0, apLen));
+
+                                var sentLen = msg.Pack(sendBuf, myClientId,
+                                                       sequence: packetSeq, iteration: 1,
+                                                       encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                walkTickAps++;
+                                lastSentWaypointPos = newPos;
+                                Console.WriteLine(
+                                    $"[motion] walk-tick #{walkTickAps}: AP " +
+                                    $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2},{walkSelf.Position.Z:F2}) " +
+                                    $"intent=({newPos.X:F2},{newPos.Y:F2},{newPos.Z:F2}) " +
+                                    $"step=({stepX:F2},{stepY:F2}) stepLen={stepLen:F2}u " +
+                                    $"distToTargetXY={lenXY:F2}u pktSeq={packetSeq} fragSeq={fragSeq}");
+                            }
+                        }
+                    }
+                }
             }
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
@@ -1061,10 +1233,15 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     var dfin = (float)Math.Sqrt(dfin2);
                     var delta = motionInitialDistance.HasValue ? motionInitialDistance.Value - dfin : float.NaN;
+                    var elapsedSec = motionStartedAt is DateTime mts
+                        ? (DateTime.UtcNow - mts).TotalSeconds
+                        : double.NaN;
                     Console.WriteLine(
                         $"[motion] outcome target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
                         $"initialDist={motionInitialDistance ?? float.NaN:F2}u finalDist={dfin:F2}u " +
-                        $"closed={delta:F2}u (positive = bot moved toward target)");
+                        $"closed={delta:F2}u (positive = bot moved toward target) " +
+                        $"walkTickAps={walkTickAps} motionElapsed={elapsedSec:F1}s " +
+                        $"lastWaypoint={(lastSentWaypointPos is Vector3 lwp ? $"({lwp.X:F2},{lwp.Y:F2},{lwp.Z:F2})" : "-")}");
                 }
                 else
                 {
@@ -1081,7 +1258,7 @@ internal sealed class HandshakeDriver : IDisposable
         {
             Console.WriteLine("[spatial] self snapshot has no CellId — skipping spatial queries");
         }
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}, walkTickAps={walkTickAps}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
