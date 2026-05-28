@@ -69,7 +69,8 @@ internal sealed record MotionMessage(
     MovementType MovementType,
     MotionFlags MotionFlags,
     ushort CurrentStyle,
-    byte[] BodyBytes)
+    byte[] BodyBytes,
+    MotionBody? Body = null)
 {
     /// <summary>Minimum bytes required to parse the header alone:
     /// 4 opcode + 4 guid + 2+2+2 sequences + 1 autonomous + 1 align

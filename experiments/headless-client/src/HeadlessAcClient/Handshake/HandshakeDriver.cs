@@ -482,12 +482,15 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"{vel}{plc} flags=0x{(uint)upm.Flags:X2} seq=(inst={upm.InstanceSequence},pos={upm.PositionSequence},tp={upm.TeleportSequence},fp={upm.ForcePositionSequence})");
                             break;
                         case MotionMessage mm:
+                            var bodyDesc = mm.Body is not null
+                                ? mm.Body.ToString()
+                                : $"raw[{mm.BodyBytes.Length}]";
                             Console.WriteLine(
                                 $"[observe]   -> Motion: guid=0x{mm.Guid:X8} type={mm.MovementType} " +
                                 $"flags={mm.MotionFlags} style=0x{mm.CurrentStyle:X4} " +
                                 $"autonomous={mm.IsAutonomous} " +
                                 $"seq=(inst={mm.InstanceSequence},mov={mm.MovementSequence},srv={mm.ServerControlSequence}) " +
-                                $"body[{mm.BodyBytes.Length}]");
+                                $"body={bodyDesc}");
                             break;
                         case SetStateMessage ss:
                             Console.WriteLine(

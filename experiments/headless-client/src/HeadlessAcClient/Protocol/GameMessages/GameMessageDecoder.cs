@@ -117,9 +117,10 @@ internal static class GameMessageDecoder
             var style = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
 
             var body = p.Slice(cursor).ToArray();
+            var decodedBody = MotionBodyDecoder.Decode(body, mt, mf);
             return new MotionMessage(
                 guid, instSeq, movSeq, srvCtl,
-                autoByte != 0, mt, mf, style, body);
+                autoByte != 0, mt, mf, style, body, decodedBody);
         }
         catch
         {
