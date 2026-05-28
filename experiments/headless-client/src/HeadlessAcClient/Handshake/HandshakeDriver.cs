@@ -337,6 +337,7 @@ internal sealed class HandshakeDriver : IDisposable
         int                  walkTickAps = 0;
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
+        bool                 useSent = false;
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -1114,6 +1115,44 @@ internal sealed class HandshakeDriver : IDisposable
                         $"posSource={(lastSentWaypointPos is null ? "self-snap" : "last-waypoint")} " +
                         $"trigger={trigger} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                }
+
+                // Phase 6e — After STOP fires for a walk-done finish (i.e. we
+                // arrived at the target), send a Use(targetGuid) so the server
+                // resolves the interact: pickup for items, toggle for doors,
+                // teleport for portals, dialog for NPCs. We ONLY send on
+                // walk-done (not on wall-clock-timeout or distance) to avoid
+                // pinging the server with Use while we're not adjacent.
+                if (moveToStateStopSent &&
+                    !useSent &&
+                    motionDone &&
+                    motionTarget is not null)
+                {
+                    useSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var useBuf = new byte[GameActionUseMessage.PackedSize];
+                    var useLen = GameActionUseMessage.Pack(useBuf, motionTarget.Guid);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: useBuf.AsSpan(0, useLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"[observe]   -> PHASE6E USE: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                        $"itemType=0x{motionTarget.ItemType ?? 0:X} " +
+                        $"payload={useLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }
 
                 // Periodic world-state heartbeat — once every 100

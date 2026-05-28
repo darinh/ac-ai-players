@@ -19,6 +19,9 @@
 //   WeenieError (0x028A):
 //     u32 errorCode                                   = 4B
 //
+//   UseDone (0x01C7):
+//     u32 errorCode (WeenieError; 0 = None / success) = 4B
+//
 //   WeenieErrorWithString (0x028B):
 //     u32 errorCode
 //     string16L message  (u16 len + utf8 bytes + 4-byte align)
@@ -69,6 +72,14 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 internal sealed record WeenieErrorPayload(uint ErrorCode)
 {
     public override string ToString() => $"WeenieError(0x{ErrorCode:X8})";
+}
+
+internal sealed record UseDonePayload(uint ErrorCode)
+{
+    public override string ToString()
+        => ErrorCode == 0
+            ? "UseDone(ok)"
+            : $"UseDone(err=0x{ErrorCode:X8})";
 }
 
 internal sealed record WeenieErrorWithStringPayload(
@@ -133,7 +144,8 @@ internal sealed record GameEventPayload(
     WeenieErrorWithStringPayload?    WeenieErrorWithString,
     CharacterTitlePayload?           CharacterTitle,
     FriendsListUpdatePayload?        FriendsListUpdate,
-    SetTurbineChatChannelsPayload?   SetTurbineChatChannels)
+    SetTurbineChatChannelsPayload?   SetTurbineChatChannels,
+    UseDonePayload?                  UseDone)
 {
     public override string ToString() => EventType switch
     {
@@ -142,6 +154,7 @@ internal sealed record GameEventPayload(
         GameEventType.CharacterTitle           when CharacterTitle           is { } x => x.ToString(),
         GameEventType.FriendsListUpdate        when FriendsListUpdate        is { } x => x.ToString(),
         GameEventType.SetTurbineChatChannels   when SetTurbineChatChannels   is { } x => x.ToString(),
+        GameEventType.UseDone                  when UseDone                  is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -162,35 +175,48 @@ internal static class GameEventPayloadDecoder
                         WeenieErrorWithString: null,
                         CharacterTitle: null,
                         FriendsListUpdate: null,
-                        SetTurbineChatChannels: null),
+                        SetTurbineChatChannels: null,
+                        UseDone: null),
                 GameEventType.WeenieErrorWithString =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
                         WeenieErrorWithString: DecodeWeenieErrorWithString(body),
                         CharacterTitle: null,
                         FriendsListUpdate: null,
-                        SetTurbineChatChannels: null),
+                        SetTurbineChatChannels: null,
+                        UseDone: null),
                 GameEventType.CharacterTitle =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
                         WeenieErrorWithString: null,
                         CharacterTitle: DecodeCharacterTitle(body),
                         FriendsListUpdate: null,
-                        SetTurbineChatChannels: null),
+                        SetTurbineChatChannels: null,
+                        UseDone: null),
                 GameEventType.FriendsListUpdate =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
                         WeenieErrorWithString: null,
                         CharacterTitle: null,
                         FriendsListUpdate: DecodeFriendsListUpdate(body),
-                        SetTurbineChatChannels: null),
+                        SetTurbineChatChannels: null,
+                        UseDone: null),
                 GameEventType.SetTurbineChatChannels =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
                         WeenieErrorWithString: null,
                         CharacterTitle: null,
                         FriendsListUpdate: null,
-                        SetTurbineChatChannels: DecodeSetTurbineChatChannels(body)),
+                        SetTurbineChatChannels: DecodeSetTurbineChatChannels(body),
+                        UseDone: null),
+                GameEventType.UseDone =>
+                    new GameEventPayload(eventType,
+                        WeenieError: null,
+                        WeenieErrorWithString: null,
+                        CharacterTitle: null,
+                        FriendsListUpdate: null,
+                        SetTurbineChatChannels: null,
+                        UseDone: DecodeUseDone(body)),
                 _ => null,
             };
         }
@@ -207,6 +233,13 @@ internal static class GameEventPayloadDecoder
         if (body.Length < 4)
             throw new InvalidOperationException("body too short for WeenieError");
         return new WeenieErrorPayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
+    }
+
+    private static UseDonePayload DecodeUseDone(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 4)
+            throw new InvalidOperationException("body too short for UseDone");
+        return new UseDonePayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
     }
 
     private static WeenieErrorWithStringPayload DecodeWeenieErrorWithString(ReadOnlySpan<byte> body)

@@ -36,6 +36,7 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 internal enum GameActionType : uint
 {
     LoginComplete      = 0x00A1,
+    Use                = 0x0036,
     MoveToState        = 0xF61C,
     AutonomousPosition = 0xF753,
 }
@@ -174,6 +175,35 @@ internal static class GameActionLoginCompleteMessage
     /// </summary>
     public static int Pack(Span<byte> dest)
         => GameActionMessage.Pack(dest, GameActionType.LoginComplete);
+}
+
+/// <summary>
+/// Use (0x0036). The single most useful interact opcode: sent by the
+/// client when the user double-clicks a world object. Server handler
+/// is <c>Source/ACE.Server/Network/GameAction/Actions/GameActionUseItem.cs</c>
+/// which calls <c>session.Player.HandleActionUseItem(itemGuid)</c>.
+/// HandleActionUseItem walks the player to the target if needed, then
+/// invokes the target's ActivationResponse: items get picked up,
+/// doors toggle, portals teleport, NPCs initiate dialog, etc.
+///
+/// Payload after the GameAction header is a single u32: the target
+/// object's guid. No rotation, no position — the server resolves the
+/// target from the in-world guid registry.
+/// </summary>
+internal static class GameActionUseMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.Use, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);
+        cursor += 4;
+        return cursor;
+    }
 }
 
 /// <summary>
