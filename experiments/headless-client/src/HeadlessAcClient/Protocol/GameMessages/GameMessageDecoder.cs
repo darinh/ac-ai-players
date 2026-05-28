@@ -11,6 +11,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Numerics;
 
 namespace HeadlessAcClient.Protocol.GameMessages;
 
@@ -47,9 +48,68 @@ internal static class GameMessageDecoder
             GameMessageOpcode.ServerMessage => DecodeServerMessage(payload),
             GameMessageOpcode.ObjectCreate => ObjectCreateDecoder.Decode(payload),
             GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
+            GameMessageOpcode.UpdatePosition => DecodeUpdatePosition(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
             _ => null,
         };
+    }
+
+    private static UpdatePositionMessage? DecodeUpdatePosition(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < UpdatePositionMessage.MinPackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var guid  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var flags = (PositionFlags)BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var cell  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var px = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+            var py = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+            var pz = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+
+            // Inverse-presence orientation: a flag SET means the
+            // component is OMITTED on the wire (default 0). Read
+            // in W/X/Y/Z order to match server PositionPack write
+            // sequence.
+            float rw = 0f, rx = 0f, ry = 0f, rz = 0f;
+            if ((flags & PositionFlags.OrientationHasNoW) == 0) { rw = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4; }
+            if ((flags & PositionFlags.OrientationHasNoX) == 0) { rx = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4; }
+            if ((flags & PositionFlags.OrientationHasNoY) == 0) { ry = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4; }
+            if ((flags & PositionFlags.OrientationHasNoZ) == 0) { rz = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4; }
+
+            Vector3? velocity = null;
+            if ((flags & PositionFlags.HasVelocity) != 0)
+            {
+                var vx = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+                var vy = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+                var vz = BinaryPrimitives.ReadSingleLittleEndian(p.Slice(cursor)); cursor += 4;
+                velocity = new Vector3(vx, vy, vz);
+            }
+
+            uint? placement = null;
+            if ((flags & PositionFlags.HasPlacementID) != 0)
+            {
+                placement = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            }
+
+            // 4 trailing u16 sequences in fixed order.
+            if (p.Length - cursor < 8) return null;
+            var instSeq = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var posSeq  = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var tpSeq   = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor)); cursor += 2;
+            var fpSeq   = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor));
+
+            return new UpdatePositionMessage(
+                guid, flags, cell,
+                new Vector3(px, py, pz),
+                new Quaternion(rx, ry, rz, rw),
+                velocity, placement,
+                instSeq, posSeq, tpSeq, fpSeq);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static PrivateUpdatePropertyIntMessage? DecodePrivateUpdatePropertyInt(ReadOnlySpan<byte> p)

@@ -17,6 +17,7 @@ internal enum GameMessageOpcode : uint
     CharacterError           = 0xF659,
     ObjectCreate             = 0xF745,
     PlayerCreate             = 0xF746,
+    UpdatePosition           = 0xF748,
     Motion                   = 0xF74C,
     GameEvent                = 0xF7B0,
     CharacterEnterWorldServerReady = 0xF7DF,
