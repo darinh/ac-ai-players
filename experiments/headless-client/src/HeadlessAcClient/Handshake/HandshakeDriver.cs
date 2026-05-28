@@ -31,6 +31,7 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
+    private const int ObserveSeconds = 30;
 
     private readonly IPEndPoint _serverPort0;
     private readonly IPEndPoint _serverPort1;
@@ -76,30 +77,12 @@ internal sealed class HandshakeDriver : IDisposable
             await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, respLen),
                                       SocketFlags.None, _serverPort1, ct).ConfigureAwait(false);
 
-            // Try to receive whatever the server sends next. If we got
-            // past the handshake, the server replies with character list
-            // and friends on port 0. We don't parse them in Phase 1 but
-            // recording that something arrived is the gate signal.
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            cts.CancelAfter(TimeSpan.FromSeconds(5));
-            int postLen = 0;
-            try
-            {
-                var ep = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
-                var result = await _socket.ReceiveFromAsync(new ArraySegment<byte>(recvBuf), SocketFlags.None, ep, cts.Token).ConfigureAwait(false);
-                postLen = result.ReceivedBytes;
-                Console.WriteLine($"[handshake] received post-handshake packet ({postLen} bytes) from {result.RemoteEndPoint}");
-                if (postLen >= PacketHeader.HeaderSize)
-                {
-                    var hdr = new PacketHeader();
-                    hdr.Unpack(recvBuf.AsSpan(0, PacketHeader.HeaderSize));
-                    Console.WriteLine($"[handshake]   header: {hdr}");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                Console.WriteLine("[handshake] no post-handshake packet within 5s timeout");
-            }
+            // Phase 1 gate: receive whatever the server sends next on
+            // port 0 (the handshake socket). Loop for up to ObserveSeconds
+            // so we can see what packet types arrive (AckSequence, TimeSync,
+            // BlobFragments carrying CharacterList, etc) before the server
+            // times us out for not acking.
+            int packetsObserved = await ObservePostHandshakePackets(recvBuf, ObserveSeconds, ct).ConfigureAwait(false);
 
             return new HandshakeResult(
                 connectReq.ServerTime,
@@ -107,7 +90,7 @@ internal sealed class HandshakeDriver : IDisposable
                 connectReq.ClientId,
                 connectReq.ServerSeed,
                 connectReq.ClientSeed,
-                postLen > 0);
+                packetsObserved > 0);
         }
         finally
         {
@@ -209,6 +192,45 @@ internal sealed class HandshakeDriver : IDisposable
         return PacketHeader.HeaderSize + bodyLen;
     }
 
+    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CancellationToken ct)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        var count = 0;
+        Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s ...");
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            var remaining = deadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) break;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(remaining);
+            try
+            {
+                var ep = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
+                var result = await _socket!.ReceiveFromAsync(new ArraySegment<byte>(recvBuf), SocketFlags.None, ep, cts.Token).ConfigureAwait(false);
+                var len = result.ReceivedBytes;
+                count++;
+                if (len < PacketHeader.HeaderSize)
+                {
+                    Console.WriteLine($"[observe] #{count} short packet: {len} bytes from {result.RemoteEndPoint}");
+                    continue;
+                }
+                var hdr = new PacketHeader();
+                hdr.Unpack(recvBuf.AsSpan(0, PacketHeader.HeaderSize));
+                var bodyLen = Math.Min((int)hdr.Size, len - PacketHeader.HeaderSize);
+                Console.WriteLine($"[observe] #{count} from {result.RemoteEndPoint}: {hdr}");
+                if (bodyLen > 0)
+                    Console.WriteLine($"[observe]   body[{bodyLen}]: {Hex(recvBuf.AsSpan(PacketHeader.HeaderSize, bodyLen))}");
+            }
+            catch (OperationCanceledException)
+            {
+                Console.WriteLine("[observe] observation window elapsed");
+                break;
+            }
+        }
+        Console.WriteLine($"[observe] total post-handshake packets observed: {count}");
+        return count;
+    }
+
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -242,16 +264,20 @@ internal sealed class HandshakeDriver : IDisposable
         return new ConnectRequestData(serverTime, cookie, clientId, serverSeed, clientSeed);
     }
 
-    private static string Hex(byte[] bytes)
+    private static string Hex(byte[] bytes) => Hex(bytes.AsSpan());
+
+    private static string Hex(ReadOnlySpan<byte> bytes)
     {
-        Span<char> chars = stackalloc char[bytes.Length * 2];
+        if (bytes.Length == 0) return string.Empty;
+        Span<char> chars = stackalloc char[bytes.Length * 3];
         for (var i = 0; i < bytes.Length; i++)
         {
             var b = bytes[i];
-            chars[i * 2] = ToHex((byte)(b >> 4));
-            chars[i * 2 + 1] = ToHex((byte)(b & 0xF));
+            chars[i * 3] = ToHex((byte)(b >> 4));
+            chars[i * 3 + 1] = ToHex((byte)(b & 0xF));
+            chars[i * 3 + 2] = ' ';
         }
-        return new string(chars);
+        return new string(chars[..^1]);
     }
 
     private static char ToHex(byte nibble) => (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));

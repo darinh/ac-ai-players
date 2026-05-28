@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/api-host/" />
+  <Folder Name="/api-host/src/">
+    <Project Path="api-host/src/AcAiPlayers.ApiHost/AcAiPlayers.ApiHost.csproj" />
+  </Folder>
+  <Folder Name="/headless-client/" />
+  <Folder Name="/headless-client/src/">
+    <Project Path="headless-client/src/HeadlessAcClient/HeadlessAcClient.csproj" />
+  </Folder>
+  <Folder Name="/services-common/" />
+  <Folder Name="/services-common/src/">
+    <Project Path="services-common/src/AcAiPlayers.ServicesClient/AcAiPlayers.ServicesClient.csproj" />
+  </Folder>
+</Solution>
