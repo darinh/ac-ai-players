@@ -31,7 +31,7 @@ internal static class Program
     {
         if (args.Length < 4)
         {
-            Console.Error.WriteLine("usage: HeadlessAcClient <host> <port> <account> <password>");
+            Console.Error.WriteLine("usage: HeadlessAcClient <host> <port> <account> <password> [character-name]");
             return 2;
         }
 
@@ -39,8 +39,9 @@ internal static class Program
         var port = int.Parse(args[1]);
         var account = args[2];
         var password = args[3];
+        var characterName = args.Length >= 5 ? args[4] : null;
 
-        Console.WriteLine($"[main] target {host}:{port}, account '{account}'");
+        Console.WriteLine($"[main] target {host}:{port}, account '{account}', character '{characterName ?? "Headless01"}'");
 
         try
         {
@@ -56,7 +57,7 @@ internal static class Program
         await PingApiAsync().ConfigureAwait(false);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(200));
-        using var driver = new HandshakeDriver(host, port, account, password);
+        using var driver = new HandshakeDriver(host, port, account, password, characterName);
         try
         {
             var result = await driver.RunAsync(cts.Token).ConfigureAwait(false);

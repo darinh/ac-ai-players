@@ -46,15 +46,17 @@ internal sealed class HandshakeDriver : IDisposable
     private readonly IPEndPoint _serverPort1;
     private readonly string _account;
     private readonly string _password;
+    private readonly string _characterName;
 
     private Socket? _socket;
 
-    public HandshakeDriver(IPAddress host, int port, string account, string password)
+    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null)
     {
         _serverPort0 = new IPEndPoint(host, port);
         _serverPort1 = new IPEndPoint(host, port + 1);
         _account = account;
         _password = password;
+        _characterName = string.IsNullOrWhiteSpace(characterName) ? "Headless01" : characterName;
     }
 
     public async Task<HandshakeResult> RunAsync(CancellationToken ct)
@@ -306,6 +308,19 @@ internal sealed class HandshakeDriver : IDisposable
         const int            MaxActionsPerSession = 16;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
+        // Phase 6l — pickup→equip handoff. When PutItemInContainer is
+        // sent for a wearable item, we stash (itemGuid → equipLocation
+        // bitmask) here. On InventoryPutObjInContainer arrival for the
+        // same item guid, the next tick sends GetAndWieldItem in a
+        // fresh packet. We cannot bundle equip in the same packet as
+        // pickup — the server-side CreateMoveToChain captures rootOwner
+        // at FindObject time (still on landscape), then races against
+        // the pickup chain. By the time the equip MoveToChain callback
+        // runs, the item is in inventory, rootOwner is null, and
+        // line 1592 of Player_Inventory.cs fires ActionCancelled
+        // (WeenieError 0x36). Verified empirically in
+        // phase6l-equip-run-06-decoded.log on a fresh account.
+        var                  pendingEquip = new Dictionary<uint, uint>();
         var ownPlayerSeen = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
@@ -554,6 +569,40 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"[observe]   -> GameEvent: type={ge.EventType} (0x{(uint)ge.EventType:X4}) " +
                                 $"recv=0x{ge.ReceiverGuid:X8} seq={ge.ServerEventSequence} " +
                                 $"payload={geDesc}");
+                            // Phase 6l — pickup-ack triggers the queued
+                            // equip. Send GetAndWieldItem in a fresh
+                            // packet now that the server reports the
+                            // item is in our inventory; rootOwner==this
+                            // takes the no-MoveToChain branch
+                            // (Player_Inventory.cs:1646).
+                            if (ge.Payload?.InventoryPutObjInContainer is { } putAck
+                                && pendingEquip.TryGetValue(putAck.ItemGuid, out var equipSlot))
+                            {
+                                pendingEquip.Remove(putAck.ItemGuid);
+                                var equipPktSeq = nextOutboundPacketSequence++;
+                                var equipFragSeq = nextOutboundFragmentSequence++;
+                                var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                                var equipLen = GameActionGetAndWieldItemMessage.Pack(
+                                    equipBuf,
+                                    itemGuid: putAck.ItemGuid,
+                                    equipLocation: (int)equipSlot);
+                                var equipMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    equipMsg.AddAckSequence(lastReceivedSeq);
+                                equipMsg.AddBlobFragment(
+                                    fragSequence: equipFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: equipBuf.AsSpan(0, equipLen));
+                                var equipSentLen = equipMsg.Pack(sendBuf, myClientId,
+                                                                 sequence: equipPktSeq, iteration: 1,
+                                                                 encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, equipSentLen),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                Console.WriteLine(
+                                    $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
+                                    $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
+                            }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
                             Console.WriteLine(
@@ -660,7 +709,7 @@ internal sealed class HandshakeDriver : IDisposable
                     // server itself populated via Session.Account).
                     var opt = new CharacterCreateMessage.Options(
                         Account: charList.Account,
-                        Name:    "Headless01");
+                        Name:    _characterName);
 
                     var packedSize = CharacterCreateMessage.MeasurePackedSize(opt);
                     if (packedSize > 448)
@@ -925,13 +974,24 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        // Doors/portals first, then everything else, then signs/books.
-                        // - Doors (Misc 0x80 + Name="Door") and Portals (0x10000) drive
-                        //   spatial progress; they're the chief mechanism for
-                        //   discovering new rooms / regions of the academy.
-                        // - Writables (signs/books, 0x2000) reply with UseDone(ok)
-                        //   and (currently) no visible payload, so they're low-value
-                        //   per cycle and we let everything actionable go first.
+                        // Tri-priority: pickup-eligible armor/weapons,
+                        // doors, portals all go first; writables (signs/
+                        // books) go last; everything else in between.
+                        // - Pickup-eligible items (Armor/Weapon/Clothing/
+                        //   etc per PickupItemTypeMask) are highest
+                        //   priority alongside doors/portals so the bot
+                        //   collects gear from its current room before
+                        //   moving on. The equip-after-pickup path
+                        //   (Phase 6l) then wields wearable items
+                        //   automatically.
+                        // - Doors (Misc 0x80 + Name="Door") and Portals
+                        //   (0x10000) drive spatial progress; they're
+                        //   the chief mechanism for discovering new
+                        //   rooms / regions of the academy.
+                        // - Writables (signs/books, 0x2000) reply with
+                        //   UseDone(ok) and (currently) no visible
+                        //   payload, so they're low-value per cycle and
+                        //   we let everything actionable go first.
                         candidate = inRange
                             .Select(s =>
                             {
@@ -939,7 +999,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
                                 var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                int prio = (isDoor || isPortal) ? 0 : (isWritable ? 2 : 1);
+                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
+                                int prio = (isDoor || isPortal || isPickup) ? 0 : (isWritable ? 2 : 1);
                                 return (snap: s, d2, prio);
                             })
                             .OrderBy(t => t.prio)
@@ -1253,42 +1314,30 @@ internal sealed class HandshakeDriver : IDisposable
                         queue: (ushort)GameMessageGroup.UIQueue,
                         gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
 
-                    // Phase 6l — equip-after-pickup. When the just-picked-
-                    // up item is wearable (ValidLocations is set), bundle
-                    // a follow-up GetAndWieldItem in the SAME packet so
-                    // the server processes the equip immediately after
-                    // the inventory transfer. The server walks fragments
-                    // in-order within a packet, so this is safe even
-                    // though pickup hasn't yet been acknowledged.
+                    // Phase 6l (revised) — equip-after-pickup HANDOFF.
+                    // We DON'T bundle GetAndWieldItem in the same packet
+                    // as PutItemInContainer; the server's HandleAction-
+                    // GetAndWieldItem races against its own pickup chain
+                    // and emits InventoryServerSaveFailed(ActionCancelled).
+                    // Instead we stash (itemGuid → slot bitmask) and
+                    // dispatch the equip from the inbound message-handler
+                    // when InventoryPutObjInContainer arrives for the
+                    // same guid. This mirrors what a retail client does:
+                    // the AC GUI sends GetAndWieldItem only AFTER the
+                    // server acknowledges the inventory transfer.
                     //
                     // Slot selection: lowest set bit of ValidLocations.
-                    // - Single-slot items (gauntlets=HandWear=0x20,
-                    //   helmet=HeadWear=0x01, etc.) have one bit set.
+                    // - Single-slot items (gauntlets=HandWear=0x20, etc.)
+                    //   have one bit set.
                     // - Multi-slot items (rings=FingerWearLeft|Right)
                     //   pick the lowest, which is the canonical default.
                     // - Items with ValidLocations==0 or null aren't
                     //   wearable (food/keys/currency) — skip equip.
-                    //
-                    // If pickup fails OR the slot is already occupied,
-                    // the server replies with WeenieErrorWithString and
-                    // takes no action. Non-fatal; we just see the error
-                    // in the log.
                     uint? equipLoc = null;
                     if (isPickup && motionTarget.ValidLocations is uint vl && vl != 0)
                     {
-                        // Isolate the lowest set bit.
                         equipLoc = vl & (~vl + 1);
-                        var equipFragSeq = nextOutboundFragmentSequence++;
-                        var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                        var equipLen = GameActionGetAndWieldItemMessage.Pack(
-                            equipBuf,
-                            itemGuid: motionTarget.Guid,
-                            equipLocation: (int)equipLoc.Value);
-                        msg.AddBlobFragment(
-                            fragSequence: equipFragSeq,
-                            fragId: OutboundFragmentId,
-                            queue: (ushort)GameMessageGroup.UIQueue,
-                            gameMessagePayload: equipBuf.AsSpan(0, equipLen));
+                        pendingEquip[motionTarget.Guid] = equipLoc.Value;
                     }
 
                     var sentLen = msg.Pack(sendBuf, myClientId,
@@ -1297,7 +1346,7 @@ internal sealed class HandshakeDriver : IDisposable
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     var equipNote = equipLoc is uint el
-                        ? $" + EQUIP(loc=0x{el:X})"
+                        ? $" (queued EQUIP loc=0x{el:X} for after pickup-ack)"
                         : (isPickup ? " (not wearable; ValidLocations=null/0)" : "");
                     Console.WriteLine(
                         $"[observe]   -> PHASE6E/6F {actionName}{equipNote}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +

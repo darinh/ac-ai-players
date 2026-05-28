@@ -159,6 +159,38 @@ internal sealed record InventoryPutObjInContainerPayload(
         $"placement={Placement} containerType={ContainerType})";
 }
 
+internal sealed record InventoryServerSaveFailedPayload(
+    uint ItemGuid,
+    uint ErrorType)
+{
+    public override string ToString() =>
+        $"InventoryServerSaveFailed(item=0x{ItemGuid:X8} err=0x{ErrorType:X8} [{WeenieErrorLabels.Label(ErrorType)}])";
+}
+
+internal static class WeenieErrorLabels
+{
+    // Subset of ACE.Entity.Enum.WeenieError relevant to inventory/equip errors.
+    // Source: ACE-bots/Source/ACE.Entity/Enum/WeenieError.cs
+    public static string Label(uint code) => code switch
+    {
+        0x00000000 => "None",
+        0x00000007 => "TooBusyToMove",
+        0x0000004B => "InvalidInventoryLocation",
+        0x0000004C => "YouHaveBeenInterrupted",
+        0x0000004D => "ConflictingInventoryLocation",
+        0x00000051 => "ActionCancelled",
+        0x00000059 => "YouAreTooBusy",
+        0x00000064 => "SkillTooLow",
+        0x00000065 => "LevelTooLow",
+        0x000000C9 => "Stuck",
+        0x000000CA => "YoureTooBusy",
+        0x00000204 => "YouDoNotOwnThatItem",
+        0x00000274 => "HeritageRequiresSpecificArmor",
+        0x00000275 => "ArmorRequiresSpecificHeritage",
+        _ => "?",
+    };
+}
+
 internal sealed record TellPayload(
     string Message,
     string SenderName,
@@ -189,6 +221,7 @@ internal sealed record GameEventPayload(
     SetTurbineChatChannelsPayload?       SetTurbineChatChannels,
     UseDonePayload?                      UseDone,
     InventoryPutObjInContainerPayload?   InventoryPutObjInContainer,
+    InventoryServerSaveFailedPayload?    InventoryServerSaveFailed,
     TellPayload?                         Tell)
 {
     public override string ToString() => EventType switch
@@ -200,6 +233,7 @@ internal sealed record GameEventPayload(
         GameEventType.SetTurbineChatChannels       when SetTurbineChatChannels     is { } x => x.ToString(),
         GameEventType.UseDone                      when UseDone                    is { } x => x.ToString(),
         GameEventType.InventoryPutObjInContainer   when InventoryPutObjInContainer is { } x => x.ToString(),
+        GameEventType.InventoryServerSaveFailed    when InventoryServerSaveFailed  is { } x => x.ToString(),
         GameEventType.Tell                         when Tell                       is { } x => x.ToString(),
         _ => $"{EventType}",
     };
@@ -216,85 +250,23 @@ internal static class GameEventPayloadDecoder
             return eventType switch
             {
                 GameEventType.WeenieError =>
-                    new GameEventPayload(eventType,
-                        WeenieError: DecodeWeenieError(body),
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { WeenieError = DecodeWeenieError(body) },
                 GameEventType.WeenieErrorWithString =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: DecodeWeenieErrorWithString(body),
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { WeenieErrorWithString = DecodeWeenieErrorWithString(body) },
                 GameEventType.CharacterTitle =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: DecodeCharacterTitle(body),
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { CharacterTitle = DecodeCharacterTitle(body) },
                 GameEventType.FriendsListUpdate =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: DecodeFriendsListUpdate(body),
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { FriendsListUpdate = DecodeFriendsListUpdate(body) },
                 GameEventType.SetTurbineChatChannels =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: DecodeSetTurbineChatChannels(body),
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { SetTurbineChatChannels = DecodeSetTurbineChatChannels(body) },
                 GameEventType.UseDone =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: DecodeUseDone(body),
-                        InventoryPutObjInContainer: null,
-                        Tell: null),
+                    Empty(eventType) with { UseDone = DecodeUseDone(body) },
                 GameEventType.InventoryPutObjInContainer =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: DecodeInventoryPutObjInContainer(body),
-                        Tell: null),
+                    Empty(eventType) with { InventoryPutObjInContainer = DecodeInventoryPutObjInContainer(body) },
+                GameEventType.InventoryServerSaveFailed =>
+                    Empty(eventType) with { InventoryServerSaveFailed = DecodeInventoryServerSaveFailed(body) },
                 GameEventType.Tell =>
-                    new GameEventPayload(eventType,
-                        WeenieError: null,
-                        WeenieErrorWithString: null,
-                        CharacterTitle: null,
-                        FriendsListUpdate: null,
-                        SetTurbineChatChannels: null,
-                        UseDone: null,
-                        InventoryPutObjInContainer: null,
-                        Tell: DecodeTell(body)),
+                    Empty(eventType) with { Tell = DecodeTell(body) },
                 _ => null,
             };
         }
@@ -305,6 +277,18 @@ internal static class GameEventPayloadDecoder
             return null;
         }
     }
+
+    private static GameEventPayload Empty(GameEventType et) =>
+        new GameEventPayload(et,
+            WeenieError: null,
+            WeenieErrorWithString: null,
+            CharacterTitle: null,
+            FriendsListUpdate: null,
+            SetTurbineChatChannels: null,
+            UseDone: null,
+            InventoryPutObjInContainer: null,
+            InventoryServerSaveFailed: null,
+            Tell: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -401,6 +385,16 @@ internal static class GameEventPayloadDecoder
             ContainerGuid: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4,  4)),
             Placement:     BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(8,  4)),
             ContainerType: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(12, 4)));
+    }
+
+    private static InventoryServerSaveFailedPayload DecodeInventoryServerSaveFailed(ReadOnlySpan<byte> body)
+    {
+        const int FixedSize = 8;
+        if (body.Length < FixedSize)
+            throw new InvalidOperationException($"body too short for InventoryServerSaveFailed: need {FixedSize}, got {body.Length}");
+        return new InventoryServerSaveFailedPayload(
+            ItemGuid:  BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)),
+            ErrorType: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4, 4)));
     }
 
     private static TellPayload DecodeTell(ReadOnlySpan<byte> body)
