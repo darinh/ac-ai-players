@@ -295,6 +295,17 @@ internal sealed class HandshakeDriver : IDisposable
         var autonomousPositionSent = false;
         var moveToStateStartSent = false;
         var moveToStateStopSent = false;
+        // Phase 6g — multi-action loop. After each motion+action cycle
+        // completes, we reset all the per-action gates above so the
+        // picker block can fire again and target the next object. We
+        // track recently-visited guids so we don't immediately re-
+        // target the same item, and we cap total actions so we don't
+        // loop forever in a dense room.
+        DateTime?            useSentAt = null;
+        const int            PostActionCooldownSec = 4;
+        const int            MaxActionsPerSession = 8;
+        int                  actionsCompleted = 0;
+        var                  visitedTargetGuids = new HashSet<uint>();
         var ownPlayerSeen = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
@@ -809,6 +820,44 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
 
+                // Phase 6g — post-action loop reset. After USE/PICKUP
+                // completes and the post-action cooldown elapses, clear
+                // all per-action gates so the picker block (below) can
+                // fire again with a fresh target. Cap total actions per
+                // session so the bot doesn't loop forever.
+                if (useSent && useSentAt is DateTime usat &&
+                    (DateTime.UtcNow - usat).TotalSeconds >= PostActionCooldownSec)
+                {
+                    actionsCompleted++;
+                    if (motionTarget is not null)
+                        visitedTargetGuids.Add(motionTarget.Guid);
+                    Console.WriteLine(
+                        $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}'); " +
+                        $"resetting motion state to pick next target");
+
+                    // Reset every per-action gate.
+                    autonomousPositionSent = false;
+                    moveToStateStartSent = false;
+                    moveToStateStopSent = false;
+                    motionTarget = null;
+                    motionRotation = null;
+                    motionInitialDistance = null;
+                    motionStartedAt = null;
+                    motionStoppedAt = null;
+                    motionLockedCellId = 0;
+                    motionDone = false;
+                    useSent = false;
+                    useSentAt = null;
+                    lastSentWaypointPos = null;
+                    walkTickAps = 0;
+
+                    if (actionsCompleted >= MaxActionsPerSession)
+                    {
+                        Console.WriteLine(
+                            $"[motion] max actions per session ({MaxActionsPerSession}) reached; staying idle until observation window closes");
+                    }
+                }
+
                 // Phase 5a: send one GameActionAutonomousPosition
                 // (0xF753) echoing our current server-asserted
                 // position back at the server. First outbound
@@ -833,6 +882,7 @@ internal sealed class HandshakeDriver : IDisposable
                 // proving the server's broadcast path fired. See
                 // rubber-duck critique in checkpoint 033.
                 if (!autonomousPositionSent &&
+                    actionsCompleted < MaxActionsPerSession &&
                     loginCompleteSent &&
                     loginCompletePacketIndex >= 0 &&
                     (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
@@ -851,10 +901,11 @@ internal sealed class HandshakeDriver : IDisposable
                     //              within MotionSearchRadius. Equal-name ties broken by 3D dist
                     //              via WorldDistance.TrySquaredDistance which already wins on
                     //              the nearest-snapshot side via NearestN ordering.
-                    // We pick ONCE; no per-tick re-pick.
+                    // Phase 6g: exclude guids we've already targeted this session.
                     var apRot = self.Rotation;
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
+                        .Where(s => !visitedTargetGuids.Contains(s.Guid))
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
@@ -1149,6 +1200,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionTarget is not null)
                 {
                     useSent = true;
+                    useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
                     var isPickup = (itemType & PickupItemTypeMask) != 0;
                     var packetSeq = nextOutboundPacketSequence++;
