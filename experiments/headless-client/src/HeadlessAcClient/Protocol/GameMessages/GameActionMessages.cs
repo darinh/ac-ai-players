@@ -35,11 +35,14 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 
 internal enum GameActionType : uint
 {
-    LoginComplete      = 0x00A1,
-    PutItemInContainer = 0x0019,
-    Use                = 0x0036,
-    MoveToState        = 0xF61C,
-    AutonomousPosition = 0xF753,
+    LoginComplete       = 0x00A1,
+    PutItemInContainer  = 0x0019,
+    Use                 = 0x0036,
+    MoveToState         = 0xF61C,
+    AutonomousPosition  = 0xF753,
+    TargetedMeleeAttack = 0x0008,
+    GetAndWieldItem     = 0x001A,
+    ChangeCombatMode    = 0x0053,
 }
 
 /// <summary>
@@ -241,6 +244,122 @@ internal static class GameActionPutItemInContainerMessage
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);     cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), containerGuid); cursor += 4;
         BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), placement);     cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// ChangeCombatMode (0x0053). Switches the player between non-combat
+/// idle stance and an active combat stance (Melee / Missile / Magic).
+/// Required before any TargetedMeleeAttack / TargetedMissileAttack /
+/// CreateSpell game action — the server's HandleAction* methods all
+/// validate that <c>Player.CombatMode</c> matches the action.
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionChangeCombatMode.cs</c>
+///   reads u32 newMode and calls
+///   <c>session.Player.HandleActionChangeCombatMode((CombatMode)newMode)</c>.
+///
+/// Payload after the 12B GameAction header:
+///   u32 newCombatMode  (CombatMode enum:
+///                       NonCombat=1, Melee=2, Missile=4, Magic=8)
+/// = 16 bytes total.
+///
+/// On success the server broadcasts a Motion update flipping the
+/// player into the new stance and emits SetState for nearby
+/// observers. Subsequent attack actions become legal.
+/// </summary>
+internal static class GameActionChangeCombatModeMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint newCombatMode, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.ChangeCombatMode, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), newCombatMode); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// TargetedMeleeAttack (0x0008). Issues a melee strike against a
+/// specific creature guid using the currently wielded weapon (or
+/// unarmed strike). Requires the player to already be in
+/// CombatMode.Melee — see <see cref="GameActionChangeCombatModeMessage"/>.
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionTargetedMeleeAttack.cs</c>
+///   reads u32 targetGuid + u32 attackHeight + f32 powerLevel and
+///   calls <c>session.Player.HandleActionTargetedMeleeAttack(
+///       targetGuid, attackHeight, powerLevel)</c>.
+///
+/// Payload after the 12B GameAction header:
+///   u32 targetGuid
+///   u32 attackHeight   (AttackHeight enum: High=1, Medium=2, Low=3)
+///   f32 powerLevel     ([0.0, 1.0] — 0.5 is the "half power" default
+///                       a real client sends for an unmodified click)
+/// = 24 bytes total.
+///
+/// The server walks the player into UseRadius, plays the swing
+/// animation, rolls hit/miss/damage based on the wielded weapon and
+/// the target's defenses, and broadcasts UpdateHealth (the target's
+/// PrivateUpdatePropertyInt for Health) plus various combat events.
+/// </summary>
+internal static class GameActionTargetedMeleeAttackMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 12;  // 24 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint attackHeight, float powerLevel, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.TargetedMeleeAttack, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);    cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), attackHeight);  cursor += 4;
+        BinaryPrimitives.WriteSingleLittleEndian(dest.Slice(cursor), powerLevel);    cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// GetAndWieldItem (0x001A). Equips an item that is currently in the
+/// player's inventory (or picks it up from the world and equips it in
+/// one combined action) into the specified equipment slot.
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionGetAndWieldItem.cs</c>
+///   reads u32 itemGuid + i32 location and calls
+///   <c>session.Player.HandleActionGetAndWieldItem(itemGuid, location)</c>.
+///
+/// Payload after the 12B GameAction header:
+///   u32 itemGuid
+///   i32 equipLocation  (EquipMask enum, e.g. HeadWear=0x01,
+///                       HandWear=0x40, ChestArmor=0x100,
+///                       MeleeWeapon=0x10000, etc.)
+/// = 20 bytes total.
+///
+/// The chosen location must be compatible with the item's
+/// ValidLocations property OR the server rejects with a
+/// WeenieErrorWithString. For unambiguously-slotted gear (gauntlets,
+/// helmet, etc.) the location is typically a single bit; for
+/// multi-slot items (rings, bracelets) the caller must pick one.
+/// </summary>
+internal static class GameActionGetAndWieldItemMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, uint itemGuid, int equipLocation, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.GetAndWieldItem, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);       cursor += 4;
+        BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), equipLocation);  cursor += 4;
         return cursor;
     }
 }
