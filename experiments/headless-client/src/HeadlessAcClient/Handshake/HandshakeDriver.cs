@@ -99,11 +99,12 @@ internal sealed class HandshakeDriver : IDisposable
             Console.WriteLine($"[handshake]   sent {ConnectResponseRetries}× from local endpoint {_socket.LocalEndPoint}");
 
             // Phase 1 gate: receive whatever the server sends next on
-            // port 0 (the handshake socket). Loop for up to ObserveSeconds
-            // so we can see what packet types arrive (AckSequence, TimeSync,
-            // BlobFragments carrying CharacterList, etc) before the server
-            // times us out for not acking.
-            int packetsObserved = await ObservePostHandshakePackets(recvBuf, ObserveSeconds, ct).ConfigureAwait(false);
+            // port 0 (the handshake socket). Phase 2 wires CRC verification
+            // using the ISAAC keystream seeded from ServerSeed -- every
+            // EncryptedChecksum packet should now verify.
+            var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
+            int packetsObserved = await ObservePostHandshakePackets(
+                recvBuf, ObserveSeconds, cryptoRecv, ct).ConfigureAwait(false);
 
             return new HandshakeResult(
                 connectReq.ServerTime,
@@ -213,10 +214,12 @@ internal sealed class HandshakeDriver : IDisposable
         return PacketHeader.HeaderSize + bodyLen;
     }
 
-    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CancellationToken ct)
+    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         var count = 0;
+        var crcPass = 0;
+        var crcFail = 0;
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -235,12 +238,25 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe] #{count} short packet: {len} bytes from {result.RemoteEndPoint}");
                     continue;
                 }
-                var hdr = new PacketHeader();
-                hdr.Unpack(recvBuf.AsSpan(0, PacketHeader.HeaderSize));
-                var bodyLen = Math.Min((int)hdr.Size, len - PacketHeader.HeaderSize);
-                Console.WriteLine($"[observe] #{count} from {result.RemoteEndPoint}: {hdr}");
-                if (bodyLen > 0)
-                    Console.WriteLine($"[observe]   body[{bodyLen}]: {Hex(recvBuf.AsSpan(PacketHeader.HeaderSize, bodyLen))}");
+                var pkt = new InboundPacket();
+                if (!pkt.Unpack(recvBuf, len))
+                {
+                    Console.WriteLine($"[observe] #{count} from {result.RemoteEndPoint}: UNPACK FAILED ({len} bytes)");
+                    continue;
+                }
+                var verified = pkt.VerifyCRC(cryptoRecv);
+                if (verified) crcPass++; else crcFail++;
+                var verdict = verified
+                    ? "CRC_OK"
+                    : (pkt.Header.HasFlag(PacketHeaderFlags.EncryptedChecksum) ? "CRC_FAIL_enc" : "CRC_FAIL_plain");
+                Console.WriteLine($"[observe] #{count} from {result.RemoteEndPoint}: {pkt.Header}  [{verdict}]");
+
+                if (pkt.Header.HasFlag(PacketHeaderFlags.TimeSync))
+                    Console.WriteLine($"[observe]   optional: TimeSync={pkt.Optional.TimeSync:R}");
+                if (pkt.Header.HasFlag(PacketHeaderFlags.AckSequence))
+                    Console.WriteLine($"[observe]   optional: AckSequence={pkt.Optional.AckSequence}");
+                foreach (var (fh, data) in pkt.Fragments)
+                    Console.WriteLine($"[observe]   {fh} payload[{data.Length}]: {Hex(data.AsSpan(0, Math.Min(data.Length, 32)))}{(data.Length > 32 ? " ..." : "")}");
             }
             catch (OperationCanceledException)
             {
@@ -248,7 +264,7 @@ internal sealed class HandshakeDriver : IDisposable
                 break;
             }
         }
-        Console.WriteLine($"[observe] total post-handshake packets observed: {count}");
+        Console.WriteLine($"[observe] total post-handshake packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         return count;
     }
 
