@@ -27,10 +27,6 @@
 //     server-issued PlayerCreate) routes correctly.
 //
 // What's intentionally NOT here yet (Phase 5+):
-//   - Spatial query API (EnumerateNearby) — defer until tactics
-//     actually need it. Naive Vector3.Distance across CellIds
-//     is wrong; doing it properly requires landblock
-//     coordinate conversion.
 //   - Full Motion body decode — only header fields surface
 //     here; the polymorphic body is still raw bytes.
 
@@ -391,5 +387,125 @@ internal sealed class WorldState
         }
         var props = Self?.PropertyInts?.Count ?? 0;
         return $"objects={_objects.Count} self={selfStr} selfProps={props}";
+    }
+
+    // ---- Spatial queries ----
+    //
+    // Public API for the future Motor/Tactics layer. All methods
+    // return eagerly-materialized lists — never lazy enumerators
+    // over the underlying dictionary — so a caller iterating
+    // results while another callback applies new messages can't
+    // trip a "Collection was modified" exception.
+    //
+    // All queries skip snapshots without a CellId (no spatial
+    // state yet) and skip the origin itself (matched by Guid,
+    // not reference identity, so callers can pass a copy/stub).
+
+    /// <summary>
+    /// Enumerate every snapshot in the world with a known position,
+    /// paired with its squared distance to <paramref name="origin"/>.
+    /// Excludes the origin itself and any object without a CellId.
+    /// Returns empty if origin has no CellId.
+    /// Results are NOT sorted — use NearestN if you need ordering.
+    /// </summary>
+    public IReadOnlyList<(WorldObjectSnapshot Object, float SquaredDistance)>
+        EnumerateNearby(WorldObjectSnapshot origin)
+    {
+        if (origin is null) throw new ArgumentNullException(nameof(origin));
+        if (origin.CellId is not uint originCell)
+            return Array.Empty<(WorldObjectSnapshot, float)>();
+
+        var result = new List<(WorldObjectSnapshot, float)>(_objects.Count);
+        foreach (var snap in _objects.Values)
+        {
+            if (snap.Guid == origin.Guid) continue;
+            if (snap.CellId is not uint cell) continue;
+            var d2 = WorldDistance.SquaredDistanceBetween(
+                originCell, origin.Position, cell, snap.Position);
+            result.Add((snap, d2));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// All objects within <paramref name="radius"/> game units of
+    /// <paramref name="origin"/>. Order is unspecified — call
+    /// NearestN if you need distance-sorted output.
+    /// Throws on negative or NaN radius.
+    /// </summary>
+    public IReadOnlyList<WorldObjectSnapshot>
+        WithinRadius(WorldObjectSnapshot origin, float radius)
+    {
+        if (origin is null) throw new ArgumentNullException(nameof(origin));
+        if (float.IsNaN(radius) || radius < 0f)
+            throw new ArgumentOutOfRangeException(nameof(radius),
+                $"radius must be non-negative and finite (got {radius})");
+
+        var radiusSq = radius * radius;
+        var nearby = EnumerateNearby(origin);
+        var result = new List<WorldObjectSnapshot>(nearby.Count);
+        foreach (var (snap, d2) in nearby)
+        {
+            if (d2 <= radiusSq) result.Add(snap);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// The <paramref name="count"/> objects closest to
+    /// <paramref name="origin"/>, sorted ascending by distance.
+    /// Tie-break: guid ascending (deterministic).
+    /// If fewer objects than <paramref name="count"/> have known
+    /// positions, returns all of them.
+    /// Throws on negative count.
+    /// </summary>
+    public IReadOnlyList<WorldObjectSnapshot>
+        NearestN(WorldObjectSnapshot origin, int count)
+    {
+        if (origin is null) throw new ArgumentNullException(nameof(origin));
+        if (count < 0)
+            throw new ArgumentOutOfRangeException(nameof(count),
+                $"count must be non-negative (got {count})");
+        if (count == 0)
+            return Array.Empty<WorldObjectSnapshot>();
+
+        var nearby = EnumerateNearby(origin);
+        if (nearby.Count == 0)
+            return Array.Empty<WorldObjectSnapshot>();
+
+        // Stable sort by (squared-distance asc, guid asc).
+        var sorted = new List<(WorldObjectSnapshot Obj, float D2)>(nearby);
+        sorted.Sort((a, b) =>
+        {
+            var cmp = a.D2.CompareTo(b.D2);
+            return cmp != 0 ? cmp : a.Obj.Guid.CompareTo(b.Obj.Guid);
+        });
+
+        var take = Math.Min(count, sorted.Count);
+        var result = new List<WorldObjectSnapshot>(take);
+        for (var i = 0; i < take; i++) result.Add(sorted[i].Obj);
+        return result;
+    }
+
+    /// <summary>
+    /// All objects whose ItemType bitmask intersects
+    /// <paramref name="itemTypeMask"/>. AC's ItemType is a bit
+    /// field — `Creature | MeleeWeapon | ...` — so a mask of
+    /// multiple bits matches objects of any of those types.
+    /// Objects without an ItemType (no ObjectCreate yet) are
+    /// excluded. A zero mask matches nothing.
+    /// </summary>
+    public IReadOnlyList<WorldObjectSnapshot> OfType(uint itemTypeMask)
+    {
+        if (itemTypeMask == 0)
+            return Array.Empty<WorldObjectSnapshot>();
+
+        var result = new List<WorldObjectSnapshot>();
+        foreach (var snap in _objects.Values)
+        {
+            if (snap.ItemType is uint t && (t & itemTypeMask) != 0)
+                result.Add(snap);
+        }
+        return result;
     }
 }

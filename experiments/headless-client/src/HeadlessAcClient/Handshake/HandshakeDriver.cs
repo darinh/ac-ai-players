@@ -953,6 +953,29 @@ internal sealed class HandshakeDriver : IDisposable
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         Console.WriteLine($"[world]   final: {worldState.FormatSummary()}");
+
+        // Spatial query smoke check — exercise the new
+        // EnumerateNearby / WithinRadius / NearestN API against
+        // the live world snapshot so we get real-world numbers
+        // in the run log (academy populates ~30 objects).
+        if (worldState.Self is { CellId: not null } spatialSelf)
+        {
+            var top5 = worldState.NearestN(spatialSelf, 5);
+            Console.WriteLine($"[spatial] nearestN(5) for self 0x{spatialSelf.Guid:X8}:");
+            foreach (var snap in top5)
+            {
+                WorldDistance.TrySquaredDistance(spatialSelf, snap, out var d2);
+                var d = (float)Math.Sqrt(d2);
+                var name = snap.Name ?? "<no name>";
+                Console.WriteLine($"[spatial]   guid=0x{snap.Guid:X8} d={d,7:F2} cell=0x{snap.CellId ?? 0:X8} name='{name}'");
+            }
+            var within30 = worldState.WithinRadius(spatialSelf, 30f);
+            Console.WriteLine($"[spatial] within 30 units: {within30.Count} objects");
+        }
+        else
+        {
+            Console.WriteLine("[spatial] self snapshot has no CellId — skipping spatial queries");
+        }
         Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
