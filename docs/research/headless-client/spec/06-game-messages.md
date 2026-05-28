@@ -120,8 +120,8 @@ sends, the bare name is the server's "you're in" confirmation.
 | `0xF7E5` | `DDD_Interrogation` | S → C | `DatabaseQueue` (5) | Triggers client to declare its data versions |
 | `0xF7C8` | `CharacterEnterWorldRequest` | C → S | (TBD Phase 3) | Client asks to enter world with a chosen character GUID + name |
 | `0xF657` | `CharacterEnterWorld` | S → C | (TBD Phase 3) | Server confirms entry and starts world stream |
-| `0xF656` | `CharacterCreate` | C → S | (TBD Phase 3+) | Create new character (request side) |
-| `0xF643` | `CharacterCreateResponse` | S → C | (TBD) | Outcome of `CharacterCreate` |
+| `0xF656` | `CharacterCreate` | C → S | `UIQueue` (9) | Create new character (request side); verified Phase 3.2 |
+| `0xF643` | `CharacterCreateResponse` | S → C | `UIQueue` (9) | Outcome of `CharacterCreate`; conditional body, verified Phase 3.2 |
 | `0xF655` | `CharacterDelete` | C → S | (TBD) | Mark character for deletion |
 | `0xF653` | `CharacterLogOff` | C → S | (TBD) | Exit to character-select |
 
@@ -242,6 +242,143 @@ e1 f7 00 00            # opcode 0xF7E1
 41 43 45 6d 75 6c 61 74 6f 72             # "ACEmulator"
 # no pad needed: 2 + 10 = 12, already a 4-multiple
 ```
+
+### `0xF656` `GameMessageCharacterCreate` (C → S)
+
+Sources:
+[`CharacterHandler.cs:26-44`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Handlers/CharacterHandler.cs#L26-L44)
+(opcode dispatch and account-string gate) +
+[`CharacterCreateInfo.cs:37-68`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Entity/CharacterCreateInfo.cs#L37-L68)
+(payload structure) +
+[`Appearance.cs:28-50`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Entity/Appearance.cs#L28-L50)
+(the appearance sub-record).
+
+Queue: `UIQueue` (9). Reliability: implicitly reliable (server
+calls `Reliable*` on the response).
+
+**Critical**: the very first field is the session's account name.
+If it does not exactly match `session.Account`, the handler
+**silently returns** with no error packet at all. This is the
+single most opaque failure mode for this message.
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF656` |
+| 4 | `String16L` | `account` | MUST equal `session.Account`. Drawn from the inbound `CharacterList.account`. |
+| varies | `u32` | `unknown` | Source comment: "this is a u32 we don't use". Server reads and discards. Write `1`. |
+| +4 | `u32` | `heritage` | `HeritageGroup` enum. Aluvian=1, Gharu'ndim=2, Sho=3, Viamontian=4, Empyrean=5, Umbraen=6, Penumbraen=7, Lugian=8, Tumerok=9, Olthoi=10, OlthoiAcid=11. Must index into `CharGen.HeritageGroups`. |
+| +4 | `u32` | `gender` | 0=Female, 1=Male. Must index into `heritageGroup.Genders`. |
+| +4 | `Appearance` | `appearance` | See sub-schema below (104 bytes). |
+| +104 | `i32` | `templateOption` | Index into `heritageGroup.Templates`. 0 = first template. |
+| +4 | `u32 × 6` | `attributes` | Strength, Endurance, Coordination, Quickness, Focus, Self. Each ∈ [10, 100]. Sum ≤ `heritage.AttributeCredits` (Aluvian = 290). |
+| +24 | `u32` | `characterSlot` | Display slot index (0-10). |
+| +4 | `u32` | `classId` | Custom class id; 0 is safe. |
+| +4 | `u32` | `numOfSkills` | **MUST be 55 exactly.** Wrong count → `ClientServerSkillsMismatch` → session terminated via `GameMessageBootAccount`. Hard runtime guard required (Debug.Assert is not enough). |
+| +4 | `u32 × 55` | `skillAdvancementClass` | Per-skill `SkillAdvancementClass`: Inactive=0, Untrained=1, Trained=2, Specialized=3. All-Inactive (zeros) is the safe default. |
+| +220 | `String16L` | `name` | Character name. Checked against the taboo table (`NameBanned`) and existing-character index (`NameInUse`). |
+| varies | `u32` | `startArea` | Index into `CharGen.StarterAreas`. 0 = first area. |
+| +4 | `u32` | `isAdmin` | Boolean. Must be 0 unless the account is flagged admin. |
+| +4 | `u32` | `isSentinel` | Boolean. Must be 0 unless the account is flagged sentinel. |
+
+#### `Appearance` sub-schema (104 bytes, all little-endian)
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | `u32` | `Eyes` (texture index) |
+| 4 | `u32` | `Nose` |
+| 8 | `u32` | `Mouth` |
+| 12 | `u32` | `EyeColor` (palette) |
+| 16 | `u32` | `HairColor` |
+| 20 | `u32` | `HairStyle` |
+| 24 | `u32` | `HairHue` |
+| 28 | `u32` | `SkinHue` |
+| 32 | `u32` | `HeadgearStyle` |
+| 36 | `u32` | `HeadgearColor` |
+| 40 | `u32` | `ShirtStyle` |
+| 44 | `u32` | `ShirtColor` |
+| 48 | `u32` | `PantsStyle` |
+| 52 | `u32` | `PantsColor` |
+| 56 | `f64` | `HeadgearHue` |
+| 64 | `f64` | `ShirtHue` |
+| 72 | `f64` | `PantsHue` |
+| 80 | `f64` | `FootwearHue` |
+| 88 | `f64` | `HeadgearHue2` |
+| 96 | `f64` | `ShirtHue2` |
+
+Empirically (Phase 3.2 PASS), all-zero Appearance is valid for an
+Aluvian Male: `sex.GetEyeTexture(0)` and the rest of the indexed
+DAT lookups succeed with index 0.
+
+#### Validation rules (all silent unless flagged)
+
+| Server check | Failure response |
+|---|---|
+| `session.Account != payloadAccount` | **silent return** — no response packet |
+| Heritage index out of range | `Corrupt` (=5) |
+| Gender index out of range | `Corrupt` |
+| TemplateOption index out of range | `Corrupt` |
+| Any attribute outside [10, 100] | `InvalidSkillRequested` (misleading name; this is the attribute path) |
+| Sum of attributes > `heritage.AttributeCredits` | `TooManySkillCreditsUsed` |
+| `numOfSkills != 55` | `ClientServerSkillsMismatch` → **session terminated** |
+| Non-Inactive skill not in DAT `SkillBaseHash` | `InvalidSkillRequested` |
+| Name in taboo table | `NameBanned` (=4) |
+| Name already in use | `NameInUse` (=3) |
+| Any other exception inside `PlayerFactory.Create` | caught + logged server-side; **no response packet** |
+
+Verified Phase 3.2 payload (420 bytes, account `"headless-test"`,
+name `"Headless01"`, all-10s attributes, all-Inactive skills):
+see [`phase3-charcreate-run-01.log`](../phase3-charcreate-run-01.log)
+for the captured wire bytes and server response.
+
+### `0xF643` `GameMessageCharacterCreateResponse` (S → C)
+
+Source:
+[`GameMessageCharacterCreateResponse.cs:8-19`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageCharacterCreateResponse.cs#L8-L19).
+
+Queue: `UIQueue` (9).
+
+**Conditional body** — the optional fields are only present when
+`response == Ok` (=1). A decoder that eagerly reads them on any
+non-Ok response will overrun the fragment and corrupt downstream
+parsing of batched messages.
+
+| Offset | Size | Field | Always present? |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | yes (`0xF643`) |
+| 4 | `u32` | `response` | yes — `CharacterGenerationVerificationResponse` enum |
+| 8 | `u32` | `guid` | **only if `response == Ok`** — character's `ObjectGuid.Full` |
+| 12 | `String16L` | `name` | only if `response == Ok` |
+| varies | `u32` | `trailingZero` | only if `response == Ok` — server always writes `0` |
+
+`CharacterGenerationVerificationResponse` values:
+| Code | Name | Meaning |
+|---|---|---|
+| 0 | Undef | Unused. |
+| 1 | **Ok** | Character created; body fields populated. |
+| 2 | Pending | Async check in progress (rare). |
+| 3 | NameInUse | Name already taken. |
+| 4 | NameBanned | Name in taboo table. |
+| 5 | Corrupt | One of the validation gates above failed. |
+| 6 | DatabaseDown | Shard DB unreachable. |
+| 7 | AdminPrivilegeDenied | Requested admin/sentinel without account flag. |
+| 8 | Count | Sentinel. |
+
+Captured payload from Phase 3.2 (28 bytes, full fragment Size=44
+including the 16-byte FragmentHeader):
+
+```
+43 f6 00 00                                # opcode 0xF643
+01 00 00 00                                # response = Ok (1)
+06 00 00 50                                # guid = 0x50000006
+0a 00                                      # String16L length = 10
+48 65 61 64 6c 65 73 73 30 31              # "Headless01"
+00 00                                      # pad (2 + 10 = 12, no pad needed; these two bytes are part of trailing)
+00 00 00 00                                # trailingZero
+```
+
+(Note the 2-byte alignment: `2 + 10 = 12` is already a 4-multiple,
+so the String16L has zero pad bytes; the four `00` bytes that
+follow are the `trailingZero` field, not padding.)
 
 ## Reliability and ordering
 

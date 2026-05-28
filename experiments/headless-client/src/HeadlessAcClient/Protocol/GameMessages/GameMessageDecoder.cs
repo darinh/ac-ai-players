@@ -40,8 +40,35 @@ internal static class GameMessageDecoder
             GameMessageOpcode.CharacterList    => DecodeCharacterList(payload),
             GameMessageOpcode.ServerName       => DecodeServerName(payload),
             GameMessageOpcode.DDDInterrogation => DecodeDDDInterrogation(payload),
+            GameMessageOpcode.CharacterCreateResponse => DecodeCharacterCreateResponse(payload),
             _ => null,
         };
+    }
+
+    private static CharacterCreateResponseMessage? DecodeCharacterCreateResponse(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            var cursor = sizeof(uint); // skip opcode
+            var response = (CharacterCreateResponse)BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor));
+            cursor += 4;
+
+            // Server only writes guid+name+trailing on Ok - see
+            // GameMessageCharacterCreateResponse.cs:13-18. Eagerly
+            // reading them on a failure would consume bytes that
+            // belong to the next message in a batched fragment.
+            if (response != CharacterCreateResponse.Ok)
+                return new CharacterCreateResponseMessage(response, 0, "", 0);
+
+            var guid = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var name = AcStrings.ReadString16L(p, ref cursor);
+            var trailing = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            return new CharacterCreateResponseMessage(response, guid, name, trailing);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static CharacterListMessage? DecodeCharacterList(ReadOnlySpan<byte> p)

@@ -21,6 +21,7 @@ using System.Threading.Tasks;
 using AcAiPlayers.Services;
 
 using HeadlessAcClient.Protocol;
+using HeadlessAcClient.Protocol.GameMessages;
 
 namespace HeadlessAcClient;
 
@@ -64,7 +65,17 @@ internal static class Program
                 var hasMessages = result.DDDInterrogation is not null
                     || result.CharacterList is not null
                     || result.ServerName is not null;
-                if (hasMessages)
+                var charCreateOk = result.CharacterCreateResponse is { Response: CharacterCreateResponse.Ok };
+                if (charCreateOk)
+                {
+                    var ccr = result.CharacterCreateResponse!;
+                    Console.WriteLine($"[main] PHASE 3.2 PASS — CharacterCreate accepted: guid=0x{ccr.CharacterGuid:X8} name=\"{ccr.Name}\"");
+                }
+                else if (result.CharacterCreateResponse is { } ccrErr)
+                {
+                    Console.WriteLine($"[main] PHASE 3.2 PARTIAL — CharacterCreate sent, server replied {ccrErr.Response} (code={(uint)ccrErr.Response})");
+                }
+                else if (hasMessages)
                 {
                     Console.WriteLine("[main] PHASE 2 PASS — handshake + crypto + keepalive + game-message decode all working.");
                 }

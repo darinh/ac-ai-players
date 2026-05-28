@@ -29,6 +29,7 @@ internal static class OutboundSelfCheck
         RunPlainOptionalPlusFragment();
         RunEncryptedSingleFragment();
         RunFragmentSizeGuards();
+        RunCharacterCreateRoundTrip();
 
         Console.WriteLine("[selfcheck] OutboundPacket round-trip OK");
     }
@@ -158,6 +159,122 @@ internal static class OutboundSelfCheck
             throw new InvalidOperationException("guard: 449-byte payload should have thrown");
         }
         catch (ArgumentException) { /* expected */ }
+    }
+
+    private static void RunCharacterCreateRoundTrip()
+    {
+        // Mirror the server's read side (CharacterHandler.cs +
+        // CharacterCreateInfo.cs + Appearance.cs) to verify EVERY field
+        // round-trips through our packer at the exact byte offsets the
+        // server expects. Catches alignment/padding bugs before the bytes
+        // go on the wire (where the server's "silently return" failure
+        // mode is opaque).
+        var opt = new GameMessages.CharacterCreateMessage.Options(
+            Account: "headless-test",
+            Name:    "Headless01");
+
+        var size = GameMessages.CharacterCreateMessage.MeasurePackedSize(opt);
+        if (size > 448)
+            throw new InvalidOperationException(
+                $"CharacterCreate measured {size} bytes; exceeds single-fragment cap 448");
+
+        var buf = new byte[size];
+        var actual = GameMessages.CharacterCreateMessage.Pack(buf, opt);
+        if (actual != size)
+            throw new InvalidOperationException(
+                $"CharacterCreate Pack returned {actual}; MeasurePackedSize said {size}");
+
+        // Round-trip: read the bytes we just wrote, in the exact order
+        // CharacterHandler + CharacterCreateInfo.Unpack would read them.
+        var cur = 0;
+        var opcode = ReadU32(buf, ref cur);
+        Require(opcode == (uint)GameMessages.GameMessageOpcode.CharacterCreate,
+            $"CharacterCreate opcode={opcode:X8}");
+
+        var account = AcStrings.ReadString16L(buf, ref cur);
+        Require(account == "headless-test", $"CharacterCreate account=\"{account}\"");
+
+        var unknown = ReadU32(buf, ref cur);
+        Require(unknown == 1, $"CharacterCreate unknown={unknown}");
+
+        var heritage = ReadU32(buf, ref cur);
+        Require(heritage == GameMessages.CharacterCreateMessage.HeritageAluvian,
+            $"CharacterCreate heritage={heritage}");
+
+        var gender = ReadU32(buf, ref cur);
+        Require(gender == GameMessages.CharacterCreateMessage.GenderMale,
+            $"CharacterCreate gender={gender}");
+
+        // Appearance: 14 u32 + 6 f64 = 104 bytes, all zero in defaults.
+        for (var i = 0; i < 14; i++)
+        {
+            var v = ReadU32(buf, ref cur);
+            Require(v == 0, $"CharacterCreate appearance u32[{i}]={v}");
+        }
+        for (var i = 0; i < 6; i++)
+        {
+            var v = ReadF64(buf, ref cur);
+            Require(v == 0.0, $"CharacterCreate appearance f64[{i}]={v}");
+        }
+
+        var templateOption = (int)ReadU32(buf, ref cur);
+        Require(templateOption == 0, $"CharacterCreate templateOption={templateOption}");
+
+        // 6 abilities - default is all-10s per rubber-duck recommendation.
+        for (var i = 0; i < 6; i++)
+        {
+            var v = ReadU32(buf, ref cur);
+            Require(v == 10, $"CharacterCreate ability[{i}]={v}");
+        }
+
+        var slot    = ReadU32(buf, ref cur);
+        var classId = ReadU32(buf, ref cur);
+        Require(slot == 0,    $"CharacterCreate slot={slot}");
+        Require(classId == 0, $"CharacterCreate classId={classId}");
+
+        var skillCount = ReadU32(buf, ref cur);
+        Require(skillCount == GameMessages.CharacterCreateMessage.RequiredSkillCount,
+            $"CharacterCreate skillCount={skillCount}");
+        for (var i = 0; i < GameMessages.CharacterCreateMessage.RequiredSkillCount; i++)
+        {
+            var v = ReadU32(buf, ref cur);
+            Require(v == GameMessages.CharacterCreateMessage.SACInactive,
+                $"CharacterCreate skill[{i}]={v}");
+        }
+
+        var name = AcStrings.ReadString16L(buf, ref cur);
+        Require(name == "Headless01", $"CharacterCreate name=\"{name}\"");
+
+        var startArea  = ReadU32(buf, ref cur);
+        var isAdmin    = ReadU32(buf, ref cur);
+        var isSentinel = ReadU32(buf, ref cur);
+        Require(startArea == 0,  $"CharacterCreate startArea={startArea}");
+        Require(isAdmin == 0,    $"CharacterCreate isAdmin={isAdmin}");
+        Require(isSentinel == 0, $"CharacterCreate isSentinel={isSentinel}");
+
+        if (cur != actual)
+            throw new InvalidOperationException(
+                $"CharacterCreate over/underread: cursor={cur} packed={actual}");
+    }
+
+    private static uint ReadU32(ReadOnlySpan<byte> buf, ref int cur)
+    {
+        var v = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(buf.Slice(cur));
+        cur += 4;
+        return v;
+    }
+
+    private static double ReadF64(ReadOnlySpan<byte> buf, ref int cur)
+    {
+        var v = System.Buffers.Binary.BinaryPrimitives.ReadDoubleLittleEndian(buf.Slice(cur));
+        cur += 8;
+        return v;
+    }
+
+    private static void Require(bool condition, string label)
+    {
+        if (!condition)
+            throw new InvalidOperationException($"selfcheck failed: {label}");
     }
 
     /// <summary>

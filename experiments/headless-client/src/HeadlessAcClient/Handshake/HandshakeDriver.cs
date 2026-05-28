@@ -125,7 +125,8 @@ internal sealed class HandshakeDriver : IDisposable
                 observe.PacketCount > 0,
                 observe.CharacterList,
                 observe.ServerName,
-                observe.DDDInterrogation);
+                observe.DDDInterrogation,
+                observe.CharacterCreateResponse);
         }
         finally
         {
@@ -260,13 +261,13 @@ internal sealed class HandshakeDriver : IDisposable
         // Inbound code appears to ignore the field. Pick a non-high-bit constant
         // so the client/server origin remains distinguishable in captures.
         const uint OutboundFragmentId = 0x00000001;
-        // Phase 3.1 probe: send one unknown-opcode BlobFragments packet after
-        // CharacterList arrives. Server's InboundMessageManager.cs:115-118 logs
-        // "Received unhandled fragment opcode: 0xFFFE" and continues. Proves the
-        // encrypted-fragment path works end-to-end without committing to a real
-        // game message yet.
-        const uint UnknownProbeOpcode = 0xFFFE;
-        var probeSent = false;
+
+        // Phase 3.2: send a CharacterCreate (opcode 0xF656) once
+        // CharacterList confirms we're in AuthConnected state with zero
+        // existing characters. Server replies with 0xF643
+        // CharacterCreateResponse - decoded in GameMessageDecoder.
+        var characterCreateSent = false;
+        CharacterCreateResponseMessage? createResponse = null;
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -328,6 +329,13 @@ internal sealed class HandshakeDriver : IDisposable
                             ddd = di;
                             Console.WriteLine($"[observe]   -> DDDInterrogation: region={di.ServersRegion} lang={di.NameRuleLanguage} product={di.ProductId} supportedLangs=[{string.Join(",", di.SupportedLanguages)}]");
                             break;
+                        case CharacterCreateResponseMessage ccr:
+                            createResponse = ccr;
+                            if (ccr.Response == CharacterCreateResponse.Ok)
+                                Console.WriteLine($"[observe]   -> CharacterCreateResponse: Ok guid=0x{ccr.CharacterGuid:X8} name=\"{ccr.Name}\"");
+                            else
+                                Console.WriteLine($"[observe]   -> CharacterCreateResponse: {ccr.Response} (code={(uint)ccr.Response})");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;
@@ -374,41 +382,51 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> sent TimeSync({pkt.Optional.TimeSync:R}) [{tsLen} bytes]");
                 }
 
-                // Phase 3.1 acceptance probe: once we know we're in AuthConnected
-                // state (CharacterList means the server is past the AuthConnected
-                // transition - see Handlers/CharacterHandler.cs:26-27), send a
-                // single encrypted BlobFragments packet carrying an unknown
-                // opcode. Server's InboundMessageManager.cs:117 logs a warning
-                // and keeps the session alive. Confirms the outbound encryption
-                // chain works end-to-end without committing to a real game
-                // message yet.
-                if (!probeSent && charList is not null)
+                // Phase 3.2: send CharacterCreate once CharacterList shows
+                // the test account has zero characters. Server replies with
+                // 0xF643 CharacterCreateResponse. Per CharacterHandler.cs:26
+                // ([GameMessage(..., SessionState.AuthConnected)]) this is
+                // dispatched in the same state CharacterList arrives in -
+                // so receiving CharacterList confirms we can send it.
+                if (!characterCreateSent && charList is not null && charList.Characters.Count == 0)
                 {
-                    probeSent = true;
+                    characterCreateSent = true;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
-                    var payload = new byte[4];
-                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload, UnknownProbeOpcode);
+                    // Account MUST exactly match the session's account
+                    // (CharacterHandler.cs:31-32 silently returns on
+                    // mismatch). Take it from CharacterList (which the
+                    // server itself populated via Session.Account).
+                    var opt = new CharacterCreateMessage.Options(
+                        Account: charList.Account,
+                        Name:    "Headless01");
 
-                    var probe = new OutboundPacket();
-                    // Piggyback the latest inbound ack so the server's
-                    // retransmit pressure stays low.
+                    var packedSize = CharacterCreateMessage.MeasurePackedSize(opt);
+                    if (packedSize > 448)
+                    {
+                        Console.WriteLine($"[observe]   -> SKIP CharacterCreate: {packedSize} bytes exceeds 448-byte single-fragment cap");
+                        continue;
+                    }
+                    var ccBuf = new byte[packedSize];
+                    var actual = CharacterCreateMessage.Pack(ccBuf, opt);
+
+                    var msg = new OutboundPacket();
                     if (lastReceivedSeq != 0)
-                        probe.AddAckSequence(lastReceivedSeq);
-                    probe.AddBlobFragment(
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
                         fragSequence: fragSeq,
                         fragId: OutboundFragmentId,
                         queue: (ushort)GameMessageGroup.UIQueue,
-                        gameMessagePayload: payload);
+                        gameMessagePayload: ccBuf.AsSpan(0, actual));
 
-                    var probeLen = probe.Pack(sendBuf, myClientId,
-                                              sequence: packetSeq, iteration: 1,
-                                              encrypt: true, cryptoSend: cryptoSend);
-                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, probeLen),
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                    Console.WriteLine($"[observe]   -> PHASE3.1 PROBE: sent encrypted BlobFragments(opcode=0x{UnknownProbeOpcode:X4}, pktSeq={packetSeq}, fragSeq={fragSeq}) [{probeLen} bytes]");
-                    Console.WriteLine($"[observe]      Check C:\\ACE\\Logs\\ACE_Log.txt for: \"Received unhandled fragment opcode: 0x{UnknownProbeOpcode:X4}\"");
+                    Console.WriteLine($"[observe]   -> PHASE3.2 SEND: CharacterCreate(account=\"{opt.Account}\" name=\"{opt.Name}\" payload={actual}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]      Expect 0xF643 CharacterCreateResponse (Ok=1, NameInUse=3, Corrupt=5, etc.)");
                 }
             }
             catch (OperationCanceledException)
@@ -418,8 +436,12 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes");
-        return new ObserveResult(count, charList, serverName, ddd, probeSent);
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}");
+        if (createResponse is not null)
+            Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
+        else if (characterCreateSent)
+            Console.WriteLine($"[observe] WARNING: CharacterCreate sent but no 0xF643 response received within window");
+        return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse);
     }
 
     private readonly record struct ObserveResult(
@@ -427,7 +449,8 @@ internal sealed class HandshakeDriver : IDisposable
         CharacterListMessage? CharacterList,
         ServerNameMessage? ServerName,
         DDDInterrogationMessage? DDDInterrogation,
-        bool ProbeSent);
+        bool CharacterCreateSent,
+        CharacterCreateResponseMessage? CharacterCreateResponse);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
@@ -499,4 +522,5 @@ internal readonly record struct HandshakeResult(
     bool PostHandshakePacketSeen,
     CharacterListMessage? CharacterList,
     ServerNameMessage? ServerName,
-    DDDInterrogationMessage? DDDInterrogation);
+    DDDInterrogationMessage? DDDInterrogation,
+    CharacterCreateResponseMessage? CharacterCreateResponse);
