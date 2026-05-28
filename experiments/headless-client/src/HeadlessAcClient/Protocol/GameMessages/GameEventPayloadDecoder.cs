@@ -56,6 +56,22 @@
 //     u32 societyRadiantBlood
 //     -------------------------- = 40B fixed
 //
+//   InventoryPutObjInContainer (0x0022):
+//     u32 itemGuid
+//     u32 containerGuid
+//     u32 placementPosition
+//     u32 containerType
+//     -------------------------- = 16B fixed
+//     (mirrors GameEventItemServerSaysContainId.cs)
+//
+//   Tell (0x02BD):
+//     string16L messageText  (u16 len + cp1252 bytes + pad-to-4)
+//     string16L senderName   (same encoding)
+//     u32 senderId
+//     u32 targetId
+//     u32 chatMessageType
+//     u32 padding (always 0; see GameEventTell.cs)
+//
 // PlayerDescription (0x0013) is deliberately NOT decoded here — it
 // is a multi-section character-sheet serialization (PackableHashTable
 // of 7 different property collections, attributes, skills, spells,
@@ -132,6 +148,32 @@ internal sealed record SetTurbineChatChannelsPayload(
         $"lfg={Lfg} rp={Roleplay} olthoi={Olthoi} society={Society})";
 }
 
+internal sealed record InventoryPutObjInContainerPayload(
+    uint ItemGuid,
+    uint ContainerGuid,
+    uint Placement,
+    uint ContainerType)
+{
+    public override string ToString() =>
+        $"InventoryPutObjInContainer(item=0x{ItemGuid:X8} container=0x{ContainerGuid:X8} " +
+        $"placement={Placement} containerType={ContainerType})";
+}
+
+internal sealed record TellPayload(
+    string Message,
+    string SenderName,
+    uint SenderId,
+    uint TargetId,
+    uint ChatMessageType)
+{
+    public override string ToString()
+    {
+        var preview = Message.Length > 80 ? Message.Substring(0, 80) + "..." : Message;
+        return $"Tell(from='{SenderName}' (0x{SenderId:X8}) -> 0x{TargetId:X8} " +
+               $"chatType={ChatMessageType}: \"{preview}\")";
+    }
+}
+
 /// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
@@ -140,21 +182,25 @@ internal sealed record SetTurbineChatChannelsPayload(
 /// </summary>
 internal sealed record GameEventPayload(
     GameEventType EventType,
-    WeenieErrorPayload?              WeenieError,
-    WeenieErrorWithStringPayload?    WeenieErrorWithString,
-    CharacterTitlePayload?           CharacterTitle,
-    FriendsListUpdatePayload?        FriendsListUpdate,
-    SetTurbineChatChannelsPayload?   SetTurbineChatChannels,
-    UseDonePayload?                  UseDone)
+    WeenieErrorPayload?                  WeenieError,
+    WeenieErrorWithStringPayload?        WeenieErrorWithString,
+    CharacterTitlePayload?               CharacterTitle,
+    FriendsListUpdatePayload?            FriendsListUpdate,
+    SetTurbineChatChannelsPayload?       SetTurbineChatChannels,
+    UseDonePayload?                      UseDone,
+    InventoryPutObjInContainerPayload?   InventoryPutObjInContainer,
+    TellPayload?                         Tell)
 {
     public override string ToString() => EventType switch
     {
-        GameEventType.WeenieError              when WeenieError              is { } x => x.ToString(),
-        GameEventType.WeenieErrorWithString    when WeenieErrorWithString    is { } x => x.ToString(),
-        GameEventType.CharacterTitle           when CharacterTitle           is { } x => x.ToString(),
-        GameEventType.FriendsListUpdate        when FriendsListUpdate        is { } x => x.ToString(),
-        GameEventType.SetTurbineChatChannels   when SetTurbineChatChannels   is { } x => x.ToString(),
-        GameEventType.UseDone                  when UseDone                  is { } x => x.ToString(),
+        GameEventType.WeenieError                  when WeenieError                is { } x => x.ToString(),
+        GameEventType.WeenieErrorWithString        when WeenieErrorWithString      is { } x => x.ToString(),
+        GameEventType.CharacterTitle               when CharacterTitle             is { } x => x.ToString(),
+        GameEventType.FriendsListUpdate            when FriendsListUpdate          is { } x => x.ToString(),
+        GameEventType.SetTurbineChatChannels       when SetTurbineChatChannels     is { } x => x.ToString(),
+        GameEventType.UseDone                      when UseDone                    is { } x => x.ToString(),
+        GameEventType.InventoryPutObjInContainer   when InventoryPutObjInContainer is { } x => x.ToString(),
+        GameEventType.Tell                         when Tell                       is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -176,7 +222,9 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: null,
                         FriendsListUpdate: null,
                         SetTurbineChatChannels: null,
-                        UseDone: null),
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
                 GameEventType.WeenieErrorWithString =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
@@ -184,7 +232,9 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: null,
                         FriendsListUpdate: null,
                         SetTurbineChatChannels: null,
-                        UseDone: null),
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
                 GameEventType.CharacterTitle =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
@@ -192,7 +242,9 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: DecodeCharacterTitle(body),
                         FriendsListUpdate: null,
                         SetTurbineChatChannels: null,
-                        UseDone: null),
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
                 GameEventType.FriendsListUpdate =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
@@ -200,7 +252,9 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: null,
                         FriendsListUpdate: DecodeFriendsListUpdate(body),
                         SetTurbineChatChannels: null,
-                        UseDone: null),
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
                 GameEventType.SetTurbineChatChannels =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
@@ -208,7 +262,9 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: null,
                         FriendsListUpdate: null,
                         SetTurbineChatChannels: DecodeSetTurbineChatChannels(body),
-                        UseDone: null),
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
                 GameEventType.UseDone =>
                     new GameEventPayload(eventType,
                         WeenieError: null,
@@ -216,7 +272,29 @@ internal static class GameEventPayloadDecoder
                         CharacterTitle: null,
                         FriendsListUpdate: null,
                         SetTurbineChatChannels: null,
-                        UseDone: DecodeUseDone(body)),
+                        UseDone: DecodeUseDone(body),
+                        InventoryPutObjInContainer: null,
+                        Tell: null),
+                GameEventType.InventoryPutObjInContainer =>
+                    new GameEventPayload(eventType,
+                        WeenieError: null,
+                        WeenieErrorWithString: null,
+                        CharacterTitle: null,
+                        FriendsListUpdate: null,
+                        SetTurbineChatChannels: null,
+                        UseDone: null,
+                        InventoryPutObjInContainer: DecodeInventoryPutObjInContainer(body),
+                        Tell: null),
+                GameEventType.Tell =>
+                    new GameEventPayload(eventType,
+                        WeenieError: null,
+                        WeenieErrorWithString: null,
+                        CharacterTitle: null,
+                        FriendsListUpdate: null,
+                        SetTurbineChatChannels: null,
+                        UseDone: null,
+                        InventoryPutObjInContainer: null,
+                        Tell: DecodeTell(body)),
                 _ => null,
             };
         }
@@ -311,6 +389,41 @@ internal static class GameEventPayloadDecoder
             BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(28, 4)),
             BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(32, 4)),
             BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(36, 4)));
+    }
+
+    private static InventoryPutObjInContainerPayload DecodeInventoryPutObjInContainer(ReadOnlySpan<byte> body)
+    {
+        const int FixedSize = 16;
+        if (body.Length < FixedSize)
+            throw new InvalidOperationException($"body too short for InventoryPutObjInContainer: need {FixedSize}, got {body.Length}");
+        return new InventoryPutObjInContainerPayload(
+            ItemGuid:      BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0,  4)),
+            ContainerGuid: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4,  4)),
+            Placement:     BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(8,  4)),
+            ContainerType: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(12, 4)));
+    }
+
+    private static TellPayload DecodeTell(ReadOnlySpan<byte> body)
+    {
+        // Mirrors GameEventTell.cs (single overload used for NPC dialogue):
+        //   string16L messageText
+        //   string16L senderName
+        //   u32 senderId
+        //   u32 targetId
+        //   u32 chatMessageType
+        //   u32 padding (always 0 from server side)
+        if (body.Length < 2)
+            throw new InvalidOperationException("body too short for Tell");
+        var cursor = 0;
+        var message = ReadString16L(body, ref cursor);
+        var senderName = ReadString16L(body, ref cursor);
+        if (body.Length - cursor < 16)
+            throw new InvalidOperationException("Tell: not enough bytes for trailing 4xu32");
+        var senderId  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var targetId  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var chatType  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        // u32 padding — ignored.
+        return new TellPayload(message, senderName, senderId, targetId, chatType);
     }
 
     /// <summary>
