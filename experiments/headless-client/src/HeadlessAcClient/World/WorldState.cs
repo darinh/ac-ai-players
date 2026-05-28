@@ -204,6 +204,8 @@ internal sealed class WorldState
         snap.ItemType = oc.Weenie.ItemType;
         snap.WeenieFlags = (uint)oc.Weenie.Flags;
         snap.WeenieFlags2 = (uint)oc.Weenie.Flags2;
+        snap.ValidLocations = oc.Weenie.ValidLocations;
+        snap.CurrentWieldedLocation = oc.Weenie.CurrentlyWieldedLocation;
 
         // Spatial/physics fields are gated by SeqObjectPosition
         // within the same instance epoch. After a ResetForNewInstance,

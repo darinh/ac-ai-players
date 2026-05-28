@@ -45,6 +45,8 @@ internal sealed class WorldObjectSnapshot
     public uint? ItemType { get; internal set; }
     public uint? WeenieFlags { get; internal set; }
     public uint? WeenieFlags2 { get; internal set; }
+    public uint? ValidLocations { get; internal set; }
+    public uint? CurrentWieldedLocation { get; internal set; }
 
     // Spatial state.
     public uint? CellId { get; internal set; }

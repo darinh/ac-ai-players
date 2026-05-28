@@ -338,8 +338,8 @@ internal static class GameActionTargetedMeleeAttackMessage
 /// Payload after the 12B GameAction header:
 ///   u32 itemGuid
 ///   i32 equipLocation  (EquipMask enum, e.g. HeadWear=0x01,
-///                       HandWear=0x40, ChestArmor=0x100,
-///                       MeleeWeapon=0x10000, etc.)
+///                       HandWear=0x20, ChestArmor=0x200,
+///                       MeleeWeapon=0x100000, etc.)
 /// = 20 bytes total.
 ///
 /// The chosen location must be compatible with the item's

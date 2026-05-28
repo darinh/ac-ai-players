@@ -1253,13 +1253,54 @@ internal sealed class HandshakeDriver : IDisposable
                         queue: (ushort)GameMessageGroup.UIQueue,
                         gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
 
+                    // Phase 6l — equip-after-pickup. When the just-picked-
+                    // up item is wearable (ValidLocations is set), bundle
+                    // a follow-up GetAndWieldItem in the SAME packet so
+                    // the server processes the equip immediately after
+                    // the inventory transfer. The server walks fragments
+                    // in-order within a packet, so this is safe even
+                    // though pickup hasn't yet been acknowledged.
+                    //
+                    // Slot selection: lowest set bit of ValidLocations.
+                    // - Single-slot items (gauntlets=HandWear=0x20,
+                    //   helmet=HeadWear=0x01, etc.) have one bit set.
+                    // - Multi-slot items (rings=FingerWearLeft|Right)
+                    //   pick the lowest, which is the canonical default.
+                    // - Items with ValidLocations==0 or null aren't
+                    //   wearable (food/keys/currency) — skip equip.
+                    //
+                    // If pickup fails OR the slot is already occupied,
+                    // the server replies with WeenieErrorWithString and
+                    // takes no action. Non-fatal; we just see the error
+                    // in the log.
+                    uint? equipLoc = null;
+                    if (isPickup && motionTarget.ValidLocations is uint vl && vl != 0)
+                    {
+                        // Isolate the lowest set bit.
+                        equipLoc = vl & (~vl + 1);
+                        var equipFragSeq = nextOutboundFragmentSequence++;
+                        var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                        var equipLen = GameActionGetAndWieldItemMessage.Pack(
+                            equipBuf,
+                            itemGuid: motionTarget.Guid,
+                            equipLocation: (int)equipLoc.Value);
+                        msg.AddBlobFragment(
+                            fragSequence: equipFragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: equipBuf.AsSpan(0, equipLen));
+                    }
+
                     var sentLen = msg.Pack(sendBuf, myClientId,
                                            sequence: packetSeq, iteration: 1,
                                            encrypt: true, cryptoSend: cryptoSend);
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    var equipNote = equipLoc is uint el
+                        ? $" + EQUIP(loc=0x{el:X})"
+                        : (isPickup ? " (not wearable; ValidLocations=null/0)" : "");
                     Console.WriteLine(
-                        $"[observe]   -> PHASE6E/6F {actionName}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                        $"[observe]   -> PHASE6E/6F {actionName}{equipNote}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
                         $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
                         $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }

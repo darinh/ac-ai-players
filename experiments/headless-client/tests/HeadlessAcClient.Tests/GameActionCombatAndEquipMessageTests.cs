@@ -98,7 +98,7 @@ public class GameActionCombatAndEquipMessageTests
         var written = GameActionGetAndWieldItemMessage.Pack(
             dest,
             itemGuid:      0x800002E8u,
-            equipLocation: 0x40 /* HandWear */,
+            equipLocation: 0x20 /* HandWear */,
             actionSequence: 11u);
 
         Assert.Equal(GameActionGetAndWieldItemMessage.PackedSize, written);
@@ -109,7 +109,7 @@ public class GameActionCombatAndEquipMessageTests
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 11u);                       c += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x001Au);                   c += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x800002E8u);               c += 4;
-        BinaryPrimitives.WriteInt32LittleEndian (expected.AsSpan(c), 0x40);                      c += 4;
+        BinaryPrimitives.WriteInt32LittleEndian (expected.AsSpan(c), 0x20);                      c += 4;
 
         Assert.Equal(expected, dest);
     }
