@@ -303,7 +303,7 @@ internal sealed class HandshakeDriver : IDisposable
         // loop forever in a dense room.
         DateTime?            useSentAt = null;
         const int            PostActionCooldownSec = 4;
-        const int            MaxActionsPerSession = 8;
+        const int            MaxActionsPerSession = 16;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
         var ownPlayerSeen = false;
@@ -898,14 +898,23 @@ internal sealed class HandshakeDriver : IDisposable
                     // Phase 6c — pick the motion target.
                     // Override:    HEADLESS_MOTION_TARGET_NAME=<name>  (exact match, case-sensitive)
                     // Default:     nearest named (Name != null && != "") non-self snapshot
-                    //              within MotionSearchRadius. Equal-name ties broken by 3D dist
-                    //              via WorldDistance.TrySquaredDistance which already wins on
-                    //              the nearest-snapshot side via NearestN ordering.
+                    //              within MotionSearchRadius.
                     // Phase 6g: exclude guids we've already targeted this session.
+                    // Phase 6i: exclude other players (their guids start with
+                    //          0x5xxxxxxx — see ObjectGuid.Player range). USE'ing
+                    //          another player accomplishes nothing useful and
+                    //          can deadlock the loop on a stationary peer bot.
+                    //          Also: weight the sort so any object named "Door"
+                    //          ranks ahead of equal-distance non-doors. Doors
+                    //          are the chief mechanism for progressing between
+                    //          tutorial rooms; otherwise a dense room of NPCs
+                    //          can starve us of door interactions until they
+                    //          all join the visited set.
                     var apRot = self.Rotation;
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                        .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
@@ -916,16 +925,19 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        // Nearest-first: pick the entry with the smallest 3D distance
-                        // to self. WithinRadius doesn't guarantee ordering, so sort
-                        // explicitly here.
+                        // Doors-first, then nearest. A door within MotionSearchRadius
+                        // is always preferred over any non-door, because progress
+                        // through the academy gates on doors. Among doors (or
+                        // among non-doors), the closest wins.
                         candidate = inRange
                             .Select(s =>
                             {
                                 WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                return (snap: s, d2);
+                                var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
+                                return (snap: s, d2, isDoor);
                             })
-                            .OrderBy(t => t.d2)
+                            .OrderBy(t => t.isDoor ? 0 : 1)
+                            .ThenBy(t => t.d2)
                             .Select(t => t.snap)
                             .FirstOrDefault();
                     }
