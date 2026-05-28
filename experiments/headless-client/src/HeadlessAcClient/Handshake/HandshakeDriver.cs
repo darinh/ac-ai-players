@@ -292,6 +292,14 @@ internal sealed class HandshakeDriver : IDisposable
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
 
+        // Multi-fragment messages (ObjectCreate for players with active
+        // motion, LoginCompletion GameEvent, etc.) split across multiple
+        // UDP packets. The reassembler buffers fragments by Sequence
+        // until all Count slots are populated, then emits the assembled
+        // payload. See Protocol/FragmentReassembler.cs for the wire-
+        // protocol rationale.
+        var reassembler = new FragmentReassembler();
+
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -327,12 +335,36 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   optional: TimeSync={pkt.Optional.TimeSync:R}");
                 if (pkt.Header.HasFlag(PacketHeaderFlags.AckSequence))
                     Console.WriteLine($"[observe]   optional: AckSequence={pkt.Optional.AckSequence}");
+
+                // CRC-fail gate before any state mutation. A corrupted /
+                // spoofed packet whose CRC fails must NOT be allowed to
+                // feed FragmentReassembler — `fh.Count` is attacker-
+                // controlled until CRC has authenticated the bytes, and
+                // any partial state we accept here would pollute valid
+                // in-flight messages on the same Sequence (and could
+                // trigger pathological allocations via huge Count).
+                if (!verified)
+                    continue;
+
                 foreach (var (fh, data) in pkt.Fragments)
                 {
                     Console.WriteLine($"[observe]   {fh} payload[{data.Length}]: {Hex(data.AsSpan(0, Math.Min(data.Length, 32)))}{(data.Length > 32 ? " ..." : "")}");
 
-                    var decoded = GameMessageDecoder.Decode(data);
-                    var opcode = GameMessageDecoder.PeekOpcode(data);
+                    // Reassemble before decoding. Multi-fragment messages
+                    // arrive across separate UDP packets, possibly out
+                    // of order. Reassembler returns null while waiting
+                    // for more fragments; non-null = full message ready.
+                    var assembled = reassembler.Add(fh, data);
+                    if (assembled is null)
+                    {
+                        Console.WriteLine($"[observe]   -> buffering fragment {fh.Index + 1}/{fh.Count} for Seq={fh.Sequence} (in-flight messages: {reassembler.InFlightCount})");
+                        continue;
+                    }
+                    if (fh.Count > 1)
+                        Console.WriteLine($"[observe]   -> reassembled {fh.Count}-fragment message Seq={fh.Sequence} totalBytes={assembled.Length}");
+
+                    var decoded = GameMessageDecoder.Decode(assembled);
+                    var opcode = GameMessageDecoder.PeekOpcode(assembled);
                     switch (decoded)
                     {
                         case CharacterListMessage cl:
@@ -375,14 +407,21 @@ internal sealed class HandshakeDriver : IDisposable
                             var preview = sm.Text.Length > 80 ? sm.Text.Substring(0, 80) + "..." : sm.Text;
                             Console.WriteLine($"[observe]   -> ServerMessage(chatType=0x{sm.ChatMessageType:X}): \"{preview}\"");
                             break;
+                        case ObjectCreateMessage oc:
+                            var loc = oc.Physics.Position is { } pos
+                                ? $" lb=0x{pos.LandblockId:X8} xyz=({pos.X:F1},{pos.Y:F1},{pos.Z:F1})"
+                                : "";
+                            Console.WriteLine(
+                                $"[observe]   -> ObjectCreate: guid=0x{oc.Guid:X8} wcid={oc.Weenie.WeenieClassId} " +
+                                $"itemType=0x{oc.Weenie.ItemType:X} name=\"{oc.Weenie.Name}\"" +
+                                $" wFlags=0x{(uint)oc.Weenie.Flags:X8}/0x{(uint)oc.Weenie.Flags2:X8}" +
+                                $" pFlags=0x{(uint)oc.Physics.DescriptionFlags:X6}{loc}");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;
                     }
                 }
-
-                if (!verified)
-                    continue;
 
                 // Mirror NetworkSession.HandlePacket line 495: track highest
                 // received sequence, skipping Seq=0 and bare AckSequence-only.

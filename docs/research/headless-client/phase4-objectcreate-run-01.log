@@ -1,0 +1,200 @@
+[main] target 127.0.0.1:9000, account 'headless-test'
+[selfcheck] OutboundPacket round-trip ...
+[selfcheck] OutboundPacket round-trip OK
+[api] WARNING: AC_BOTS_API_TOKEN not set; using dev-insecure-token
+[api] AcAiPlayers.ApiHost v1.0.0+9a6aaec8c3f11c3560bf0a962185aaed20301206: ok
+[api] WARNING: API host unreachable: HttpRequestException: Response status code does not indicate success: 401 (Unauthorized).
+[api] continuing without API; Phase 1 spike doesn't require it
+[handshake] bound UDP socket on 0.0.0.0:55910
+[handshake] sending LoginRequest (84 bytes) to 127.0.0.1:9000
+[handshake] received 52 bytes from 127.0.0.1:9000
+[handshake]   header: Seq=0 Id=11 Iter=1 Flags=ConnectRequest Size=32 CRC=0xDE578212
+[handshake] received ConnectRequest:
+             serverTime  = 294106357.5217467
+             cookie      = 0xC9FE2C2EA97B62E7
+             clientId    = 0
+             serverSeed  = 2f 34 50 74
+             clientSeed  = e1 34 4b 4f
+[handshake] sending ConnectResponse (28 bytes) to 127.0.0.1:9001
+[handshake]   bytes: 00 00 00 00 00 00 08 00 fa ff 7a 2e 00 00 00 00 08 00 00 00 e7 62 7b a9 2e 2c fe c9
+[handshake]   sent 3× from local endpoint 0.0.0.0:55910
+[observe] listening for post-handshake packets for 65s; will send acks + timesync echoes ...
+[observe] #1 from 127.0.0.1:9001: Seq=2 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0xEE055B3B  [CRC_OK]
+[observe]   optional: TimeSync=294106357.64111346
+[observe]   -> sent Ack(2) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294106357.64111346) [28 bytes]
+[observe] #2 from 127.0.0.1:9001: Seq=3 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0x607BD3C6  [CRC_OK]
+[observe]   Frag Seq=0 Id=0x80000000 Count=1 Size=44 Idx=0 Q=5 payload[28]: e5 f7 00 00 01 00 00 00 01 00 00 00 01 00 00 00 02 00 00 00 00 00 00 00 01 00 00 00
+[observe]   -> DDDInterrogation: region=1 lang=1 product=1 supportedLangs=[0,1]
+[observe]   -> sent Ack(3) [24 bytes] to 127.0.0.1:9000
+[observe] #3 from 127.0.0.1:9001: Seq=4 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=120 CRC=0x99DEF67C  [CRC_OK]
+[observe]   Frag Seq=1 Id=0x80000000 Count=1 Size=80 Idx=0 Q=9 payload[64]: 58 f6 00 00 00 00 00 00 01 00 00 00 06 00 00 50 0a 00 48 65 61 64 6c 65 73 73 30 31 00 00 00 00 ...
+[observe]   -> CharacterList: account="headless-test" slots=11 characters=1 turbineChat=1 tod=1
+[observe]      [0] id=0x50000006 name="Headless01" deleteIn=0s
+[observe]   Frag Seq=2 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: e1 f7 00 00 01 00 00 00 80 00 00 00 0a 00 41 43 45 6d 75 6c 61 74 6f 72
+[observe]   -> ServerName: name="ACEmulator" connections=1/128
+[observe]   -> sent Ack(4) [24 bytes] to 127.0.0.1:9000
+[observe]   -> PHASE3.3a SEND: CharacterEnterWorldRequest (chosenGuid=0x50000006, pktSeq=2, fragSeq=1, totalBytes=44)
+[observe]      Expect 0xF7DF CharacterEnterWorldServerReady (or 0xF659 CharacterError on shutdown)
+[observe] #4 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=20 CRC=0xA2469DA8  [CRC_OK]
+[observe]   Frag Seq=3 Id=0x80000000 Count=1 Size=20 Idx=0 Q=9 payload[4]: df f7 00 00
+[observe]   -> CharacterEnterWorldServerReady (server ready, send 0xF657)
+[observe]   -> sent Ack(5) [24 bytes] to 127.0.0.1:9000
+[observe]   -> PHASE3.3b SEND: CharacterEnterWorld(guid=0x50000006, account="headless-test", payload=24B) pktSeq=3 fragSeq=2 totalBytes=64
+[observe]      Expect world-state firehose to begin (PlayerCreate, PlayerDescription, landblock data, ...) - or 0xF659 CharacterError on validation failure
+[observe] #5 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x246E4B23  [CRC_OK]
+[observe]   Frag Seq=4 Id=0x80000000 Count=2 Size=464 Idx=0 Q=9 payload[448]: b0 f7 00 00 06 00 00 50 01 00 00 00 13 00 00 00 9f 00 00 00 0a 00 00 00 0d 00 40 00 05 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   -> sent Ack(6) [24 bytes] to 127.0.0.1:9000
+[observe] #6 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=424 CRC=0xEC98FBFA  [CRC_OK]
+[observe]   Frag Seq=4 Id=0x80000000 Count=2 Size=252 Idx=1 Q=9 payload[236]: 00 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 34 00 00 00 ...
+[observe]   -> opcode 0x10000 (no decoder yet)
+[observe]   Frag Seq=5 Id=0x80000000 Count=1 Size=48 Idx=0 Q=9 payload[32]: b0 f7 00 00 06 00 00 50 02 00 00 00 29 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=6 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: b0 f7 00 00 06 00 00 50 03 00 00 00 21 00 00 00 00 00 00 00 00 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=7 Id=0x80000000 Count=1 Size=36 Idx=0 Q=9 payload[20]: b0 f7 00 00 06 00 00 50 04 00 00 00 8a 02 00 00 1d 05 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=8 Id=0x80000000 Count=1 Size=48 Idx=0 Q=9 payload[32]: b0 f7 00 00 06 00 00 50 05 00 00 00 8b 02 00 00 1b 05 00 00 07 00 47 65 6e 65 72 61 6c 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   -> sent Ack(7) [24 bytes] to 127.0.0.1:9000
+[observe] #7 from 127.0.0.1:9001: Seq=8 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=456 CRC=0xC292E765  [CRC_OK]
+[observe]   Frag Seq=9 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 06 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=10 Id=0x80000000 Count=1 Size=44 Idx=0 Q=9 payload[28]: b0 f7 00 00 06 00 00 50 07 00 00 00 8b 02 00 00 1b 05 00 00 05 00 54 72 61 64 65 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=11 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 08 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=12 Id=0x80000000 Count=1 Size=44 Idx=0 Q=9 payload[28]: b0 f7 00 00 06 00 00 50 09 00 00 00 8b 02 00 00 1b 05 00 00 03 00 4c 46 47 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=13 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 0a 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=14 Id=0x80000000 Count=1 Size=152 Idx=0 Q=9 payload[136]: e0 f7 00 00 7c 00 57 65 6c 63 6f 6d 65 20 74 6f 20 41 73 68 65 72 6f 6e 27 73 20 43 61 6c 6c 0a ...
+[observe]   -> ServerMessage(chatType=0x0): "Welcome to Asheron's Call
+  powered by ACEmulator
+
+For more information on comma..."
+[observe]   -> sent Ack(8) [24 bytes] to 127.0.0.1:9000
+[observe] #8 from 127.0.0.1:9001: Seq=9 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0xB575E41F  [CRC_OK]
+[observe]   Frag Seq=15 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 00 7d 00 00 00 fd 00 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(9) [24 bytes] to 127.0.0.1:9000
+[observe] #9 from 127.0.0.1:9001: Seq=10 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=452 CRC=0xD96C3E79  [CRC_OK]
+[observe]   Frag Seq=16 Id=0x80000000 Count=1 Size=24 Idx=0 Q=10 payload[8]: 46 f7 00 00 06 00 00 50
+[observe]   -> PlayerCreate: guid=0x50000006
+[observe]   Frag Seq=17 Id=0x80000000 Count=1 Size=428 Idx=0 Q=10 payload[412]: 45 f7 00 00 06 00 00 50 11 09 17 24 7e 00 b1 1f 18 08 b6 02 00 18 bc 02 20 08 f3 05 40 08 8b 06 ...
+[ObjectCreateDecoder] decode failed at offset 412/412: MessageReader non-zero pad byte at local offset 410 (absolute 410, context: String16L tail): 0x04. Cursor is likely desynchronized.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(10) [24 bytes] to 127.0.0.1:9000
+[observe] #10 from 127.0.0.1:9001: Seq=11 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x127E0A0B  [CRC_OK]
+[observe]   Frag Seq=18 Id=0x80000000 Count=1 Size=152 Idx=0 Q=10 payload[136]: 45 f7 00 00 4a 02 00 80 11 00 00 00 01 18 02 00 14 04 00 00 65 00 00 00 14 00 00 20 2b 00 00 34 ...
+[ObjectCreateDecoder] decode failed at offset 78/136: MessageReader underflow at local offset 78 (absolute 78): needed 28534, remaining 58.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=19 Id=0x80000000 Count=1 Size=152 Idx=0 Q=10 payload[136]: 45 f7 00 00 49 02 00 80 11 01 02 01 7e 00 f3 05 a0 08 00 ce 03 ce 03 00 cb 03 cb 03 00 8c 04 00 ...
+[ObjectCreateDecoder] decode failed at offset 98/136: MessageReader underflow at local offset 98 (absolute 98): needed 115, remaining 38.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=20 Id=0x80000000 Count=1 Size=160 Idx=0 Q=10 payload[144]: 45 f7 00 00 48 02 00 80 11 02 03 01 7e 00 f3 05 40 08 8b 06 48 08 00 d8 03 a1 00 00 b0 0b b0 0b ...
+[ObjectCreateDecoder] decode failed at offset 106/144: MessageReader underflow at local offset 106 (absolute 106): needed 2604, remaining 38.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(11) [24 bytes] to 127.0.0.1:9000
+[observe] #11 from 127.0.0.1:9001: Seq=12 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=360 CRC=0x05164A7A  [CRC_OK]
+[observe]   Frag Seq=21 Id=0x80000000 Count=1 Size=140 Idx=0 Q=10 payload[124]: 45 f7 00 00 46 02 00 80 11 01 01 01 7e 00 f3 05 fa 06 00 a3 0c c9 0e 00 81 04 00 00 01 18 02 00 ...
+[ObjectCreateDecoder] decode failed at offset 124/124: MessageReader underflow at local offset 124 (absolute 124): needed 1, remaining 0.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=22 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 47 02 00 80 11 02 06 01 7e 00 f3 05 28 18 97 06 5c 04 00 d5 03 5f 02 00 d5 03 5e 02 ...
+[ObjectCreateDecoder] decode failed at offset 152/152: MessageReader underflow at local offset 152 (absolute 152): needed 1, remaining 0.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=25 Id=0x80000000 Count=2 Size=52 Idx=1 Q=10 payload[36]: 08 00 50 69 6c 6f 74 2d 30 31 00 00 01 00 36 10 10 00 00 00 1c 00 00 00 66 07 01 00 00 00 00 00 ...
+[observe]   -> opcode 0x69500008 (no decoder yet)
+[observe]   -> sent Ack(12) [24 bytes] to 127.0.0.1:9000
+[observe] #12 from 127.0.0.1:9001: Seq=13 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=396 CRC=0xDB552292  [CRC_OK]
+[observe]   Frag Seq=23 Id=0x80000000 Count=1 Size=396 Idx=0 Q=10 payload[380]: 45 f7 00 00 d1 01 00 80 11 0b 0f 23 7e 00 c1 1f 18 08 a4 04 00 18 ae 04 20 08 78 10 f0 0a 75 10 ...
+[ObjectCreateDecoder] decode failed at offset 354/380: MessageReader underflow at local offset 354 (absolute 354): needed 114, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(13) [24 bytes] to 127.0.0.1:9000
+[observe] #13 from 127.0.0.1:9001: Seq=14 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0xBD4C30D0  [CRC_OK]
+[observe]   Frag Seq=24 Id=0x80000000 Count=1 Size=164 Idx=0 Q=10 payload[148]: 45 f7 00 00 fe 01 00 80 11 00 00 00 05 98 02 00 14 04 00 00 65 00 00 00 ad 01 02 86 e3 a5 f7 40 ...
+[ObjectCreateDecoder] decode failed at offset 122/148: MessageReader underflow at local offset 122 (absolute 122): needed 5090, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=26 Id=0x80000000 Count=1 Size=156 Idx=0 Q=10 payload[140]: 45 f7 00 00 2d 20 60 78 11 00 00 00 03 98 01 00 1c 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 130/140: MessageReader underflow at local offset 130 (absolute 130): needed 4116, remaining 10.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=32 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 2a 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 b1 01 02 86 de 13 b0 41 ...
+[ObjectCreateDecoder] decode failed at offset 102/128: MessageReader underflow at local offset 102 (absolute 102): needed 5141, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(14) [24 bytes] to 127.0.0.1:9000
+[observe] #14 from 127.0.0.1:9001: Seq=15 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x694C7633  [CRC_OK]
+[observe]   Frag Seq=25 Id=0x80000000 Count=2 Size=464 Idx=0 Q=10 payload[448]: 45 f7 00 00 05 00 00 50 11 0a 1b 26 7e 00 be 1f 18 08 ab 04 00 18 bd 02 20 08 f3 05 40 08 8b 06 ...
+[ObjectCreateDecoder] decode failed at offset 448/448: MessageReader underflow at local offset 448 (absolute 448): needed 4, remaining 0.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(15) [24 bytes] to 127.0.0.1:9000
+[observe] #15 from 127.0.0.1:9001: Seq=16 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=388 CRC=0x04AEC012  [CRC_OK]
+[observe]   Frag Seq=27 Id=0x80000000 Count=1 Size=388 Idx=0 Q=10 payload[372]: 45 f7 00 00 ce 01 00 80 11 0b 0f 23 7e 00 db 1f 18 08 ba 02 00 18 bd 02 20 08 8b 06 f0 0a f0 05 ...
+[ObjectCreateDecoder] decode failed at offset 372/372: MessageReader non-zero pad byte at local offset 370 (absolute 370, context: String16L tail): 0x08. Cursor is likely desynchronized.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(16) [24 bytes] to 127.0.0.1:9000
+[observe] #16 from 127.0.0.1:9001: Seq=17 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=348 CRC=0xECB25503  [CRC_OK]
+[observe]   Frag Seq=28 Id=0x80000000 Count=1 Size=172 Idx=0 Q=10 payload[156]: 45 f7 00 00 fb 01 00 80 11 01 01 01 7e 00 e7 05 a8 06 00 40 20 27 01 00 86 04 00 00 01 98 02 00 ...
+[ObjectCreateDecoder] decode failed at offset 126/156: MessageReader underflow at local offset 126 (absolute 126): needed 29797, remaining 30.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=29 Id=0x80000000 Count=1 Size=176 Idx=0 Q=10 payload[160]: 45 f7 00 00 fa 01 00 80 11 01 02 01 7e 00 e7 05 98 08 00 d8 03 fa 0e 00 da 03 fa 0e 00 4d 06 00 ...
+[ObjectCreateDecoder] decode failed at offset 130/160: MessageReader underflow at local offset 130 (absolute 130): needed 29543, remaining 30.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(17) [24 bytes] to 127.0.0.1:9000
+[observe] #17 from 127.0.0.1:9001: Seq=18 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=336 CRC=0x7A4FA62F  [CRC_OK]
+[observe]   Frag Seq=30 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 fc 01 00 80 11 00 00 00 01 98 02 00 14 04 00 00 65 00 00 00 b6 01 02 86 c1 ca 8e 41 ...
+[ObjectCreateDecoder] decode failed at offset 110/152: MessageReader underflow at local offset 110 (absolute 110): needed 29268, remaining 42.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=31 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 fd 01 00 80 11 01 01 01 7e 00 e7 05 fa 06 00 a3 0c c9 0e 00 81 04 00 00 01 98 02 00 ...
+[ObjectCreateDecoder] decode failed at offset 126/152: MessageReader underflow at local offset 126 (absolute 126): needed 13239, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(18) [24 bytes] to 127.0.0.1:9000
+[observe] #18 from 127.0.0.1:9001: Seq=19 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=384 CRC=0x68ADD483  [CRC_OK]
+[observe]   Frag Seq=33 Id=0x80000000 Count=1 Size=384 Idx=0 Q=10 payload[368]: 45 f7 00 00 d4 01 00 80 11 0b 0f 23 7e 00 c5 1f 18 08 ad 04 00 18 ae 04 20 08 78 10 f0 0a 75 10 ...
+[ObjectCreateDecoder] decode failed at offset 360/368: MessageReader non-zero pad byte at local offset 358 (absolute 358, context: String16L tail): 0x20. Cursor is likely desynchronized.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(19) [24 bytes] to 127.0.0.1:9000
+[observe] #19 from 127.0.0.1:9001: Seq=20 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x0B9AA741  [CRC_OK]
+[observe]   Frag Seq=34 Id=0x80000000 Count=1 Size=164 Idx=0 Q=10 payload[148]: 45 f7 00 00 2c 20 60 78 11 00 00 00 03 98 01 00 18 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 130/148: MessageReader underflow at local offset 130 (absolute 130): needed 29329, remaining 18.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=35 Id=0x80000000 Count=1 Size=156 Idx=0 Q=10 payload[140]: 45 f7 00 00 38 20 60 78 11 00 00 00 03 98 01 00 18 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 130/140: MessageReader underflow at local offset 130 (absolute 130): needed 4116, remaining 10.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=39 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 4f 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 6c 02 02 86 9f ad 83 42 ...
+[ObjectCreateDecoder] decode failed at offset 102/128: MessageReader underflow at local offset 102 (absolute 102): needed 5102, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(20) [24 bytes] to 127.0.0.1:9000
+[observe] #20 from 127.0.0.1:9001: Seq=21 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=328 CRC=0x3F0A7FC9  [CRC_OK]
+[observe]   Frag Seq=36 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ab 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 142/164: MessageReader underflow at local offset 142 (absolute 142): needed 12698, remaining 22.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=38 Id=0x80000000 Count=1 Size=148 Idx=0 Q=10 payload[132]: 45 f7 00 00 44 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 38 02 02 86 21 b0 70 42 ...
+[ObjectCreateDecoder] decode failed at offset 102/132: MessageReader underflow at local offset 102 (absolute 102): needed 32, remaining 30.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(21) [24 bytes] to 127.0.0.1:9000
+[observe] #21 from 127.0.0.1:9001: Seq=22 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=396 CRC=0x6E6F73F3  [CRC_OK]
+[observe]   Frag Seq=37 Id=0x80000000 Count=1 Size=396 Idx=0 Q=10 payload[380]: 45 f7 00 00 d7 01 00 80 11 0b 0f 23 7e 00 df 1f 18 08 a2 04 00 18 ae 04 20 08 7a 10 f0 0a 77 10 ...
+[ObjectCreateDecoder] decode failed at offset 354/380: MessageReader underflow at local offset 354 (absolute 354): needed 114, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(22) [24 bytes] to 127.0.0.1:9000
+[observe] #22 from 127.0.0.1:9001: Seq=23 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=360 CRC=0x082F8123  [CRC_OK]
+[observe]   Frag Seq=40 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ae 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 142/164: MessageReader underflow at local offset 142 (absolute 142): needed 12698, remaining 22.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=41 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 af 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 142/164: MessageReader underflow at local offset 142 (absolute 142): needed 12698, remaining 22.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(23) [24 bytes] to 127.0.0.1:9000
+[observe] #23 from 127.0.0.1:9001: Seq=24 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=360 CRC=0x77A0A065  [CRC_OK]
+[observe]   Frag Seq=42 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ac 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 142/164: MessageReader underflow at local offset 142 (absolute 142): needed 12698, remaining 22.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   Frag Seq=43 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 b0 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[ObjectCreateDecoder] decode failed at offset 142/164: MessageReader underflow at local offset 142 (absolute 142): needed 12698, remaining 22.
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(24) [24 bytes] to 127.0.0.1:9000
+[observe] #24 from 127.0.0.1:9001: Seq=25 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=324 CRC=0x3DDF6D93  [CRC_OK]
+[observe]   Frag Seq=44 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 54 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 81 02 02 86 12 43 97 42 ...
+[ObjectCreateDecoder] decode failed at offset 102/128: MessageReader underflow at local offset 102 (absolute 102): needed 5103, remaining 26.
+[observe]   -> opcode 0xF745 (no decoder yet)

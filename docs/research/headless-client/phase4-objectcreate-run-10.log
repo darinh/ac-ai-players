@@ -1,0 +1,32 @@
+[main] target 127.0.0.1:9000, account 'headless-test'
+[selfcheck] OutboundPacket round-trip ...
+[selfcheck] OutboundPacket round-trip OK
+[api] WARNING: AC_BOTS_API_TOKEN not set; using dev-insecure-token
+[api] AcAiPlayers.ApiHost v1.0.0+9a6aaec8c3f11c3560bf0a962185aaed20301206: ok
+[api] WARNING: API host unreachable: HttpRequestException: Response status code does not indicate success: 401 (Unauthorized).
+[api] continuing without API; Phase 1 spike doesn't require it
+[handshake] bound UDP socket on 0.0.0.0:49326
+[handshake] sending LoginRequest (84 bytes) to 127.0.0.1:9000
+[handshake] received 52 bytes from 127.0.0.1:9000
+[handshake]   header: Seq=0 Id=11 Iter=1 Flags=ConnectRequest Size=32 CRC=0x1D83F7BE
+[handshake] received ConnectRequest:
+             serverTime  = 294108790.58429396
+             cookie      = 0xBE2828C0C9CEB3E5
+             clientId    = 1
+             serverSeed  = 99 09 a9 a9
+             clientSeed  = 6f 84 10 ba
+[handshake] sending ConnectResponse (28 bytes) to 127.0.0.1:9001
+[handshake]   bytes: 00 00 00 00 00 00 08 00 8b 4d f8 42 01 00 00 00 08 00 00 00 e5 b3 ce c9 c0 28 28 be
+[handshake]   sent 3× from local endpoint 0.0.0.0:49326
+[observe] listening for post-handshake packets for 65s; will send acks + timesync echoes ...
+[observe] #1 from 127.0.0.1:9000: Seq=2 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=24 CRC=0xF69BB9F6  [CRC_OK]
+[observe]   Frag Seq=0 Id=0x80000000 Count=1 Size=24 Idx=0 Q=9 payload[8]: 59 f6 00 00 01 00 00 00
+[observe]   -> CharacterError: code=0x0001
+[observe]   -> sent Ack(2) [24 bytes] to 127.0.0.1:9000
+[observe] #2 from 127.0.0.1:9000: Seq=2 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x796EB0EF  [CRC_OK]
+[observe]   optional: AckSequence=1
+[observe] observation window elapsed
+[observe] total packets observed: 2 (CRC pass=2, fail=0)
+[observe] sent: 1 acks, 0 timesync echoes, characterCreate=False, enterWorldRequest=False, enterWorld=False
+[observe] LAST CharacterError observed: code=0x0001
+[main] PHASE 1 PASS — handshake completed; no decodable game messages observed (yet).

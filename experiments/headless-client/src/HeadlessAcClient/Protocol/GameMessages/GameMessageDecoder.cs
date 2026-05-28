@@ -45,6 +45,7 @@ internal static class GameMessageDecoder
             GameMessageOpcode.CharacterError => DecodeCharacterError(payload),
             GameMessageOpcode.PlayerCreate => DecodePlayerCreate(payload),
             GameMessageOpcode.ServerMessage => DecodeServerMessage(payload),
+            GameMessageOpcode.ObjectCreate => ObjectCreateDecoder.Decode(payload),
             _ => null,
         };
     }
