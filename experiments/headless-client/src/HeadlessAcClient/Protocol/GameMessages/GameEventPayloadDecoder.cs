@@ -167,26 +167,86 @@ internal sealed record InventoryServerSaveFailedPayload(
         $"InventoryServerSaveFailed(item=0x{ItemGuid:X8} err=0x{ErrorType:X8} [{WeenieErrorLabels.Label(ErrorType)}])";
 }
 
+internal sealed record WieldObjectPayload(
+    uint ItemGuid,
+    uint NewLocation)
+{
+    public override string ToString() =>
+        $"WieldObject(item=0x{ItemGuid:X8} loc=0x{NewLocation:X8} [{EquipMaskLabels.Label(NewLocation)}])";
+}
+
+internal static class EquipMaskLabels
+{
+    // Verified against ACE-bots/Source/ACE.Entity/Enum/EquipMask.cs.
+    // The value can be a bitmask combining adjacent slots (e.g. pants
+    // wield to UpperLegArmor|LowerLegArmor = 0x6000) so we list every
+    // set bit.
+    private static readonly (uint Bit, string Name)[] Bits =
+    {
+        (0x00000001, "HeadWear"),
+        (0x00000002, "ChestWear"),
+        (0x00000004, "AbdomenWear"),
+        (0x00000008, "UpperArmWear"),
+        (0x00000010, "LowerArmWear"),
+        (0x00000020, "HandWear"),
+        (0x00000040, "UpperLegWear"),
+        (0x00000080, "LowerLegWear"),
+        (0x00000100, "FootWear"),
+        (0x00000200, "ChestArmor"),
+        (0x00000400, "AbdomenArmor"),
+        (0x00000800, "UpperArmArmor"),
+        (0x00001000, "LowerArmArmor"),
+        (0x00002000, "UpperLegArmor"),
+        (0x00004000, "LowerLegArmor"),
+        (0x00008000, "NeckWear"),
+        (0x00010000, "WristWearLeft"),
+        (0x00020000, "WristWearRight"),
+        (0x00040000, "FingerWearLeft"),
+        (0x00080000, "FingerWearRight"),
+        (0x00100000, "MeleeWeapon"),
+        (0x00200000, "Shield"),
+        (0x00400000, "MissileWeapon"),
+        (0x00800000, "MissileAmmo"),
+        (0x01000000, "Held"),
+        (0x02000000, "TwoHanded"),
+        (0x04000000, "TrinketOne"),
+        (0x08000000, "Cloak"),
+        (0x10000000, "SigilOne"),
+        (0x20000000, "SigilTwo"),
+        (0x40000000, "SigilThree"),
+    };
+
+    public static string Label(uint mask)
+    {
+        if (mask == 0) return "None";
+        var names = new List<string>();
+        foreach (var (bit, name) in Bits)
+        {
+            if ((mask & bit) != 0) names.Add(name);
+        }
+        return names.Count == 0 ? $"0x{mask:X8}" : string.Join("|", names);
+    }
+}
+
 internal static class WeenieErrorLabels
 {
-    // Subset of ACE.Entity.Enum.WeenieError relevant to inventory/equip errors.
-    // Source: ACE-bots/Source/ACE.Entity/Enum/WeenieError.cs
+    // Subset of ACE.Entity.Enum.WeenieError. Codes VERIFIED against
+    // ACE-bots/Source/ACE.Entity/Enum/WeenieError.cs as of 2025-11.
+    // Prior table had many wrong values (decimal/hex confusion).
     public static string Label(uint code) => code switch
     {
-        0x00000000 => "None",
-        0x00000007 => "TooBusyToMove",
-        0x0000004B => "InvalidInventoryLocation",
-        0x0000004C => "YouHaveBeenInterrupted",
-        0x0000004D => "ConflictingInventoryLocation",
-        0x00000051 => "ActionCancelled",
-        0x00000059 => "YouAreTooBusy",
-        0x00000064 => "SkillTooLow",
-        0x00000065 => "LevelTooLow",
-        0x000000C9 => "Stuck",
-        0x000000CA => "YoureTooBusy",
-        0x00000204 => "YouDoNotOwnThatItem",
-        0x00000274 => "HeritageRequiresSpecificArmor",
-        0x00000275 => "ArmorRequiresSpecificHeritage",
+        0x0000 => "None",
+        0x001D => "YoureTooBusy",
+        0x0029 => "Stuck",
+        0x0036 => "ActionCancelled",
+        0x03F0 => "InvalidInventoryLocation",
+        0x03F3 => "ConflictingInventoryLocation",
+        0x0420 => "LevelTooLow",
+        0x043F => "YouHaveSolvedThisQuestTooManyTimes",
+        0x0468 => "SkillTooLow",
+        0x04BE => "YouDoNotOwnThatItem",
+        0x0585 => "HeritageRequiresSpecificArmor",
+        0x0586 => "ArmorRequiresSpecificHeritage",
         _ => "?",
     };
 }
@@ -222,6 +282,7 @@ internal sealed record GameEventPayload(
     UseDonePayload?                      UseDone,
     InventoryPutObjInContainerPayload?   InventoryPutObjInContainer,
     InventoryServerSaveFailedPayload?    InventoryServerSaveFailed,
+    WieldObjectPayload?                  WieldObject,
     TellPayload?                         Tell)
 {
     public override string ToString() => EventType switch
@@ -234,6 +295,7 @@ internal sealed record GameEventPayload(
         GameEventType.UseDone                      when UseDone                    is { } x => x.ToString(),
         GameEventType.InventoryPutObjInContainer   when InventoryPutObjInContainer is { } x => x.ToString(),
         GameEventType.InventoryServerSaveFailed    when InventoryServerSaveFailed  is { } x => x.ToString(),
+        GameEventType.WieldObject                  when WieldObject                is { } x => x.ToString(),
         GameEventType.Tell                         when Tell                       is { } x => x.ToString(),
         _ => $"{EventType}",
     };
@@ -265,6 +327,8 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { InventoryPutObjInContainer = DecodeInventoryPutObjInContainer(body) },
                 GameEventType.InventoryServerSaveFailed =>
                     Empty(eventType) with { InventoryServerSaveFailed = DecodeInventoryServerSaveFailed(body) },
+                GameEventType.WieldObject =>
+                    Empty(eventType) with { WieldObject = DecodeWieldObject(body) },
                 GameEventType.Tell =>
                     Empty(eventType) with { Tell = DecodeTell(body) },
                 _ => null,
@@ -288,6 +352,7 @@ internal static class GameEventPayloadDecoder
             UseDone: null,
             InventoryPutObjInContainer: null,
             InventoryServerSaveFailed: null,
+            WieldObject: null,
             Tell: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
@@ -395,6 +460,16 @@ internal static class GameEventPayloadDecoder
         return new InventoryServerSaveFailedPayload(
             ItemGuid:  BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)),
             ErrorType: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4, 4)));
+    }
+
+    private static WieldObjectPayload DecodeWieldObject(ReadOnlySpan<byte> body)
+    {
+        const int FixedSize = 8;
+        if (body.Length < FixedSize)
+            throw new InvalidOperationException($"body too short for WieldObject: need {FixedSize}, got {body.Length}");
+        return new WieldObjectPayload(
+            ItemGuid:    BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)),
+            NewLocation: BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4, 4)));
     }
 
     private static TellPayload DecodeTell(ReadOnlySpan<byte> body)
