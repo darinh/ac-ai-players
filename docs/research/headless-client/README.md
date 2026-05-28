@@ -241,6 +241,19 @@ revert to in-process `BotPlayer` discipline.
 | 7 | `Pathfinder` integrated with the ACE-bots dungeon-nav work. | open-ended |
 | 8 | `Supervisor` runs N bots in one process. Resource sharing measured (LLM queue depth, navmesh cache hit rate). | 2-3 days |
 
+### Phase results
+
+- **Phase 1** — [`phase1-results.md`](phase1-results.md). PASS. Three-leg
+  handshake (`LoginRequest` → `ConnectRequest` → `ConnectResponse`)
+  works against a vanilla ACE server. Required a client-side
+  retransmit of `ConnectResponse` to cover the server's bcrypt-vs-
+  loopback-RTT race; documented in
+  [`spec/04-handshake.md`](spec/04-handshake.md).
+- **Phase 2** — [`phase2-results.md`](phase2-results.md). In progress.
+  2.1 (CRC verification) and 2.2 (ack + timesync keepalive) PASS;
+  the session now lives indefinitely instead of dying at +17s.
+  2.3 (CharacterList parsing) and 2.4 (doc roll-up) pending.
+
 ## Risks
 
 - **ISAAC encryption** is the Phase 1 deal-breaker. If the ACE

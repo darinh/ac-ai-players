@@ -85,12 +85,37 @@ the 20-byte fixed header.
 | 0 | 4 | `u32` | `Sequence` | Per-stream sequence number. 0 for handshake legs; for in-session packets, monotonically incremented per direction. |
 | 4 | 4 | `u32` | `Flags` | Bitfield of `PacketHeaderFlags`. See table below. |
 | 8 | 4 | `u32` | `Checksum` | Plain `headerChecksum + payloadChecksum`, or encrypted `headerChecksum + (payloadChecksum XOR isaacKey)` when `EncryptedChecksum` flag is set. See `03-crypto.md`. |
-| 12 | 2 | `u16` | `Id` | Session ID. Server-assigned. 0 in client's LoginRequest; non-zero in server's ConnectRequest reply and all subsequent packets. The same `Id` is echoed by both peers throughout the session. |
+| 12 | 2 | `u16` | `Id` | **Session id. Direction-dependent value.** Inbound (S→C) packets carry the server's `ServerId` constant (the same value across all sessions, e.g. `11` on a typical ACE deployment). Outbound (C→S) packets must carry the **client's assigned session-map index**, which the server delivers as the `NetID` field inside the `ConnectRequest` body (NOT the `Id` field of that packet's header). The server uses inbound `Header.Id` to index `NetworkManager.sessionMap[]` and route the packet. **Wrong client `Id` = silent drop** with no log line below DEBUG. See "Header.Id is not symmetric" callout below. |
 | 14 | 2 | `u16` | `Time` | Packet-emitter timestamp (server uses `(ushort)((Timers.PortalYearTicks - SomeBase) & 0xFFFF)`). Used for time sync. Clients typically write 0 outbound until they receive a TimeSync. |
 | 16 | 2 | `u16` | `Size` | Byte count of payload (everything after this header). |
 | 18 | 2 | `u16` | `Iteration` | Session iteration counter. Increments on each reconnect within a session id. Acts as a tie-breaker if `Id` is reused. |
 
 **Source**: [`PacketHeader.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/PacketHeader.cs).
+
+### `Header.Id` is not symmetric
+
+This trips up every from-scratch client implementer:
+
+The server's outbound `Header.Id` field carries the server's
+own identifier (`ServerId`, a process-wide constant — `11` on
+a typical ACE host). Naively echoing this id back in client
+outbound packets makes the server's
+[`NetworkManager.ProcessPacket`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Managers/NetworkManager.cs#L147-L156)
+look up `sessionMap[11]`, which either misses (returning a
+`DEBUG (Unsolicited Packet)` log line that is invisible at the
+default `INFO` log level) or finds an unrelated session whose
+`EndPointC2S` won't match, and the packet is silently dropped.
+
+The correct value to write into outbound `Header.Id` is the
+client's own session-map index — supplied by the server as the
+`NetID` field inside the `ConnectRequest` **body** (NOT the
+header). For the first session created on a freshly-started
+server, this index is `0`. See `04-handshake.md` for the body
+layout.
+
+Mnemonic: inbound `Id` identifies the SERVER; outbound `Id`
+identifies the CLIENT'S SESSION ON THE SERVER. They are
+different concepts that happen to share a header field.
 
 ### Observed example (Phase 1 spike, ConnectRequest reply)
 
@@ -165,11 +190,19 @@ no body bytes — they're pure flags.
 After the handshake, both sides start emitting sequenced
 packets:
 
-- Each sender independently maintains an outbound counter,
-  starting at `Sequence = 1` (handshake legs use `Sequence = 0`).
-- The sender increments `Sequence` for every outbound packet
-  that needs reliable delivery (i.e. carrying fragments or
-  certain optional sections).
+- Each sender independently maintains an outbound counter.
+  The first encrypted (`EncryptedChecksum`-flagged) packet a
+  side emits is `Sequence = 1`; subsequent encrypted packets
+  increment by 1.
+  See [`NetworkSession.FlushPackets`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/NetworkSession.cs#L736-L745).
+- Handshake legs (`LoginRequest`, `ConnectRequest`,
+  `ConnectResponse`) and bare control packets (`AckSequence`-only
+  or `TimeSync`-only with no other flags) use `Sequence = 0`
+  and do NOT advance the counter. The server's "received same
+  sequence again" guard at
+  [`NetworkSession.cs:362`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/NetworkSession.cs#L362)
+  explicitly whitelists `Sequence == 0` and the
+  `Flags == AckSequence` special case.
 - The receiver, on receipt of `Sequence = N`, sets a pending
   `AckSequence = N` to send back at the next opportunity.
 - The receiver bundles the `AckSequence` flag onto its next
@@ -182,17 +215,35 @@ packets:
   no longer has buffered, it replies with `RejectRetransmit`
   and the connection effectively dies.
 
-⚠ **Empirical observation (Phase 1 spike, 30-second silent
-client)**: after a successful handshake, an ACE server sends
-the client a `Flags=AckSequence Size=4 body=01 00 00 00`
-packet every ~3.7 seconds — i.e., it ACKs `1` over and over
-even though the client has sent nothing past the handshake.
-The connection survived the full 30s observation window
-without a TCP-style RST or session termination. We do not yet
-know the actual server-side timeout for a fully-silent client;
-plan as if it's 15-30s and send our own keepalive (either an
-`AckSequence` or a `TimeSync` echo) at least every 5s once
-sequenced traffic begins.
+⚠ **Empirical observations (Phase 2 spike)**:
+
+- Without any keepalive from us, the server tears the session
+  down at exactly 17 seconds with `Reason: Network Timeout`
+  (`Session 0\127.0.0.1:NNNNN dropped`). The 17s = 15s
+  `AuthenticationHandler.DefaultAuthTimeout` plus a couple of
+  seconds of post-handshake processing — the session is still
+  treated as un-authenticated for timeout purposes until the
+  client transmits something back.
+
+- Sending **either** a bare `AckSequence` (at `Sequence=0`,
+  unencrypted) **or** a bare `TimeSync` echo (at `Sequence=0`,
+  unencrypted) on every received sequenced server packet is
+  sufficient to keep the session alive indefinitely. Every
+  valid inbound packet refreshes `session.Network.TimeoutTick`
+  in [`NetworkSession.HandlePacket`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/NetworkSession.cs#L349-L351),
+  and authenticated sessions get the 60s `NetworkManager.DefaultSessionTimeout`.
+
+- After the handshake the server pushes its own `TimeSync` flag
+  every 20 seconds (`NetworkSession.timeBetweenTimeSync`), as
+  well as bare `AckSequence` packets at irregular intervals
+  (~250 ms during the initial "I haven't heard from you yet"
+  burst, slowing once we ack).
+
+- The `TimeSync` body the server ignores entirely: see
+  [`NetworkSession.HandlePacket`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/NetworkSession.cs#L470-L477)
+  "Do something with this..." comment. Echoing the value the
+  server just sent is fine.
+
 
 ## Retransmit protocol (server-driven)
 

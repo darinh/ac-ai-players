@@ -201,7 +201,7 @@ LoginRequest came from).
 |---|---|---|---|---|
 | 0 | 8 | `f64` | `ServerTime` | `Timers.PortalYearTicks` — server's clock at issue time |
 | 8 | 8 | `u64` | `ConnectionCookie` | Random nonce. Client must echo this back in leg 3. |
-| 16 | 4 | `u32` | `ClientId` | Server-assigned session id. Same value as `Header.Id`. |
+| 16 | 4 | `u32` | `ClientId` | Server-assigned session-map index. **All future client-to-server packets must put this value in `Header.Id`.** Do NOT confuse with the `Header.Id` on leg 2 itself — that one is the server's `ServerId` constant (typically `11`). See [`spec/02-network.md` "Header.Id is not symmetric"](../spec/02-network.md#packet-header). |
 | 20 | 4 | `bytes[4]` | `ServerSeed` | ISAAC seed for server → client stream |
 | 24 | 4 | `bytes[4]` | `ClientSeed` | ISAAC seed for client → server stream |
 | 28 | 4 | `u32` | `Padding` | Always `0`. Comment in source: "Padding for alignment?" |
