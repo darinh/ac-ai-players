@@ -60,7 +60,17 @@ internal static class Program
             var result = await driver.RunAsync(cts.Token).ConfigureAwait(false);
             if (result.PostHandshakePacketSeen)
             {
-                Console.WriteLine("[main] PHASE 1 PASS — server kept talking to us after the handshake.");
+                var hasMessages = result.DDDInterrogation is not null
+                    || result.CharacterList is not null
+                    || result.ServerName is not null;
+                if (hasMessages)
+                {
+                    Console.WriteLine("[main] PHASE 2 PASS — handshake + crypto + keepalive + game-message decode all working.");
+                }
+                else
+                {
+                    Console.WriteLine("[main] PHASE 1 PASS — handshake completed; no decodable game messages observed (yet).");
+                }
                 return 0;
             }
             Console.WriteLine("[main] PHASE 1 PARTIAL — got ConnectRequest from server but no post-handshake packet within timeout.");

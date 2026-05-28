@@ -1,7 +1,7 @@
 # Phase 2 results — encryption, CRC verification, keepalive
 
-**Status**: in progress (sub-phases 2.1 + 2.2 PASS, 2.3 CharacterList
-parsing pending, 2.4 documentation roll-up pending).
+**Status**: in progress (sub-phases 2.1 + 2.2 + 2.3 PASS,
+2.4 documentation roll-up in flight).
 
 Phase 2 builds on the [Phase 1 handshake](phase1-results.md) by
 porting the ISAAC stream cipher + Hash32 CRC verification chain and
@@ -15,8 +15,8 @@ session alive past the 17-second un-authenticated timeout.
 |---|---|---|
 | 2.1 | Port `CryptoSystem` (ISAAC + 256-key lookahead) and verify every inbound packet's CRC | PASS |
 | 2.2 | Build outbound packet path; send bare `AckSequence` + `TimeSync` echo; survive past 60s | PASS |
-| 2.3 | Parse `CharacterList` (opcode `0xF7E5`) payload so a brain can pick a character | pending |
-| 2.4 | Roll-up documentation: CryptoSystem semantics, outbound packet wire format, keepalive timing | pending (in flight) |
+| 2.3 | Parse `CharacterList`, `ServerName`, `DDDInterrogation` payloads so a brain can pick a character | PASS |
+| 2.4 | Roll-up documentation: CryptoSystem semantics, outbound packet wire format, keepalive timing, game-message wire formats | pending (in flight) |
 
 ## Sub-phase 2.1 evidence — CRC verification PASS
 
@@ -32,11 +32,19 @@ commit). Observed 11 inbound packets across a 30-second window. All
 [observe] total post-handshake packets observed: 11 (CRC pass=11, fail=0)
 ```
 
-Real game-message opcodes decoded out of the verified fragments:
+Real game-message opcodes decoded out of the verified fragments
+(opcode mapping verified against
+[`GameMessageOpcode.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/GameMessageOpcode.cs)):
 
-- `0xF7E5` `GameMessageCharacterList`  — fragment Queue=5
-- `0xF658` `GameMessageServerName`     — fragment Queue=9, ASCII `"headless-test"`
-- `0xF7E1` `GameMessageDDDInterrogation` — fragment Queue=9, ASCII `"ACEmulator"`
+- `0xF7E5` `GameMessageDDDInterrogation` — fragment Queue=5 (`DatabaseQueue`)
+- `0xF658` `GameMessageCharacterList`     — fragment Queue=9 (`UIQueue`), carries ASCII `"headless-test"` (the account name)
+- `0xF7E1` `GameMessageServerName`        — fragment Queue=9 (`UIQueue`), carries ASCII `"ACEmulator"`
+
+> ⚠ **Opcode mapping correction.** An earlier revision of this
+> document and `spec/06-game-messages.md` listed these three opcodes
+> with the wrong message names (rotated by one). The correct mapping
+> above is the authoritative one and was verified by decoding live
+> wire bytes against the source schemas. See `phase2-charlist-run-01.log`.
 
 Implementation notes (full detail in `spec/03-crypto.md`):
 
@@ -139,11 +147,113 @@ advances. Real game traffic (Phase 3, sending `BlobFragments` from
 the client) will naturally bump the value once the client emits its
 first encrypted sequenced packet.
 
-## What unblocks once 2.3 lands
+## Sub-phase 2.3 evidence — game-message parsing PASS
+
+Spike run after `<this commit>` (the `Protocol/GameMessages/`
+decoder + `HandshakeDriver.ObservePostHandshakePackets` integration).
+Capture: `phase2-charlist-run-01.log` in the session-state files
+folder.
+
+Decoded output for the three messages the server pushes during
+character-list delivery:
+
+```
+[observe] #2 ... Flags=EncryptedChecksum, BlobFragments Size=44 ... [CRC_OK]
+[observe]   Frag Seq=0 Id=0x80000000 Count=1 Size=44 Idx=0 Q=5 payload[28]: e5 f7 00 00 ...
+[observe]   -> DDDInterrogation: region=1 lang=1 product=1 supportedLangs=[0,1]
+
+[observe] #3 ... Flags=EncryptedChecksum, BlobFragments Size=100 ... [CRC_OK]
+[observe]   Frag Seq=1 Id=0x80000000 Count=1 Size=60 Idx=0 Q=9 payload[44]: 58 f6 00 00 ...
+[observe]   -> CharacterList: account="headless-test" slots=11 characters=0 turbineChat=1 tod=1
+[observe]   Frag Seq=2 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: e1 f7 00 00 ...
+[observe]   -> ServerName: name="ACEmulator" connections=1/128
+```
+
+Verified facts about each message's wire format (full payload schemas
+documented in `spec/06-game-messages.md`):
+
+- All three game messages encode the opcode as `u32 LE` (4 bytes), not
+  the `u16` you might expect — `GameMessage.cs:26` is the canonical
+  authority.
+- `WriteString16L` (the string encoding ACE uses for every short
+  string) is `u16 length` + body bytes in Windows-1252/Latin-1 + zero
+  padding so `(2 + length + pad) % 4 == 0`. Mirror is `ReadString16L`.
+- The fragment-header `Size` field on the wire **includes the 16-byte
+  fragment header itself**. So a 44-byte server fragment carries a
+  28-byte payload. Source: `ServerPacketFragment.PackAndReturnHash32`.
+- A `BlobFragments`-flagged packet may carry multiple fragments back-
+  to-back (packet #3 above carries `CharacterList` + `ServerName` in
+  one UDP datagram).
+- Fragment `Id = 0x80000000` is the per-message id assigned by the
+  server. The high bit is set because the server numbers its own
+  messages starting at `0x80000000`; the client numbers its outbound
+  messages starting at `0x00000001`. The split keeps the two streams
+  independent.
+
+### Three things we learned implementing 2.3
+
+**1. The `CharacterList` payload contains the *account* name, not a
+character name.** Source:
+[`GameMessageCharacterList.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageCharacterList.cs)
+writes `session.Account` (here `"headless-test"`) at offset 16. There
+is no separate `AccountInfo` message — `CharacterList` is the only
+authoritative source of the account name post-handshake. A
+spike that mis-decodes this field could pick the wrong identity.
+
+**2. The "slot count" is a per-account max, not a per-character
+counter.** ACE's `max_chars_per_account` config (default 11) appears
+verbatim in every `CharacterList` push, regardless of how many
+characters exist. The `characters.Count` is a separate field. Two
+zero-length character lists at different slot counts are normal.
+
+**3. Fragment `Queue` selects the inbound delivery semantics, NOT the
+game-message reliability class.** Server-side, every game message we
+observed was sent reliably (`AddPacketTail` in `NetworkSession.cs`
+followed the `Reliable*` path). The `Queue` value (`5 =
+DatabaseQueue`, `9 = UIQueue`) is the per-stream ordering bucket on
+the *send* side — the receiver doesn't have to interpret it; it just
+needs to ack the packet sequence. So our spike currently ignores it
+on the parse side and only logs it for debugging.
+
+## Sub-phase 2.4 evidence — documentation roll-up
+
+This document covers Phase 2 end-to-end. Companion files:
+
+- `spec/03-crypto.md` — CryptoSystem (ISAAC) port + CRC chain
+- `spec/02-network.md` — Header.Id asymmetry + `Sequence=0` control rule
+- `spec/04-handshake.md` — ConnectResponse race + retransmit + ClientId
+- `spec/06-game-messages.md` — verified per-opcode wire formats
+- `spec/07-outbound-packet.md` — outbound packet wire format + checksum chain
+  (TODO if not yet written)
+
+### Operational caveat — back-to-back reconnects
+
+Reconnecting on the same account inside the server's session-expiry
+window (~17s after the last packet of the previous session) triggers
+ACE's duplicate-login handling: the new session boots the old one
+("Account was logged in, booting currently connected account in
+favor of new connection") and then the second connection itself can
+be dropped ("Account In Use: Found another session already logged in
+for this account"). Reproducible: run the spike, exit, run it again
+within ~10s.
+
+Symptoms client-side: server pushes a single `BlobFragments` carrying
+opcode `0xF659` (`CharacterError`) before dropping the link. To avoid
+this during dev: wait ~30s between runs, exit cleanly via a logoff
+packet (Phase 3+ TODO), or use a different account per run.
+
+## What unblocks now that Phase 2 PASSes
 
 Picking a character from the parsed `CharacterList` lets the client
-emit `GameActionCharacterEnterWorld`. That is the first packet the
-spike will need to actually encrypt (it's a `BlobFragments`-carrying
-packet, so `EncryptedChecksum` is mandatory), which exercises the
-`cryptoSend` ISAAC instance for the first time. Phase 3 picks up
-from there.
+emit `GameActionCharacterEnterWorldRequest` (opcode `0xF7C8`, C → S).
+That is the first packet the spike will need to actually encrypt
+(it's a `BlobFragments`-carrying packet, so `EncryptedChecksum` is
+mandatory), which exercises the `cryptoSend` ISAAC instance for the
+first time. The server replies with `CharacterEnterWorld` (opcode
+`0xF657`, S → C) once it has hydrated the character. Phase 3 picks
+up from there.
+
+Note: the `headless-test` account currently has zero characters.
+Either run `/createchar` via an ACE admin session before Phase 3 test
+runs, or implement `GameMessageCharacterCreate` (opcode `0xF656`,
+C → S) first so the spike is self-sufficient.

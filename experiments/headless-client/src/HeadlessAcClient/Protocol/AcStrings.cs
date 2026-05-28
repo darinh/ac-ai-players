@@ -161,4 +161,34 @@ internal static class AcStrings
             dest[i] = (byte)s[i];
         return s.Length;
     }
+
+    /// <summary>
+    /// Read an AC String16L: <c>u16 length, bytes (CP1252-style
+    /// 8-bit, treated as Latin-1), padded so (2 + length) reaches
+    /// the next multiple of 4</c>. Advances <paramref name="offset"/>
+    /// past the padded extent.
+    /// </summary>
+    public static string ReadString16L(ReadOnlySpan<byte> src, ref int offset)
+    {
+        if (src.Length - offset < sizeof(ushort))
+            throw new ArgumentException("String16L: buffer too small for length prefix");
+
+        ushort length = BinaryPrimitives.ReadUInt16LittleEndian(src.Slice(offset));
+        offset += sizeof(ushort);
+
+        if (src.Length - offset < length)
+            throw new ArgumentException($"String16L: buffer too small for {length} char body");
+
+        var chars = new char[length];
+        for (var i = 0; i < length; i++)
+            chars[i] = (char)src[offset + i];
+        offset += length;
+
+        // Advance past pad bytes so (2 + length + pad) is a multiple of 4.
+        var raw = sizeof(ushort) + length;
+        var padded = AlignTo4(raw);
+        offset += (padded - raw);
+
+        return new string(chars);
+    }
 }

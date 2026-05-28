@@ -24,6 +24,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using HeadlessAcClient.Crypto;
+using HeadlessAcClient.Protocol.GameMessages;
 
 namespace HeadlessAcClient.Protocol;
 
@@ -103,7 +104,7 @@ internal sealed class HandshakeDriver : IDisposable
             // using the ISAAC keystream seeded from ServerSeed -- every
             // EncryptedChecksum packet should now verify.
             var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
-            int packetsObserved = await ObservePostHandshakePackets(
+            var observe = await ObservePostHandshakePackets(
                 recvBuf, ObserveSeconds, cryptoRecv, connectReq.ClientId, ct).ConfigureAwait(false);
 
             return new HandshakeResult(
@@ -112,7 +113,10 @@ internal sealed class HandshakeDriver : IDisposable
                 connectReq.ClientId,
                 connectReq.ServerSeed,
                 connectReq.ClientSeed,
-                packetsObserved > 0);
+                observe.PacketCount > 0,
+                observe.CharacterList,
+                observe.ServerName,
+                observe.DDDInterrogation);
         }
         finally
         {
@@ -214,7 +218,7 @@ internal sealed class HandshakeDriver : IDisposable
         return PacketHeader.HeaderSize + bodyLen;
     }
 
-    private async Task<int> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, uint assignedClientId, CancellationToken ct)
+    private async Task<ObserveResult> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, uint assignedClientId, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         var count = 0;
@@ -224,6 +228,9 @@ internal sealed class HandshakeDriver : IDisposable
         var sendBuf = new byte[64]; // bare ack/timesync is tiny (20-byte header + ≤16 bytes optional)
         var acksSent = 0;
         var timeSyncsSent = 0;
+        CharacterListMessage? charList = null;
+        ServerNameMessage? serverName = null;
+        DDDInterrogationMessage? ddd = null;
         // Per ConnectRequest body, this is our index in NetworkManager.sessionMap.
         // Server's NetworkManager.ProcessPacket (line 147-156) uses it to find our
         // session. Setting Header.Id wrong = silent drop.
@@ -265,7 +272,35 @@ internal sealed class HandshakeDriver : IDisposable
                 if (pkt.Header.HasFlag(PacketHeaderFlags.AckSequence))
                     Console.WriteLine($"[observe]   optional: AckSequence={pkt.Optional.AckSequence}");
                 foreach (var (fh, data) in pkt.Fragments)
+                {
                     Console.WriteLine($"[observe]   {fh} payload[{data.Length}]: {Hex(data.AsSpan(0, Math.Min(data.Length, 32)))}{(data.Length > 32 ? " ..." : "")}");
+
+                    var decoded = GameMessageDecoder.Decode(data);
+                    var opcode = GameMessageDecoder.PeekOpcode(data);
+                    switch (decoded)
+                    {
+                        case CharacterListMessage cl:
+                            charList = cl;
+                            Console.WriteLine($"[observe]   -> CharacterList: account=\"{cl.Account}\" slots={cl.SlotCount} characters={cl.Characters.Count} turbineChat={cl.UseTurbineChat} tod={cl.HasThroneOfDestiny}");
+                            for (var i = 0; i < cl.Characters.Count; i++)
+                            {
+                                var c = cl.Characters[i];
+                                Console.WriteLine($"[observe]      [{i}] id=0x{c.Id:X8} name=\"{c.Name}\" deleteIn={c.SecondsToDelete}s");
+                            }
+                            break;
+                        case ServerNameMessage sn:
+                            serverName = sn;
+                            Console.WriteLine($"[observe]   -> ServerName: name=\"{sn.ServerName}\" connections={sn.CurrentConnections}/{sn.MaxConnections}");
+                            break;
+                        case DDDInterrogationMessage di:
+                            ddd = di;
+                            Console.WriteLine($"[observe]   -> DDDInterrogation: region={di.ServersRegion} lang={di.NameRuleLanguage} product={di.ProductId} supportedLangs=[{string.Join(",", di.SupportedLanguages)}]");
+                            break;
+                        case null when opcode is not null:
+                            Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
+                            break;
+                    }
+                }
 
                 if (!verified)
                     continue;
@@ -315,8 +350,14 @@ internal sealed class HandshakeDriver : IDisposable
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes");
-        return count;
+        return new ObserveResult(count, charList, serverName, ddd);
     }
+
+    private readonly record struct ObserveResult(
+        int PacketCount,
+        CharacterListMessage? CharacterList,
+        ServerNameMessage? ServerName,
+        DDDInterrogationMessage? DDDInterrogation);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
@@ -385,4 +426,7 @@ internal readonly record struct HandshakeResult(
     uint ClientId,
     byte[] ServerSeed,
     byte[] ClientSeed,
-    bool PostHandshakePacketSeen);
+    bool PostHandshakePacketSeen,
+    CharacterListMessage? CharacterList,
+    ServerNameMessage? ServerName,
+    DDDInterrogationMessage? DDDInterrogation);
