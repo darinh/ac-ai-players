@@ -321,6 +321,21 @@ internal sealed class HandshakeDriver : IDisposable
         // (WeenieError 0x36). Verified empirically in
         // phase6l-equip-run-06-decoded.log on a fresh account.
         var                  pendingEquip = new Dictionary<uint, uint>();
+        // Phase 6n — anti-starvation: after an item is successfully
+        // wielded, mark its weenie-class as "satisfied" so we stop
+        // chasing duplicate quest-reward copies. Also count successful
+        // pickups per name; after 1, deprioritize that name so we
+        // don't pick a third Bruised Apple just because the academy
+        // gifted us another one. Without this, the bot loops on
+        // apples/armor reward respawns and never reaches NPCs or
+        // doors.
+        var                  satisfiedEquipSlots = new HashSet<uint>();
+        var                  satisfiedWeenieClasses = new HashSet<uint>();
+        var                  pickupCountByName = new Dictionary<string, int>();
+        // Phase 6n — guid -> weenie class for items we put in pendingEquip,
+        // so we can promote the class to satisfiedWeenieClasses when the
+        // wield ack arrives.
+        var                  pendingEquipWcid = new Dictionary<uint, uint>();
         var ownPlayerSeen = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
@@ -575,33 +590,81 @@ internal sealed class HandshakeDriver : IDisposable
                             // item is in our inventory; rootOwner==this
                             // takes the no-MoveToChain branch
                             // (Player_Inventory.cs:1646).
-                            if (ge.Payload?.InventoryPutObjInContainer is { } putAck
-                                && pendingEquip.TryGetValue(putAck.ItemGuid, out var equipSlot))
+                            if (ge.Payload?.InventoryPutObjInContainer is { } putAck)
                             {
-                                pendingEquip.Remove(putAck.ItemGuid);
-                                var equipPktSeq = nextOutboundPacketSequence++;
-                                var equipFragSeq = nextOutboundFragmentSequence++;
-                                var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                                var equipLen = GameActionGetAndWieldItemMessage.Pack(
-                                    equipBuf,
-                                    itemGuid: putAck.ItemGuid,
-                                    equipLocation: (int)equipSlot);
-                                var equipMsg = new OutboundPacket();
-                                if (lastReceivedSeq != 0)
-                                    equipMsg.AddAckSequence(lastReceivedSeq);
-                                equipMsg.AddBlobFragment(
-                                    fragSequence: equipFragSeq,
-                                    fragId: OutboundFragmentId,
-                                    queue: (ushort)GameMessageGroup.UIQueue,
-                                    gameMessagePayload: equipBuf.AsSpan(0, equipLen));
-                                var equipSentLen = equipMsg.Pack(sendBuf, myClientId,
-                                                                 sequence: equipPktSeq, iteration: 1,
-                                                                 encrypt: true, cryptoSend: cryptoSend);
-                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, equipSentLen),
-                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                // Phase 6n — count this pickup so the
+                                // picker doesn't keep chasing identical
+                                // quest-reward respawns of the same name.
+                                var pickedSnap = worldState.TryGet(putAck.ItemGuid);
+                                if (pickedSnap is not null && !string.IsNullOrEmpty(pickedSnap.Name))
+                                {
+                                    pickupCountByName.TryGetValue(pickedSnap.Name!, out var pc);
+                                    pickupCountByName[pickedSnap.Name!] = pc + 1;
+                                }
+                                // Phase 6n — for wearables, mark the
+                                // weenie class satisfied as soon as the
+                                // pickup acks (don't wait for WieldObject).
+                                // If the server later rejects the wield
+                                // (InventoryServerSaveFailed), we've
+                                // still got a copy in the bag and
+                                // grabbing a second duplicate won't help.
+                                // Without this, the bot loops on cap
+                                // respawns when the cap fails to wield.
+                                if (pendingEquipWcid.TryGetValue(putAck.ItemGuid, out var equipWcidEarly))
+                                {
+                                    satisfiedWeenieClasses.Add(equipWcidEarly);
+                                }
+
+                                if (pendingEquip.TryGetValue(putAck.ItemGuid, out var equipSlot))
+                                {
+                                    pendingEquip.Remove(putAck.ItemGuid);
+                                    var equipPktSeq = nextOutboundPacketSequence++;
+                                    var equipFragSeq = nextOutboundFragmentSequence++;
+                                    var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                                    var equipLen = GameActionGetAndWieldItemMessage.Pack(
+                                        equipBuf,
+                                        itemGuid: putAck.ItemGuid,
+                                        equipLocation: (int)equipSlot);
+                                    var equipMsg = new OutboundPacket();
+                                    if (lastReceivedSeq != 0)
+                                        equipMsg.AddAckSequence(lastReceivedSeq);
+                                    equipMsg.AddBlobFragment(
+                                        fragSequence: equipFragSeq,
+                                        fragId: OutboundFragmentId,
+                                        queue: (ushort)GameMessageGroup.UIQueue,
+                                        gameMessagePayload: equipBuf.AsSpan(0, equipLen));
+                                    var equipSentLen = equipMsg.Pack(sendBuf, myClientId,
+                                                                     sequence: equipPktSeq, iteration: 1,
+                                                                     encrypt: true, cryptoSend: cryptoSend);
+                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, equipSentLen),
+                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                    Console.WriteLine(
+                                        $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
+                                        $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
+                                }
+                            }
+                            // Phase 6n — wield ack: mark the slot mask
+                            // and the wcid as satisfied so the picker
+                            // stops chasing duplicate copies of the
+                            // same armor reward.
+                            if (ge.Payload?.WieldObject is { } wieldAck)
+                            {
+                                if (wieldAck.NewLocation != 0)
+                                    satisfiedEquipSlots.Add(wieldAck.NewLocation);
+                                if (pendingEquipWcid.TryGetValue(wieldAck.ItemGuid, out var wcEq))
+                                {
+                                    satisfiedWeenieClasses.Add(wcEq);
+                                    pendingEquipWcid.Remove(wieldAck.ItemGuid);
+                                }
+                                else
+                                {
+                                    var wieldedSnap = worldState.TryGet(wieldAck.ItemGuid);
+                                    if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
+                                        satisfiedWeenieClasses.Add(wc2);
+                                }
                                 Console.WriteLine(
-                                    $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
-                                    $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
+                                    $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
+                                    $"wcids=[{string.Join(",", satisfiedWeenieClasses.Select(c => c.ToString()))}]");
                             }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
@@ -964,6 +1027,15 @@ internal sealed class HandshakeDriver : IDisposable
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
                         .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
+                        // Phase 6n — anti-starvation: skip duplicate
+                        // quest reward respawns. If we've already
+                        // wielded a wearable from this weenie class
+                        // (same wcid), don't chase the next copy. If a
+                        // non-wearable name has been picked up >=1x,
+                        // deprioritize it (handled in sort below; the
+                        // hard filter below only drops EXACT duplicates
+                        // of a satisfied weenie class).
+                        .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
@@ -974,24 +1046,14 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        // Tri-priority: pickup-eligible armor/weapons,
-                        // doors, portals all go first; writables (signs/
-                        // books) go last; everything else in between.
-                        // - Pickup-eligible items (Armor/Weapon/Clothing/
-                        //   etc per PickupItemTypeMask) are highest
-                        //   priority alongside doors/portals so the bot
-                        //   collects gear from its current room before
-                        //   moving on. The equip-after-pickup path
-                        //   (Phase 6l) then wields wearable items
-                        //   automatically.
-                        // - Doors (Misc 0x80 + Name="Door") and Portals
-                        //   (0x10000) drive spatial progress; they're
-                        //   the chief mechanism for discovering new
-                        //   rooms / regions of the academy.
-                        // - Writables (signs/books, 0x2000) reply with
-                        //   UseDone(ok) and (currently) no visible
-                        //   payload, so they're low-value per cycle and
-                        //   we let everything actionable go first.
+                        // Tri-priority with NPC promotion. Phase 6n adjusted:
+                        // - prio 0: unsatisfied-slot wearables, doors, portals
+                        // - prio 1: NPCs (Creature, itemType bit 0x10 set
+                        //   but not pickup-eligible). After basic gear is
+                        //   on, NPCs become important for quest progress.
+                        // - prio 2: non-wearable pickups (apples, etc.),
+                        //   already-counted-once pickups
+                        // - prio 3: writables
                         candidate = inRange
                             .Select(s =>
                             {
@@ -1000,7 +1062,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
-                                int prio = (isDoor || isPortal || isPickup) ? 0 : (isWritable ? 2 : 1);
+                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
+                                var isWearable = isPickup && s.ValidLocations is uint vl && vl != 0;
+                                var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
+                                    (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
+                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
+                                int prio;
+                                if (isDoor || isPortal) prio = 0;
+                                else if (isWearable && !hasSatisfiedSlot) prio = 0;
+                                else if (isNpc) prio = 1;
+                                else if (isPickup && !pickedBefore) prio = 2;
+                                else if (isWritable) prio = 3;
+                                else prio = 2;
                                 return (snap: s, d2, prio);
                             })
                             .OrderBy(t => t.prio)
@@ -1338,6 +1411,8 @@ internal sealed class HandshakeDriver : IDisposable
                     {
                         equipLoc = vl & (~vl + 1);
                         pendingEquip[motionTarget.Guid] = equipLoc.Value;
+                        if (motionTarget.WeenieClassId is uint wcid)
+                            pendingEquipWcid[motionTarget.Guid] = wcid;
                     }
 
                     var sentLen = msg.Pack(sendBuf, myClientId,
@@ -1636,6 +1711,20 @@ internal sealed class HandshakeDriver : IDisposable
     }
 
     private static char ToHex(byte nibble) => (char)(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
+
+    // Phase 6n — compute the OR of all per-slot EquipMasks that the
+    // server has confirmed we're already wielding into. Used by the
+    // picker to skip duplicate quest-reward armor that targets a
+    // slot we've already filled. Server-side, the wield's NewLocation
+    // can OR multiple adjacent slots (e.g. pants occupy
+    // UpperLegArmor|LowerLegArmor=0x6000); we therefore OR every
+    // satisfied slot into one combined mask.
+    private static uint SatisfiedSlotMask(IEnumerable<uint> slots)
+    {
+        uint mask = 0;
+        foreach (var s in slots) mask |= s;
+        return mask;
+    }
 
     public void Dispose() => _socket?.Dispose();
 
