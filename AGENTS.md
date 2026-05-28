@@ -15,11 +15,37 @@ and the public roadmap.
 See [`README.md`](README.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md)
 for the project overview, status, and contributor ground rules.
 
+## ACTIVE DIRECTIVE — Pilot Track autonomous loop
+
+The project is in **Pilot Track v5** (see
+`~/.copilot/session-state/<id>/plan.md`). The bot is being driven to
+play AC end-to-end via a three-layer brain (Motor / Tactics /
+Strategy), with an LLM acting as a quest compiler (not a controller).
+
+**Until the success criteria in
+[`docs/pilot/improvement-loop.md`](docs/pilot/improvement-loop.md)
+are met, agent sessions must:**
+
+1. Read `docs/pilot/improvement-loop.md` first.
+2. Operate autonomously per that loop — do not stop and wait for the
+   user except for the documented true blockers.
+3. Treat the earlier rule "Bots are bots, not agents — LLMs only at
+   the Social layer" as **superseded**: the LLM is now used for quest
+   comprehension as well, in a constrained compiler role. See
+   [`docs/pilot/plan-vocabulary.md`](docs/pilot/plan-vocabulary.md).
+4. Checkpoint before context exhaustion so the next session resumes
+   cleanly.
+
+A scheduled prompt named `pilot-loop` periodically kicks a fresh
+session to advance the loop.
+
 ## House style (match this or docs will feel off)
 
 - Plain, direct prose. No marketing voice. No hype. No emoji.
 - Short sentences. Cross-link related docs via relative paths.
-- "Bots are bots, not agents." LLMs only at the Social layer.
+- (Historical: "Bots are bots, not agents — LLMs only at the Social
+  layer." Superseded by the Pilot Track directive above; the loop doc
+  governs current architecture.)
 
 ## Branch workflow (MANDATORY for Medium and Large tasks)
 
