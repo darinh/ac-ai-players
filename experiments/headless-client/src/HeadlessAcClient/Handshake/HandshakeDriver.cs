@@ -463,10 +463,13 @@ internal sealed class HandshakeDriver : IDisposable
                                 $" pFlags=0x{(uint)oc.Physics.DescriptionFlags:X6}{loc}");
                             break;
                         case GameEventMessage ge:
+                            var geDesc = ge.Payload is not null
+                                ? ge.Payload.ToString()
+                                : $"raw[{ge.PayloadBytes.Length}]";
                             Console.WriteLine(
                                 $"[observe]   -> GameEvent: type={ge.EventType} (0x{(uint)ge.EventType:X4}) " +
                                 $"recv=0x{ge.ReceiverGuid:X8} seq={ge.ServerEventSequence} " +
-                                $"payload[{ge.PayloadBytes.Length}]");
+                                $"payload={geDesc}");
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
                             Console.WriteLine(

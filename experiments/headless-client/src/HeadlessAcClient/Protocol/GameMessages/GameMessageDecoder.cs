@@ -213,7 +213,8 @@ internal static class GameMessageDecoder
             var seq  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
             var et   = (GameEventType)BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
             var rest = p.Slice(cursor).ToArray();
-            return new GameEventMessage(guid, seq, et, rest);
+            var decodedPayload = GameEventPayloadDecoder.Decode(rest, et);
+            return new GameEventMessage(guid, seq, et, rest, decodedPayload);
         }
         catch
         {

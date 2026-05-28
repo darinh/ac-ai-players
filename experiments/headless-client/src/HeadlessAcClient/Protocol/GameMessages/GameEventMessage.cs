@@ -33,7 +33,8 @@ internal sealed record GameEventMessage(
     uint ReceiverGuid,
     uint ServerEventSequence,
     GameEventType EventType,
-    ReadOnlyMemory<byte> PayloadBytes)
+    ReadOnlyMemory<byte> PayloadBytes,
+    GameEventPayload? Payload = null)
 {
     /// <summary>16 = u32 opcode + u32 guid + u32 seq + u32 eventType.</summary>
     public const int HeaderSize = 16;
