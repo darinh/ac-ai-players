@@ -6,21 +6,34 @@ Wire schemas for the messages the server pushes after
 where it is, what its avatar looks like, what objects exist nearby,
 and how those objects move.
 
-Status: **DRAFT** for Phase 4.3 (`0xF745 ObjectCreate`). Other
-opcodes are stubbed; will be expanded as each decoder lands and is
-verified against capture logs.
+Status: **VERIFIED** for `0xF745 ObjectCreate` (Phase 4.3 PASS),
+`0xF748 UpdatePosition` (Phase 4.8 PASS), and `0xF74C Motion`
+header (Phase 4.6 PASS — body kept as raw bytes, full body decode
+deferred to Phase 5). The post-EnterWorld firehose has been
+observed end-to-end with zero fall-through to the "no decoder yet"
+log line in [`phase4-state-speech-run-01.log`](../phase4-state-speech-run-01.log).
 
 ## Decoder priority
 
-From the Phase 3.3 firehose (`phase3-enterworld-run-01.log`, 221
-packets in 65s):
+From the post-EnterWorld firehose. Counts are from the final
+verified run, `phase4-state-speech-run-01.log` (~120s observation
+window, 616 packets, 100% CRC pass, ZERO fall-through):
 
-| opcode | name | volume | first decoded |
-|---|---|---|---|
-| `0xF745` | `ObjectCreate` | high | Phase 4.3 (this doc, in-flight) |
-| `0xF74C` | `Motion` | per-tick | Phase 4.4 (deferred) |
-| `0xF7B0` | `GameEvent` | login-burst then sparse | Phase 4.6 (deferred) |
-| `0x02CD` | `PrivateUpdatePropertyInt` | event-driven | Phase 4.5 (deferred) |
+| opcode | name | count | status | section |
+|---|---|---|---|---|
+| `0xF748` | `UpdatePosition` | 348 | ✅ Phase 4.8 PASS | [§UpdatePosition](#0xf748-updateposition-s--c) |
+| `0xF74C` | `Motion` | 121 | ✅ Phase 4.6 PASS (header; body raw) | [§Motion](#0xf74c-motion-s--c-header-only) |
+| `0xF745` | `ObjectCreate` | 30 | ✅ Phase 4.3 PASS | [§ObjectCreate](#0xf745-objectcreate-s--c) |
+| `0xF7B0` | `GameEvent` | 10 | ✅ Phase 4.5 PASS (envelope; payload raw) | [spec/06 §GameEvent envelope](06-game-messages.md) |
+| `0x02CD` | `PrivateUpdatePropertyInt` | 26 | ✅ Phase 4.7 PASS | [spec/06 §PrivateUpdatePropertyInt](06-game-messages.md) |
+| `0xF74B` | `SetState` | 12 | ✅ Phase 4.9 PASS | [spec/06 §SetState](06-game-messages.md) |
+
+Note: the lower-volume `0x02xx` messages (`PrivateUpdateProperty*`,
+`SetState`, etc.) are documented in [`spec/06-game-messages.md`](06-game-messages.md)
+since their schemas are small and fit the per-message wire-format
+section there. World-state-heavy opcodes (`ObjectCreate`,
+`UpdatePosition`, `Motion`) live here because their schemas
+dominate the bot's model of "what's around me".
 
 ## Helper primitives (shared by all schemas)
 
@@ -191,7 +204,9 @@ Align()
 
 **Movement body** (when `physicsDescriptionFlag & Movement` is set):
 Length-prefixed. The decoder can SKIP the body for now and still
-keep cursor alignment. When fully decoded (Phase 4.4) the body
+keep cursor alignment. When fully decoded (Phase 5 — see
+[§Motion](#0xf74c-motion-s--c-header-only) below for the header
+layout we already verified) the body
 layout is (source: `MovementDataExtensions.Write` with `header=false`,
 lines 184-229):
 
@@ -363,7 +378,8 @@ Decoder built in stages:
    Variable-length RestrictionDB body cannot be safely skipped.
    (House objects are not expected in the training academy where
    we test.)
-6. **Stage E** — Full Movement body decode (Phase 4.4).
+6. **Stage E** — Full Movement body decode (deferred to Phase 5;
+   header is verified — see [§Motion](#0xf74c-motion-s--c-header-only)).
 
 Acceptance gate for 4.3 (Stages 0-D):
 - All `0xF745 ObjectCreate` packets in the next capture decode
@@ -389,16 +405,188 @@ uses. Cursor sizes are unchanged either way.
 - `UseRadius` — `f32`.
 - `Value`, `Spell` (DID) etc. — `u32` / `u16`.
 
+## 0xF748 UpdatePosition (S → C)
+
+Verified Phase 4.8. Per-tick broadcast of a `WorldObject`'s
+position. By far the highest-volume world-state message — one per
+visible moving object per server tick. In the academy this is
+dominated by the Pilot-01 BotPlayer (`0x50000005`) doing idle
+wander.
+
+Encoder:
+[`GameMessageUpdatePosition.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageUpdatePosition.cs)
++
+[`PositionPack.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Structure/PositionPack.cs).
+
+**Wire layout** (variable, 44 to 68 bytes depending on flags):
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF748` |
+| 4 | `u32` | `guid` | `ObjectGuid.Full` |
+| 8 | `u32` | `flags` | `PositionFlags` (see below) |
+| 12 | `u32` | `cellId` | `Origin.CellID` — the landblock cell the object is in |
+| 16 | `Vector3` (12B) | `pos` | Always present — `f32` x/y/z within the cell |
+| +12 | `f32` | `rot.w` | Only if `(flags & OrientationHasNoW) == 0` |
+| ... | `f32` | `rot.x` | Only if `(flags & OrientationHasNoX) == 0` |
+| ... | `f32` | `rot.y` | Only if `(flags & OrientationHasNoY) == 0` |
+| ... | `f32` | `rot.z` | Only if `(flags & OrientationHasNoZ) == 0` |
+| ... | `Vector3` (12B) | `vel` | Only if `(flags & HasVelocity)` |
+| ... | `u32` | `placementId` | Only if `(flags & HasPlacementID)` |
+| ... | `u16` | `instanceSequence` | `UShortSequence` |
+| +2 | `u16` | `positionSequence` | `UShortSequence` |
+| +2 | `u16` | `teleportSequence` | `UShortSequence` |
+| +2 | `u16` | `forcePositionSequence` | `UShortSequence` |
+
+All four sequence fields are `u16`, packed, no alignment padding.
+
+**`PositionFlags`** (`uint`, `[Flags]`):
+
+| value | name | meaning |
+|---|---|---|
+| `0x01` | `HasVelocity` | `vel` triplet is PRESENT on the wire |
+| `0x02` | `HasPlacementID` | `placementId` u32 is PRESENT |
+| `0x04` | `IsGrounded` | Object grounded (no z-velocity) — informational |
+| `0x08` | `OrientationHasNoW` | `rot.W` is **ABSENT** from the wire (inverse-presence!) |
+| `0x10` | `OrientationHasNoX` | `rot.X` is ABSENT |
+| `0x20` | `OrientationHasNoY` | `rot.Y` is ABSENT |
+| `0x40` | `OrientationHasNoZ` | `rot.Z` is ABSENT |
+
+> **INVERSE-PRESENCE TRAP**: the orientation flags use the
+> opposite convention from `HasVelocity` / `HasPlacementID`.
+> `HasVelocity SET` means "velocity is present"; but
+> `OrientationHasNoW SET` means "rot.W is ABSENT" — the server
+> omits zero components as a compression. When reconstructing the
+> quaternion, default any missing component to `0.0`.
+
+**Verified evidence** (`phase4-updateposition-run-01.log`):
+
+```
+-> UpdatePosition: guid=0x50000005 lb=0x860201DE
+   xyz=(25.48,-30.00,0.00) rot=(0.707,0.000,0.000,-0.707)
+   flags=0x34 seq=(inst=4,pos=38561,tp=0,fp=0)
+```
+
+`flags=0x34` = `IsGrounded | OrientationHasNoY | OrientationHasNoZ`:
+W and X present, Y and Z reconstructed to 0. The reconstructed
+quaternion `(0.707, 0.000, 0.000, -0.707)` is a unit rotation
+matching Pilot-01's facing direction.
+
+`lb=0x860201DE` is the landblock cell ID (the upper bytes
+`0x860201..` are the landblock; the low byte is the cell within
+the landblock).
+
+## 0xF74C Motion (S → C, header only)
+
+Verified Phase 4.6 — header only. Per-tick broadcast of a
+`WorldObject`'s movement intent (an animated motion command +
+the sequence trio needed to validate ordering). Wraps a
+`MovementData` payload whose body shape depends on `MovementType`.
+The polymorphic body (`MovementInvalid` / `MoveToObject` /
+`MoveToPosition` / `TurnToObject` / `TurnToHeading`) is preserved
+as raw bytes for later phases.
+
+Encoder:
+[`GameMessageUpdateMotion.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageUpdateMotion.cs)
++
+[`MovementData.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Structure/MovementData.cs).
+`Align()` impl:
+[`Extensions.cs:54-63`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Extensions.cs#L54-L63).
+
+**Wire layout** (variable, ≥20-byte header):
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF74C` |
+| 4 | `u32` | `guid` | `ObjectGuid.Full` |
+| 8 | `u16` | `instanceSequence` | `UShortSequence: ObjectInstance` |
+| 10 | `u16` | `movementSequence` | `UShortSequence: ObjectMovement` |
+| 12 | `u16` | `serverControlSequence` | `UShortSequence: ObjectServerControl` |
+| 14 | `u8` | `isAutonomous` | `0` = server-initiated, `1` = client |
+| 15 | `u8 × 1` | **align pad** | One pad byte to land at offset 16 — see trap below |
+| 16 | `u8` | `movementType` | `MovementType` enum |
+| 17 | `u8` | `motionFlags` | `MotionFlags [Flags]` enum |
+| 18 | `u16` | `currentStyle` | `MotionStance` enum, written as `ushort` |
+| 20 | `bytes[N]` | `body` | Polymorphic, kept as raw bytes |
+
+> **ALIGNMENT TRAP (single most expensive Phase 4 finding)**:
+> `writer.Align()` in ACE pads the stream **LENGTH** to the next
+> multiple of 4, NOT the current write position. After the 4-byte
+> opcode + 4-byte guid + (2+2+2)-byte sequence trio + 1-byte
+> `isAutonomous`, the stream length is 15. `Align()` writes 1
+> pad byte to land at 16 before `movementType`. Forgetting this
+> pad shifts the rest of the header read by 1 byte and corrupts
+> everything downstream.
+
+**`MovementType` enum** (verbatim from
+[`MovementType.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Entity/Enum/MovementType.cs)):
+
+| value | name |
+|---|---|
+| `0x0` | `Invalid` |
+| `0x1` | `RawCommand` |
+| `0x2` | `InterpretedCommand` |
+| `0x3` | `StopRawCommand` |
+| `0x4` | `StopInterpretedCommand` |
+| `0x5` | `StopCompletely` |
+| `0x6` | `MoveToObject` |
+| `0x7` | `MoveToPosition` |
+| `0x8` | `TurnToObject` |
+| `0x9` | `TurnToHeading` |
+
+**`MotionFlags` `[Flags]`**:
+
+| bit | name |
+|---|---|
+| `0x1` | `StickToObject` |
+| `0x2` | `StandingLongJump` |
+
+**Body shape per `MovementType`** (deferred — Phase 5):
+
+- `Invalid` → `MovementInvalid` blob (most common; sticks animation
+  state).
+- `MoveToObject` → `u32 targetGuid` + position + heading data.
+- `MoveToPosition` → position + heading data.
+- `TurnToObject` → `u32 targetGuid` + heading data.
+- `TurnToHeading` → heading data.
+
+**Verified evidence** (`phase4-state-speech-run-01.log`):
+
+```
+-> Motion: guid=0x50000005 type=TurnToObject flags=None style=0x003D
+   autonomous=False seq=(inst=4,mov=3178,srv=3178) body[20]
+-> Motion: guid=0x50000005 type=Invalid      flags=None style=0x003D
+   autonomous=False seq=(inst=4,mov=3180,srv=3180) body[12]
+```
+
+Style `0x003D` = `NonCombat` (from `MotionStance` enum). The bot
+sees Pilot-01 alternating between TurnToObject (toward
+`0x50000006` = Headless01) and Invalid (idle-pose stick).
+
 ## Open questions / verification targets
 
-- The `Velocity`/`Acceleration`/`Omega` ordering in the encoder
-  (lines 389-402) lists them AFTER `Translucency`. The encoder's
-  textual order is what the wire format actually is — confirm
-  with capture during Stage B.
-- `Children` count is `int` (`writer.Write(Children.Count)`), not
-  `u32`. Probably equivalent on wire but document the signed-ness
-  on first capture.
-- `Translucency` is conditionally rewritten for cloaked admins —
-  decoder reads `f32` regardless.
-- Verify `marker = 0x11` for ModelData against captured bytes
-  before committing Stage A.
+**Resolved during Phase 4.3 implementation:**
+
+- ✅ `Velocity` / `Acceleration` / `Omega` ordering matches the
+  encoder text (after `Translucency`, before the always-present
+  sequence trio). Verified by clean ObjectCreate decode of player
+  + creatures in `phase4-objectcreate-run-13.log`.
+- ✅ `Children.Count` is encoded as `int` (`writer.Write(Children.Count)`)
+  and decoded as `i32`. Equivalent to `u32` on the wire for the
+  observed ranges; signedness preserved in the record type.
+- ✅ ModelData marker byte = `0x11`. Verified in every captured
+  ObjectCreate.
+
+**Still open (deferred to later phases):**
+
+- Cloaked-admin `Translucency` rewrite — the decoder reads `f32`
+  unconditionally; not yet observed in the academy where no
+  cloaked admins exist.
+- Full `Motion` body decode (per-`MovementType` payloads). The
+  spike currently preserves the body as raw bytes; full decode
+  is queued for Phase 5.
+- Per-`GameEventType` payload decoders. The envelope is decoded
+  (Phase 4.5) but each event's body is preserved as raw bytes;
+  the highest-value first target is `PlayerDescription`
+  (`0x0013`, 668 bytes — the character sheet).
+

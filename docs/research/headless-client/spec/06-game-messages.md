@@ -1,11 +1,14 @@
 # 06 — Game messages
 
-**Status**: Phase 2.3 PASS. The three messages the server pushes
-between the handshake and the `EnterWorld` request are fully decoded
-and documented below. Each schema in this file is verified against
-both the ACE source and against captured wire bytes — see
-[`phase2-results.md`](../phase2-results.md) for the captures and
-decoded output.
+**Status**: Phase 4 complete (all post-EnterWorld opcodes the spike
+observes are decoded). The handshake messages (Phase 2.3), the
+character-management round-trip (Phase 3.2 + 3.3), and the
+world-state firehose opcodes (Phase 4.1 through 4.10) are all
+documented below. Each schema in this file is verified against both
+the ACE source and against captured wire bytes — see
+[`phase2-results.md`](../phase2-results.md), [`phase3-results.md`](../phase3-results.md),
+and [`phase4-results.md`](../phase4-results.md) for the captures
+and decoded output.
 
 This file replaces the earlier opcode table that contained fabricated
 hex values; every opcode in the table below is now cited from
@@ -578,6 +581,174 @@ Phase 4.2 capture: `ServerMessage(chatType=0x0): "Welcome to
 Asheron's Call..."` — Broadcast/MOTD on the login firehose. Decoded
 from `phase4-decoders-run-01.log`.
 
+### 0xF7B0 `GameEvent` envelope (server → client)
+
+Verified Phase 4.5. Base class for all `GameEvent*` messages — every
+event the server sends shares the same 16-byte envelope, then
+appends an event-specific payload. The payload is NOT decoded at
+this layer (see Phase 5 backlog); the spike preserves it as raw
+bytes alongside the decoded envelope.
+
+Encoder (base ctor):
+[`GameEventMessage.cs:14-26`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameEvent/GameEventMessage.cs#L14-L26).
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF7B0` |
+| 4 | `u32` | `receiverGuid` | `session.Player.Guid`, or `0` when logged out |
+| 8 | `u32` | `serverEventSequence` | Auto-increment per server-side `GameEventSequence++`. Lets the client reorder out-of-order events. The spike logs it but does not enforce ordering. |
+| 12 | `u32` | `eventType` | `GameEventType` enum value (see source listing) |
+| 16 | `bytes[N]` | `payload` | Event-specific body, kept opaque |
+
+`GameEventType` enum source:
+[`GameEventType.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameEvent/GameEventType.cs).
+Verbatim copy lives at
+`experiments/headless-client/src/HeadlessAcClient/Protocol/GameMessages/GameEventType.cs`
+— keep in sync if the server adds new event types or the decoder
+will print "Unknown".
+
+Captured login burst (`phase4-gameevent-run-01.log`):
+
+```
+PlayerDescription        (0x0013) seq=1  payload[668]
+CharacterTitle           (0x0029) seq=2  payload[16]
+FriendsListUpdate        (0x0021) seq=3  payload[8]
+WeenieError              (0x028A) seq=4  payload[4]
+WeenieErrorWithString    (0x028B) seq=5  payload[16]
+SetTurbineChatChannels   (0x0295) seq=6  payload[40]
+...
+```
+
+The 668-byte `PlayerDescription` carries the full character sheet
+and is the obvious next sub-decoder target.
+
+### 0x02CD `PrivateUpdatePropertyInt` (server → client)
+
+Verified Phase 4.7. Server informs the client that an int-valued
+property on a WorldObject changed (`CurrentHealth`, `Level`,
+`Coinage`, `Age`, etc.). "Private" = only visible to the receiving
+session, unlike the broadcast variant `0x019B PublicUpdatePropertyInt`.
+
+Encoder:
+[`GameMessagePrivateUpdatePropertyInt.cs:6-15`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessagePrivateUpdatePropertyInt.cs#L6-L15).
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0x02CD` |
+| 4 | `u8` | `sequence` | `ByteSequence` (NextBytes returns a single byte). Per-property auto-increment for client-side ordering. |
+| 5 | `u32` | `property` | `PropertyInt` enum value. Underlying server enum is `ushort` but the writer `Write((uint)property)` promotes to `u32` on the wire. |
+| 9 | `i32` | `value` | The new property value |
+
+Total 13 bytes, packed, no alignment padding. Group: `UIQueue`.
+
+> **PROPERTY-FAMILY TRAP (CRITICAL)** — the 1-byte `sequence` is
+> shared by the ENTIRE `PrivateUpdateProperty*` / `PublicUpdateProperty*`
+> family. The naive "u32 sequence" assumption silently mis-decodes
+> every message of this family. Confirmed sizes per message:
+>
+> | Opcode | Name | Size (bytes) |
+> |---|---|---|
+> | `0x02CC` | `PrivateUpdatePropertyBool` | 13 |
+> | `0x02CD` | `PrivateUpdatePropertyInt` (this) | 13 |
+> | `0x02CE` | `PrivateUpdatePropertyFloat` (f64 value) | 17 |
+> | `0x02CF` | `PrivateUpdatePropertyInt64` (i64 value) | 17 |
+> | `0x02D0` | `PrivateUpdatePropertyString` (variable; includes Align) | variable |
+> | `0x019A` | `PublicUpdatePropertyBool` (+ u32 sender) | 17 |
+> | `0x019B` | `PublicUpdatePropertyInt` (+ u32 sender) | 17 |
+> | `0x019C` | `PublicUpdatePropertyFloat` (+ u32 sender) | 21 |
+> | `0x019D` | `PublicUpdatePropertyInt64` (+ u32 sender) | 21 |
+> | `0x019E` | `PublicUpdatePropertyString` (+ u32 sender, variable) | variable |
+>
+> Public variants insert a `u32 sender guid` AFTER the sequence for
+> Int / Bool / Float / Int64; the String variant swaps the
+> guid/property field order, so re-check the writer when those
+> decoders land.
+
+`PropertyInt` enum: full list (~660 entries) in
+[`PropertyInt.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Entity/Enum/Properties/PropertyInt.cs).
+The spike maintains a small hand-picked `KnownProperties` dictionary
+for log readability; the decoded record stores the raw `u32` so
+unknown properties survive round-trip.
+
+Captured ticker (`phase4-state-speech-run-01.log`):
+
+```
+PrivateUpdatePropertyInt: Age = 3473 (seq=0)
+PrivateUpdatePropertyInt: Age = 3480 (seq=1)
+PrivateUpdatePropertyInt: Age = 3487 (seq=2)
+... (one every ~7s, monotone increasing)
+```
+
+`Age` (`PropertyInt` value `125`) ticks once per server heartbeat
+on the player.
+
+### 0xF74B `SetState` (server → client)
+
+Verified Phase 4.9. Broadcasts updated `PhysicsState` bitfield for a
+WorldObject + the two sequences needed for ordering validation.
+
+Encoder:
+[`GameMessageSetState.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageSetState.cs).
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF74B` |
+| 4 | `u32` | `guid` | `ObjectGuid.Full` of the object whose state changed |
+| 8 | `u32` | `state` | `PhysicsState` `[Flags]` bitfield, kept as raw u32 in the spike |
+| 12 | `u16` | `instanceSequence` | `UShortSequence: ObjectInstance` |
+| 14 | `u16` | `stateSequence` | `UShortSequence: ObjectState` |
+
+Total fixed 16 bytes, packed. `PhysicsState` enum source:
+[`PhysicsState.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Entity/Enum/PhysicsState.cs).
+
+Captured (`phase4-state-speech-run-01.log`):
+
+```
+SetState: guid=0x50000006 state=0x00400408 seq=(inst=23,state=1)
+SetState: guid=0x7860202C state=0x0001001C seq=(inst=0,state=355)
+SetState: guid=0x7860202D state=0x00010018 seq=(inst=0,state=327)
+```
+
+The first is our own avatar's physics state on EnterWorld; the
+`0x7860202x` series is door / static-object state changes in the
+academy lobby.
+
+### 0x02BB `HearSpeech` (server → client)
+
+Verified Phase 4.10. Chat text the player hears — both NPC dialogue
+AND other players' (and bots') chat in /say range.
+
+Encoder:
+[`GameMessageHearSpeech.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageHearSpeech.cs).
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0x02BB` |
+| 4 | `String16L` | `messageText` | The chat line. Padded to 4-multiple. |
+| variable | `String16L` | `senderName` | Speaker's display name. Padded to 4-multiple. |
+| variable | `u32` | `senderId` | Speaker's `ObjectGuid.Full` |
+| +4 | `u32` | `chatMessageType` | `ChatMessageType` enum (see below) |
+
+Sibling `0x02BC HearRangedSpeech` is structurally identical with an
+extra `f32 range` field between `senderId` and `chatMessageType` —
+not yet observed in the spike's firehose, so deferred.
+
+Captured (`phase4-state-speech-run-01.log`):
+
+```
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "oh hey Headless01"
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "lol nice hat {p}"
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "anyone selling a good bow? {p}"
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "where is the best xp around here?"
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "i need a bag, anyone got one?"
+HearSpeech: <Pilot-01> (0x50000005, chatType=0x2): "wow this place is huge"
+```
+
+`chatType=0x02` = `Speech` (local /say). Pilot-01 is broadcasting
+scripted chat from a HeartBeat emote chain; the headless client
+receiving and decoding that chat closes the first hop of the bot's
+perception loop.
+
 ## Reliability and ordering
 
 Server-side, every game message we observed in Phase 2 was sent on
@@ -626,5 +797,14 @@ When the spike starts emitting game messages:
   bare-control rule does not apply when `BlobFragments` is set;
   see `spec/02-network.md`).
 
-These are written up in `spec/07-outbound-packet.md` once that file
-exists (TODO Phase 3).
+These are written up in [`spec/08-outbound-packet.md`](08-outbound-packet.md)
+(landed in Phase 3 — outbound packet framing, sequence rules, and
+the encrypted-checksum chain).
+
+## See also
+
+- [`spec/07-world-state.md`](07-world-state.md) — verified schemas
+  for the world-state opcodes that share this game-message envelope:
+  `0xF745 ObjectCreate`, `0xF748 UpdatePosition`, `0xF74C Motion`
+  (header). Those messages are factored into a separate file because
+  their schemas dominate the world-state model.

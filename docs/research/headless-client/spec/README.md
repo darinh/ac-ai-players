@@ -1,8 +1,10 @@
 # AC1 Protocol Specification
 
-**Status:** v0.1 — covers UDP transport, packet framing,
-cryptography, and the login handshake. Game messages and world
-state are stubs that grow as the headless-client spike advances.
+**Status:** v0.2 — covers UDP transport, packet framing,
+cryptography, the login handshake, the character-mgmt round-trip
+(Phase 3.2 + 3.3), and the post-EnterWorld world-state firehose
+(Phase 4: ObjectCreate, UpdatePosition, Motion header, plus the
+chat / property-update / state opcodes in spec/06).
 
 **Audience:** an engineer who wants to implement a working AC1
 client from scratch using only this spec and the ACE server
@@ -23,8 +25,8 @@ the spec disagrees with the source, the source wins.
 | 03 | [03-crypto.md](03-crypto.md) | Hash32, ISAAC, CryptoSystem, checksum formulas | ✅ |
 | 04 | [04-handshake.md](04-handshake.md) | Three-leg login, state machine, account auto-create | ✅ |
 | 05 | [05-data-types.md](05-data-types.md) | Strings, primitives, common wire encodings | ✅ |
-| 06 | [06-game-messages.md](06-game-messages.md) | BlobFragments, GameMessage dispatch, common opcodes | ✅ partial |
-| 07 | [07-world-state.md](07-world-state.md) | Object spawns, positions, vitals, inventory | 🚧 stub |
+| 06 | [06-game-messages.md](06-game-messages.md) | BlobFragments, GameMessage dispatch, character-mgmt + Phase 4 opcode schemas | ✅ Phase 4 complete |
+| 07 | [07-world-state.md](07-world-state.md) | Object spawns (ObjectCreate), positions (UpdatePosition), motion (header) | ✅ verified (Motion body deferred) |
 | 08 | [08-outbound-packet.md](08-outbound-packet.md) | Packing C→S packets: sequence rules, fragments, encrypted CRC | ✅ |
 | 99 | [99-references.md](99-references.md) | File citations, related projects, terminology | ✅ |
 
@@ -52,5 +54,11 @@ the spec disagrees with the source, the source wins.
 
 ## Version history
 
+- v0.2 (2026-05-28) — Phase 3.3 EnterWorld + Phase 4 world-state
+  firehose decoded. Game-message envelope, character-mgmt round-trip,
+  and the world-state opcodes (ObjectCreate, UpdatePosition,
+  Motion header, GameEvent envelope, PrivateUpdatePropertyInt,
+  SetState, HearSpeech) all verified end-to-end against capture
+  logs.
 - v0.1 (2026-05-28) — initial drop after Phase 1 handshake
   passed against a live ACE dev server.
