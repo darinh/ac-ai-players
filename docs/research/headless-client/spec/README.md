@@ -23,8 +23,9 @@ the spec disagrees with the source, the source wins.
 | 03 | [03-crypto.md](03-crypto.md) | Hash32, ISAAC, CryptoSystem, checksum formulas | ✅ |
 | 04 | [04-handshake.md](04-handshake.md) | Three-leg login, state machine, account auto-create | ✅ |
 | 05 | [05-data-types.md](05-data-types.md) | Strings, primitives, common wire encodings | ✅ |
-| 06 | [06-game-messages.md](06-game-messages.md) | BlobFragments, GameMessage dispatch, common opcodes | 🚧 stub |
+| 06 | [06-game-messages.md](06-game-messages.md) | BlobFragments, GameMessage dispatch, common opcodes | ✅ partial |
 | 07 | [07-world-state.md](07-world-state.md) | Object spawns, positions, vitals, inventory | 🚧 stub |
+| 08 | [08-outbound-packet.md](08-outbound-packet.md) | Packing C→S packets: sequence rules, fragments, encrypted CRC | ✅ |
 | 99 | [99-references.md](99-references.md) | File citations, related projects, terminology | ✅ |
 
 ## Conventions

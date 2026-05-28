@@ -249,10 +249,18 @@ revert to in-process `BotPlayer` discipline.
   retransmit of `ConnectResponse` to cover the server's bcrypt-vs-
   loopback-RTT race; documented in
   [`spec/04-handshake.md`](spec/04-handshake.md).
-- **Phase 2** — [`phase2-results.md`](phase2-results.md). In progress.
-  2.1 (CRC verification) and 2.2 (ack + timesync keepalive) PASS;
-  the session now lives indefinitely instead of dying at +17s.
-  2.3 (CharacterList parsing) and 2.4 (doc roll-up) pending.
+- **Phase 2** — [`phase2-results.md`](phase2-results.md). PASS. CRC
+  verification, encrypted-checksum keepalive (ack + timesync echo),
+  and decode of the three S→C messages the server pushes between
+  handshake-leg-3 and EnterWorld (`DDDInterrogation`,
+  `CharacterList`, `ServerName`). Session lives indefinitely with
+  zero CRC failures.
+- **Phase 3** — [`phase3-results.md`](phase3-results.md). In progress.
+  3.1 (encrypted outbound `BlobFragments`) PASS — first C→S game
+  message accepted by server (`AckSequence=2` flood + dispatch log
+  entry). 3.2 (`CharacterCreate`) and 3.3 (`CharacterEnterWorldRequest`)
+  pending. See also [`spec/08-outbound-packet.md`](spec/08-outbound-packet.md)
+  for the C→S packet construction rules.
 
 ## Risks
 

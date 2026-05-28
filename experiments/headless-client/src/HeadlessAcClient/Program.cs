@@ -44,6 +44,7 @@ internal static class Program
         try
         {
             AcStrings.RunSelfChecks();
+            OutboundSelfCheck.Run();
         }
         catch (Exception ex)
         {

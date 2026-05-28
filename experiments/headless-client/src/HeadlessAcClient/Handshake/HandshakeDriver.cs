@@ -103,9 +103,18 @@ internal sealed class HandshakeDriver : IDisposable
             // port 0 (the handshake socket). Phase 2 wires CRC verification
             // using the ISAAC keystream seeded from ServerSeed -- every
             // EncryptedChecksum packet should now verify.
+            //
+            // Phase 3 adds the outbound encryption path. Per
+            // SessionConnectionData.cs:60-61, the server seeds:
+            //   CryptoClient = CryptoSystem(ClientSeed) -- for VERIFYING our packets
+            //   IssacServer  = ISAAC(ServerSeed)         -- for ENCRYPTING server packets
+            // So our client must mirror:
+            //   cryptoRecv = CryptoSystem(ServerSeed)    -- to verify server packets
+            //   cryptoSend = CryptoSystem(ClientSeed)    -- to encrypt our outbound
             var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
+            var cryptoSend = new CryptoSystem(connectReq.ClientSeed);
             var observe = await ObservePostHandshakePackets(
-                recvBuf, ObserveSeconds, cryptoRecv, connectReq.ClientId, ct).ConfigureAwait(false);
+                recvBuf, ObserveSeconds, cryptoRecv, cryptoSend, connectReq.ClientId, ct).ConfigureAwait(false);
 
             return new HandshakeResult(
                 connectReq.ServerTime,
@@ -218,14 +227,14 @@ internal sealed class HandshakeDriver : IDisposable
         return PacketHeader.HeaderSize + bodyLen;
     }
 
-    private async Task<ObserveResult> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, uint assignedClientId, CancellationToken ct)
+    private async Task<ObserveResult> ObservePostHandshakePackets(byte[] recvBuf, int seconds, CryptoSystem cryptoRecv, CryptoSystem cryptoSend, uint assignedClientId, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         var count = 0;
         var crcPass = 0;
         var crcFail = 0;
         uint lastReceivedSeq = 0;
-        var sendBuf = new byte[64]; // bare ack/timesync is tiny (20-byte header + ≤16 bytes optional)
+        var sendBuf = new byte[1024]; // bare ack/timesync is tiny but encrypted blob fragments can fill a full packet
         var acksSent = 0;
         var timeSyncsSent = 0;
         CharacterListMessage? charList = null;
@@ -235,6 +244,29 @@ internal sealed class HandshakeDriver : IDisposable
         // Server's NetworkManager.ProcessPacket (line 147-156) uses it to find our
         // session. Setting Header.Id wrong = silent drop.
         ushort myClientId = (ushort)assignedClientId;
+
+        // Phase 3 outbound counters. Server's NetworkSession.cs:57 inits
+        // lastReceivedPacketSequence = 1; first valid C->S sequenced packet
+        // must therefore be Sequence = 2 (lines 362-367 reject <= last).
+        // Bare-control packets (AckSequence/TimeSync only) use Seq=0 and
+        // bypass that check; they don't consume from this counter.
+        uint nextOutboundPacketSequence = 2;
+        // Fragment Sequence is per-MESSAGE (not per-fragment). Server-side
+        // partialFragments dict is keyed by fragment.Header.Sequence
+        // (NetworkSession.cs:42, 515-537), and lastReceivedFragmentSequence
+        // advances by 1 per COMPLETE message (NetworkSession.cs:570-573).
+        uint nextOutboundFragmentSequence = 1;
+        // Server uses 0x80000000 as a constant Id marker (MessageFragment.cs:94).
+        // Inbound code appears to ignore the field. Pick a non-high-bit constant
+        // so the client/server origin remains distinguishable in captures.
+        const uint OutboundFragmentId = 0x00000001;
+        // Phase 3.1 probe: send one unknown-opcode BlobFragments packet after
+        // CharacterList arrives. Server's InboundMessageManager.cs:115-118 logs
+        // "Received unhandled fragment opcode: 0xFFFE" and continues. Proves the
+        // encrypted-fragment path works end-to-end without committing to a real
+        // game message yet.
+        const uint UnknownProbeOpcode = 0xFFFE;
+        var probeSent = false;
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -341,6 +373,43 @@ internal sealed class HandshakeDriver : IDisposable
                     timeSyncsSent++;
                     Console.WriteLine($"[observe]   -> sent TimeSync({pkt.Optional.TimeSync:R}) [{tsLen} bytes]");
                 }
+
+                // Phase 3.1 acceptance probe: once we know we're in AuthConnected
+                // state (CharacterList means the server is past the AuthConnected
+                // transition - see Handlers/CharacterHandler.cs:26-27), send a
+                // single encrypted BlobFragments packet carrying an unknown
+                // opcode. Server's InboundMessageManager.cs:117 logs a warning
+                // and keeps the session alive. Confirms the outbound encryption
+                // chain works end-to-end without committing to a real game
+                // message yet.
+                if (!probeSent && charList is not null)
+                {
+                    probeSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var payload = new byte[4];
+                    System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(payload, UnknownProbeOpcode);
+
+                    var probe = new OutboundPacket();
+                    // Piggyback the latest inbound ack so the server's
+                    // retransmit pressure stays low.
+                    if (lastReceivedSeq != 0)
+                        probe.AddAckSequence(lastReceivedSeq);
+                    probe.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: payload);
+
+                    var probeLen = probe.Pack(sendBuf, myClientId,
+                                              sequence: packetSeq, iteration: 1,
+                                              encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, probeLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE3.1 PROBE: sent encrypted BlobFragments(opcode=0x{UnknownProbeOpcode:X4}, pktSeq={packetSeq}, fragSeq={fragSeq}) [{probeLen} bytes]");
+                    Console.WriteLine($"[observe]      Check C:\\ACE\\Logs\\ACE_Log.txt for: \"Received unhandled fragment opcode: 0x{UnknownProbeOpcode:X4}\"");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -350,14 +419,15 @@ internal sealed class HandshakeDriver : IDisposable
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes");
-        return new ObserveResult(count, charList, serverName, ddd);
+        return new ObserveResult(count, charList, serverName, ddd, probeSent);
     }
 
     private readonly record struct ObserveResult(
         int PacketCount,
         CharacterListMessage? CharacterList,
         ServerNameMessage? ServerName,
-        DDDInterrogationMessage? DDDInterrogation);
+        DDDInterrogationMessage? DDDInterrogation,
+        bool ProbeSent);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
