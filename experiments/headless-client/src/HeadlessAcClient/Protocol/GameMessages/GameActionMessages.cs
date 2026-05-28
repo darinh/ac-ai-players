@@ -36,6 +36,7 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 internal enum GameActionType : uint
 {
     LoginComplete      = 0x00A1,
+    PutItemInContainer = 0x0019,
     Use                = 0x0036,
     MoveToState        = 0xF61C,
     AutonomousPosition = 0xF753,
@@ -202,6 +203,44 @@ internal static class GameActionUseMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.Use, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);
         cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// PutItemInContainer (0x0019). The pickup / move-between-containers
+/// network event. Real clients emit this when the user drags an item
+/// from the world (or another container) into a container; passing
+/// the player's own guid as the container picks it up into the main
+/// inventory.
+///
+/// Server handler at
+/// <c>Source/ACE.Server/Network/GameAction/Actions/GameActionPutItemInContainer.cs</c>
+/// calls <c>session.Player.HandleActionPutItemInContainer(itemGuid,
+/// containerGuid, placement)</c>. That method enqueues a server-side
+/// MoveTo chain to walk the player into UseRadius of the item, then
+/// performs the pickup callback (broadcasts ObjectDelete on the item,
+/// adds it to the player's inventory, emits Sound.PickUpItem).
+///
+/// Payload after the 12B GameAction header:
+///   u32 itemGuid
+///   u32 containerGuid
+///   i32 placement       (0 = first available slot)
+/// = 24 bytes total.
+/// </summary>
+internal static class GameActionPutItemInContainerMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 12;  // 24 bytes
+
+    public static int Pack(Span<byte> dest, uint itemGuid, uint containerGuid, int placement = 0, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.PutItemInContainer, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);     cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), containerGuid); cursor += 4;
+        BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), placement);     cursor += 4;
         return cursor;
     }
 }

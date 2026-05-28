@@ -342,8 +342,25 @@ internal sealed class HandshakeDriver : IDisposable
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
             Environment.GetEnvironmentVariable("HEADLESS_MOTION_TARGET_NAME");
-        const float          MotionStopRadius = 2.0f;
+        // Phase 6f: stop radius lowered from 2.0u -> 1.0u so the bot
+        // ends up inside ACE's default UseRadius (0.6u) plus the
+        // cylinder-distance fudge. Server-side
+        // <c>WorldObject.IsWithinUseRadiusOf</c> uses cylinder dist
+        // (XY-only with bounding-cylinder radii); ending at 1.0u of
+        // center keeps us comfortably inside the pickup threshold
+        // without overshooting through the item collision.
+        const float          MotionStopRadius = 1.0f;
         const float          MotionSearchRadius = 30f;
+        // Phase 6f: discriminate pickup-eligible items from interact-
+        // only objects via the ItemType bitmask
+        // (ACE.Entity.Enum.ItemType). Pickup mask covers MeleeWeapon
+        // (0x1) | Armor (0x2) | Clothing (0x4) | Jewelry (0x8) | Food
+        // (0x20) | Money (0x40) | MissileWeapon (0x100) | Gem (0x800)
+        // | SpellComponents (0x1000) | Key (0x4000) | Caster (0x8000).
+        // Misc (0x80) is deliberately EXCLUDED — doors carry Misc but
+        // are not pickup-able. Creatures, Portals, LifeStones, etc.
+        // fall through to the Use action.
+        const uint           PickupItemTypeMask = 0xD96F;
         const int            WalkTickIntervalMs = 250;
         const float          WalkSpeedUnitsPerSec = 2.5f;
         const int            MotionWallClockTimeoutSec = 30;
@@ -1117,23 +1134,45 @@ internal sealed class HandshakeDriver : IDisposable
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }
 
-                // Phase 6e — After STOP fires for a walk-done finish (i.e. we
-                // arrived at the target), send a Use(targetGuid) so the server
-                // resolves the interact: pickup for items, toggle for doors,
-                // teleport for portals, dialog for NPCs. We ONLY send on
-                // walk-done (not on wall-clock-timeout or distance) to avoid
-                // pinging the server with Use while we're not adjacent.
+                // Phase 6e/6f — After STOP fires for a walk-done finish (i.e. we
+                // arrived at the target), send the appropriate interact:
+                //   - PutItemInContainer(item, self, 0) for pickup-eligible
+                //     items (Armor/Weapon/Food/etc per PickupItemTypeMask)
+                //   - Use(target) for everything else (NPC dialog, door
+                //     toggle, portal teleport, lifestone attune).
+                // We ONLY send on walk-done (not on wall-clock-timeout or
+                // distance) to avoid pinging the server while we're not
+                // adjacent.
                 if (moveToStateStopSent &&
                     !useSent &&
                     motionDone &&
                     motionTarget is not null)
                 {
                     useSent = true;
+                    var itemType = motionTarget.ItemType ?? 0u;
+                    var isPickup = (itemType & PickupItemTypeMask) != 0;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
-                    var useBuf = new byte[GameActionUseMessage.PackedSize];
-                    var useLen = GameActionUseMessage.Pack(useBuf, motionTarget.Guid);
+                    int payloadLen;
+                    string actionName;
+                    byte[] actionBuf;
+                    if (isPickup)
+                    {
+                        actionName = "PUTITEMINCONTAINER";
+                        actionBuf  = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                        payloadLen = GameActionPutItemInContainerMessage.Pack(
+                            actionBuf,
+                            itemGuid: motionTarget.Guid,
+                            containerGuid: chosenCharacterGuid,
+                            placement: 0);
+                    }
+                    else
+                    {
+                        actionName = "USE";
+                        actionBuf  = new byte[GameActionUseMessage.PackedSize];
+                        payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
+                    }
 
                     var msg = new OutboundPacket();
                     if (lastReceivedSeq != 0)
@@ -1142,7 +1181,7 @@ internal sealed class HandshakeDriver : IDisposable
                         fragSequence: fragSeq,
                         fragId: OutboundFragmentId,
                         queue: (ushort)GameMessageGroup.UIQueue,
-                        gameMessagePayload: useBuf.AsSpan(0, useLen));
+                        gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
 
                     var sentLen = msg.Pack(sendBuf, myClientId,
                                            sequence: packetSeq, iteration: 1,
@@ -1150,9 +1189,9 @@ internal sealed class HandshakeDriver : IDisposable
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     Console.WriteLine(
-                        $"[observe]   -> PHASE6E USE: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
-                        $"itemType=0x{motionTarget.ItemType ?? 0:X} " +
-                        $"payload={useLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                        $"[observe]   -> PHASE6E/6F {actionName}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                        $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
+                        $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }
 
                 // Periodic world-state heartbeat — once every 100
