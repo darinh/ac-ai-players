@@ -72,11 +72,19 @@ VirindiTank has been doing it for 20 years with hand-written rules.
 - **Job:** Long-term goals — leveling path, gear targets, faction allegiance,
   daily schedule (hunt vs. town vs. travel).
 - **Tool:** Scripted "personality archetypes" + a simple planner driven by
-  archetype config.
+  archetype config. **Refined by
+  [`adr/0011-bot-brain-agent-loop.md`](adr/0011-bot-brain-agent-loop.md):**
+  the goal selection inside this layer is a Deliberation LLM call
+  when the agent loop's Goal Stack is empty, gated by a scripted
+  fallback for cheap archetypes.
 
 ### Social layer
 - **Job:** Chat in /local, /allegiance, /tell. RP in starter towns.
-  Respond to questions. Trade negotiations.
+  Respond to questions. Trade negotiations. **Plus:** read NPC
+  dialog and extract facts + candidate goals
+  ([ADR-0011](adr/0011-bot-brain-agent-loop.md), Dialog mode).
+  This extends the original "LLM only at Social" framing into the
+  Strategic layer for goal selection, per `AGENTS.md`.
 - **Tool:** LLM, with a short system prompt encoding archetype + recent memory.
   This is the *only* layer that justifies a model.
 - **Cheap path:** Many archetypes (Grinder, Buffbot) need zero or near-zero
@@ -133,6 +141,14 @@ Everything else lives outside the fork.
 
 ## See also
 
+- [`adr/0011-bot-brain-agent-loop.md`](adr/0011-bot-brain-agent-loop.md)
+  — refines this layered model into an explicit six-stage agent
+  loop (Perception → Blackboard → Goal Stack → Planner → Executor
+  → Critic). Maps to layers as: Motor ≈ Executor, Tactical ≈
+  Critic + interrupts, Strategic ≈ Goal Stack + Deliberation LLM,
+  Social ≈ Dialog LLM. Read alongside this doc for current shape.
+- [`design/bot-brain-agent-loop.md`](design/bot-brain-agent-loop.md)
+  — the detailed design behind ADR-0011.
 - [`ace-fork-plan.md`](ace-fork-plan.md) — the concrete one-pager of what
   we change in ACE (M0 final deliverable)
 - [`architecture-diagrams.md`](architecture-diagrams.md) — Mermaid
@@ -143,6 +159,8 @@ Everything else lives outside the fork.
 - [`research/ace-investigation.md`](research/ace-investigation.md) — what we
   need to learn about ACE before forking
 - [`adr/0003-botcreature-not-botplayer.md`](adr/0003-botcreature-not-botplayer.md)
-  — bots subclass `Creature`, not `Player`
+  — **superseded by [0007](adr/0007-bots-as-player-not-creature.md).**
+  Originally proposed `Creature` subclass.
 - [`adr/0004-bot-tick-via-monster-tick.md`](adr/0004-bot-tick-via-monster-tick.md)
-  — bots tick on the per-landblock `Monster_Tick` scheduler
+  — **superseded by [0008](adr/0008-bot-tick-via-player-tick.md).**
+  Originally proposed `Monster_Tick`.

@@ -78,3 +78,17 @@ _(Add a line per ADR as they land.)_
   end of `Player.Player_Tick`. Supersedes ADR-0004 (which assumed
   the `Monster_Tick` scheduler that no longer applies under
   ADR-0007). Brain work remains async-by-contract.
+- [`0009-github-models-first-hosted-provider.md`](0009-github-models-first-hosted-provider.md)
+  — Proposed. GitHub Models is the first hosted `IBrainProvider`
+  implementation; ships alongside `LocalOllamaProvider` and the
+  scripted/null fallbacks.
+- [`0010-pathfinding-as-standalone-mod.md`](0010-pathfinding-as-standalone-mod.md)
+  — Proposed. Build pathfinding as `ACE.Mod.Pathfinding` Harmony
+  mod; BotPlayer and player quest helpers both consume
+  `IPathfindingService` from the mod.
+- [`0011-bot-brain-agent-loop.md`](0011-bot-brain-agent-loop.md) —
+  Proposed. Restructure the bot brain as an explicit six-stage
+  agent loop (Perception → Blackboard → Goal Stack → Planner →
+  Executor → Critic) with two-tick cadence; LLM emits goals/facts,
+  not plans. Extends ADRs 0001, 0005, 0007, 0008. Detailed design
+  in [`../design/bot-brain-agent-loop.md`](../design/bot-brain-agent-loop.md).

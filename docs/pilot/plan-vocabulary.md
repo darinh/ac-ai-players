@@ -18,9 +18,18 @@ to compile to. This document defines that schema (the "plan vocabulary")
 and grounds it in the actual quest mechanics ACE supports.
 
 This is a survey doc, not a design decision. The four pending ADRs
-(`0010` three-layer brain, `0011` LLM as compiler, `0012` two-tier LLM,
-`0013` needs engine) build on this survey but don't depend on every
-detail being right. The vocabulary is expected to grow as Pilot-01
+referenced in revision 1 (`0010` three-layer brain, `0011` LLM as
+compiler, `0012` two-tier LLM, `0013` needs engine) were never
+written under those numbers — `0010` shipped as
+[ADR-0010 pathfinding-as-standalone-mod](../adr/0010-pathfinding-as-standalone-mod.md)
+and the remaining three are now collapsed into
+[ADR-0011 bot-brain-agent-loop](../adr/0011-bot-brain-agent-loop.md)
+plus its design doc
+[`../design/bot-brain-agent-loop.md`](../design/bot-brain-agent-loop.md).
+The op vocabulary below carries forward unchanged under ADR-0011;
+what changes is *who* emits the `steps[]` (a deterministic Planner,
+not the LLM directly) and the LLM's output schema (facts and goals,
+not full plans). The vocabulary is expected to grow as Pilot-01
 encounters quest patterns we missed; the goal of P-1 is to nail the
 common 80–90% so the compiler is useful from day one.
 
