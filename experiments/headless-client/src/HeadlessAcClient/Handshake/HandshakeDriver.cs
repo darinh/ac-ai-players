@@ -291,6 +291,8 @@ internal sealed class HandshakeDriver : IDisposable
         var enterWorldSent = false;
         var loginCompleteSent = false;
         var autonomousPositionSent = false;
+        var moveToStateStartSent = false;
+        var moveToStateStopSent = false;
         var ownPlayerSeen = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
@@ -299,7 +301,11 @@ internal sealed class HandshakeDriver : IDisposable
         // Without this gate, the AP handler short-circuits on
         // (!Teleporting) and we observe nothing.
         int loginCompletePacketIndex = -1;
+        int autonomousPositionPacketIndex = -1;
+        int moveToStateStartPacketIndex = -1;
         const int PostLoginCompleteGracePackets = 30;
+        const int PostAutonomousPositionGracePackets = 30;
+        const int PostMoveStartGracePackets = 40;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
@@ -746,6 +752,7 @@ internal sealed class HandshakeDriver : IDisposable
                     selfCell != 0)
                 {
                     autonomousPositionSent = true;
+                    autonomousPositionPacketIndex = count;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
@@ -784,6 +791,129 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect: inbound UpdatePosition for our own guid 0x{(worldState.SelfGuid ?? 0):X8} (server's broadcast echo).");
                 }
 
+                // Phase 5b — MoveToState START. Tell the server we're
+                // walking forward. Wait an additional grace window
+                // after AutonomousPosition so the server has applied
+                // the position update before we layer motion on top.
+                //
+                // Per rubber-duck on this phase: WalkForward +
+                // CurrentHoldKey=Run gets remapped to RunForward
+                // server-side, so we use HoldKey.None to actually
+                // walk. Also: Player.OnMoveToState short-circuits on
+                // !FastTick (true for our NPK headless char), so we
+                // do NOT expect a continuous UpdatePosition stream —
+                // only a Motion broadcast back at us. That broadcast
+                // alone proves the wire format is accepted.
+                if (autonomousPositionSent &&
+                    !moveToStateStartSent &&
+                    autonomousPositionPacketIndex >= 0 &&
+                    (count - autonomousPositionPacketIndex) >= PostAutonomousPositionGracePackets &&
+                    worldState.Self is WorldObjectSnapshot moveSelf &&
+                    moveSelf.CellId is uint moveCell &&
+                    moveCell != 0)
+                {
+                    moveToStateStartSent = true;
+                    moveToStateStartPacketIndex = count;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var motion = RawMotionStatePayload.ForwardMotion(
+                        holdKey: HoldKey.None,
+                        stance:  MotionStance.NonCombat,
+                        command: MotionCommand.WalkForward,
+                        speed:   1.0f);
+
+                    var msBuf = new byte[GameActionMoveToStateMessage.CalcPackedSize(motion.Flags)];
+                    var msLen = GameActionMoveToStateMessage.Pack(
+                        msBuf,
+                        motion,
+                        cellId: moveCell,
+                        pos:    moveSelf.Position,
+                        rot:    moveSelf.Rotation,
+                        instanceSequence:      moveSelf.SeqInstance      ?? 0,
+                        serverControlSequence: moveSelf.SeqServerControl ?? 0,
+                        teleportSequence:      moveSelf.SeqTeleport      ?? 0,
+                        forcePositionSequence: moveSelf.SeqForcePosition ?? 0,
+                        contact: true);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: msBuf.AsSpan(0, msLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"[observe]   -> PHASE5B START: GameActionMoveToState " +
+                        $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand|ForwardSpeed) " +
+                        $"holdKey=None stance=NonCombat cmd=WalkForward speed=1.0 " +
+                        $"cell=0x{moveCell:X8} xyz=({moveSelf.Position.X:F2},{moveSelf.Position.Y:F2},{moveSelf.Position.Z:F2}) " +
+                        $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]      Expect: inbound Motion (0xF74C) for our own guid 0x{(worldState.SelfGuid ?? 0):X8}.");
+                }
+
+                // Phase 5b — MoveToState STOP. Cancel the forward
+                // motion intent. Per rubber-duck: a real client would
+                // send a stop on key-release; otherwise the server's
+                // recorded intent keeps drifting and the next
+                // movement command may be misinterpreted. We send
+                // PostMoveStartGracePackets after the START.
+                if (moveToStateStartSent &&
+                    !moveToStateStopSent &&
+                    moveToStateStartPacketIndex >= 0 &&
+                    (count - moveToStateStartPacketIndex) >= PostMoveStartGracePackets &&
+                    worldState.Self is WorldObjectSnapshot stopSelf &&
+                    stopSelf.CellId is uint stopCell &&
+                    stopCell != 0)
+                {
+                    moveToStateStopSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var motion = RawMotionStatePayload.Stop(MotionStance.NonCombat);
+
+                    var msBuf = new byte[GameActionMoveToStateMessage.CalcPackedSize(motion.Flags)];
+                    var msLen = GameActionMoveToStateMessage.Pack(
+                        msBuf,
+                        motion,
+                        cellId: stopCell,
+                        pos:    stopSelf.Position,
+                        rot:    stopSelf.Rotation,
+                        instanceSequence:      stopSelf.SeqInstance      ?? 0,
+                        serverControlSequence: stopSelf.SeqServerControl ?? 0,
+                        teleportSequence:      stopSelf.SeqTeleport      ?? 0,
+                        forcePositionSequence: stopSelf.SeqForcePosition ?? 0,
+                        contact: true);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: msBuf.AsSpan(0, msLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"[observe]   -> PHASE5B STOP: GameActionMoveToState " +
+                        $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand) " +
+                        $"cmd=Invalid (stop) " +
+                        $"cell=0x{stopCell:X8} xyz=({stopSelf.Position.X:F2},{stopSelf.Position.Y:F2},{stopSelf.Position.Z:F2}) " +
+                        $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                }
+
                 // Periodic world-state heartbeat — once every 100
                 // packets the bot prints what it currently knows.
                 // Useful for spotting whether the accumulator is
@@ -800,7 +930,7 @@ internal sealed class HandshakeDriver : IDisposable
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         Console.WriteLine($"[world]   final: {worldState.FormatSummary()}");
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)

@@ -36,7 +36,69 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 internal enum GameActionType : uint
 {
     LoginComplete      = 0x00A1,
+    MoveToState        = 0xF61C,
     AutonomousPosition = 0xF753,
+}
+
+/// <summary>
+/// Mirror of ACE's RawMotionFlags
+/// (Source/ACE.Server/Network/Enum/RawMotionFlags.cs).
+/// The low 11 bits of <c>RawMotionState.PackedFlags</c> encode a
+/// bitmask of which optional fields follow; the high 21 bits encode
+/// <c>CommandListLength</c>. Fields are serialized in strict
+/// numeric flag order: 0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80,
+/// 0x100, 0x200, 0x400.
+/// </summary>
+[Flags]
+internal enum RawMotionFlags : uint
+{
+    None            = 0x000,
+    CurrentHoldKey  = 0x001,
+    CurrentStyle    = 0x002,
+    ForwardCommand  = 0x004,
+    ForwardHoldKey  = 0x008,
+    ForwardSpeed    = 0x010,
+    SideStepCommand = 0x020,
+    SideStepHoldKey = 0x040,
+    SideStepSpeed   = 0x080,
+    TurnCommand     = 0x100,
+    TurnHoldKey     = 0x200,
+    TurnSpeed       = 0x400,
+}
+
+/// <summary>
+/// Subset of <c>ACE.Entity.Enum.MotionStance</c> values the spike
+/// uses. NonCombat is the default standing stance for an unequipped
+/// player. Full enum at
+/// <c>Source/ACE.Entity/Enum/MotionStance.cs</c>.
+/// </summary>
+internal enum MotionStance : uint
+{
+    Invalid   = 0x80000000,
+    NonCombat = 0x8000003D,
+}
+
+/// <summary>
+/// Subset of <c>ACE.Entity.Enum.MotionCommand</c> values the spike
+/// uses. Full enum at
+/// <c>Source/ACE.Entity/Enum/MotionCommand.cs</c>.
+/// </summary>
+internal enum MotionCommand : uint
+{
+    Invalid     = 0x00000000,
+    Ready       = 0x41000003,
+    WalkForward = 0x45000005,
+    RunForward  = 0x44000007,
+}
+
+/// <summary>
+/// Mirror of <c>ACE.Entity.Enum.HoldKey</c>.
+/// </summary>
+internal enum HoldKey : uint
+{
+    Invalid = 0x0,
+    None    = 0x1,
+    Run     = 0x2,
 }
 
 internal static class GameActionMessage
@@ -190,5 +252,217 @@ internal static class GameActionAutonomousPositionMessage
         dest[cursor++] = 0;
 
         return cursor;
+    }
+}
+
+/// <summary>
+/// Bag of optional <c>RawMotionState</c> fields. Each <c>(Flag, Value)</c>
+/// pair is emitted IFF the flag bit is set; emitted in strict
+/// numeric flag order regardless of how this struct is populated.
+/// Speed fields are floats; all others are u32s.
+/// </summary>
+internal readonly record struct RawMotionStatePayload(
+    RawMotionFlags Flags,
+    HoldKey        CurrentHoldKey,
+    MotionStance   CurrentStyle,
+    MotionCommand  ForwardCommand,
+    HoldKey        ForwardHoldKey,
+    float          ForwardSpeed,
+    MotionCommand  SidestepCommand,
+    HoldKey        SidestepHoldKey,
+    float          SidestepSpeed,
+    MotionCommand  TurnCommand,
+    HoldKey        TurnHoldKey,
+    float          TurnSpeed,
+    ushort         CommandListLength = 0)
+{
+    /// <summary>
+    /// Convenience constructor for the most common case: forward
+    /// motion with stance + holdkey + command + speed.
+    /// </summary>
+    public static RawMotionStatePayload ForwardMotion(
+        HoldKey holdKey, MotionStance stance, MotionCommand command, float speed)
+        => new(
+            RawMotionFlags.CurrentHoldKey | RawMotionFlags.CurrentStyle |
+            RawMotionFlags.ForwardCommand | RawMotionFlags.ForwardSpeed,
+            CurrentHoldKey:  holdKey,
+            CurrentStyle:    stance,
+            ForwardCommand:  command,
+            ForwardHoldKey:  default,
+            ForwardSpeed:    speed,
+            SidestepCommand: default,
+            SidestepHoldKey: default,
+            SidestepSpeed:   0f,
+            TurnCommand:     default,
+            TurnHoldKey:     default,
+            TurnSpeed:       0f);
+
+    /// <summary>
+    /// "Stop" intent — explicitly cancel forward motion by sending
+    /// the stance + a None holdkey + an Invalid forward command. A
+    /// real client sends something close to this on key-release.
+    /// </summary>
+    public static RawMotionStatePayload Stop(MotionStance stance)
+        => new(
+            RawMotionFlags.CurrentHoldKey | RawMotionFlags.CurrentStyle |
+            RawMotionFlags.ForwardCommand,
+            CurrentHoldKey:  HoldKey.None,
+            CurrentStyle:    stance,
+            ForwardCommand:  MotionCommand.Invalid,
+            ForwardHoldKey:  default,
+            ForwardSpeed:    0f,
+            SidestepCommand: default,
+            SidestepHoldKey: default,
+            SidestepSpeed:   0f,
+            TurnCommand:     default,
+            TurnHoldKey:     default,
+            TurnSpeed:       0f);
+}
+
+/// <summary>
+/// MoveToState (0xF61C). Sent by a real client on every movement
+/// key press AND release to update the server's view of player
+/// motion intent. Server handler:
+/// Source/ACE.Server/Network/GameAction/Actions/GameActionMoveToState.cs
+///
+/// Important server-side caveat (per rubber-duck on Phase 5b):
+///   - <c>Player.OnMoveToState</c> is gated by <c>Player.FastTick</c>,
+///     which is FALSE for normal NPK players (returns true only
+///     when <c>IsPKType</c>). So the server-side physics
+///     integration that would actually MOVE a normal char in
+///     response to one of these messages is short-circuited.
+///   - <c>BroadcastMovement(moveToState)</c> is called
+///     unconditionally though, so we DO see a Motion broadcast
+///     for our own guid back at us proving wire-format acceptance.
+///   - For continuous server-driven physics movement we would need
+///     a PK char OR a different code path. Phase 5b's success
+///     criterion is therefore "Motion broadcast observed", not
+///     "UpdatePosition stream observed".
+///
+/// Wire layout (after the 12B GameAction header):
+///   u32 packedFlags        (low 11 bits = RawMotionFlags,
+///                           high 21 bits = CommandListLength)
+///   ... flagged fields ... (u32 or float, in strict numeric flag
+///                           order: 0x1 → 0x2 → 0x4 → ... → 0x400)
+///   32B Position           (full cell + xyz + W,X,Y,Z quaternion)
+///   8B sequences           (instance, serverControl, teleport, forcePos)
+///   1B ContactLongJump     (bit 0 = Contact, bit 1 = StandingLongJump)
+///   align to 4B boundary
+/// </summary>
+internal static class GameActionMoveToStateMessage
+{
+    /// <summary>
+    /// Size of the fixed (non-RawMotionState) suffix: Position +
+    /// sequences + ContactLongJump byte + 3B align.
+    /// </summary>
+    private const int FixedSuffixSize = 32 + 8 + 4;  // 44
+
+    /// <summary>
+    /// Total packed bytes for a given motion state. Does NOT include
+    /// any MotionItems (CommandListLength is always 0 for the
+    /// spike's needs).
+    /// </summary>
+    public static int CalcPackedSize(RawMotionFlags flags)
+        => GameActionMessage.HeaderSize  // 12
+         + 4                              // packedFlags
+         + CountFlaggedFieldBytes(flags)
+         + FixedSuffixSize;
+
+    public static int Pack(
+        Span<byte> dest,
+        RawMotionStatePayload motion,
+        uint cellId, Vector3 pos, Quaternion rot,
+        ushort instanceSequence,
+        ushort serverControlSequence,
+        ushort teleportSequence,
+        ushort forcePositionSequence,
+        bool contact,
+        bool standingLongJump = false,
+        uint actionSequence = 1)
+    {
+        var needed = CalcPackedSize(motion.Flags);
+        if (dest.Length < needed)
+            throw new ArgumentException($"buffer too small: need {needed}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(
+            dest, GameActionType.MoveToState, actionSequence);
+
+        // packedFlags: bottom 11 bits = flags, top 21 bits = commandListLength.
+        // Per rubber-duck: mask to 0x7FF defensively even though the
+        // RawMotionFlags enum's highest value is 0x400 — guards
+        // against accidentally setting reserved bits.
+        var packedFlags = ((uint)motion.Flags & 0x7FF) | ((uint)motion.CommandListLength << 11);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), packedFlags);
+        cursor += 4;
+
+        // Emit fields in strict numeric flag order. The server's
+        // RawMotionState(BinaryReader) parser reads them in this
+        // exact order; any other order will misparse.
+        if ((motion.Flags & RawMotionFlags.CurrentHoldKey) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.CurrentHoldKey);
+        if ((motion.Flags & RawMotionFlags.CurrentStyle) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.CurrentStyle);
+        if ((motion.Flags & RawMotionFlags.ForwardCommand) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.ForwardCommand);
+        if ((motion.Flags & RawMotionFlags.ForwardHoldKey) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.ForwardHoldKey);
+        if ((motion.Flags & RawMotionFlags.ForwardSpeed) != 0)
+            cursor += WriteF32(dest.Slice(cursor), motion.ForwardSpeed);
+        if ((motion.Flags & RawMotionFlags.SideStepCommand) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.SidestepCommand);
+        if ((motion.Flags & RawMotionFlags.SideStepHoldKey) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.SidestepHoldKey);
+        if ((motion.Flags & RawMotionFlags.SideStepSpeed) != 0)
+            cursor += WriteF32(dest.Slice(cursor), motion.SidestepSpeed);
+        if ((motion.Flags & RawMotionFlags.TurnCommand) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.TurnCommand);
+        if ((motion.Flags & RawMotionFlags.TurnHoldKey) != 0)
+            cursor += WriteU32(dest.Slice(cursor), (uint)motion.TurnHoldKey);
+        if ((motion.Flags & RawMotionFlags.TurnSpeed) != 0)
+            cursor += WriteF32(dest.Slice(cursor), motion.TurnSpeed);
+
+        cursor += GameActionMessage.WritePosition(dest.Slice(cursor), cellId, pos, rot);
+
+        BinaryPrimitives.WriteUInt16LittleEndian(dest.Slice(cursor), instanceSequence);      cursor += 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(dest.Slice(cursor), serverControlSequence); cursor += 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(dest.Slice(cursor), teleportSequence);      cursor += 2;
+        BinaryPrimitives.WriteUInt16LittleEndian(dest.Slice(cursor), forcePositionSequence); cursor += 2;
+
+        byte contactLongJump = 0;
+        if (contact)           contactLongJump |= 0x1;
+        if (standingLongJump)  contactLongJump |= 0x2;
+        dest[cursor++] = contactLongJump;
+
+        // Align to 4-byte boundary. After ContactLongJump cursor sits
+        // 1 byte into the trailing dword, so 3 bytes of zero padding.
+        dest[cursor++] = 0;
+        dest[cursor++] = 0;
+        dest[cursor++] = 0;
+
+        return cursor;
+    }
+
+    private static int WriteU32(Span<byte> dest, uint value)
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(dest, value);
+        return 4;
+    }
+
+    private static int WriteF32(Span<byte> dest, float value)
+    {
+        BinaryPrimitives.WriteSingleLittleEndian(dest, value);
+        return 4;
+    }
+
+    private static int CountFlaggedFieldBytes(RawMotionFlags flags)
+    {
+        var count = 0;
+        // Every flag emits 4 bytes (either u32 or float). 11 possible flags.
+        for (var bit = 0; bit < 11; bit++)
+        {
+            if (((uint)flags & (1u << bit)) != 0)
+                count += 4;
+        }
+        return count;
     }
 }
