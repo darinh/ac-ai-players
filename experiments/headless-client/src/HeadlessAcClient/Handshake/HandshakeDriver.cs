@@ -25,6 +25,7 @@ using System.Threading.Tasks;
 
 using HeadlessAcClient.Crypto;
 using HeadlessAcClient.Protocol.GameMessages;
+using HeadlessAcClient.World;
 
 namespace HeadlessAcClient.Protocol;
 
@@ -302,6 +303,14 @@ internal sealed class HandshakeDriver : IDisposable
         // protocol rationale.
         var reassembler = new FragmentReassembler();
 
+        // Phase 5 world-state accumulator. Every decoded
+        // ObjectCreate / UpdatePosition / Motion / SetState /
+        // PrivateUpdatePropertyInt / PlayerCreate flows through
+        // worldState.Apply so the bot can later answer "where am
+        // I?" / "what's nearby?" / "what's my health?" without
+        // re-parsing the firehose.
+        var worldState = new WorldState();
+
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -367,6 +376,14 @@ internal sealed class HandshakeDriver : IDisposable
 
                     var decoded = GameMessageDecoder.Decode(assembled);
                     var opcode = GameMessageDecoder.PeekOpcode(assembled);
+
+                    // Feed the world-state accumulator BEFORE the
+                    // logging switch. Apply is a no-op for message
+                    // types it doesn't recognize (CharacterList,
+                    // ServerName, GameEvent envelopes, etc.) so it's
+                    // safe to call unconditionally here.
+                    worldState.Apply(decoded);
+
                     switch (decoded)
                     {
                         case CharacterListMessage cl:
@@ -575,6 +592,14 @@ internal sealed class HandshakeDriver : IDisposable
 
                     if (chosenCharacterGuid != 0)
                     {
+                        // Pre-seed the world state with our own guid so
+                        // PrivateUpdatePropertyInt (which has no guid in
+                        // the wire format and implicitly targets the
+                        // receiving session's player) can route to the
+                        // self snapshot even though it arrives BEFORE
+                        // the server's PlayerCreate for our character.
+                        worldState.SetSelf(chosenCharacterGuid);
+
                         enterWorldRequestSent = true;
                         var packetSeq = nextOutboundPacketSequence++;
                         var fragSeq   = nextOutboundFragmentSequence++;
@@ -678,6 +703,14 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> PHASE3.4 SEND: GameActionLoginComplete (payload={lcLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
+
+                // Periodic world-state heartbeat — once every 100
+                // packets the bot prints what it currently knows.
+                // Useful for spotting whether the accumulator is
+                // actually accumulating (vs. silently dropping
+                // everything due to a sequence-gating bug).
+                if (count % 100 == 0)
+                    Console.WriteLine($"[world] {worldState.FormatSummary()}");
             }
             catch (OperationCanceledException)
             {
@@ -686,6 +719,7 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
+        Console.WriteLine($"[world]   final: {worldState.FormatSummary()}");
         Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");

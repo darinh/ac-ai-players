@@ -7,6 +7,9 @@
   <Folder Name="/headless-client/src/">
     <Project Path="headless-client/src/HeadlessAcClient/HeadlessAcClient.csproj" />
   </Folder>
+  <Folder Name="/headless-client/tests/">
+    <Project Path="headless-client/tests/HeadlessAcClient.Tests/HeadlessAcClient.Tests.csproj" />
+  </Folder>
   <Folder Name="/services-common/" />
   <Folder Name="/services-common/src/">
     <Project Path="services-common/src/AcAiPlayers.ServicesClient/AcAiPlayers.ServicesClient.csproj" />

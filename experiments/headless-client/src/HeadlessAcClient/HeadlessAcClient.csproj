@@ -18,4 +18,8 @@
     <ProjectReference Include="..\..\..\services-common\src\AcAiPlayers.ServicesClient\AcAiPlayers.ServicesClient.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="HeadlessAcClient.Tests" />
+  </ItemGroup>
+
 </Project>
