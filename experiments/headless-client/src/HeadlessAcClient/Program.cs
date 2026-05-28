@@ -41,6 +41,16 @@ internal static class Program
 
         Console.WriteLine($"[main] target {host}:{port}, account '{account}'");
 
+        try
+        {
+            AcStrings.RunSelfChecks();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[selfcheck] AcStrings: {ex.Message}");
+            return 1;
+        }
+
         await PingApiAsync().ConfigureAwait(false);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));

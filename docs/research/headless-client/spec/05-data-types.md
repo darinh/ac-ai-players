@@ -205,23 +205,27 @@ public static int WriteString32L(Span<byte> dest, ReadOnlySpan<char> s)
 }
 ```
 
-⚠ KNOWN BUG in the Phase 1 spike code at
-`experiments/headless-client/src/HeadlessAcClient/Protocol/AcStrings.cs`:
-the writer there switches to 2-byte packed length at
-`s.Length >= 128` (high-bit threshold), but the reader's
-threshold is `s.Length > 254`. For passwords in
-`128..254` chars the spike writes 2 packed bytes but the
-reader expects 1, misaligning everything that follows.
-**Untested in Phase 1** (test password `"Test1234!"` is 9
-chars). Fix before sending long strings.
+**Reader-side note**: the reader uses `dataLen - 1` (or
+`dataLen - 2` after the second skip) to determine char count
+and ignores the *content* of the packed-prefix byte(s). A
+correct writer therefore has freedom in what it writes there;
+the convention here is to write the char count itself (for
+debuggability) but any byte value would round-trip.
+
+**History**: the Phase 1 spike writer at
+[`experiments/headless-client/src/HeadlessAcClient/Protocol/AcStrings.cs`](../../../experiments/headless-client/src/HeadlessAcClient/Protocol/AcStrings.cs)
+originally used the wrong threshold (`s.Length >= 128`) which
+misaligned the wire for char counts in `128..254`. Fixed
+2026-05-28; covered by `AcStrings.RunSelfChecks()` invoked at
+startup.
 
 ### Examples
 
 | Input | dataLen | packed_len | hex (after dataLen) |
 |---|---|---|---|
 | `""` | 0 | 0 | (no packed-len, no padding needed beyond the 4-byte dataLen field) → `00 00 00 00` total |
-| `"x"` | 2 | 1 | `02 00 00 00 00 78` + 2 pad → `02 00 00 00 00 78 00 00` |
-| `"Test1234!"` | 10 | 1 | `0A 00 00 00 00 54 65 73 74 31 32 33 34 21` + 2 pad → 16 bytes total |
+| `"x"` | 2 | 1 | `02 00 00 00 01 78` + 2 pad → `02 00 00 00 01 78 00 00` |
+| `"Test1234!"` | 10 | 1 | `0A 00 00 00 09 54 65 73 74 31 32 33 34 21` + 2 pad → 16 bytes total |
 
 ## GUID ranges
 
