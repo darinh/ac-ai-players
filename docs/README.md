@@ -21,6 +21,9 @@ The planning docs for the project, grouped by topic. Start with
 - [`ace-fork-plan.md`](ace-fork-plan.md) — the one-page summary of
   exactly what we change in our ACE fork (M0 final deliverable; stub
   until Q1–Q5 are answered).
+- [`design/README.md`](design/README.md) — implementation-level design
+  spikes (denser than ADRs; bridge an ADR to a tracked implementation
+  issue).
 
 ## How-to
 
