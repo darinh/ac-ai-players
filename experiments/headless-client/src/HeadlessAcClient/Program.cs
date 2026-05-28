@@ -66,7 +66,28 @@ internal static class Program
                     || result.CharacterList is not null
                     || result.ServerName is not null;
                 var charCreateOk = result.CharacterCreateResponse is { Response: CharacterCreateResponse.Ok };
-                if (charCreateOk)
+                var serverReady = result.EnterWorldServerReady is not null;
+
+                // Phase 3.3 takes top priority: full two-step world entry
+                // observed (ServerReady received + EnterWorld committed).
+                if (result.EnterWorldSent && serverReady)
+                {
+                    Console.WriteLine($"[main] PHASE 3.3 PASS — EnterWorld two-step handshake committed (guid=0x{result.ChosenCharacterGuid:X8}); world-state firehose should follow.");
+                    if (result.LastCharacterError is { } cerr)
+                        Console.WriteLine($"[main] PHASE 3.3 NOTE — post-EnterWorld CharacterError observed: code=0x{cerr.ErrorCode:X4}");
+                }
+                else if (result.EnterWorldRequestSent && serverReady)
+                {
+                    Console.WriteLine($"[main] PHASE 3.3 PARTIAL — ServerReady received but EnterWorld send failed/skipped (guid=0x{result.ChosenCharacterGuid:X8})");
+                }
+                else if (result.EnterWorldRequestSent)
+                {
+                    if (result.LastCharacterError is { } cerr)
+                        Console.WriteLine($"[main] PHASE 3.3 PARTIAL — EnterWorldRequest sent; server replied CharacterError code=0x{cerr.ErrorCode:X4}");
+                    else
+                        Console.WriteLine($"[main] PHASE 3.3 PARTIAL — EnterWorldRequest sent but no ServerReady/CharacterError received within window");
+                }
+                else if (charCreateOk)
                 {
                     var ccr = result.CharacterCreateResponse!;
                     Console.WriteLine($"[main] PHASE 3.2 PASS — CharacterCreate accepted: guid=0x{ccr.CharacterGuid:X8} name=\"{ccr.Name}\"");

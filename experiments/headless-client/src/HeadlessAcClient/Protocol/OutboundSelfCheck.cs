@@ -30,6 +30,8 @@ internal static class OutboundSelfCheck
         RunEncryptedSingleFragment();
         RunFragmentSizeGuards();
         RunCharacterCreateRoundTrip();
+        RunCharacterEnterWorldRequestRoundTrip();
+        RunCharacterEnterWorldRoundTrip();
 
         Console.WriteLine("[selfcheck] OutboundPacket round-trip OK");
     }
@@ -255,6 +257,55 @@ internal static class OutboundSelfCheck
         if (cur != actual)
             throw new InvalidOperationException(
                 $"CharacterCreate over/underread: cursor={cur} packed={actual}");
+    }
+
+    private static void RunCharacterEnterWorldRequestRoundTrip()
+    {
+        // 0xF7C8 is opcode-only (CharacterHandler.cs:184-196 reads
+        // nothing from the payload). Round-trip verifies our packer
+        // writes exactly 4 bytes with the correct opcode.
+        var buf = new byte[GameMessages.CharacterEnterWorldRequestMessage.PackedSize];
+        var actual = GameMessages.CharacterEnterWorldRequestMessage.Pack(buf);
+        Require(actual == 4, $"CharacterEnterWorldRequest size={actual} (want 4)");
+
+        var cur = 0;
+        var opcode = ReadU32(buf, ref cur);
+        Require(opcode == (uint)GameMessages.GameMessageOpcode.CharacterEnterWorldRequest,
+            $"CharacterEnterWorldRequest opcode=0x{opcode:X8}");
+        if (cur != actual)
+            throw new InvalidOperationException(
+                $"CharacterEnterWorldRequest over/underread: cursor={cur} packed={actual}");
+    }
+
+    private static void RunCharacterEnterWorldRoundTrip()
+    {
+        // 0xF657 layout: u32 opcode + u32 guid + string16L account.
+        // CharacterHandler.cs:200-204 reads guid first, then the
+        // account string; account must equal session.Account else
+        // EnterGameCharacterNotOwned.
+        const uint testGuid = 0x50000006u;
+        const string testAccount = "headless-test";
+
+        var size = GameMessages.CharacterEnterWorldMessage.MeasurePackedSize(testAccount);
+        var buf = new byte[size];
+        var actual = GameMessages.CharacterEnterWorldMessage.Pack(buf, testGuid, testAccount);
+        Require(actual == size,
+            $"CharacterEnterWorld Pack returned {actual}, MeasurePackedSize said {size}");
+
+        var cur = 0;
+        var opcode = ReadU32(buf, ref cur);
+        Require(opcode == (uint)GameMessages.GameMessageOpcode.CharacterEnterWorld,
+            $"CharacterEnterWorld opcode=0x{opcode:X8}");
+
+        var guid = ReadU32(buf, ref cur);
+        Require(guid == testGuid, $"CharacterEnterWorld guid=0x{guid:X8}");
+
+        var account = AcStrings.ReadString16L(buf, ref cur);
+        Require(account == testAccount, $"CharacterEnterWorld account=\"{account}\"");
+
+        if (cur != actual)
+            throw new InvalidOperationException(
+                $"CharacterEnterWorld over/underread: cursor={cur} packed={actual}");
     }
 
     private static uint ReadU32(ReadOnlySpan<byte> buf, ref int cur)

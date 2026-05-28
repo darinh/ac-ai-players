@@ -41,8 +41,23 @@ internal static class GameMessageDecoder
             GameMessageOpcode.ServerName       => DecodeServerName(payload),
             GameMessageOpcode.DDDInterrogation => DecodeDDDInterrogation(payload),
             GameMessageOpcode.CharacterCreateResponse => DecodeCharacterCreateResponse(payload),
+            GameMessageOpcode.CharacterEnterWorldServerReady => new CharacterEnterWorldServerReadyMessage(),
+            GameMessageOpcode.CharacterError => DecodeCharacterError(payload),
             _ => null,
         };
+    }
+
+    private static CharacterErrorMessage? DecodeCharacterError(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            var errorCode = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(sizeof(uint)));
+            return new CharacterErrorMessage(errorCode);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static CharacterCreateResponseMessage? DecodeCharacterCreateResponse(ReadOnlySpan<byte> p)

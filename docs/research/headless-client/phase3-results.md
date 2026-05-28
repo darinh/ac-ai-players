@@ -1,6 +1,6 @@
 # Phase 3 results — encrypted outbound, character bootstrap, world entry
 
-**Status**: 3.1 PASS. 3.2 PASS. 3.3 pending. 3.4 documentation
+**Status**: 3.1 PASS. 3.2 PASS. 3.3 PASS. 3.4 documentation
 rolling up as each sub-phase lands.
 
 Phase 3 takes the spike from "observer that can keep a session
@@ -13,7 +13,7 @@ create a character and enter the world."
 |---|---|---|
 | 3.1 | Send an encrypted `BlobFragments` packet that the server accepts (CRC valid, ISAAC in sync, sequence rules right). Use an unknown opcode so dispatch can't side-effect game state. | PASS |
 | 3.2 | Send a real `CharacterCreate` (opcode `0xF656`) so the spike bootstraps its own character on the `headless-test` account. | PASS |
-| 3.3 | Send `CharacterEnterWorldRequest` (opcode `0xF7C8`) and observe the resulting world-state stream. | pending |
+| 3.3 | Two-step world-entry handshake: send `CharacterEnterWorldRequest` (opcode `0xF7C8`), receive `CharacterEnterWorldServerReady` (`0xF7DF`), commit with `CharacterEnterWorld` (`0xF657`), observe the world-state firehose. | PASS |
 | 3.4 | Doc roll-up: `spec/08-outbound-packet.md` (done), expand `spec/06-game-messages.md` with C→S payloads, expand `spec/07-world-state.md` as world packets are decoded. | in flight |
 
 ## Sub-phase 3.1 evidence — encrypted outbound PASS
@@ -261,22 +261,157 @@ total wire bytes: 460  (16 header + 16 frag header + 8 BlobFragments header + 42
 - `HandshakeResult` record + `Program.cs` PASS banner now print
   Phase 3.2 status.
 
-## Sub-phase 3.3 (pending) — `CharacterEnterWorldRequest`
+## Sub-phase 3.3 evidence — `CharacterEnterWorld` two-step handshake PASS
 
-Goal: spike sends opcode `0xF7C8` (NOT `0xF657` — that's the
-server's reply). Payload per `CharacterHandler.cs:184-196`:
+Run after the Phase 3.3 commit:
+[`phase3-enterworld-run-01.log`](phase3-enterworld-run-01.log).
+
+The real flow is **two messages from the client and one ack from
+the server before any world state moves.** The handshake is split
+this way (vs. a single "enter world" command) because the server
+treats the request as a probe — it lets the client know if the
+world is open BEFORE the client commits to a particular character
+GUID. Once the client gets the ready signal, it sends the commit
+message carrying both the chosen GUID and the account name; the
+server validates ownership and only then transitions the session
+to `WorldConnected` and starts streaming world state.
+
+### Wire flow
 
 ```
-u32     character GUID
-string16L  account name (matches the session account)
+C → S: BlobFragments
+         opcode = 0xF7C8  CharacterEnterWorldRequest
+         payload  = 4 bytes (opcode only - no body)
+         queue   = 0x09  UIQueue
+         pktSeq  = 2     (first non-zero outbound; 1 was used by 3.2's create)
+         fragSeq = 1
+         total bytes on wire = 44
+
+S → C: BlobFragments
+         opcode = 0xF7DF  CharacterEnterWorldServerReady
+         payload  = 4 bytes (opcode only - no body)
+         queue   = 0x09  UIQueue
+
+C → S: BlobFragments
+         opcode = 0xF657  CharacterEnterWorld
+         body    = u32 guid (0x50000006) + string16L account ("headless-test", padded to 16)
+         payload = 24 bytes total
+         queue   = 0x09  UIQueue
+         pktSeq  = 3
+         fragSeq = 2
+         total bytes on wire = 64
+
+S → C: (world-state firehose - see "post-EnterWorld stream" below)
 ```
 
-On accept, server replies with
-`GameMessageCharacterEnterWorldServerReady` (opcode TBD —
-verify against `GameMessageOpcode.cs` before sending) and
-the per-tick world-state firehose starts. That stream
-populates the world-state model documented in
-`spec/07-world-state.md`.
+### Acceptance signals (all five required, all five observed)
+
+1. **Self-check round-trip PASS** for both new packers at startup:
+   ```
+   [selfcheck] OutboundPacket round-trip ...
+   [selfcheck] OutboundPacket round-trip OK
+   ```
+   `RunCharacterEnterWorldRequestRoundTrip` and
+   `RunCharacterEnterWorldRoundTrip` mirror the server's read path
+   byte-by-byte through `BinaryPrimitives` + `AcStrings.ReadString16L`.
+
+2. **`CharacterEnterWorldRequest` accepted by the server** —
+   no CharacterError 0xF659 came back; instead the server replied
+   with the documented 0xF7DF:
+   ```
+   [observe]   -> CharacterEnterWorldServerReady (server ready, send 0xF657)
+   ```
+
+3. **`CharacterEnterWorld` validated** — account string matched
+   `session.Account`, character GUID `0x50000006` was in
+   `session.Characters`, and the character was not flagged
+   deleted/in-world/Olthoi-disabled. No CharacterError, transition
+   to `WorldConnected` succeeded.
+
+4. **World-state firehose started** — the moment the server
+   committed the entry, the per-tick stream began. Captured opcode
+   distribution from the 65-second window (221 packets, 100% CRC
+   pass):
+
+   | Opcode | Name | Role | Observations |
+   |---|---|---|---|
+   | `0xF7B0` | `GameEvent` | Login-completion bring-up | initial burst of ~12 packets |
+   | `0xF7E0` | `ServerMessage` | Welcome / system text | 1 packet shortly after entry |
+   | `0xF746` | `PlayerCreate` | The player avatar materialised | 1 packet, carries our GUID |
+   | `0xF745` | `ObjectCreate` | World objects entering visibility | dominant volume — every static/dynamic object the player can see |
+   | `0xF74C` | `Motion` / `MovementEvent` | Per-player motion updates | repeats ~once/sec; payload contains our GUID `06 00 00 50` |
+   | `0x02CD` | `PrivateUpdatePropertyInt` | Server pushing private int properties to client | periodic |
+
+5. **Session stayed alive** the full 65-second observation window
+   without disconnect or duplicate-login bounce. Final summary:
+   ```
+   [observe] total packets observed: 221 (CRC pass=221, fail=0)
+   [observe] sent: 192 acks, 3 timesync echoes, characterCreate=False, enterWorldRequest=True, enterWorld=True
+   [observe] CharacterEnterWorldServerReady received
+   [main] PHASE 3.3 PASS — EnterWorld two-step handshake committed (guid=0x50000006); world-state firehose should follow.
+   ```
+   (`characterCreate=False` is expected on this run because
+   `Headless01` was already created in the Phase 3.2 run, so the
+   spike correctly skipped re-create and used the existing GUID.)
+
+### Design notes
+
+- **The 0xF7C8 request is opcode-only.** This is the protocol's
+  "Hey, may I enter?" probe. The handler reads NOTHING from the
+  payload — it just checks `ServerManager.ShutdownInProgress` and
+  `WorldManager.WorldStatus == Open`. We could put garbage after
+  the opcode and it would still succeed; we pack exactly 4 bytes
+  to be the smallest legal payload.
+- **0xF7DF ServerReady is also opcode-only.** Our decoder returns
+  an empty marker record (`CharacterEnterWorldServerReadyMessage()`)
+  so the state machine can pattern-match without parsing zero
+  bytes.
+- **The 0xF657 commit message MUST use `string16L`, not raw chars.**
+  `CharacterHandler.cs:202-204` calls `payload.ReadString16L()`. The
+  account name follows the same padding rule documented in
+  `spec/06-game-messages.md` (pad to 4-multiple after the
+  `u16 length + chars`).
+- **Re-run path uses an existing GUID.** The state machine prefers
+  `createResponse.CharacterGuid` (Phase 3.2 path) and falls back
+  to `charList.Characters[0].Id` (re-run path). Both produce the
+  same value on the test account because `Headless01` is the only
+  character. On re-runs the spike correctly skips CharacterCreate
+  (would return `NameInUse=3`) and goes straight to EnterWorld.
+- **No retry on `EnterWorldRequest`.** We send it exactly once
+  after CharacterList arrives. If the server is shutting down it
+  replies with `CharacterError(LogonServerFull=0x0F)` and our
+  decoder logs it; the spike does not auto-retry because the
+  failure modes are operator-actionable (server restart) not
+  packet-loss-recoverable.
+- **The server's "you're in" message is implicit.** There is no
+  single ack packet — entry is confirmed by the world-state
+  firehose beginning. The spike treats `EnterWorldServerReady`
+  arriving + `EnterWorldSent` being true as PASS; observation of
+  follow-up `0xF74C/F745/F746` packets is the secondary
+  confirmation logged for Phase 4 planning.
+
+### Files touched
+
+- New: `Protocol/GameMessages/CharacterEnterWorldMessages.cs`
+  (both `CharacterEnterWorldRequestMessage` and
+  `CharacterEnterWorldMessage` packers).
+- New: `Protocol/GameMessages/CharacterEnterWorldServerReadyMessage.cs`
+  (empty marker record).
+- New: `Protocol/GameMessages/CharacterErrorMessage.cs` (record
+  carrying the `u32` error code).
+- Edited: `Protocol/GameMessages/GameMessageDecoder.cs` — added
+  branches for `CharacterEnterWorldServerReady` (no body) and
+  `CharacterError`.
+- Edited: `Protocol/OutboundSelfCheck.cs` — added
+  `RunCharacterEnterWorldRequestRoundTrip` and
+  `RunCharacterEnterWorldRoundTrip` mirroring server read paths.
+- Edited: `Handshake/HandshakeDriver.cs` — two-step state machine
+  layered after the CharacterCreate send; `ObserveResult` +
+  `HandshakeResult` extended with five new fields
+  (`EnterWorldRequestSent`, `EnterWorldServerReady`,
+  `EnterWorldSent`, `LastCharacterError`, `ChosenCharacterGuid`).
+- Edited: `Program.cs` — Phase 3.3 PASS / PARTIAL banners take
+  priority over the Phase 3.2 ones.
 
 ## Sub-phase 3.4 (in flight) — documentation
 
@@ -286,9 +421,15 @@ Done as part of 3.1:
   formula, ISAAC seed wiring, end-to-end evidence pointer.
 - Spec README updated to list `08`.
 
-To add as 3.2/3.3 land:
-- `spec/06-game-messages.md`: C→S payload schema for each new
-  opcode (`CharacterCreate`, `CharacterEnterWorldRequest`),
-  with field-by-field tables and the server-handler line cite.
+Done as part of 3.3:
+- `spec/06-game-messages.md`: C→S payload schemas for
+  `CharacterEnterWorldRequest` (`0xF7C8`, empty body) and
+  `CharacterEnterWorld` (`0xF657`, guid + account); S→C schemas
+  for `CharacterEnterWorldServerReady` (`0xF7DF`, empty body) and
+  `CharacterError` (`0xF659`, u32 error code) with full enum
+  list.
+
+To add as later phases land:
 - `spec/07-world-state.md`: object schema, landblock/cell
-  coordinate encoding, inventory layout.
+  coordinate encoding, inventory layout. Will be driven by Phase 4
+  decoders for `0xF745`, `0xF746`, `0xF74C`, `0xF7B0`.

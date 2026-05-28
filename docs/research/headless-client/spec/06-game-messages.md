@@ -118,8 +118,10 @@ sends, the bare name is the server's "you're in" confirmation.
 | `0xF658` | `CharacterList` | S → C | `UIQueue` (9) | Character roster + account name + slot count |
 | `0xF7E1` | `ServerName` | S → C | `UIQueue` (9) | Server display name + connection counts |
 | `0xF7E5` | `DDD_Interrogation` | S → C | `DatabaseQueue` (5) | Triggers client to declare its data versions |
-| `0xF7C8` | `CharacterEnterWorldRequest` | C → S | (TBD Phase 3) | Client asks to enter world with a chosen character GUID + name |
-| `0xF657` | `CharacterEnterWorld` | S → C | (TBD Phase 3) | Server confirms entry and starts world stream |
+| `0xF7C8` | `CharacterEnterWorldRequest` | C → S | `UIQueue` (9) | "May I enter?" probe; opcode-only payload; verified Phase 3.3 |
+| `0xF7DF` | `CharacterEnterWorldServerReady` | S → C | `UIQueue` (9) | Server "yes, commit now"; opcode-only payload; verified Phase 3.3 |
+| `0xF657` | `CharacterEnterWorld` | C → S | `UIQueue` (9) | Client commits to a character GUID + account; verified Phase 3.3 |
+| `0xF659` | `CharacterError` | S → C | `UIQueue` (9) | Failure ack for character-mgmt ops; `u32` error code; verified Phase 3.3 |
 | `0xF656` | `CharacterCreate` | C → S | `UIQueue` (9) | Create new character (request side); verified Phase 3.2 |
 | `0xF643` | `CharacterCreateResponse` | S → C | `UIQueue` (9) | Outcome of `CharacterCreate`; conditional body, verified Phase 3.2 |
 | `0xF655` | `CharacterDelete` | C → S | (TBD) | Mark character for deletion |
@@ -379,6 +381,130 @@ including the 16-byte FragmentHeader):
 (Note the 2-byte alignment: `2 + 10 = 12` is already a 4-multiple,
 so the String16L has zero pad bytes; the four `00` bytes that
 follow are the `trailingZero` field, not padding.)
+
+### `0xF7C8` `GameMessageCharacterEnterWorldRequest` (C → S)
+
+Server read path:
+[`CharacterHandler.cs:184-196`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Handlers/CharacterHandler.cs#L184-L196).
+
+This is the "may I enter the world?" probe. The handler reads
+NOTHING from the payload — it only checks
+`ServerManager.ShutdownInProgress` and
+`WorldManager.WorldStatus == Open`. On accept the server replies
+with `0xF7DF CharacterEnterWorldServerReady` (also empty); on
+shutdown it replies with `0xF659 CharacterError(LogonServerFull)`.
+
+**Wire layout (4 bytes total):**
+
+| Offset | Type | Field | Value |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF7C8` |
+
+**Captured wire bytes** (`phase3-enterworld-run-01.log`):
+
+```
+c8 f7 00 00                                # opcode 0xF7C8 (no body)
+```
+
+The fragment header on this message is the same envelope used for
+every other game message (Q=`UIQueue`=9, count=1, idx=0); the
+fragment payload is exactly 4 bytes.
+
+### `0xF7DF` `GameMessageCharacterEnterWorldServerReady` (S → C)
+
+Server encode path:
+[`GameMessageCharacterEnterWorldServerReady.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageCharacterEnterWorldServerReady.cs).
+Constructor passes `GameMessageGroup.UIQueue` (9) and a size of 4
+(opcode only).
+
+**Wire layout (4 bytes total):**
+
+| Offset | Type | Field | Value |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF7DF` |
+
+The decoder returns an empty marker record
+(`CharacterEnterWorldServerReadyMessage()`) so the state machine
+can pattern-match on the type without parsing zero bytes.
+
+### `0xF657` `GameMessageCharacterEnterWorld` (C → S)
+
+Server read path:
+[`CharacterHandler.cs:198-263`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Handlers/CharacterHandler.cs#L198-L263).
+Reads `u32 guid` first, then `string16L account`.
+
+**Wire layout (variable, 8 + string16L bytes):**
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF657` |
+| 4 | `u32` | `characterGuid` | Must exist in `session.Characters` (sourced from `CharacterList`). |
+| 8 | `string16L` | `account` | Must `==` `session.Account` (case-sensitive). Padded to next 4-multiple. |
+
+**Validation gates** (server replies `CharacterError(code)` on
+any failure, no per-character side effects):
+
+| Failure | Code |
+|---|---|
+| `ServerManager.ShutdownInProgress` | `LogonServerFull = 0x0F` |
+| `account != session.Account` | `EnterGameCharacterNotOwned = 0x06` |
+| `characterGuid` not in `session.Characters` | `EnterGameCharacterNotOwned = 0x06` |
+| Character marked deleted | `EnterGameCharacterNotOwned = 0x06` |
+| Character already in world (other session) | `EnterGameCharacterInWorld = 0x07` |
+| Offline player record missing | `EnterGameGeneric = 0x08` |
+| Olthoi heritage but Olthoi-play disabled | `EnterGameCouldntPlaceCharacter = 0x09` |
+
+On success: `session.State` → `WorldConnected`,
+`WorldManager.PlayerEnterWorld` is invoked, and the per-tick
+world-state firehose begins (no single "ok" message — entry is
+confirmed implicitly by the stream starting).
+
+**Captured wire bytes** for `guid=0x50000006` +
+`account="headless-test"` (13 chars):
+
+```
+57 f6 00 00                                # opcode 0xF657
+06 00 00 50                                # characterGuid = 0x50000006
+0d 00                                      # String16L length = 13
+68 65 61 64 6c 65 73 73 2d 74 65 73 74     # "headless-test"
+00                                         # pad (2 + 13 = 15, +1 byte → 16)
+```
+
+Total payload: 24 bytes. Plus the 8-byte BlobFragments envelope +
+16-byte FragmentHeader + 16-byte PacketHeader = 64 bytes on the
+wire.
+
+### `0xF659` `GameMessageCharacterError` (S → C)
+
+Server encode path:
+[`GameMessageCharacterError.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/GameMessages/Messages/GameMessageCharacterError.cs).
+Constructor passes `GameMessageGroup.UIQueue` (9) and a size of 8.
+
+**Wire layout (8 bytes total):**
+
+| Offset | Type | Field | Notes |
+|---|---|---|---|
+| 0 | `u32` | `opcode` | `0xF659` |
+| 4 | `u32` | `errorCode` | `CharacterError` enum value |
+
+**`CharacterError` enum** (from
+[`CharacterError.cs`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Enum/CharacterError.cs)
+— spike decodes raw `u32` so unknown values are logged not dropped):
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0x01` | `Logon` | Two accounts logged on simultaneously |
+| `0x03` | `AccountLogin` | Server cannot access account info |
+| `0x04` | `ServerCrash1` | Server disconnected |
+| `0x05` | `Logoff` | Server cannot log off character |
+| `0x06` | `EnterGameCharacterNotOwned` | GUID/account mismatch on EnterWorld |
+| `0x07` | `EnterGameCharacterInWorld` | Character already in world |
+| `0x08` | `EnterGameGeneric` | Generic enter-world failure |
+| `0x09` | `EnterGameCouldntPlaceCharacter` | Heritage disabled etc. |
+| `0x0F` | `LogonServerFull` | World closed or shutting down |
+
+(Full enum has more values for cross-server transfer, name policy
+violations, etc. — not yet observed.)
 
 ## Reliability and ordering
 

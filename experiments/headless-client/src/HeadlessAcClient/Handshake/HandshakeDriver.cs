@@ -126,7 +126,12 @@ internal sealed class HandshakeDriver : IDisposable
                 observe.CharacterList,
                 observe.ServerName,
                 observe.DDDInterrogation,
-                observe.CharacterCreateResponse);
+                observe.CharacterCreateResponse,
+                observe.EnterWorldRequestSent,
+                observe.EnterWorldServerReady,
+                observe.EnterWorldSent,
+                observe.LastCharacterError,
+                observe.ChosenCharacterGuid);
         }
         finally
         {
@@ -269,6 +274,24 @@ internal sealed class HandshakeDriver : IDisposable
         var characterCreateSent = false;
         CharacterCreateResponseMessage? createResponse = null;
 
+        // Phase 3.3: two-step world-entry handshake.
+        //   1. Send CharacterEnterWorldRequest (0xF7C8, payload-less)
+        //      once we have a character guid (either just-created via
+        //      Phase 3.2, or already-existing per CharacterList).
+        //   2. Server replies with CharacterEnterWorldServerReady
+        //      (0xF7DF, payload-less) OR CharacterError (0xF659,
+        //      LogonServerFull) if shutting down.
+        //   3. On ServerReady, send CharacterEnterWorld (0xF657)
+        //      carrying the chosen guid + session account name.
+        //   4. Server commits to WorldConnected state and starts the
+        //      world-state firehose. (Decoding that firehose is
+        //      Phase 4 territory.)
+        var enterWorldRequestSent = false;
+        var enterWorldSent = false;
+        CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
+        CharacterErrorMessage? lastCharacterError = null;
+        uint chosenCharacterGuid = 0;
+
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
@@ -335,6 +358,14 @@ internal sealed class HandshakeDriver : IDisposable
                                 Console.WriteLine($"[observe]   -> CharacterCreateResponse: Ok guid=0x{ccr.CharacterGuid:X8} name=\"{ccr.Name}\"");
                             else
                                 Console.WriteLine($"[observe]   -> CharacterCreateResponse: {ccr.Response} (code={(uint)ccr.Response})");
+                            break;
+                        case CharacterEnterWorldServerReadyMessage ready:
+                            enterWorldServerReady = ready;
+                            Console.WriteLine($"[observe]   -> CharacterEnterWorldServerReady (server ready, send 0xF657)");
+                            break;
+                        case CharacterErrorMessage cerr:
+                            lastCharacterError = cerr;
+                            Console.WriteLine($"[observe]   -> CharacterError: code=0x{cerr.ErrorCode:X4}");
                             break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
@@ -428,6 +459,91 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> PHASE3.2 SEND: CharacterCreate(account=\"{opt.Account}\" name=\"{opt.Name}\" payload={actual}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     Console.WriteLine($"[observe]      Expect 0xF643 CharacterCreateResponse (Ok=1, NameInUse=3, Corrupt=5, etc.)");
                 }
+
+                // Phase 3.3 step 1: send CharacterEnterWorldRequest (0xF7C8,
+                // payload-less) once we know a character guid to use. Sources:
+                //   - just-created (createResponse.Ok with non-zero guid), or
+                //   - already existing in CharacterList (charList.Characters[0])
+                // Server replies with CharacterEnterWorldServerReady (0xF7DF)
+                // or CharacterError(LogonServerFull) if shutting down.
+                if (!enterWorldRequestSent && charList is not null)
+                {
+                    // Pick the guid we'll commit to in step 2. Prefer the
+                    // just-created guid (Phase 3.2 path); fall back to the
+                    // first character in the list (re-run path).
+                    if (createResponse is { Response: CharacterCreateResponse.Ok } okCreate)
+                        chosenCharacterGuid = okCreate.CharacterGuid;
+                    else if (charList.Characters.Count > 0)
+                        chosenCharacterGuid = charList.Characters[0].Id;
+
+                    if (chosenCharacterGuid != 0)
+                    {
+                        enterWorldRequestSent = true;
+                        var packetSeq = nextOutboundPacketSequence++;
+                        var fragSeq   = nextOutboundFragmentSequence++;
+
+                        var ewrBuf = new byte[CharacterEnterWorldRequestMessage.PackedSize];
+                        var ewrLen = CharacterEnterWorldRequestMessage.Pack(ewrBuf);
+
+                        var msg = new OutboundPacket();
+                        if (lastReceivedSeq != 0)
+                            msg.AddAckSequence(lastReceivedSeq);
+                        msg.AddBlobFragment(
+                            fragSequence: fragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: ewrBuf.AsSpan(0, ewrLen));
+
+                        var sentLen = msg.Pack(sendBuf, myClientId,
+                                               sequence: packetSeq, iteration: 1,
+                                               encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                        Console.WriteLine($"[observe]   -> PHASE3.3a SEND: CharacterEnterWorldRequest (chosenGuid=0x{chosenCharacterGuid:X8}, pktSeq={packetSeq}, fragSeq={fragSeq}, totalBytes={sentLen})");
+                        Console.WriteLine($"[observe]      Expect 0xF7DF CharacterEnterWorldServerReady (or 0xF659 CharacterError on shutdown)");
+                    }
+                }
+
+                // Phase 3.3 step 2: once server replies with ServerReady,
+                // commit by sending CharacterEnterWorld (0xF657) with the
+                // chosen guid + session account. Server validates and on
+                // success transitions to WorldConnected and begins the
+                // world-state firehose (PlayerCreate, PlayerDescription,
+                // landblock data, etc.). Failure paths reply with
+                // CharacterError (EnterGameCharacterNotOwned=6,
+                // EnterGameCharacterInWorld=7, EnterGameGeneric=8, etc.).
+                if (!enterWorldSent && enterWorldServerReady is not null && chosenCharacterGuid != 0 && charList is not null)
+                {
+                    enterWorldSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var payloadSize = CharacterEnterWorldMessage.MeasurePackedSize(charList.Account);
+                    if (payloadSize > 448)
+                    {
+                        Console.WriteLine($"[observe]   -> SKIP CharacterEnterWorld: {payloadSize} bytes exceeds 448-byte cap");
+                        continue;
+                    }
+                    var ewBuf = new byte[payloadSize];
+                    var ewLen = CharacterEnterWorldMessage.Pack(ewBuf, chosenCharacterGuid, charList.Account);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: ewBuf.AsSpan(0, ewLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE3.3b SEND: CharacterEnterWorld(guid=0x{chosenCharacterGuid:X8}, account=\"{charList.Account}\", payload={ewLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]      Expect world-state firehose to begin (PlayerCreate, PlayerDescription, landblock data, ...) - or 0xF659 CharacterError on validation failure");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -436,12 +552,19 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
             Console.WriteLine($"[observe] WARNING: CharacterCreate sent but no 0xF643 response received within window");
-        return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse);
+        if (enterWorldServerReady is not null)
+            Console.WriteLine($"[observe] CharacterEnterWorldServerReady received");
+        else if (enterWorldRequestSent)
+            Console.WriteLine($"[observe] WARNING: EnterWorldRequest sent but no 0xF7DF received within window");
+        if (lastCharacterError is not null)
+            Console.WriteLine($"[observe] LAST CharacterError observed: code=0x{lastCharacterError.ErrorCode:X4}");
+        return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse,
+            enterWorldRequestSent, enterWorldServerReady, enterWorldSent, lastCharacterError, chosenCharacterGuid);
     }
 
     private readonly record struct ObserveResult(
@@ -450,7 +573,12 @@ internal sealed class HandshakeDriver : IDisposable
         ServerNameMessage? ServerName,
         DDDInterrogationMessage? DDDInterrogation,
         bool CharacterCreateSent,
-        CharacterCreateResponseMessage? CharacterCreateResponse);
+        CharacterCreateResponseMessage? CharacterCreateResponse,
+        bool EnterWorldRequestSent,
+        CharacterEnterWorldServerReadyMessage? EnterWorldServerReady,
+        bool EnterWorldSent,
+        CharacterErrorMessage? LastCharacterError,
+        uint ChosenCharacterGuid);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
@@ -523,4 +651,9 @@ internal readonly record struct HandshakeResult(
     CharacterListMessage? CharacterList,
     ServerNameMessage? ServerName,
     DDDInterrogationMessage? DDDInterrogation,
-    CharacterCreateResponseMessage? CharacterCreateResponse);
+    CharacterCreateResponseMessage? CharacterCreateResponse,
+    bool EnterWorldRequestSent,
+    CharacterEnterWorldServerReadyMessage? EnterWorldServerReady,
+    bool EnterWorldSent,
+    CharacterErrorMessage? LastCharacterError,
+    uint ChosenCharacterGuid);
