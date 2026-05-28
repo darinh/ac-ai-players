@@ -682,7 +682,7 @@ likely ~2-4 hours per zone depending on geometry complexity.
 
 - [ADR-0005](../adr/0005-pathfinding-reuse-and-build.md) — the
   "build a planner" decision
-- [ADR-0008](../adr/0008-bot-tick-via-onbrain.md) — tick cadence the
+- [ADR-0008](../adr/0008-bot-tick-via-player-tick.md) — tick cadence the
   planner runs against
 - [`bot-director.md`](../bot-director.md) — M3 spawn rules will
   consume the same waypoint atlas
