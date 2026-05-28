@@ -290,7 +290,16 @@ internal sealed class HandshakeDriver : IDisposable
         var enterWorldRequestSent = false;
         var enterWorldSent = false;
         var loginCompleteSent = false;
+        var autonomousPositionSent = false;
         var ownPlayerSeen = false;
+        // Packet index at which LoginComplete was sent; we gate the
+        // first AutonomousPosition probe on "saw at least this many
+        // more inbound packets after LC" so the server has time to
+        // process LoginComplete and clear the Teleporting flag.
+        // Without this gate, the AP handler short-circuits on
+        // (!Teleporting) and we observe nothing.
+        int loginCompletePacketIndex = -1;
+        const int PostLoginCompleteGracePackets = 30;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
@@ -680,6 +689,7 @@ internal sealed class HandshakeDriver : IDisposable
                 if (!loginCompleteSent && ownPlayerSeen && enterWorldSent)
                 {
                     loginCompleteSent = true;
+                    loginCompletePacketIndex = count;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
@@ -704,6 +714,76 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
 
+                // Phase 5a: send one GameActionAutonomousPosition
+                // (0xF753) echoing our current server-asserted
+                // position back at the server. First outbound
+                // movement-adjacent GameAction. Gating preconditions
+                // (in order):
+                //   1. LoginComplete already sent (so server clears
+                //      Teleporting).
+                //   2. At least PostLoginCompleteGracePackets more
+                //      inbound packets observed AFTER LoginComplete —
+                //      gives the server time to actually process LC
+                //      and clear Teleporting. Without this the AP
+                //      handler short-circuits on (!Teleporting) and
+                //      we see nothing in response.
+                //   3. worldState.Self exists AND has a populated
+                //      CellId (i.e., we've already received at least
+                //      one ObjectCreate or UpdatePosition for our
+                //      own guid). Echoing a stale or zeroed position
+                //      back at the server is a likely snap-back
+                //      trigger.
+                // Success criterion: at least one inbound
+                // UpdatePosition for our own guid AFTER the send,
+                // proving the server's broadcast path fired. See
+                // rubber-duck critique in checkpoint 033.
+                if (!autonomousPositionSent &&
+                    loginCompleteSent &&
+                    loginCompletePacketIndex >= 0 &&
+                    (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
+                    worldState.Self is WorldObjectSnapshot self &&
+                    self.CellId is uint selfCell &&
+                    selfCell != 0)
+                {
+                    autonomousPositionSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                    var apLen = GameActionAutonomousPositionMessage.Pack(
+                        apBuf,
+                        cellId: selfCell,
+                        pos:    self.Position,
+                        rot:    self.Rotation,
+                        instanceSequence:      self.SeqInstance       ?? 0,
+                        serverControlSequence: self.SeqServerControl ?? 0,
+                        teleportSequence:      self.SeqTeleport      ?? 0,
+                        forcePositionSequence: self.SeqForcePosition ?? 0,
+                        contact: true);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: apBuf.AsSpan(0, apLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine(
+                        $"[observe]   -> PHASE5A SEND: GameActionAutonomousPosition " +
+                        $"cell=0x{selfCell:X8} xyz=({self.Position.X:F2},{self.Position.Y:F2},{self.Position.Z:F2}) " +
+                        $"seq=(inst={self.SeqInstance},srvCtrl={self.SeqServerControl}," +
+                        $"tele={self.SeqTeleport},forcePos={self.SeqForcePosition}) " +
+                        $"contact=true payload={apLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]      Expect: inbound UpdatePosition for our own guid 0x{(worldState.SelfGuid ?? 0):X8} (server's broadcast echo).");
+                }
+
                 // Periodic world-state heartbeat — once every 100
                 // packets the bot prints what it currently knows.
                 // Useful for spotting whether the accumulator is
@@ -720,7 +800,7 @@ internal sealed class HandshakeDriver : IDisposable
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
         Console.WriteLine($"[world]   final: {worldState.FormatSummary()}");
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
