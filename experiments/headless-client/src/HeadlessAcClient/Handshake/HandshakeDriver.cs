@@ -35,7 +35,7 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    private const int ObserveSeconds = 180;
+    private const int ObserveSeconds = 360;
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -925,18 +925,24 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        // Doors-first, then nearest. A door within MotionSearchRadius
-                        // is always preferred over any non-door, because progress
-                        // through the academy gates on doors. Among doors (or
-                        // among non-doors), the closest wins.
+                        // Doors/portals first, then everything else, then signs/books.
+                        // - Doors (Misc 0x80 + Name="Door") and Portals (0x10000) drive
+                        //   spatial progress; they're the chief mechanism for
+                        //   discovering new rooms / regions of the academy.
+                        // - Writables (signs/books, 0x2000) reply with UseDone(ok)
+                        //   and (currently) no visible payload, so they're low-value
+                        //   per cycle and we let everything actionable go first.
                         candidate = inRange
                             .Select(s =>
                             {
                                 WorldDistance.TrySquaredDistance(self, s, out var d2);
                                 var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
-                                return (snap: s, d2, isDoor);
+                                var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
+                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
+                                int prio = (isDoor || isPortal) ? 0 : (isWritable ? 2 : 1);
+                                return (snap: s, d2, prio);
                             })
-                            .OrderBy(t => t.isDoor ? 0 : 1)
+                            .OrderBy(t => t.prio)
                             .ThenBy(t => t.d2)
                             .Select(t => t.snap)
                             .FirstOrDefault();
