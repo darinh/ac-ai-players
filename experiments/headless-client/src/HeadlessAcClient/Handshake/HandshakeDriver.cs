@@ -18,8 +18,10 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -306,6 +308,24 @@ internal sealed class HandshakeDriver : IDisposable
         const int PostLoginCompleteGracePackets = 30;
         const int PostAutonomousPositionGracePackets = 30;
         const int PostMoveStartGracePackets = 40;
+
+        // Phase 6 — first goal-directed motion. Locked at the AP send
+        // boundary if a "Bruised Apple" snapshot is in range (stationary
+        // floor item, unambiguous demo target). If present, we REPLACE
+        // (not duplicate) the vanilla AP with one whose rotation faces
+        // the apple, then use the same rotation in MoveToState START.
+        // Stop trigger: EITHER the grace window expires (authoritative)
+        // OR observed distance drops below MotionStopRadius (opportunistic).
+        // Per rubber-duck on Phase 6: distance-based stop is opportunistic
+        // because Player.OnMoveToState is gated by !FastTick for NPK chars
+        // so we may not get a continuous UpdatePosition stream — relying
+        // solely on distance could miss the stop entirely.
+        WorldObjectSnapshot? motionTarget = null;
+        Quaternion?          motionRotation = null;
+        float?               motionInitialDistance = null;
+        const string         MotionTargetName = "Bruised Apple";
+        const float          MotionStopRadius = 2.0f;
+        const float          MotionSearchRadius = 30f;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
@@ -779,12 +799,39 @@ internal sealed class HandshakeDriver : IDisposable
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
+                    // Phase 6 — try to lock onto Bruised Apple. If
+                    // present, send AP with rotation facing it; if
+                    // not, fall through to the original behavior
+                    // (AP echoes current rotation). We pick the
+                    // target ONCE; no per-tick re-pick.
+                    var apRot = self.Rotation;
+                    var candidate = worldState.WithinRadius(self, MotionSearchRadius)
+                        .FirstOrDefault(s => string.Equals(s.Name, MotionTargetName, StringComparison.Ordinal));
+                    if (candidate is not null &&
+                        WorldHeading.TryYawToTarget(self, candidate, out var targetYaw))
+                    {
+                        apRot = WorldHeading.RotationFromYaw(targetYaw);
+                        motionTarget = candidate;
+                        motionRotation = apRot;
+                        if (WorldDistance.TrySquaredDistance(self, candidate, out var d2lock))
+                            motionInitialDistance = (float)Math.Sqrt(d2lock);
+                        Console.WriteLine(
+                            $"[motion] LOCK target guid=0x{candidate.Guid:X8} name='{candidate.Name}' " +
+                            $"cell=0x{(candidate.CellId ?? 0):X8} dist={motionInitialDistance ?? float.NaN:F2}u " +
+                            $"yaw={targetYaw:F3}rad (rot=({apRot.X:F3},{apRot.Y:F3},{apRot.Z:F3},{apRot.W:F3}))");
+                    }
+                    else
+                    {
+                        Console.WriteLine(
+                            $"[motion] no '{MotionTargetName}' within {MotionSearchRadius}u — sending AP with unchanged rotation");
+                    }
+
                     var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
                     var apLen = GameActionAutonomousPositionMessage.Pack(
                         apBuf,
                         cellId: selfCell,
                         pos:    self.Position,
-                        rot:    self.Rotation,
+                        rot:    apRot,
                         instanceSequence:      self.SeqInstance       ?? 0,
                         serverControlSequence: self.SeqServerControl ?? 0,
                         teleportSequence:      self.SeqTeleport      ?? 0,
@@ -846,13 +893,21 @@ internal sealed class HandshakeDriver : IDisposable
                         command: MotionCommand.WalkForward,
                         speed:   1.0f);
 
+                    // Phase 6 — use the locked rotation if we picked
+                    // a target; otherwise the snapshot's current
+                    // rotation. The server may not have echoed our
+                    // AP-rotation update before we send START, so
+                    // we deliberately do NOT trust moveSelf.Rotation
+                    // for the rot field when we have an intent.
+                    var moveRot = motionRotation ?? moveSelf.Rotation;
+
                     var msBuf = new byte[GameActionMoveToStateMessage.CalcPackedSize(motion.Flags)];
                     var msLen = GameActionMoveToStateMessage.Pack(
                         msBuf,
                         motion,
                         cellId: moveCell,
                         pos:    moveSelf.Position,
-                        rot:    moveSelf.Rotation,
+                        rot:    moveRot,
                         instanceSequence:      moveSelf.SeqInstance      ?? 0,
                         serverControlSequence: moveSelf.SeqServerControl ?? 0,
                         teleportSequence:      moveSelf.SeqTeleport      ?? 0,
@@ -878,6 +933,8 @@ internal sealed class HandshakeDriver : IDisposable
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand|ForwardSpeed) " +
                         $"holdKey=None stance=NonCombat cmd=WalkForward speed=1.0 " +
                         $"cell=0x{moveCell:X8} xyz=({moveSelf.Position.X:F2},{moveSelf.Position.Y:F2},{moveSelf.Position.Z:F2}) " +
+                        $"rot=({moveRot.X:F3},{moveRot.Y:F3},{moveRot.Z:F3},{moveRot.W:F3}) " +
+                        $"rotSource={(motionRotation is null ? "self" : "target-lock")} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     Console.WriteLine($"[observe]      Expect: inbound Motion (0xF74C) for our own guid 0x{(worldState.SelfGuid ?? 0):X8}.");
                 }
@@ -886,12 +943,30 @@ internal sealed class HandshakeDriver : IDisposable
                 // motion intent. Per rubber-duck: a real client would
                 // send a stop on key-release; otherwise the server's
                 // recorded intent keeps drifting and the next
-                // movement command may be misinterpreted. We send
-                // PostMoveStartGracePackets after the START.
+                // movement command may be misinterpreted.
+                //
+                // Phase 6: stop fires when EITHER (a) the grace
+                // window expires (authoritative — always works even
+                // for NPK !FastTick chars where UpdatePosition may
+                // not stream back), OR (b) observed distance to the
+                // locked target drops below MotionStopRadius
+                // (opportunistic — fires only if Self position
+                // actually updates during motion). Whichever first.
+                var stopByGrace = moveToStateStartPacketIndex >= 0 &&
+                                  (count - moveToStateStartPacketIndex) >= PostMoveStartGracePackets;
+                var stopByDistance = false;
+                float stopByDistanceCurr = float.NaN;
+                if (motionTarget is not null &&
+                    worldState.Self is WorldObjectSnapshot stopProbe &&
+                    WorldDistance.TrySquaredDistance(stopProbe, motionTarget, out var d2curr) &&
+                    d2curr <= MotionStopRadius * MotionStopRadius)
+                {
+                    stopByDistance = true;
+                    stopByDistanceCurr = (float)Math.Sqrt(d2curr);
+                }
                 if (moveToStateStartSent &&
                     !moveToStateStopSent &&
-                    moveToStateStartPacketIndex >= 0 &&
-                    (count - moveToStateStartPacketIndex) >= PostMoveStartGracePackets &&
+                    (stopByGrace || stopByDistance) &&
                     worldState.Self is WorldObjectSnapshot stopSelf &&
                     stopSelf.CellId is uint stopCell &&
                     stopCell != 0)
@@ -934,6 +1009,7 @@ internal sealed class HandshakeDriver : IDisposable
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand) " +
                         $"cmd=Invalid (stop) " +
                         $"cell=0x{stopCell:X8} xyz=({stopSelf.Position.X:F2},{stopSelf.Position.Y:F2},{stopSelf.Position.Z:F2}) " +
+                        $"trigger={(stopByDistance ? $"distance({stopByDistanceCurr:F2}u)" : "grace-window")} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                 }
 
@@ -971,6 +1047,35 @@ internal sealed class HandshakeDriver : IDisposable
             }
             var within30 = worldState.WithinRadius(spatialSelf, 30f);
             Console.WriteLine($"[spatial] within 30 units: {within30.Count} objects");
+
+            // Phase 6 — motion outcome summary. If we locked a target,
+            // re-fetch its current snapshot (the world dictionary
+            // returns the live mutable reference, so this just reads
+            // the latest accumulated position) and report the closure.
+            if (motionTarget is not null)
+            {
+                var liveTarget = worldState.WithinRadius(spatialSelf, 999f)
+                    .FirstOrDefault(s => s.Guid == motionTarget.Guid);
+                if (liveTarget is not null &&
+                    WorldDistance.TrySquaredDistance(spatialSelf, liveTarget, out var dfin2))
+                {
+                    var dfin = (float)Math.Sqrt(dfin2);
+                    var delta = motionInitialDistance.HasValue ? motionInitialDistance.Value - dfin : float.NaN;
+                    Console.WriteLine(
+                        $"[motion] outcome target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                        $"initialDist={motionInitialDistance ?? float.NaN:F2}u finalDist={dfin:F2}u " +
+                        $"closed={delta:F2}u (positive = bot moved toward target)");
+                }
+                else
+                {
+                    Console.WriteLine(
+                        $"[motion] outcome target=0x{motionTarget.Guid:X8} disappeared from world snapshot before window end");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"[motion] outcome no target was locked");
+            }
         }
         else
         {
