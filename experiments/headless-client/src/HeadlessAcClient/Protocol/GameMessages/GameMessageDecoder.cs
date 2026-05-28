@@ -43,8 +43,39 @@ internal static class GameMessageDecoder
             GameMessageOpcode.CharacterCreateResponse => DecodeCharacterCreateResponse(payload),
             GameMessageOpcode.CharacterEnterWorldServerReady => new CharacterEnterWorldServerReadyMessage(),
             GameMessageOpcode.CharacterError => DecodeCharacterError(payload),
+            GameMessageOpcode.PlayerCreate => DecodePlayerCreate(payload),
+            GameMessageOpcode.ServerMessage => DecodeServerMessage(payload),
             _ => null,
         };
+    }
+
+    private static PlayerCreateMessage? DecodePlayerCreate(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            // u32 opcode + u32 guid - 8 bytes total
+            var guid = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(sizeof(uint)));
+            return new PlayerCreateMessage(guid);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static ServerMessageMessage? DecodeServerMessage(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            var cursor = sizeof(uint); // skip opcode
+            var text = AcStrings.ReadString16L(p, ref cursor);
+            var chatType = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(cursor));
+            return new ServerMessageMessage(text, chatType);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static CharacterErrorMessage? DecodeCharacterError(ReadOnlySpan<byte> p)

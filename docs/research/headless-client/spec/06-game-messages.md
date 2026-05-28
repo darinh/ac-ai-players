@@ -506,6 +506,78 @@ Constructor passes `GameMessageGroup.UIQueue` (9) and a size of 8.
 (Full enum has more values for cross-server transfer, name policy
 violations, etc. — not yet observed.)
 
+### 0xF746 `PlayerCreate` (server → client)
+
+Verified Phase 4.1, group SmartboxQueue (6).
+
+Encoder: `Source/ACE.Server/Network/GameMessages/Messages/GameMessagePlayerCreate.cs`.
+
+```
+offset  size  field      notes
+0       4     opcode     0xF746 little-endian
+4       4     guid       u32; player's avatar ObjectGuid
+```
+
+Total: 8 bytes.
+
+Semantics: one-shot. Arrives once per session, immediately after the
+client commits `0xF657 CharacterEnterWorld`. Carries the GUID the
+player is now embodying — must match the GUID the client sent in
+the commit. Phase 4.1 capture (`phase4-decoders-run-01.log`):
+`46 f7 00 00 06 00 00 50` → `PlayerCreate guid=0x50000006` against
+the `Headless01` character.
+
+Subsequent `0xF74C Motion` and `0xF745 ObjectCreate` messages
+targeting this same GUID describe our avatar's animation state.
+
+### 0xF7E0 `ServerMessage` (server → client)
+
+Verified Phase 4.2, group UIQueue (9).
+
+Encoder: `Source/ACE.Server/Network/GameMessages/Messages/GameMessageSystemChat.cs`.
+
+```
+offset      size            field             notes
+0           4               opcode            0xF7E0 little-endian
+4           2               textLength        u16; byte count for string16L body
+6           textLength      text (Latin-1)    AC string16L body, 1 byte per char
+6+n         pad             align-to-4        (2 + n) padded up to next mult of 4
+...         4               chatMessageType   i32; channel id (see below)
+```
+
+Total: 8 + AlignTo4(2 + textLength).
+
+string16L details: see [spec/05-data-types.md](05-data-types.md). The
+prefix counts characters, not bytes; characters are written as
+single 8-bit Latin-1 code units (NOT UTF-16). Padding zero-fills
+the prefix+body block to a 4-byte multiple so the trailing i32
+lands on alignment.
+
+ChatMessageType wire values (from
+`Source/ACE.Entity/Enum/ChatMessageType.cs`, verified — enum is
+`uint`, sequential, NOT a bit-field):
+
+| value | name | notes |
+|---|---|---|
+| `0x00` | `Broadcast` | Welcome banner, MOTD, default channel |
+| `0x01` | `AllChannels` | Broadcast to all chat channels |
+| `0x02` | `Speech` | Local /say |
+| `0x03` | `Tell` | Incoming `/tell` |
+| `0x04` | `OutgoingTell` | Echo of `/tell` sent by us |
+| `0x05` | `System` | Server system notices |
+| `0x06` | `Combat` | Combat log entries |
+| `0x07` | `Magic` | Spell messages |
+| `0x08` | `Channel` | Custom channels |
+| `0x0C` | `Emote` | `/emote` text |
+| `0x0F` | `Help` | `@help` output |
+| `0x12` | `Allegiance` | Allegiance chat |
+| `0x13` | `Fellowship` | Fellowship chat |
+| `0x14` | `WorldBroadcast` | Server-wide announcements |
+
+Phase 4.2 capture: `ServerMessage(chatType=0x0): "Welcome to
+Asheron's Call..."` — Broadcast/MOTD on the login firehose. Decoded
+from `phase4-decoders-run-01.log`.
+
 ## Reliability and ordering
 
 Server-side, every game message we observed in Phase 2 was sent on

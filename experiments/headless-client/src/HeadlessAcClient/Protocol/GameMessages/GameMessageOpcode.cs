@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// GameMessageOpcode — only the opcodes the Phase 2/3 spike
+// GameMessageOpcode — only the opcodes the Phase 2/3/4 spike
 // observes or emits. Full enum lives in
 // Source/ACE.Server/Network/GameMessages/GameMessageOpcode.cs.
 //
@@ -10,19 +10,26 @@ namespace HeadlessAcClient.Protocol.GameMessages;
 
 internal enum GameMessageOpcode : uint
 {
-    // Server → client (already decoded)
-    CharacterCreateResponse = 0xF643,
-    CharacterList     = 0xF658,
-    CharacterError    = 0xF659,
-    ServerName        = 0xF7E1,
-    DDDInterrogation  = 0xF7E5,
-
-    // Client → server, used by Phase 3.
-    CharacterCreate            = 0xF656,
-    CharacterDelete            = 0xF655,
-    // Note: 0xF657 is `CharacterEnterWorld` (the server's confirmation
-    // response). The client-side *request* lives at 0xF7C8.
-    CharacterEnterWorldRequest = 0xF7C8,
-    CharacterEnterWorld        = 0xF657,
+    // Phase 2/3 server → client
+    PrivateUpdatePropertyInt = 0x02CD,
+    CharacterCreateResponse  = 0xF643,
+    CharacterList            = 0xF658,
+    CharacterError           = 0xF659,
+    ObjectCreate             = 0xF745,
+    PlayerCreate             = 0xF746,
+    Motion                   = 0xF74C,
+    GameEvent                = 0xF7B0,
     CharacterEnterWorldServerReady = 0xF7DF,
+    ServerMessage            = 0xF7E0,
+    ServerName               = 0xF7E1,
+    DDDInterrogation         = 0xF7E5,
+
+    // Phase 3 client → server
+    CharacterDelete            = 0xF655,
+    CharacterCreate            = 0xF656,
+    // Phase 3.3 verified: 0xF657 is the CLIENT-SIDE commit message,
+    // sent AFTER receiving 0xF7DF CharacterEnterWorldServerReady. The
+    // "request" probe (0xF7C8) is what kicks the handshake off.
+    CharacterEnterWorld        = 0xF657,
+    CharacterEnterWorldRequest = 0xF7C8,
 }

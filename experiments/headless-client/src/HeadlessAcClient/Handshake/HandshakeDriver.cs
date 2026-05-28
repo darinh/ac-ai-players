@@ -367,6 +367,14 @@ internal sealed class HandshakeDriver : IDisposable
                             lastCharacterError = cerr;
                             Console.WriteLine($"[observe]   -> CharacterError: code=0x{cerr.ErrorCode:X4}");
                             break;
+                        case PlayerCreateMessage pc:
+                            Console.WriteLine($"[observe]   -> PlayerCreate: guid=0x{pc.Guid:X8}");
+                            break;
+                        case ServerMessageMessage sm:
+                            // Trim huge welcome banners for log readability.
+                            var preview = sm.Text.Length > 80 ? sm.Text.Substring(0, 80) + "..." : sm.Text;
+                            Console.WriteLine($"[observe]   -> ServerMessage(chatType=0x{sm.ChatMessageType:X}): \"{preview}\"");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;
