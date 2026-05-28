@@ -149,8 +149,20 @@ and the `SessionState` enum.
    (default on dev), auto-creates an account with the supplied
    password (lowercased account name).
 7. `AccountSelectCallback` builds a `PacketOutboundConnectRequest`
-   and enqueues it for send (leg 2).
-8. `session.State = SessionState.AuthConnectResponse`.
+   and **enqueues it for send immediately** (leg 2 fires now,
+   on the world-manager thread).
+8. `account.PasswordMatches(loginRequest.Password)` runs
+   bcrypt. At work-factor 8 this costs ~20-30 ms.
+9. Other gates: account-in-use, ban-expire, last-login update.
+10. `session.State = SessionState.AuthConnectResponse`.
+
+Steps 7-10 run sequentially on one thread, but step 7's
+enqueue is asynchronous — leg 2 is on the wire ~µs after
+step 7. Step 10 doesn't happen until step 8 (bcrypt)
+completes. **The client receives leg 2 long before the
+server is willing to accept leg 3.** See
+[Race condition with server-side bcrypt password verification](#race-condition-with-server-side-bcrypt-password-verification)
+below.
 
 ### Failure modes
 
@@ -279,6 +291,78 @@ For client implementers, the practical rule: **after parsing
 the ConnectRequest reply, send your ConnectResponse to a
 destination port of `original_port + 1`**. Don't change your
 local source port; just change the destination.
+
+## Race condition with server-side bcrypt password verification
+
+**Symptom**: client completes legs 1-3 cleanly, server logs
+`(Packets) <<< Seq: 0 ... ConnectResponse`, but no game data
+ever flows. Server retransmits empty `AckSequence` packets
+every ~3.7s for 17s and then logs
+`Session ... dropped ... Reason: Network Timeout`.
+
+**Root cause**: the server's session state transition is
+*gated on bcrypt completion*, but the leg 2 reply is sent
+*before* bcrypt runs.
+
+Concretely, in
+[`AuthenticationHandler.AccountSelectCallback`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Handlers/AuthenticationHandler.cs#L101):
+
+| line | action | wall-clock cost |
+|---|---|---|
+| 127 | `session.Network.EnqueueSend(connectRequest)` (leg 2 on the wire) | ~µs |
+| 167 | `account.PasswordMatches(loginRequest.Password)` (bcrypt) | ~20-30 ms (work-factor 8) |
+| 232 | `session.State = SessionState.AuthConnectResponse` | ~µs |
+
+Meanwhile,
+[`NetworkManager.ProcessPacket`](https://github.com/darinh/ACE-bots/blob/botplayer-spike/Source/ACE.Server/Network/Managers/NetworkManager.cs#L50)
+on port `Port+1` looks up the matching session with the
+predicate `k.State == SessionState.AuthConnectResponse`. If
+the session is still in `AuthLoginRequest` because bcrypt
+hasn't finished yet, the lookup returns `null` and the
+packet is silently dropped (no rejection log; the
+`if (session == null)` arm at line 80 just falls through).
+
+On loopback, a co-hosted spike's RTT is ~0.5 ms but bcrypt
+takes ~20-30 ms. The client always wins the race; the
+ConnectResponse is always dropped. The session sits in
+`AuthConnectResponse` state forever, server emits
+`HandleConnectResponse` AckSequence retries on a 3.7s timer,
+client sends nothing back, and the server hits the 17s
+network-timeout and tears down.
+
+**Workaround (client-side)**: retransmit ConnectResponse a
+few times with a short delay, well past bcrypt's worst-case
+completion time. Three sends 100 ms apart covers it on
+work-factor 8; bump to 5×150 ms if your server uses a
+higher work factor.
+
+The duplicate ConnectResponses that arrive after the state
+transition are benign — the server's session lookup
+succeeds on whichever one arrives first after state is set,
+and the rest see `session.State == AuthConnected` (no
+longer `AuthConnectResponse`) and are silently dropped by
+the same `session == null` arm.
+
+The Phase 1 spike implements this in
+[`HandshakeDriver.cs`](../../../../experiments/headless-client/src/HeadlessAcClient/Handshake/HandshakeDriver.cs)
+(`ConnectResponseRetries` and `ConnectResponseRetryDelayMs`).
+
+**Cleaner fixes that are out of scope for the spike**:
+
+- *Server-side*: move `session.State = AuthConnectResponse`
+  ahead of `EnqueueSend(connectRequest)` in
+  `AccountSelectCallback`. Bcrypt could then complete in the
+  background while leg 3 is in-flight; on failure, terminate
+  the session as today. This would fix the race for all
+  clients including future real ones with tighter latency
+  budgets. (It's a ~3-line patch but touches a sensitive
+  auth path; defer until we own a fork branch dedicated to
+  upstream-able server improvements.)
+- *Client-side smarter*: after sending the first
+  ConnectResponse, poll for the first inbound packet with
+  `Sequence > 0` or `BlobFragments` flag. Stop retransmitting
+  on first sight. Saves 200-400 ms in the common case and is
+  the right shape once we have a recv loop running anyway.
 
 ## After leg 3
 

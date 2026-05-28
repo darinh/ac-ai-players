@@ -33,6 +33,11 @@ internal sealed class HandshakeDriver : IDisposable
     private const int ClientVersion = 1802;
     private const int ObserveSeconds = 30;
 
+    // ConnectResponse retransmit constants — see spec/04-handshake.md
+    // "Race condition with server-side bcrypt password verification".
+    private const int ConnectResponseRetries = 3;
+    private const int ConnectResponseRetryDelayMs = 100;
+
     private readonly IPEndPoint _serverPort0;
     private readonly IPEndPoint _serverPort1;
     private readonly string _account;
@@ -74,8 +79,24 @@ internal sealed class HandshakeDriver : IDisposable
 
             var respLen = BuildConnectResponse(loginBuf, connectReq.Cookie, connectReq.ClientId);
             Console.WriteLine($"[handshake] sending ConnectResponse ({respLen} bytes) to {_serverPort1}");
-            await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, respLen),
-                                      SocketFlags.None, _serverPort1, ct).ConfigureAwait(false);
+            Console.WriteLine($"[handshake]   bytes: {Hex(new ReadOnlySpan<byte>(loginBuf, 0, respLen))}");
+
+            // ConnectResponse retransmit: the server's session-state transition
+            // to AuthConnectResponse is gated on bcrypt password verification,
+            // which races our ConnectResponse on a co-hosted server (bcrypt
+            // ~20ms vs loopback RTT ~0.5ms). If our packet arrives before the
+            // state transition, NetworkManager.cs lookup fails (state still
+            // AuthLoginRequest) and the packet is silently dropped. Retransmit
+            // a few times with a short delay to cover the bcrypt window.
+            // See spec/04-handshake.md "Race condition" for details.
+            for (int attempt = 0; attempt < ConnectResponseRetries; attempt++)
+            {
+                await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, respLen),
+                                          SocketFlags.None, _serverPort1, ct).ConfigureAwait(false);
+                if (attempt < ConnectResponseRetries - 1)
+                    await Task.Delay(ConnectResponseRetryDelayMs, ct).ConfigureAwait(false);
+            }
+            Console.WriteLine($"[handshake]   sent {ConnectResponseRetries}× from local endpoint {_socket.LocalEndPoint}");
 
             // Phase 1 gate: receive whatever the server sends next on
             // port 0 (the handshake socket). Loop for up to ObserveSeconds

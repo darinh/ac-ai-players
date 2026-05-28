@@ -97,3 +97,81 @@ without the server tearing us down, and parse the
 account.
 
 See [`README.md`](README.md) §Phases for the full roadmap.
+
+---
+
+## Update 2026-05-28: original "PASS" was incomplete
+
+Re-running with `Packets` log level at DEBUG revealed that the
+original "PHASE 1 PASS" claim was over-stated. What looked like
+post-handshake server traffic was actually the server's
+**`HandleConnectResponse` retry loop** — empty `AckSequence`
+packets (`Size=4`, body `01 00 00 00`) emitted every ~3.7s,
+followed by a `Network Timeout` session teardown at 17s.
+
+The session never reached `SessionState.AuthConnected`. No
+`CharacterList`, `ServerName`, or `DDDInterrogation` was ever
+pushed. The first `AckSequence` we received and called a "pass"
+was the server in `AuthConnectResponse` state waiting for the
+client's ACK that never came — because the server didn't
+realize our ConnectResponse had arrived.
+
+**Why**: a race condition in
+`AuthenticationHandler.AccountSelectCallback`: the server sends
+the leg-2 reply immediately, but the session state transition
+to `AuthConnectResponse` is gated on bcrypt password
+verification (~20-30 ms at work-factor 8). On loopback the
+client's ConnectResponse arrives in ~0.5 ms and loses the race
+— the `NetworkManager.ProcessPacket` lookup on port `+1` finds
+no matching session and silently drops the packet.
+
+See
+[`spec/04-handshake.md` § "Race condition with server-side
+bcrypt password verification"](spec/04-handshake.md#race-condition-with-server-side-bcrypt-password-verification)
+for the full diagnosis and the per-line server source
+references.
+
+### Fix
+
+`HandshakeDriver.cs` now retransmits ConnectResponse 3× with
+100 ms gaps. Constants: `ConnectResponseRetries = 3`,
+`ConnectResponseRetryDelayMs = 100`.
+
+### Real Phase 1 PASS (post-fix run output)
+
+After the retransmit fix and with `Packets` logger at DEBUG,
+we observe the server actually entering `AuthConnected` and
+pushing real game data:
+
+```
+[observe] #1 from 127.0.0.1:9001: Seq=2 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8
+[observe]   body[8]: ba f5 d0 38 9f 87 b1 41
+
+[observe] #2 from 127.0.0.1:9001: Seq=3 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44
+[observe]   body[44]: 00 00 00 00 00 00 00 80 01 00 2c 00 00 00 05 00
+                       e5 f7 00 00 01 00 00 00 01 00 00 00 01 00 00 00
+                       02 00 00 00 00 00 00 00 01 00 00 00
+   ↑ CharacterList (group 5, opcode 0xf7e5, "0 characters this account")
+
+[observe] #3 from 127.0.0.1:9001: Seq=4 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=100
+[observe]   body[100]: ... 0d 00 'h' 'e' 'a' 'd' 'l' 'e' 's' 's' '-' 't' 'e' 's' 't' 00 ...
+                       ... 09 00 e1 f7 ... 0a 00 'A' 'C' 'E' 'm' 'u' 'l' 'a' 't' 'o' 'r' ...
+   ↑ Two fragments: ServerName ("headless-test" / "ACEmulator")
+     and DDDInterrogation header (opcode 0xf7e1).
+```
+
+The session still hits a Network Timeout at +17s because the
+spike doesn't yet send Acks or TimeSync responses — that's
+the Phase 2 work. But the **handshake itself is now
+demonstrably complete** end-to-end: server reached
+`AuthConnected`, `HandleConnectResponse` ran, `CharacterList`
++ `ServerName` + `DDDInterrogation` pushed, packet sequence
+numbers advancing (`Seq=2`, `3`, `4`), `EncryptedChecksum`
+flag set on game traffic exactly as documented.
+
+The original "What this does NOT validate" list still applies
+(no ISAAC verification, no Ack/TimeSync, no CharacterList
+parse) — none of that changes. What changes is that we now
+*see* the data we need to start parsing in Phase 2, where
+previously we saw only the server's "are you alive?" retries.
+
