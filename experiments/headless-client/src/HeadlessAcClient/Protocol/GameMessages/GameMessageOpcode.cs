@@ -32,4 +32,12 @@ internal enum GameMessageOpcode : uint
     // "request" probe (0xF7C8) is what kicks the handshake off.
     CharacterEnterWorld        = 0xF657,
     CharacterEnterWorldRequest = 0xF7C8,
+
+    // Phase 4 client → server: GameAction wrapper for post-world-
+    // entry commands (LoginComplete, movement, chat, ...). Carries
+    // an inner GameActionType opcode (e.g. 0x00A1 LoginComplete) +
+    // a per-action sequence number that the server reads but does
+    // not currently validate (see GameActionPacket.cs:13 "TODO: verify
+    // sequence"). See Protocol/GameMessages/GameActionMessages.cs.
+    GameAction                 = 0xF7B1,
 }

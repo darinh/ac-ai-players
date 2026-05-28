@@ -288,6 +288,8 @@ internal sealed class HandshakeDriver : IDisposable
         //      Phase 4 territory.)
         var enterWorldRequestSent = false;
         var enterWorldSent = false;
+        var loginCompleteSent = false;
+        var ownPlayerSeen = false;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
@@ -401,6 +403,17 @@ internal sealed class HandshakeDriver : IDisposable
                             break;
                         case PlayerCreateMessage pc:
                             Console.WriteLine($"[observe]   -> PlayerCreate: guid=0x{pc.Guid:X8}");
+                            // PlayerCreate for our chosen guid is the
+                            // canonical "server has bound session.Player"
+                            // signal. After this, we may safely send
+                            // GameActionLoginComplete (0x00A1) — which
+                            // server-side calls OnTeleportComplete() and
+                            // clears the Teleporting flag (the purple-
+                            // portal-haze state). Without LoginComplete
+                            // the character stays in-portal forever and
+                            // cannot interact with the world.
+                            if (pc.Guid == chosenCharacterGuid)
+                                ownPlayerSeen = true;
                             break;
                         case ServerMessageMessage sm:
                             // Trim huge welcome banners for log readability.
@@ -591,6 +604,43 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> PHASE3.3b SEND: CharacterEnterWorld(guid=0x{chosenCharacterGuid:X8}, account=\"{charList.Account}\", payload={ewLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     Console.WriteLine($"[observe]      Expect world-state firehose to begin (PlayerCreate, PlayerDescription, landblock data, ...) - or 0xF659 CharacterError on validation failure");
                 }
+
+                // Phase 3.4: send GameActionLoginComplete (0x00A1) once
+                // the server has bound our session.Player. The trigger
+                // is PlayerCreate (0xF746) for our own chosen guid —
+                // that's the canonical "you are now in the world"
+                // signal, and the only thing OnTeleportComplete needs
+                // server-side. Without this, the character stays as a
+                // purple "loading" portal-haze sprite forever, cannot
+                // be targeted, and other players see it as in-portal.
+                // See Source/ACE.Server/Network/GameAction/Actions/
+                //   GameActionLoginComplete.cs for the handler.
+                if (!loginCompleteSent && ownPlayerSeen && enterWorldSent)
+                {
+                    loginCompleteSent = true;
+                    var packetSeq = nextOutboundPacketSequence++;
+                    var fragSeq   = nextOutboundFragmentSequence++;
+
+                    var lcBuf = new byte[GameActionLoginCompleteMessage.PackedSize];
+                    var lcLen = GameActionLoginCompleteMessage.Pack(lcBuf);
+
+                    var msg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        msg.AddAckSequence(lastReceivedSeq);
+                    msg.AddBlobFragment(
+                        fragSequence: fragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: lcBuf.AsSpan(0, lcLen));
+
+                    var sentLen = msg.Pack(sendBuf, myClientId,
+                                           sequence: packetSeq, iteration: 1,
+                                           encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE3.4 SEND: GameActionLoginComplete (payload={lcLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -599,7 +649,7 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
         Console.WriteLine($"[observe] total packets observed: {count} (CRC pass={crcPass}, fail={crcFail})");
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
