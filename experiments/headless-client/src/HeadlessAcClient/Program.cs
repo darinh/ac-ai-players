@@ -55,7 +55,7 @@ internal static class Program
 
         await PingApiAsync().ConfigureAwait(false);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(200));
         using var driver = new HandshakeDriver(host, port, account, password);
         try
         {

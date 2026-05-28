@@ -32,7 +32,7 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    private const int ObserveSeconds = 65;
+    private const int ObserveSeconds = 180;
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -429,6 +429,12 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"itemType=0x{oc.Weenie.ItemType:X} name=\"{oc.Weenie.Name}\"" +
                                 $" wFlags=0x{(uint)oc.Weenie.Flags:X8}/0x{(uint)oc.Weenie.Flags2:X8}" +
                                 $" pFlags=0x{(uint)oc.Physics.DescriptionFlags:X6}{loc}");
+                            break;
+                        case GameEventMessage ge:
+                            Console.WriteLine(
+                                $"[observe]   -> GameEvent: type={ge.EventType} (0x{(uint)ge.EventType:X4}) " +
+                                $"recv=0x{ge.ReceiverGuid:X8} seq={ge.ServerEventSequence} " +
+                                $"payload[{ge.PayloadBytes.Length}]");
                             break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");

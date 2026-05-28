@@ -46,8 +46,27 @@ internal static class GameMessageDecoder
             GameMessageOpcode.PlayerCreate => DecodePlayerCreate(payload),
             GameMessageOpcode.ServerMessage => DecodeServerMessage(payload),
             GameMessageOpcode.ObjectCreate => ObjectCreateDecoder.Decode(payload),
+            GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
             _ => null,
         };
+    }
+
+    private static GameEventMessage? DecodeGameEvent(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < GameEventMessage.HeaderSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var guid = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var seq  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var et   = (GameEventType)BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var rest = p.Slice(cursor).ToArray();
+            return new GameEventMessage(guid, seq, et, rest);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static PlayerCreateMessage? DecodePlayerCreate(ReadOnlySpan<byte> p)
