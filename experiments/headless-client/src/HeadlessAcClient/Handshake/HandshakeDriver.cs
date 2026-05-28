@@ -308,10 +308,9 @@ internal sealed class HandshakeDriver : IDisposable
         const int PostAutonomousPositionGracePackets = 30;
 
         // Phase 6 — first goal-directed motion. Locked at the AP send
-        // boundary if a "Bruised Apple" snapshot is in range (stationary
-        // floor item, unambiguous demo target). If present, we REPLACE
-        // (not duplicate) the vanilla AP with one whose rotation faces
-        // the apple, then use the same rotation in MoveToState START.
+        // boundary if a named-snapshot is in range. The chosen target
+        // rotation is REPLICATED (not duplicated) on both the AP and
+        // the MoveToState START.
         //
         // Phase 6b — the actual translation. Server-side, Player.OnMoveToState
         // short-circuits on !FastTick (true for NPK headless char), so
@@ -322,16 +321,26 @@ internal sealed class HandshakeDriver : IDisposable
         // by sending periodic AP packets ourselves. Real clients send AP
         // every ~1s while moving; we use a faster 4 Hz cadence so the
         // bot can cover ~5-10u within our 60s observation window.
+        //
+        // Phase 6c — generalize target picker. Default behavior: pick
+        // the nearest named non-self snapshot within search radius.
+        // Override: set env var HEADLESS_MOTION_TARGET_NAME (exact
+        // match, case-sensitive) to force a specific target name.
+        // Useful for repeatable testing against a known landmark.
         WorldObjectSnapshot? motionTarget = null;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
+        DateTime?            motionStoppedAt = null;
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         int                  walkTickAps = 0;
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
-        const string         MotionTargetName = "Bruised Apple";
+        // Optional override: pick a specific named target instead of
+        // nearest-named heuristic. Empty/null => no override.
+        string?              motionTargetNameOverride =
+            Environment.GetEnvironmentVariable("HEADLESS_MOTION_TARGET_NAME");
         const float          MotionStopRadius = 2.0f;
         const float          MotionSearchRadius = 30f;
         const int            WalkTickIntervalMs = 250;
@@ -818,14 +827,59 @@ internal sealed class HandshakeDriver : IDisposable
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
-                    // Phase 6 — try to lock onto Bruised Apple. If
-                    // present, send AP with rotation facing it; if
-                    // not, fall through to the original behavior
-                    // (AP echoes current rotation). We pick the
-                    // target ONCE; no per-tick re-pick.
+                    // Phase 6c — pick the motion target.
+                    // Override:    HEADLESS_MOTION_TARGET_NAME=<name>  (exact match, case-sensitive)
+                    // Default:     nearest named (Name != null && != "") non-self snapshot
+                    //              within MotionSearchRadius. Equal-name ties broken by 3D dist
+                    //              via WorldDistance.TrySquaredDistance which already wins on
+                    //              the nearest-snapshot side via NearestN ordering.
+                    // We pick ONCE; no per-tick re-pick.
                     var apRot = self.Rotation;
-                    var candidate = worldState.WithinRadius(self, MotionSearchRadius)
-                        .FirstOrDefault(s => string.Equals(s.Name, MotionTargetName, StringComparison.Ordinal));
+                    var inRange = worldState.WithinRadius(self, MotionSearchRadius)
+                        .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
+                        .ToList();
+
+                    WorldObjectSnapshot? candidate = null;
+                    if (!string.IsNullOrWhiteSpace(motionTargetNameOverride))
+                    {
+                        candidate = inRange.FirstOrDefault(s =>
+                            string.Equals(s.Name, motionTargetNameOverride, StringComparison.Ordinal));
+                    }
+                    else
+                    {
+                        // Nearest-first: pick the entry with the smallest 3D distance
+                        // to self. WithinRadius doesn't guarantee ordering, so sort
+                        // explicitly here.
+                        candidate = inRange
+                            .Select(s =>
+                            {
+                                WorldDistance.TrySquaredDistance(self, s, out var d2);
+                                return (snap: s, d2);
+                            })
+                            .OrderBy(t => t.d2)
+                            .Select(t => t.snap)
+                            .FirstOrDefault();
+                    }
+
+                    // Log all candidates at AP time for visibility (capped to 8 so
+                    // the spike output stays readable in dense rooms).
+                    Console.WriteLine($"[motion] candidates inRange={inRange.Count} (showing up to 8):");
+                    foreach (var (snap, d2) in inRange
+                                 .Select(s =>
+                                 {
+                                     WorldDistance.TrySquaredDistance(self, s, out var d2);
+                                     return (s, d2);
+                                 })
+                                 .OrderBy(t => t.d2)
+                                 .Take(8))
+                    {
+                        var d = (float)Math.Sqrt(d2);
+                        var marker = candidate is not null && snap.Guid == candidate.Guid ? " <-- PICKED" : "";
+                        Console.WriteLine(
+                            $"[motion]   guid=0x{snap.Guid:X8} name='{snap.Name}' " +
+                            $"itemType=0x{snap.ItemType ?? 0:X} dist={d:F2}u{marker}");
+                    }
+
                     if (candidate is not null &&
                         WorldHeading.TryYawToTarget(self, candidate, out var targetYaw))
                     {
@@ -837,12 +891,16 @@ internal sealed class HandshakeDriver : IDisposable
                         Console.WriteLine(
                             $"[motion] LOCK target guid=0x{candidate.Guid:X8} name='{candidate.Name}' " +
                             $"cell=0x{(candidate.CellId ?? 0):X8} dist={motionInitialDistance ?? float.NaN:F2}u " +
-                            $"yaw={targetYaw:F3}rad (rot=({apRot.X:F3},{apRot.Y:F3},{apRot.Z:F3},{apRot.W:F3}))");
+                            $"yaw={targetYaw:F3}rad (rot=({apRot.X:F3},{apRot.Y:F3},{apRot.Z:F3},{apRot.W:F3})) " +
+                            $"source={(string.IsNullOrWhiteSpace(motionTargetNameOverride) ? "nearest-named" : $"override='{motionTargetNameOverride}'")}");
                     }
                     else
                     {
+                        var why = string.IsNullOrWhiteSpace(motionTargetNameOverride)
+                            ? $"no named snapshots within {MotionSearchRadius}u"
+                            : $"override target name '{motionTargetNameOverride}' not within {MotionSearchRadius}u";
                         Console.WriteLine(
-                            $"[motion] no '{MotionTargetName}' within {MotionSearchRadius}u — sending AP with unchanged rotation");
+                            $"[motion] no lock — {why}. AP with unchanged rotation.");
                     }
 
                     var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
@@ -1008,6 +1066,7 @@ internal sealed class HandshakeDriver : IDisposable
                     stopCell != 0)
                 {
                     moveToStateStopSent = true;
+                    motionStoppedAt = DateTime.UtcNow;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
 
@@ -1233,14 +1292,17 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     var dfin = (float)Math.Sqrt(dfin2);
                     var delta = motionInitialDistance.HasValue ? motionInitialDistance.Value - dfin : float.NaN;
-                    var elapsedSec = motionStartedAt is DateTime mts
-                        ? (DateTime.UtcNow - mts).TotalSeconds
-                        : double.NaN;
+                    // Prefer the START->STOP-send interval if STOP fired; else
+                    // fall back to START->now (motion never stopped within window).
+                    double elapsedSec = double.NaN;
+                    if (motionStartedAt is DateTime mts)
+                        elapsedSec = ((motionStoppedAt ?? DateTime.UtcNow) - mts).TotalSeconds;
+                    var elapsedSource = motionStoppedAt is null ? "to-window-end" : "to-stop-send";
                     Console.WriteLine(
                         $"[motion] outcome target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
                         $"initialDist={motionInitialDistance ?? float.NaN:F2}u finalDist={dfin:F2}u " +
                         $"closed={delta:F2}u (positive = bot moved toward target) " +
-                        $"walkTickAps={walkTickAps} motionElapsed={elapsedSec:F1}s " +
+                        $"walkTickAps={walkTickAps} motionElapsed={elapsedSec:F1}s({elapsedSource}) " +
                         $"lastWaypoint={(lastSentWaypointPos is Vector3 lwp ? $"({lwp.X:F2},{lwp.Y:F2},{lwp.Z:F2})" : "-")}");
                 }
                 else
