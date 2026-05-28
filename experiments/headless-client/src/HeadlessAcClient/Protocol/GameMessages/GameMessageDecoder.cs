@@ -47,8 +47,26 @@ internal static class GameMessageDecoder
             GameMessageOpcode.ServerMessage => DecodeServerMessage(payload),
             GameMessageOpcode.ObjectCreate => ObjectCreateDecoder.Decode(payload),
             GameMessageOpcode.GameEvent => DecodeGameEvent(payload),
+            GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
             _ => null,
         };
+    }
+
+    private static PrivateUpdatePropertyIntMessage? DecodePrivateUpdatePropertyInt(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < PrivateUpdatePropertyIntMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var seq  = p[cursor]; cursor += 1;
+            var prop = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var val  = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(cursor));
+            return new PrivateUpdatePropertyIntMessage(seq, prop, val);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static GameEventMessage? DecodeGameEvent(ReadOnlySpan<byte> p)

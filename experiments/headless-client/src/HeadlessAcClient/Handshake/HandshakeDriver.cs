@@ -436,6 +436,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"recv=0x{ge.ReceiverGuid:X8} seq={ge.ServerEventSequence} " +
                                 $"payload[{ge.PayloadBytes.Length}]");
                             break;
+                        case PrivateUpdatePropertyIntMessage pup:
+                            Console.WriteLine(
+                                $"[observe]   -> PrivateUpdatePropertyInt: {pup.PropertyName} = {pup.Value} (seq={pup.Sequence})");
+                            break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
                             break;
