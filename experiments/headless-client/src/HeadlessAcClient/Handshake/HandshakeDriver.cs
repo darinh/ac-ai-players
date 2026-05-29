@@ -462,6 +462,35 @@ internal sealed class HandshakeDriver : IDisposable
         uint? lastObservedSelfLandblock = null;
         bool loginCompleteResendNeeded = false;
 
+        // Phase 7h — GIVE-to-NPC table. Maps (NPC weenie class) →
+        // (item weenie class to GIVE to that NPC if owned). Filled
+        // from ace_world emote chain inspection. Initially:
+        //   - Jonathan (29324 academyguardexitholtburg) ← Academy
+        //     Exit Token (29335). Triggers academy-exit recall.
+        //   - Society Greeter (30991) ← Calling Stone (5084). Per
+        //     stone's ShortDesc: "Give this item to the Society
+        //     Greeter." Part of the academy quest chain.
+        //
+        // The pre-emptor (below) iterates this dict in declaration
+        // order, so the first qualifying pair (we own the item AND
+        // see the NPC in worldState) wins. To prioritize the exit
+        // over the Greeter handoff, Jonathan must come first. See
+        // ac-ai-players#66 for personality-driven prioritization.
+        var giveItemForNpcWcid = new Dictionary<uint, uint>
+        {
+            { 29324u, AcademyExitTokenWcid    },  // Jonathan ← Exit Token (academy exit)
+            { 30991u, AcademyCallingStoneWcid },  // Society Greeter ← Calling Stone
+        };
+        // (npcWcid, itemWcid) pairs that have completed a GIVE.
+        // Defensive guard against re-firing on the same pair if the
+        // server-side delete of the item from inventory hasn't
+        // propagated to our worldState by the next tick.
+        var giveCompletedPairs = new HashSet<(uint, uint)>();
+        // Set by the Phase 7h pre-emptor when we lock onto an NPC to
+        // GIVE. Consumed by the action-send block (replaces USE with
+        // GiveObjectRequest). Cleared by the cooldown-reset block.
+        uint? pendingGiveItemGuid = null;
+
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
         // rotation is REPLICATED (not duplicated) on both the AP and
@@ -1402,6 +1431,28 @@ internal sealed class HandshakeDriver : IDisposable
                     // the same guid until it dies.
                     if (motionTarget is not null && motionTarget.Guid != combatTargetGuid)
                         visitedTargetGuids.Add(motionTarget.Guid);
+
+                    // Phase 7h — record completed GIVE pair so the
+                    // pre-emptor doesn't re-fire if the server-side
+                    // inventory delete hasn't reached our worldState
+                    // by the next pre-emptor pass. motionTarget here
+                    // is the NPC we GAVE to (pre-emptor set it).
+                    if (pendingGiveItemGuid is not null && motionTarget is not null &&
+                        motionTarget.WeenieClassId is uint giveNpcWc)
+                    {
+                        foreach (var p in giveItemForNpcWcid)
+                        {
+                            if (p.Key == giveNpcWc)
+                            {
+                                giveCompletedPairs.Add((p.Key, p.Value));
+                                Console.WriteLine(
+                                    $"[motion] PHASE7H GIVE COMPLETE: " +
+                                    $"npcWcid={p.Key} itemWcid={p.Value} added to giveCompletedPairs");
+                                break;
+                            }
+                        }
+                    }
+
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}'); " +
                         $"resetting motion state to pick next target");
@@ -1421,6 +1472,7 @@ internal sealed class HandshakeDriver : IDisposable
                     useSentAt = null;
                     lastSentWaypointPos = null;
                     walkTickAps = 0;
+                    pendingGiveItemGuid = null;
 
                     if (actionsCompleted >= MaxActionsPerSession)
                     {
@@ -1430,31 +1482,46 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
-                // Phase 7g — inventory-USE pre-emptor for the Academy
-                // Calling Stone. The picker (below) only sees world
-                // objects via WithinRadius → WorldDistance.TrySquaredDistance,
-                // which requires CellId. Inventory items have no
-                // CellId/Position so they are silently dropped. The
-                // Calling Stone (wcid 5084) is granted at character
-                // creation and lives in our pack — we never need to
-                // walk to it. Per ACE Player_Use.HandleActionUseItem,
-                // a USE on an inventory item skips the move-to-chain
-                // and dispatches TryUseItem directly. Gem.UseGem then
-                // casts the gem's SpellDID; the Academy Calling Stone's
-                // PortalSummon teleports us to the assigned start town.
+                // Phase 7h — GIVE-to-NPC pre-emptor (replaces the
+                // earlier Phase 7g inventory-USE-on-Calling-Stone idea,
+                // which sent UseDone(ok) but produced no teleport: per
+                // ace_world DB the Calling Stone has no SpellDID; its
+                // intended use is GIVE to a Society Greeter / Training
+                // Master, not USE).
                 //
-                // Gating: requires the Academy Exit Token (wcid 29335)
-                // — Jonathan grants it on first USE during the academy
-                // intro. Without the token the stone's emote chain
-                // burns through visited-set without progress, so the
-                // bot must wait to advance the dialog chain first.
+                // Mechanism per ace_world weenie 29324 (Jonathan,
+                // academyguardexitholtburg):
+                //   cat=6 Give wcid=29335 (Academy Exit Token) →
+                //     Goto pick_coat_color (weighted GotoSet auto-picks
+                //     one of 10 coat color variants) →
+                //     Goto finalize_exit →
+                //     InqBoolStat RecallsDisabled →
+                //     TestSuccess RecallsDisabled =
+                //       Give wcid=49563 (facility hub portal gem) +
+                //       SetSanctuaryPosition cell=0xA9B40019 (84,7.1,94) +
+                //       EraseQuest AcademeyExitTokenGiven +
+                //       CastSpellInstant spell_Id=3815 (recall to fresh
+                //       sanctuary). The recall is the actual teleport.
                 //
-                // State synthesis after send: motionTarget=stone,
-                // autonomousPositionSent=true (gate AP), motionDone=true
-                // (no walk to run), useSent=true + useSentAt=now (arm
-                // post-action cooldown). The cooldown reset block above
-                // will then own actionsCompleted++ and adding the stone
-                // guid to visitedTargetGuids (so we do not re-USE).
+                // No coat-color dialog is needed because the server
+                // auto-selects via emote probabilities. We just need to
+                // GIVE the token. The server-side CreateMoveToChain
+                // walks our player to Jonathan automatically — but since
+                // a headless player without a real client tick has a
+                // history of physics-skipping, we still drive the walk
+                // ourselves (set motionTarget=Jonathan, send AP, run
+                // through MoveToState START / walk-tick / STOP, then
+                // send GIVE). This is the same pattern as the existing
+                // walk-and-USE flow used for other NPC interactions.
+                //
+                // Pre-emptor bypasses visitedTargetGuids (Jonathan was
+                // already USE'd in cycle 3 to receive the token) and
+                // ignores radius (worldState.Objects is a global view).
+                // giveCompletedPairs records (npcWcid, itemWcid) pairs
+                // that have completed at action-send time, defensively
+                // gating re-fires (the item is normally already gone
+                // from inventory after a successful GIVE, but this is
+                // belt-and-suspenders).
                 if (!autonomousPositionSent &&
                     !useSent &&
                     motionTarget is null &&
@@ -1464,81 +1531,83 @@ internal sealed class HandshakeDriver : IDisposable
                     !loginCompleteResendNeeded &&
                     loginCompletePacketIndex >= 0 &&
                     (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
-                    worldState.Self is WorldObjectSnapshot invSelf &&
-                    invSelf.CellId is uint invSelfCell &&
-                    invSelfCell != 0)
+                    worldState.Self is WorldObjectSnapshot giveSelf &&
+                    giveSelf.CellId is uint giveSelfCell &&
+                    giveSelfCell != 0)
                 {
-                    var ownsExitToken = worldState.Objects.Values.Any(o =>
-                        o.WeenieClassId == AcademyExitTokenWcid &&
-                        o.ContainerGuid is uint tcg && tcg == invSelf.Guid);
-                    WorldObjectSnapshot? invStone = null;
-                    if (ownsExitToken)
+                    foreach (var pair in giveItemForNpcWcid)
                     {
-                        invStone = worldState.Objects.Values.FirstOrDefault(o =>
-                            o.WeenieClassId == AcademyCallingStoneWcid &&
-                            o.ContainerGuid is uint scg && scg == invSelf.Guid &&
-                            !visitedTargetGuids.Contains(o.Guid));
-                    }
-                    else
-                    {
-                        // Diagnostic: distinguish "no stone" from
-                        // "stone present but token missing" so logs
-                        // tell us whether picker progress is gated by
-                        // the dialog chain (need Jonathan first) or
-                        // by stone visibility (decoder bug).
-                        var stonePresent = worldState.Objects.Values.Any(o =>
-                            o.WeenieClassId == AcademyCallingStoneWcid &&
-                            o.ContainerGuid is uint scg && scg == invSelf.Guid);
-                        if (stonePresent && actionsCompleted == 0)
-                        {
-                            // Log once at the start — repeated checks
-                            // every tick would spam.
-                            Console.WriteLine(
-                                $"[motion] PHASE7G note: Calling Stone in " +
-                                $"inventory but Academy Exit Token not yet " +
-                                $"owned; waiting for Jonathan dialog completion " +
-                                $"before USE.");
-                        }
-                    }
-                    if (invStone is not null)
-                    {
-                        var packetSeq = nextOutboundPacketSequence++;
-                        var fragSeq   = nextOutboundFragmentSequence++;
+                        var npcWcid = pair.Key;
+                        var itemWcid = pair.Value;
+                        if (giveCompletedPairs.Contains((npcWcid, itemWcid))) continue;
 
-                        var actionBuf  = new byte[GameActionUseMessage.PackedSize];
-                        var payloadLen = GameActionUseMessage.Pack(actionBuf, invStone.Guid);
+                        var ownedItem = worldState.Objects.Values.FirstOrDefault(o =>
+                            o.WeenieClassId == itemWcid &&
+                            o.ContainerGuid is uint cg && cg == giveSelf.Guid);
+                        if (ownedItem is null) continue;
 
-                        var msg = new OutboundPacket();
+                        var npc = worldState.Objects.Values.FirstOrDefault(o =>
+                            o.WeenieClassId == npcWcid &&
+                            o.CellId is uint nCell && nCell != 0 &&
+                            (o.Guid & 0xFF000000u) != 0x50000000u);
+                        if (npc is null) continue;
+
+                        float giveYaw = 0f;
+                        Quaternion giveRot;
+                        if (WorldHeading.TryYawToTarget(giveSelf, npc, out giveYaw))
+                            giveRot = WorldHeading.RotationFromYaw(giveYaw);
+                        else
+                            giveRot = giveSelf.Rotation;
+
+                        motionTarget          = npc;
+                        motionRotation        = giveRot;
+                        pendingGiveItemGuid   = ownedItem.Guid;
+                        if (WorldDistance.TrySquaredDistance(giveSelf, npc, out var giveD2))
+                            motionInitialDistance = (float)Math.Sqrt(giveD2);
+
+                        autonomousPositionSent = true;
+                        autonomousPositionPacketIndex = count;
+
+                        var apPacketSeq = nextOutboundPacketSequence++;
+                        var apFragSeq   = nextOutboundFragmentSequence++;
+                        var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                        var apLen = GameActionAutonomousPositionMessage.Pack(
+                            apBuf,
+                            cellId: giveSelfCell,
+                            pos:    giveSelf.Position,
+                            rot:    giveRot,
+                            instanceSequence:      giveSelf.SeqInstance      ?? 0,
+                            serverControlSequence: giveSelf.SeqServerControl ?? 0,
+                            teleportSequence:      giveSelf.SeqTeleport      ?? 0,
+                            forcePositionSequence: giveSelf.SeqForcePosition ?? 0,
+                            contact: true);
+
+                        var apMsg = new OutboundPacket();
                         if (lastReceivedSeq != 0)
-                            msg.AddAckSequence(lastReceivedSeq);
-                        msg.AddBlobFragment(
-                            fragSequence: fragSeq,
+                            apMsg.AddAckSequence(lastReceivedSeq);
+                        apMsg.AddBlobFragment(
+                            fragSequence: apFragSeq,
                             fragId: OutboundFragmentId,
                             queue: (ushort)GameMessageGroup.UIQueue,
-                            gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
-
-                        var sentLen = msg.Pack(sendBuf, myClientId,
-                                               sequence: packetSeq, iteration: 1,
-                                               encrypt: true, cryptoSend: cryptoSend);
-                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                            gameMessagePayload: apBuf.AsSpan(0, apLen));
+                        var apSent = apMsg.Pack(sendBuf, myClientId,
+                                                sequence: apPacketSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSent),
                                                    SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
 
-                        motionTarget          = invStone;
-                        autonomousPositionSent = true;
-                        moveToStateStartSent  = true;
-                        moveToStateStopSent   = true;
-                        motionDone            = true;
-                        useSent               = true;
-                        useSentAt             = DateTime.UtcNow;
-
                         Console.WriteLine(
-                            $"[motion] PHASE7G INVENTORY USE: Calling Stone " +
-                            $"guid=0x{invStone.Guid:X8} wcid={invStone.WeenieClassId} " +
-                            $"pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                            $"[motion] PHASE7H GIVE TARGET LOCK: " +
+                            $"npc='{npc.Name}' wcid={npcWcid} guid=0x{npc.Guid:X8} " +
+                            $"cell=0x{(npc.CellId ?? 0):X8} dist={motionInitialDistance ?? float.NaN:F2}u; " +
+                            $"item='{ownedItem.Name}' wcid={itemWcid} guid=0x{ownedItem.Guid:X8}; " +
+                            $"sent AP yaw={giveYaw:F3}rad pktSeq={apPacketSeq} fragSeq={apFragSeq} totalBytes={apSent}");
                         Console.WriteLine(
-                            $"[motion]      Expect: server casts PortalSummon, " +
-                            $"sets Teleporting=true, UpdatePosition to new landblock; " +
-                            $"the landblock-change detector will resend LoginComplete.");
+                            $"[motion]      Expect: walk-and-GIVE flow drives MoveToState START → walk-tick AP → STOP → " +
+                            $"GameActionGiveObjectRequest(target=0x{npc.Guid:X8}, item=0x{ownedItem.Guid:X8}, amount=1). " +
+                            $"Then Jonathan's emote chain (Goto pick_coat_color → finalize_exit → CastSpellInstant 3815) " +
+                            $"recalls bot to landblock 0xA9B40019.");
+                        break;
                     }
                 }
 
@@ -2114,6 +2183,28 @@ internal sealed class HandshakeDriver : IDisposable
                                 objectGuid: motionTarget.Guid);
                             fragSeqC = nextOutboundFragmentSequence++;
                         }
+                    }
+                    else if (pendingGiveItemGuid is uint giveItemGuid)
+                    {
+                        // Phase 7h — GIVE branch. The pre-emptor set
+                        // motionTarget=NPC and pendingGiveItemGuid=item
+                        // earlier. Now that walk-and-stop completed,
+                        // send the GiveObjectRequest. Server-side:
+                        //   Player_Inventory.HandleActionGiveObjectRequest
+                        //   → CreateMoveToChain → GiveObjectToNPC
+                        //   → NPC.EmoteManager fires the cat=6 Give
+                        //     chain for the item's wcid (Jonathan's
+                        //     emote 50507 for Exit Token → Goto
+                        //     pick_coat_color → finalize_exit →
+                        //     CastSpellInstant 3815 → recall).
+                        actionName = "GIVE";
+                        actionBuf  = new byte[GameActionGiveObjectRequestMessage.PackedSize];
+                        payloadLen = GameActionGiveObjectRequestMessage.Pack(
+                            actionBuf,
+                            targetGuid: motionTarget.Guid,
+                            itemGuid:   giveItemGuid,
+                            amount:     1);
+                        fragSeq    = nextOutboundFragmentSequence++;
                     }
                     else if (isPickup)
                     {

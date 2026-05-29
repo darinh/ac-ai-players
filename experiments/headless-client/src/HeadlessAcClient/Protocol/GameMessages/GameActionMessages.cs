@@ -44,6 +44,7 @@ internal enum GameActionType : uint
     GetAndWieldItem     = 0x001A,
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
+    GiveObjectRequest   = 0x00CD,
 }
 
 /// <summary>
@@ -245,6 +246,49 @@ internal static class GameActionPutItemInContainerMessage
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);     cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), containerGuid); cursor += 4;
         BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), placement);     cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// GiveObjectRequest (0x00CD). Sent client→server to hand an
+/// inventory item to a target Container (NPC or another player).
+/// The server validates ownership, runs CreateMoveToChain to walk
+/// the player to the target, then either dispatches GiveObjectToNPC
+/// (which fires the NPC's category-6 Give emote chain for the item's
+/// wcid) or GiveObjectToPlayer.
+///
+/// Wire payload (after the 12-byte GameAction header):
+///   u32 targetGuid       (recipient — NPC's guid)
+///   u32 objectGuid       (item being given — from our inventory)
+///   i32 amount           (stack count, normally 1)
+///
+/// Server handler:
+///   Source/ACE.Server/Network/GameAction/Actions/GameActionGiveObjectRequest.cs
+///   Source/ACE.Server/WorldObjects/Player_Inventory.cs:3190
+///     HandleActionGiveObjectRequest → CreateMoveToChain → GiveObjectToNPC
+///
+/// Key academy use-case: GIVE Academy Exit Token (wcid 29335) to
+/// Jonathan (wcid 29324) triggers his emote chain:
+///   cat=6 Give wcid=29335 → Goto pick_coat_color (auto-picks via
+///   weighted GotoSet) → Goto finalize_exit → InqBoolStat
+///   RecallsDisabled → TestSuccess RecallsDisabled → CastSpellInstant
+///   spell_Id=3815 (recall to fresh sanctuary at landblock 0xA9B4
+///   cell 0x0019 coord (84, 7.1, 94) = outdoor Holtburg).
+/// </summary>
+internal static class GameActionGiveObjectRequestMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 12;  // 24 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint itemGuid, int amount = 1, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.GiveObjectRequest, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);   cursor += 4;
+        BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), amount);     cursor += 4;
         return cursor;
     }
 }
