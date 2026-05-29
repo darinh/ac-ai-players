@@ -938,6 +938,27 @@ internal sealed class HandshakeDriver : IDisposable
                                     if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
                                         satisfiedWeenieClasses.Add(wc2);
                                 }
+                                // Slice H follow-up: WieldObject is the only
+                                // notification the server sends when an item
+                                // transitions from inventory to equipped. The
+                                // server does NOT re-broadcast an ObjectCreate
+                                // for the item, so WorldObjectSnapshot's
+                                // CurrentWieldedLocation / WielderGuid stay at
+                                // their last-ObjectCreate values (typically
+                                // null/null for an inventory item) forever.
+                                // The LLM Combat readiness section reads
+                                // WieldedAt to decide if the bot is armed -
+                                // without this update, `weapon: NOT wielded`
+                                // is reported even right after we wield the
+                                // starter Spadone, blocking any Attack.
+                                var equippedSnap = worldState.TryGet(wieldAck.ItemGuid);
+                                if (equippedSnap is not null)
+                                {
+                                    equippedSnap.CurrentWieldedLocation = wieldAck.NewLocation;
+                                    if (worldState.SelfGuid is uint sg)
+                                        equippedSnap.WielderGuid = sg;
+                                    equippedSnap.ContainerGuid = null;
+                                }
                                 Console.WriteLine(
                                     $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
                                     $"wcids=[{string.Join(",", satisfiedWeenieClasses.Select(c => c.ToString()))}]");
