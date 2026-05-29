@@ -237,8 +237,107 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Id = parsed.Id == Guid.Empty ? Guid.NewGuid() : parsed.Id,
         };
 
+        // Slice N — programmatic rejection enforcement.
+        //
+        // The "do NOT retry the same (kind, target, item) combo"
+        // prompt rule (Slice F) is observably violated by the LLM
+        // — see decisions 51,52,55,58 in spike8 where Give(Worcer,
+        // List of Items) was emitted 4 times with a TradeAiDoesntWant
+        // rejection between every attempt. Prompt-only enforcement
+        // is insufficient; the policy must enforce the rule itself.
+        //
+        // If the LLM-returned goal matches a recent ActionRejected
+        // (by item guid/wcid/name OR by target name), drop the goal
+        // and fall through to the fallback policy. The fallback has
+        // its own dedup (NoQuestKnowledgePolicy.recentlyRejectedGuids
+        // + _recentProposedGuids) and will pick a fresh schema-only
+        // action (Pickup, Wield, Explore) instead of re-trying the
+        // same blocked target.
+        if (IsGoalRecentlyRejected(goal, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM goal kind={goal.Kind} target={goal.Target}" +
+                (goal.Item is null ? "" : $" item={goal.Item}") +
+                " — matches a recent ActionRejected; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: LLM goal matched a recent ActionRejected");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         return goal;
+    }
+
+    /// <summary>
+    /// True iff the goal targets an item or NPC that the server (or
+    /// our local walk-timeout) has rejected within the recent event
+    /// window. Matches by:
+    ///   - Item wcid (precise, when the rejection carries it from
+    ///     InventoryServerSaveFailed).
+    ///   - Item name (case-insensitive exact match).
+    ///   - Target name appearing in the rejection's Name field
+    ///     (Unreachable carries motionTarget.Name) or in the Text
+    ///     field (WeenieErrorWithString puts the NPC name there for
+    ///     Give rejections, "Unreachable: 'NPC' (walk timeout ...)"
+    ///     puts it for walk-timeout rejections).
+    /// Short target names (&lt; 4 chars) skip substring matching to
+    /// avoid false positives on tokens like "the" embedded in a
+    /// longer rejection message.
+    /// </summary>
+    internal static bool IsGoalRecentlyRejected(Goal goal, EventStream events)
+    {
+        const int LookbackEvents = 15;
+        var targetName = goal.Target?.Name;
+        var itemName   = goal.Item?.Name;
+        var itemWcid   = goal.Item?.Wcid;
+
+        if (string.IsNullOrWhiteSpace(targetName) &&
+            string.IsNullOrWhiteSpace(itemName) &&
+            itemWcid is null)
+        {
+            return false;
+        }
+
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (ev.Kind != EventKind.ActionRejected) continue;
+
+            // Item-specific rejection (carries item wcid/name —
+            // typically Slice J's InventoryServerSaveFailed).
+            if (itemWcid is uint w && ev.Wcid == w) return true;
+            if (!string.IsNullOrWhiteSpace(itemName) &&
+                !string.IsNullOrWhiteSpace(ev.Name) &&
+                string.Equals(ev.Name, itemName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            // Target-name match: NPC name carried in Name (Unreachable)
+            // or Text (WeenieErrorWithString puts the NPC name there).
+            if (!string.IsNullOrWhiteSpace(targetName))
+            {
+                if (!string.IsNullOrWhiteSpace(ev.Name) &&
+                    string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                if (!string.IsNullOrWhiteSpace(ev.Text))
+                {
+                    if (string.Equals(ev.Text, targetName, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                    // Substring match (for "Unreachable: 'X' (walk timeout ...)")
+                    // gated on a minimum target-name length to avoid
+                    // false positives on short common substrings.
+                    if (targetName.Length >= 4 &&
+                        ev.Text.Contains(targetName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
     }
 
     private static bool HasSalientSinceSequence(EventStream events, long sequenceFloor)

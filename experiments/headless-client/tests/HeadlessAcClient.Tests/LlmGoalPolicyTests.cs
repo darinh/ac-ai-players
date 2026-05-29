@@ -475,6 +475,185 @@ public class LlmGoalPolicyTests
         Assert.Contains("Society Greeter", s);
     }
 
+    // ---- Slice N — programmatic rejection enforcement ----
+    //
+    // Spike8 confirmed the LLM violates the "do NOT retry the same
+    // (kind, target, item) combo" prompt rule even when the rejection
+    // is the most recent rejection event (decisions 51, 52, 55, 58
+    // all emitted Give(Worcer, A List of Items) with a fresh
+    // TradeAiDoesntWant rejection between every attempt). The policy
+    // must enforce the rule itself, not rely on LLM compliance.
+
+    [Fact]
+    public void IsGoalRecentlyRejected_GiveTradeAiDoesntWant_MatchesByTargetText()
+    {
+        // Mirrors what HandshakeDriver appends when a Give is refused
+        // (WeenieErrorWithString carries the NPC name in `Text`).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Worcer",
+        });
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Give,
+            Target = new Selector { Name = "Worcer" },
+            Item = new Selector { Name = "A List of Items" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_Unreachable_MatchesByTargetName()
+    {
+        // Mirrors HandshakeDriver's walk-timeout rejection (Slice J)
+        // which carries motionTarget.Name in Name and a longer
+        // "Unreachable: 'X' (walk timeout ...)" string in Text.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Worcer",
+            Text = "Unreachable: 'Worcer' (walk timeout 30s)",
+            ItemGuid = 0x80001269u,
+        });
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Worcer" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_InventoryServerSaveFailed_MatchesByItemWcid()
+    {
+        // Mirrors HandshakeDriver's Slice J rejection for unreachable
+        // landscape items (ItemGuid + Wcid + Name populated).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x0035, ErrorLabel = "AcceptInventoryItemNotInWorld",
+            Name = "Bruised Apple",
+            Wcid = 29335u,
+            ItemGuid = 0x800005A1u,
+            Text = "Inventory action failed on 'Bruised Apple'",
+        });
+
+        var goalByWcid = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Wcid = 29335u },
+            Item = new Selector { Wcid = 29335u },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goalByWcid, es));
+
+        var goalByName = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Bruised Apple" },
+            Item = new Selector { Name = "Bruised Apple" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goalByName, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_DifferentTarget_DoesNotMatch()
+    {
+        // Rejection targets Worcer; goal targets Jonathan — should pass.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Worcer",
+        });
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Give,
+            Target = new Selector { Name = "Jonathan" },
+            Item = new Selector { Name = "Academy Exit Token" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_EmptyEvents_DoesNotMatch()
+    {
+        var es = new EventStream();
+        var goal = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Worcer" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_OldRejection_OutsideWindow_DoesNotMatch()
+    {
+        // The dedup looks back 15 events. Push the rejection then 20
+        // unrelated events so it falls off the window.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Worcer",
+        });
+        for (int i = 0; i < 20; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage, Text = $"filler {i}",
+            });
+        }
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Give,
+            Target = new Selector { Name = "Worcer" },
+            Item = new Selector { Name = "A List of Items" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_ShortTargetName_SkipsSubstringMatch()
+    {
+        // Target name "Bob" (3 chars) is below the 4-char substring
+        // gate, so a rejection text containing "Bob" should NOT match
+        // unless it's an exact equality.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Text = "Unreachable: 'Bobblehead' (walk timeout 30s)",
+        });
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Bob" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
     // ---- Slice G — server-hints prompt section regression ----
     //
     // In rejfix-run-01 the bot teleported to Holtburg, saw the Life
