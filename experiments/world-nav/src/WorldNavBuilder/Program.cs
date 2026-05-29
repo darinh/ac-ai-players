@@ -40,6 +40,12 @@ bool diag = false;
 bool partition = false;
 Vector3? traceFrom = null;
 Vector3? traceTo = null;
+// --inspect <hex>: dump a single cell's connections + bridge formation
+// status so we can audit per-cell whether ComputeWalkableBridges
+// successfully wired each CellConnection to a doorway node on both
+// sides. Outputs the count of CellConnection records, the count of
+// bridges actually formed, and per-connection FROM/TO match results.
+uint? inspectCellId = null;
 
 static Vector3 ParseV3(string s, string flag)
 {
@@ -79,9 +85,13 @@ for (int i = 0; i < args.Length; i++)
         case "--quiet": quiet = true; break;
         case "--diag": diag = true; break;
         case "--partition": partition = true; break;
+        case "--inspect":
+            var icHex = Next(a).Replace("0x", "", StringComparison.OrdinalIgnoreCase);
+            inspectCellId = uint.Parse(icHex, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            break;
         case "-h":
         case "--help":
-            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--show-walkable-bridges] [--trace x,y,z x,y,z] [--partition] [--diag] [--quiet]");
+            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--show-walkable-bridges] [--trace x,y,z x,y,z] [--inspect <cellHex>] [--partition] [--diag] [--quiet]");
             return 0;
         default:
             Console.Error.WriteLine($"unknown arg: {a}");
@@ -244,6 +254,126 @@ if (traceFrom is { } pf && traceTo is { } pt)
     else if (!quiet)
     {
         Console.Error.WriteLine($"trace: FAILED ({result.FailureReason}); visited={result.VisitedNodes}");
+    }
+}
+
+if (inspectCellId is uint icid)
+{
+    // Dump everything about one cell so we can debug per-cell bridge
+    // formation. Reports: cell connections (each from-side), the
+    // doorway node on this side (if any), the matching doorway on
+    // the other side (if any), bridge-formation outcome, plus the
+    // intra-cell connected-component count.
+    if (!graph.Cells.TryGetValue(icid, out var ic))
+    {
+        Console.Error.WriteLine($"inspect: cell 0x{icid:X8} not in landblock 0x{landblock:X4}");
+    }
+    else
+    {
+        Console.WriteLine();
+        Console.WriteLine($"inspect cell 0x{ic.CellId:X8}:");
+        Console.WriteLine($"  centroid:     ({ic.CentroidWorld.X:0.00},{ic.CentroidWorld.Y:0.00},{ic.CentroidWorld.Z:0.00})");
+        Console.WriteLine($"  connections:  {ic.Connections.Count}");
+        Console.WriteLine($"  floor polys:  {ic.FloorPolygons.Count}");
+        Console.WriteLine($"  obstacles:    {ic.StaticObstacles.Count}");
+        Console.WriteLine($"  walk nodes:   {ic.WalkableNodes.Count} (Floor + Doorway)");
+        Console.WriteLine($"  walk edges:   {ic.WalkableEdges.Count}");
+
+        int doorwayNodeCount = 0;
+        foreach (var n in ic.WalkableNodes)
+            if (n.Kind == WalkableNodeKind.Doorway) doorwayNodeCount++;
+        Console.WriteLine($"  doorway nodes: {doorwayNodeCount}");
+
+        // Intra-cell CC count
+        int n2 = ic.WalkableNodes.Count;
+        var adj2 = new List<int>[n2];
+        for (int i = 0; i < n2; i++) adj2[i] = new List<int>();
+        foreach (var e in ic.WalkableEdges)
+        {
+            adj2[e.NodeA].Add(e.NodeB);
+            adj2[e.NodeB].Add(e.NodeA);
+        }
+        var comp2 = new int[n2];
+        for (int i = 0; i < n2; i++) comp2[i] = -1;
+        int ccCount = 0;
+        int bestCcSize = 0;
+        var ccSizes = new List<int>();
+        for (int i = 0; i < n2; i++)
+        {
+            if (comp2[i] != -1) continue;
+            int sz = 0;
+            var q = new Queue<int>();
+            q.Enqueue(i); comp2[i] = ccCount;
+            while (q.Count > 0)
+            {
+                int u = q.Dequeue(); sz++;
+                foreach (var v in adj2[u])
+                    if (comp2[v] == -1) { comp2[v] = ccCount; q.Enqueue(v); }
+            }
+            ccSizes.Add(sz);
+            if (sz > bestCcSize) bestCcSize = sz;
+            ccCount++;
+        }
+        Console.WriteLine($"  CCs: {ccCount} components; largest={bestCcSize}; sizes={string.Join(",", ccSizes.OrderByDescending(s => s).Take(8))}");
+
+        // For each connection, find the doorway node on THIS side and
+        // report whether a bridge to the other side actually exists.
+        var bridgesFromHere = graph.WalkableBridges
+            .Where(b => b.FromCellId == ic.CellId || b.ToCellId == ic.CellId)
+            .ToList();
+        Console.WriteLine($"  bridges touching this cell: {bridgesFromHere.Count}");
+
+        foreach (var conn in ic.Connections)
+        {
+            string otherStr = $"0x{conn.OtherCellId:X8}";
+            string loadedStr = conn.OtherCellLoaded ? "loaded" : "DANGLING";
+            string centroidStr = conn.CentroidWorld is Vector3 ccc
+                ? $"({ccc.X:0.00},{ccc.Y:0.00},{ccc.Z:0.00})"
+                : "(no-centroid)";
+
+            // Find this side's doorway node (by ConnectionPolygonId)
+            int thisDoorwayIdx = -1;
+            for (int i = 0; i < ic.WalkableNodes.Count; i++)
+            {
+                if (ic.WalkableNodes[i].Kind == WalkableNodeKind.Doorway &&
+                    ic.WalkableNodes[i].ConnectionPolygonId == conn.PolygonId)
+                {
+                    thisDoorwayIdx = i;
+                    break;
+                }
+            }
+            string thisDwStr = thisDoorwayIdx >= 0
+                ? $"node={thisDoorwayIdx}@({ic.WalkableNodes[thisDoorwayIdx].PositionWorld.X:0.0},{ic.WalkableNodes[thisDoorwayIdx].PositionWorld.Y:0.0},{ic.WalkableNodes[thisDoorwayIdx].PositionWorld.Z:0.0})"
+                : "NO-DOORWAY-NODE";
+
+            // Count intra-cell edges from this doorway node
+            int dwEdges = 0;
+            if (thisDoorwayIdx >= 0)
+                foreach (var e in ic.WalkableEdges)
+                    if (e.NodeA == thisDoorwayIdx || e.NodeB == thisDoorwayIdx) dwEdges++;
+
+            // Look for a bridge between THIS cell + the other cell that
+            // uses THIS doorway node.
+            bool hasBridge = false;
+            if (thisDoorwayIdx >= 0 && conn.OtherCellLoaded)
+            {
+                foreach (var b in graph.WalkableBridges)
+                {
+                    if (b.ConnectionPolygonId != conn.PolygonId) continue;
+                    if ((b.FromCellId == ic.CellId && b.FromNodeIndex == thisDoorwayIdx) ||
+                        (b.ToCellId == ic.CellId && b.ToNodeIndex == thisDoorwayIdx))
+                    {
+                        hasBridge = true;
+                        break;
+                    }
+                }
+            }
+            string bridgeStr = !conn.OtherCellLoaded ? "n/a (dangling)" : (hasBridge ? "BRIDGE-OK" : "NO-BRIDGE");
+
+            Console.WriteLine($"  conn poly={conn.PolygonId} -> {otherStr} ({loadedStr}) cc-centroid={centroidStr}");
+            Console.WriteLine($"    this-side: {thisDwStr} intra-edges={dwEdges}");
+            Console.WriteLine($"    bridge:    {bridgeStr}");
+        }
     }
 }
 

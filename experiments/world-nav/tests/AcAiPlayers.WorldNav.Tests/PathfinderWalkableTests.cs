@@ -343,4 +343,179 @@ public class PathfinderWalkableTests
         Assert.Equal(4, graph.WalkableFloorNodeCount);
         Assert.Equal(2, graph.WalkableDoorwayNodeCount);
     }
+
+    /// <summary>
+    /// Threshold-cell regression: when a cell's floor polygons
+    /// tessellate into two disconnected node clusters (common for
+    /// stairs, narrow arches, doorway thresholds) and the cell holds
+    /// two doorway nodes — one wired into each cluster — A* MUST be
+    /// able to traverse from one doorway to the other within the
+    /// cell. Without an explicit doorway↔doorway intra-cell edge the
+    /// bot strands itself the moment it enters the cell from one side
+    /// because the other side's doorway is in a different component.
+    ///
+    /// Locks in the "doorway pair edges" fix in
+    /// LandblockNavLoader.AppendDoorwayNodesAndEdges. This test
+    /// directly synthesises the cell to keep the assertion focused
+    /// on the structural requirement; the loader-side fix is what
+    /// produces this shape from real DAT data.
+    /// </summary>
+    [Fact]
+    public void ThresholdCell_DoorwayPairEdge_EnablesCrossCellTraversal()
+    {
+        // Layout (top-down):
+        //   +-----------+-------------------------+-----------+
+        //   |    A      |  T (threshold cell)     |    B      |
+        //   |  3x3 grid |  cluster_W . cluster_E  |  3x3 grid |
+        //   +-----------+-------------------------+-----------+
+        // T contains:
+        //   - 3 floor nodes on west side (idx 0,1,2) — wired internally
+        //   - 3 floor nodes on east side (idx 3,4,5) — wired internally
+        //   - 1 doorway node on west (idx 6) wired only to cluster_W
+        //   - 1 doorway node on east (idx 7) wired only to cluster_E
+        // No floor edge bridges the two clusters (mimics the real
+        // academy threshold cell 0x860201B4: two stair tread groups).
+        var a = MakeCell(0x0A, 0f, 0f, 0f);
+        var b = MakeCell(0x0B, 20f, 0f, 0f);
+        var t = BuildThresholdCell(includeDoorwayPairEdge: false);
+
+        var graph = new IndoorNavGraph
+        {
+            LandblockId = 0x0001,
+            Cells = new Dictionary<uint, IndoorCell>
+            {
+                [a.CellId] = a,
+                [b.CellId] = b,
+                [t.CellId] = t,
+            },
+            BoundsWorld = new NavBounds(0, 0, 30, 10, 0, 0),
+            // Bridge A↔T into doorway-W (idx 6), bridge T↔B from
+            // doorway-E (idx 7). Without the doorway-pair edge,
+            // A→B should fail because the two doorways are in
+            // different components of T.
+            WalkableBridges = new List<WalkableBridge>
+            {
+                new(a.CellId, 5, t.CellId, 6, 1, 1f),
+                new(t.CellId, 7, b.CellId, 3, 2, 1f),
+            },
+        };
+
+        var pf = new Pathfinder();
+        var fromA = new Vector3(2.5f, 5f, 0f);
+        // Place the goal deep inside B (centroid-east) so the K=5
+        // multi-source snap doesn't pull T's east doorway into the
+        // goal set — both T.7 (20,5,0) and B.3 (20,5,0) sit on the
+        // shared boundary and tie for "nearest node".
+        var toB = new Vector3(27.5f, 5f, 0f);
+        var withoutFix = pf.FindWalkablePath(graph, fromA, toB);
+        Assert.False(
+            withoutFix.Found,
+            "Without the doorway-pair edge the threshold cell partitions A from B.");
+
+        // Now rebuild T WITH the doorway-pair edge and rebuild the
+        // graph (Cells is exposed as IReadOnlyDictionary). The same
+        // A→B query must succeed.
+        var tFixed = BuildThresholdCell(includeDoorwayPairEdge: true);
+        var graphFixed = new IndoorNavGraph
+        {
+            LandblockId = graph.LandblockId,
+            Cells = new Dictionary<uint, IndoorCell>
+            {
+                [a.CellId] = a,
+                [b.CellId] = b,
+                [tFixed.CellId] = tFixed,
+            },
+            BoundsWorld = graph.BoundsWorld,
+            WalkableBridges = graph.WalkableBridges,
+        };
+
+        var withFix = pf.FindWalkablePath(graphFixed, fromA, toB);
+        Assert.True(
+            withFix.Found,
+            $"With the doorway-pair edge the threshold cell is traversable: {withFix.FailureReason}");
+        var cellsTouched = withFix.NodePath.Select(n => n.CellId).Distinct().ToList();
+        Assert.Contains((uint)0x0A, cellsTouched);
+        Assert.Contains((uint)0x0B, cellsTouched);
+        Assert.Contains(tFixed.CellId, cellsTouched);
+    }
+
+    /// <summary>
+    /// Build a threshold-style cell at X=[10..20] Y=[0..10] with two
+    /// disconnected floor clusters (west / east) plus two doorway
+    /// nodes. If <paramref name="includeDoorwayPairEdge"/> is true,
+    /// emit a direct edge between the two doorway nodes (the fix);
+    /// otherwise leave them disconnected (the bug).
+    /// </summary>
+    private static IndoorCell BuildThresholdCell(bool includeDoorwayPairEdge)
+    {
+        // Use a constant cell id outside the {0x0A, 0x0B} test set.
+        const uint id = 0x0C;
+        var nodes = new List<WalkableNode>
+        {
+            // West cluster (idx 0..2): along x=11..13, y=5
+            new() { CellId = id, FloorPolygonIndex = 0, PositionWorld = new Vector3(11f, 5f, 0f) },
+            new() { CellId = id, FloorPolygonIndex = 0, PositionWorld = new Vector3(12f, 5f, 0f) },
+            new() { CellId = id, FloorPolygonIndex = 0, PositionWorld = new Vector3(13f, 5f, 0f) },
+            // East cluster (idx 3..5): along x=17..19, y=5 — note the
+            // 3-unit gap between cluster_W (x=13) and cluster_E (x=17)
+            // exceeds any single grid step so no 8-neighbour edge can
+            // bridge them.
+            new() { CellId = id, FloorPolygonIndex = 1, PositionWorld = new Vector3(17f, 5f, 0f) },
+            new() { CellId = id, FloorPolygonIndex = 1, PositionWorld = new Vector3(18f, 5f, 0f) },
+            new() { CellId = id, FloorPolygonIndex = 1, PositionWorld = new Vector3(19f, 5f, 0f) },
+            // Doorway west (idx 6) at the boundary with A.
+            new()
+            {
+                CellId = id,
+                FloorPolygonIndex = 0,
+                PositionWorld = new Vector3(10f, 5f, 0f),
+                Kind = WalkableNodeKind.Doorway,
+                ConnectionPolygonId = 1,
+            },
+            // Doorway east (idx 7) at the boundary with B.
+            new()
+            {
+                CellId = id,
+                FloorPolygonIndex = 1,
+                PositionWorld = new Vector3(20f, 5f, 0f),
+                Kind = WalkableNodeKind.Doorway,
+                ConnectionPolygonId = 2,
+            },
+        };
+        var edges = new List<WalkableEdge>
+        {
+            // West cluster internal edges.
+            new(0, 1, 1f),
+            new(1, 2, 1f),
+            // East cluster internal edges.
+            new(3, 4, 1f),
+            new(4, 5, 1f),
+            // Doorway-west wires only to the west cluster.
+            new(0, 6, 1f),
+            // Doorway-east wires only to the east cluster.
+            new(5, 7, 1f),
+        };
+        if (includeDoorwayPairEdge)
+        {
+            // The fix: doorway↔doorway intra-cell edge bridges the
+            // two clusters. Distance is the 3D Euclidean span.
+            edges.Add(new WalkableEdge(6, 7, Vector3.Distance(
+                nodes[6].PositionWorld, nodes[7].PositionWorld)));
+        }
+        return new IndoorCell
+        {
+            CellId = id,
+            LandblockId = (ushort)(id >> 16),
+            CellWithinLandblock = (ushort)(id & 0xFFFF),
+            OriginWorld = new Vector3(10f, 0f, 0f),
+            CentroidWorld = new Vector3(15f, 5f, 0f),
+            BoundsWorld = new NavBounds(10f, 0f, 20f, 10f, 0f, 0f),
+            Connections = new List<CellConnection>(),
+            StaticObstacles = new List<StaticObstacle>(),
+            FloorPolygons = new List<FloorPolygon>(),
+            WalkableNodes = nodes,
+            WalkableEdges = edges,
+            HasGeometry = true,
+        };
+    }
 }

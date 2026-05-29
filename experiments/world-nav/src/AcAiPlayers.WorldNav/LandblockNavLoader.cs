@@ -1000,6 +1000,38 @@ public sealed class LandblockNavLoader
             }
         }
 
+        // Stair / threshold fix: ensure every pair of Doorway nodes in
+        // this cell is directly connected (LOS-checked). Threshold
+        // cells — stairs, arches, narrow corridors — often have
+        // fragmented floor polygons whose 8-neighbour grid edges leave
+        // each side of the threshold in a separate component. Without
+        // a direct doorway↔doorway edge the bot can enter via one
+        // doorway and get stranded, unable to reach the doorway on
+        // the other side even though the cell IS architecturally one
+        // traversable space.
+        //
+        // We deliberately skip the WalkableStepMaxDz gate here: a
+        // stair cell IS the vertical traversal between two floors,
+        // so |dz| between its two doorways can legitimately be 3-4u
+        // (the stair's rise). Obstacles still block (so a barricaded
+        // archway with a CylSphere obstacle in the middle won't get
+        // wired through).
+        //
+        // The bridges layer remains the only cross-cell edge mechanism.
+        // Both endpoints here are in the SAME cell (cellId), so this
+        // can never connect through to another landblock.
+        int doorwayStart = floorNodes.Count;
+        for (int a = doorwayStart; a < nodes.Count; a++)
+        {
+            for (int b = a + 1; b < nodes.Count; b++)
+            {
+                var pa = nodes[a].PositionWorld;
+                var pb = nodes[b].PositionWorld;
+                if (SegmentIntersectsAnyObstacleXY(pa.X, pa.Y, pb.X, pb.Y, obstacles)) continue;
+                edges.Add(new WalkableEdge(a, b, Vector3.Distance(pa, pb)));
+            }
+        }
+
         return (nodes, edges);
     }
 }
