@@ -1293,17 +1293,21 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else if (candidate is null)
                     {
-                        // Phase 7c/7f picker. Priorities:
-                        // - prio 0: hostile creatures we haven't
-                        //   killed yet (wcid 12698 Sparring Golem in
-                        //   spike). Combat is gating on Academy
-                        //   Token, which only drops from golem corpses.
-                        //   Without prio 0, the picker exhausts
-                        //   doors/signs/NPCs first and the bot never
-                        //   engages combat.
-                        // - prio 1: unsatisfied-slot wearables,
+                        // Phase 7c/7f/7f.3 picker. Priorities:
+                        // - prio 0: friendly NPCs (Creature itemType
+                        //   0x10, not the hostile wcid). NPCs hand
+                        //   out academy quests, training weapons,
+                        //   and reward items. Bot MUST exhaust all
+                        //   NPCs in range before engaging hostiles —
+                        //   a bare-handed L1 cannot kill a Sparring
+                        //   Golem (verified in phase7f2 run-01: bot
+                        //   landed 2 hits over 720s, then died).
+                        // - prio 1: hostile creatures (wcid 12698
+                        //   Sparring Golem). Combat is gating on
+                        //   Academy Token, which only drops from
+                        //   golem corpses. Engage AFTER all NPCs.
+                        // - prio 2: unsatisfied-slot wearables,
                         //   doors, portals, AND writables (signs).
-                        // - prio 2: NPCs (Creature, itemType bit 0x10).
                         // - prio 3: non-wearable pickups (apples).
                         // - prio 4: everything else.
                         candidate = inRange
@@ -1321,11 +1325,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
                                 int prio;
-                                if (isHostile) prio = 0;
-                                else if (isDoor || isPortal) prio = 1;
-                                else if (isWearable && !hasSatisfiedSlot) prio = 1;
-                                else if (isWritable) prio = 1;
-                                else if (isNpc) prio = 2;
+                                if (isNpc && !isHostile) prio = 0;
+                                else if (isHostile) prio = 1;
+                                else if (isDoor || isPortal) prio = 2;
+                                else if (isWearable && !hasSatisfiedSlot) prio = 2;
+                                else if (isWritable) prio = 2;
                                 else if (isPickup && !pickedBefore) prio = 3;
                                 else prio = 4;
                                 return (snap: s, d2, prio);
