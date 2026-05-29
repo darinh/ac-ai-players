@@ -603,8 +603,9 @@ public class LlmGoalPolicyTests
     [Fact]
     public void IsGoalRecentlyRejected_OldRejection_OutsideWindow_DoesNotMatch()
     {
-        // The dedup looks back 15 events. Push the rejection then 20
-        // unrelated events so it falls off the window.
+        // Slice O — widened the dedup lookback from 15 to 30 events.
+        // Push the rejection then 35 unrelated events so it falls off
+        // the window.
         var es = new EventStream();
         es.Append(new StreamEvent
         {
@@ -613,7 +614,7 @@ public class LlmGoalPolicyTests
             ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
             Text = "Worcer",
         });
-        for (int i = 0; i < 20; i++)
+        for (int i = 0; i < 35; i++)
         {
             es.Append(new StreamEvent
             {
@@ -652,6 +653,118 @@ public class LlmGoalPolicyTests
             Target = new Selector { Name = "Bob" },
         };
         Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
+    }
+
+    // ---- Slice O — rejection diversity + widened dedup window ----
+    //
+    // Spike9 (Slice N validation) showed two prompt-side gaps:
+    //   1) Recent rejections capped at Take(5); since every walk
+    //      timeout emits an Unreachable, the 5-slot section was
+    //      flooded with Unreachables and the rare-but-actionable
+    //      TradeAiDoesntWant rejections were evicted within seconds.
+    //   2) The dedup window (15 events) wasn't long enough to span
+    //      a full observe/walk/timeout/retry loop; LLM re-emitted
+    //      Give(Society Greeter, Calling Stone) 3 times with only
+    //      one dedup hit.
+    // Slice O: dedupe rejections by (label, target) and keep 8 of
+    // the most-recent distinct combos; widen dedup window 15 → 30.
+
+    [Fact]
+    public void BuildUserPrompt_ManyUnreachables_DoesNotEvict_RareTradeAiDoesntWant()
+    {
+        var es = new EventStream();
+        // Bury one TradeAiDoesntWant under 10 Unreachable rejections.
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        });
+        for (int i = 0; i < 10; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ActionRejected,
+                ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+                Name = $"Filler NPC {i}",
+                Text = $"Unreachable: 'Filler NPC {i}' (walk timeout 30s)",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        // Diversification: even though the TradeAiDoesntWant is the
+        // OLDEST rejection, grouping by (label, target) preserves at
+        // least one of each distinct combo. With Take(8) we still see
+        // it plus a sampling of Unreachables.
+        Assert.Contains("## Recent rejections", prompt);
+        Assert.Contains("TradeAiDoesntWant", prompt);
+        Assert.Contains("Society Greeter", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DuplicateUnreachables_CollapseToOnePerTarget()
+    {
+        // Same NPC, same label → one row.
+        var es = new EventStream();
+        for (int i = 0; i < 5; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ActionRejected,
+                ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+                Name = "Jonathan",
+                Text = "Unreachable: 'Jonathan' (walk timeout 30s)",
+            });
+        }
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        // Find the rejection section.
+        var start = prompt.IndexOf("## Recent rejections", StringComparison.Ordinal);
+        Assert.True(start >= 0, "section header missing");
+        // Count "Unreachable" occurrences after the header — should
+        // collapse 5 duplicates into 1 line in the section.
+        var section = prompt[start..];
+        var nextHeader = section.IndexOf("\n## ", 1, StringComparison.Ordinal);
+        if (nextHeader > 0) section = section[..nextHeader];
+        var jonathanLines = section.Split('\n')
+            .Count(l => l.Contains("Jonathan", StringComparison.Ordinal));
+        Assert.Equal(1, jonathanLines);
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_RejectionWithin30Events_StillMatches()
+    {
+        // Verify Slice O's widened window (was 15). Push 25 unrelated
+        // events between rejection and check; under the old window
+        // this would not match.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        });
+        for (int i = 0; i < 25; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage, Text = $"filler {i}",
+            });
+        }
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Give,
+            Target = new Selector { Name = "Society Greeter" },
+            Item = new Selector { Name = "Calling Stone" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
     }
 
     // ---- Slice G — server-hints prompt section regression ----

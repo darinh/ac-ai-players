@@ -286,7 +286,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     internal static bool IsGoalRecentlyRejected(Goal goal, EventStream events)
     {
-        const int LookbackEvents = 15;
+        // Slice O — widened from 15 to 30 events. In spike9 the LLM
+        // attempted Give(Society Greeter, Calling Stone) 3 times across
+        // ~7000 log lines while accumulating Unreachable + walk-tick
+        // events between attempts; the original 15-event window only
+        // caught the first repeat. 30 events ~= 10 LLM decisions of
+        // context which is enough to span an LLM
+        // observe/walk/timeout/retry cycle.
+        const int LookbackEvents = 30;
         var targetName = goal.Target?.Name;
         var itemName   = goal.Item?.Name;
         var itemWcid   = goal.Item?.Wcid;
@@ -391,7 +398,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.BookText);
     }
 
-    private static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
+    internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -415,6 +422,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- If an inventory item's short_desc tells you what to do with it, follow it.");
         sb.AppendLine("- 'Give' requires both target (the NPC) and item (the thing being given).");
         sb.AppendLine("- If a recent event is `ActionRejected`, the server refused that exact attempt. Do NOT immediately retry the same (kind, target, item) combination. Pick a different verb (e.g. Use instead of Give), a different item, or a different NPC. Read the rejection's `label` and `message` for the reason.");
+        sb.AppendLine("- If you see TWO or more rejections of the same target+item combo (any verb), that combo is BLOCKED — the NPC has an unmet prerequisite. Inventory items whose `short_desc` mentions 'double-click', 'read', or 'activate' must be Use'd on yourself first (target = your own name from `## Self`) before related Give/Talk steps unlock. If you have an un-used item like this, prefer `Use{target: name=\"<your-name>\", item: name=\"<note-or-letter-item>\"}` over retrying the blocked combo.");
         sb.AppendLine("- Read `## Server hints` closely. Phrases like \"Double click X\" or \"Use X to ...\" tell you EXACTLY what verb to use on what target. If an object is visible nearby AND the server has instructed you to use it, emit `Use{target: name=\"X\"}`. The server is your tutorial; do not ignore its instructions in favor of pure exploration.");
         sb.AppendLine("- Combat: creatures tagged `monster` are appropriate combat targets and grant XP and loot. Creatures tagged `npc` are civilians — talk to or trade with them, do NOT attack. If a `monster` is visible nearby AND a weapon is wielded (visible in inventory as `wielded@...`) AND no server hint or item short_desc gives a more specific quest action, emit `Attack{target: name=\"X\"}` on the nearest monster. Combat is the primary source of XP outside of NPC quests.");
         sb.AppendLine("- LOOP-BREAK (Talk loop): If you have emitted `Talk{X}` 3 or more times in the last 10 goal emissions (see the Location & recency section below) AND no new inventory item has been added since AND no new unique server hint has appeared, STOP talking to X. Talk to a different visible NPC, or Use/Give an inventory item to a different target, or emit `Explore`.");
@@ -630,9 +638,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Pull out ActionRejected events into a dedicated section so
         // the LLM cannot miss them in the 15-event tail. These are
         // strong "don't retry that" signals from the server.
-        var rejections = events.Recent(50)
+        //
+        // Slice O — diversify by (label, target). In spike9 the bot
+        // accumulated 95 Unreachable rejections while a critical
+        // TradeAiDoesntWant rejection (Greeter refused Calling Stone)
+        // never made it into the 5-most-recent window the LLM was
+        // shown — the bot kept retrying Give(Greeter, CallingStone)
+        // for 30+ minutes. Bucket the recent rejections by their
+        // (ErrorLabel, Text/Name) tuple and keep only the most-recent
+        // of each bucket so every distinct rejection class surfaces.
+        var rejections = events.Recent(100)
             .Where(e => e.Kind == EventKind.ActionRejected)
-            .Take(5)
+            .GroupBy(e =>
+            {
+                var label = e.ErrorLabel ?? "?";
+                var key = e.Name ?? e.Text ?? string.Empty;
+                return label + "|" + key;
+            })
+            .Select(g => g.First())
+            .Take(8)
             .ToList();
         if (rejections.Count > 0)
         {
