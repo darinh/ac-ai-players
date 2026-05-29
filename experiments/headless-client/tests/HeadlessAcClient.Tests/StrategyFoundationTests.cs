@@ -552,6 +552,60 @@ public class StrategyFoundationTests
         Assert.NotNull(goal);
         Assert.NotEqual(GoalKind.Pickup, goal!.Kind);
     }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_RotatesTalkTargets_AcrossSuccessiveTicks()
+    {
+        // Slice K — fallback used to lock onto the same nearest NPC
+        // every tick when the LLM picked Explore (an unhandled goal
+        // kind) and yielded the floor back to the fallback. Without
+        // a "what did I just propose" memory, the same Bottle/NPC
+        // got picked over and over. Now the policy remembers the
+        // last N (=8) proposed Talk/Pickup targets and skips them,
+        // forcing a round-robin across visible candidates.
+        const uint NpcA = 0x800010A1;
+        const uint NpcB = 0x800010A2;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40155u, PositionX = 100, PositionY = 40, PositionZ = 94,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcA, Name = "Bottle", Wcid = 40526u,
+                    ItemType = 0x10u, Distance = 6.7f, IsCreature = true,
+                    ObservedHostile = false,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NpcB, Name = "Pathwarden Thorolf", Wcid = 0u,
+                    ItemType = 0x10u, Distance = 12.0f, IsCreature = true,
+                    ObservedHostile = false,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Talk, first!.Kind);
+        var firstGuid = first.Target?.Guid;
+        Assert.NotNull(firstGuid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        Assert.Equal(GoalKind.Talk, second!.Kind);
+        var secondGuid = second.Target?.Guid;
+        Assert.NotNull(secondGuid);
+        Assert.NotEqual(firstGuid, secondGuid);
+    }
 }
 
 /// <summary>

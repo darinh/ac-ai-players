@@ -1856,7 +1856,102 @@ internal sealed class HandshakeDriver : IDisposable
                     //     (e.g. Talk{name="Jonathan"}) actually drive
                     //     motion instead of falling through to the
                     //     nearest-named picker.
-                    if (goal is not null &&
+                    //   - Explore: PRE-EMPTED. We synthesize a target
+                    //     by picking the farthest visible non-self
+                    //     object the bot hasn't recently visited, then
+                    //     walk to it with no action-send on arrival.
+                    //     This unblocks the bot when the LLM emits
+                    //     `Explore{anywhere}` (a goal kind it picks
+                    //     when stuck in town with no new NPCs in view).
+                    //     Without this branch the goal would lock,
+                    //     ResolveTarget would miss (no name match),
+                    //     and the bot would sit motionless until the
+                    //     LLM picked a different goal.
+                    if (goal is not null && goal.Kind == GoalKind.Explore)
+                    {
+                        // Synthesize Explore target: farthest visible
+                        // object with a CellId that the bot hasn't
+                        // visited this session. Bias toward "go see
+                        // something new and far away" — the LLM only
+                        // picks Explore when it's already exhausted
+                        // the nearby options.
+                        WorldObjectSnapshot? exploreTarget = null;
+                        float bestDist = 0f;
+                        foreach (var snap in worldState.WithinRadius(tacticsSelf, 200f))
+                        {
+                            if (snap.Guid == tacticsSelf.Guid) continue;
+                            if (snap.CellId is not uint sc || sc == 0u) continue;
+                            if (visitedTargetGuids.Contains(snap.Guid)) continue;
+                            if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
+                            var d = (float)Math.Sqrt(dsq);
+                            if (d > bestDist)
+                            {
+                                bestDist = d;
+                                exploreTarget = snap;
+                            }
+                        }
+
+                        if (exploreTarget is null)
+                        {
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Explore: no fresh target in 200u; " +
+                                $"clearing so picker can deliberate again");
+                            tactics.Fail("explore: no fresh target", eventStream);
+                        }
+                        else
+                        {
+                            float yawX = 0f;
+                            Quaternion rotX;
+                            if (WorldHeading.TryYawToTarget(tacticsSelf, exploreTarget, out yawX))
+                                rotX = WorldHeading.RotationFromYaw(yawX);
+                            else
+                                rotX = tacticsSelf.Rotation;
+
+                            motionTarget   = exploreTarget;
+                            motionRotation = rotX;
+                            lockedGoalKind = GoalKind.Explore;
+                            motionInitialDistance = bestDist;
+
+                            autonomousPositionSent = true;
+                            autonomousPositionPacketIndex = count;
+
+                            var apPacketSeqX = nextOutboundPacketSequence++;
+                            var apFragSeqX   = nextOutboundFragmentSequence++;
+                            var apBufX = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                            var apLenX = GameActionAutonomousPositionMessage.Pack(
+                                apBufX,
+                                cellId: tacticsSelfCell,
+                                pos:    tacticsSelf.Position,
+                                rot:    rotX,
+                                instanceSequence:      tacticsSelf.SeqInstance      ?? 0,
+                                serverControlSequence: tacticsSelf.SeqServerControl ?? 0,
+                                teleportSequence:      tacticsSelf.SeqTeleport      ?? 0,
+                                forcePositionSequence: tacticsSelf.SeqForcePosition ?? 0,
+                                contact: true);
+                            var apMsgX = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                apMsgX.AddAckSequence(lastReceivedSeq);
+                            apMsgX.AddBlobFragment(
+                                fragSequence: apFragSeqX,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: apBufX.AsSpan(0, apLenX));
+                            var apSentX = apMsgX.Pack(sendBuf, myClientId,
+                                                      sequence: apPacketSeqX, iteration: 1,
+                                                      encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSentX),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL LOCK kind=Explore " +
+                                $"target='{exploreTarget.Name}' guid=0x{exploreTarget.Guid:X8} " +
+                                $"cell=0x{(exploreTarget.CellId ?? 0):X8} " +
+                                $"dist={bestDist:F2}u " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"sent AP yaw={yawX:F3}rad pktSeq={apPacketSeqX} fragSeq={apFragSeqX} bytes={apSentX}");
+                        }
+                    }
+                    else if (goal is not null &&
                         (goal.Kind == GoalKind.Give ||
                          goal.Kind == GoalKind.Use ||
                          goal.Kind == GoalKind.Talk ||
@@ -2518,6 +2613,22 @@ internal sealed class HandshakeDriver : IDisposable
                     motionDone &&
                     motionTarget is not null)
                 {
+                    // Slice L — Explore short-circuit. For Explore goals
+                    // there is no action to perform on arrival; we just
+                    // need to clear the motion lock so the next goal can
+                    // be picked. Mark useSent so the cooldown/reset
+                    // cascade fires below.
+                    if (lockedGoalKind == GoalKind.Explore)
+                    {
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        Console.WriteLine(
+                            $"[strategy] LLM-GOAL Explore arrived: " +
+                            $"target='{motionTarget.Name}' guid=0x{motionTarget.Guid:X8} " +
+                            $"(no action send; reset cascade will pick next goal)");
+                        // Fall through to skip the rest of the block.
+                        goto _slice_l_explore_done;
+                    }
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
@@ -2740,6 +2851,7 @@ internal sealed class HandshakeDriver : IDisposable
                             $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
                             $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     }
+                    _slice_l_explore_done: ;
                 }
 
                 // Periodic world-state heartbeat — once every 100

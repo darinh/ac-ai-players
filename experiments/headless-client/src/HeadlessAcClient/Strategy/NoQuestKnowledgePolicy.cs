@@ -34,6 +34,7 @@
 //      "what the dumb policy would have done".
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 
 namespace HeadlessAcClient.Strategy;
@@ -45,6 +46,28 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     // Track the latest inventory event we considered so we don't
     // propose the same Use-newly-added-item goal twice.
     private long _lastInventoryEventSeen = -1;
+
+    // Slice K — rotate fallback Talk/Pickup targets so we don't pick
+    // the same nearest-named object every deliberation. Successful
+    // actions don't produce ActionRejected events (which Slice J
+    // dedupes on), so without a separate "what did I just propose"
+    // memory the fallback gets locked into a one-NPC loop the moment
+    // the LLM stops driving (e.g. when LLM picks Explore — a goal
+    // kind the driver doesn't yet pre-empt).
+    //
+    // Window is intentionally short (8). We want to come back to the
+    // same NPC after a few cycles in case it has new dialog after
+    // a state change, but never twice in a row.
+    private const int RecentProposedWindow = 8;
+    private readonly Queue<uint> _recentProposedGuids = new();
+
+    private void RememberProposed(uint guid)
+    {
+        if (_recentProposedGuids.Contains(guid)) return;
+        _recentProposedGuids.Enqueue(guid);
+        while (_recentProposedGuids.Count > RecentProposedWindow)
+            _recentProposedGuids.Dequeue();
+    }
 
     public Goal? ProposeGoal(
         WorldStateProjection world,
@@ -101,13 +124,17 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         var pickup = world.Visible
             .Where(v => v.ItemType is uint it && (it & ItemTypeMasks.Pickup) != 0)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+            .Where(v => !_recentProposedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (pickup is not null)
+        {
+            RememberProposed(pickup.Guid);
             return MakeGoal(GoalKind.Pickup,
                 new Selector { Guid = pickup.Guid, Name = pickup.Name },
                 null, priority: 5,
                 rationale: $"pickup-eligible {pickup.Name} at d={pickup.Distance:F1}");
+        }
 
         // 5) "Newly acquired inventory" -> Use the item itself. This is the
         //    cheap version of "look at it and emit a popup" — exposes quest
@@ -134,13 +161,40 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         var npc = world.Visible
             .Where(v => v.IsCreature && !v.ObservedHostile)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+            .Where(v => !_recentProposedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (npc is not null)
+        {
+            RememberProposed(npc.Guid);
             return MakeGoal(GoalKind.Talk,
                 new Selector { Guid = npc.Guid, Name = npc.Name },
                 null, priority: 3,
                 rationale: $"explore via dialog: {npc.Name}");
+        }
+
+        // 6b) Talk recycle — if every visible NPC is in the recent
+        //     proposed-set (rare; happens in a sparse landblock where
+        //     we've already cycled through everyone), forget the
+        //     window and try again. Without this we'd starve the
+        //     fallback in a small room.
+        if (_recentProposedGuids.Count > 0)
+        {
+            _recentProposedGuids.Clear();
+            var npcRetry = world.Visible
+                .Where(v => v.IsCreature && !v.ObservedHostile)
+                .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+                .OrderBy(v => v.Distance ?? float.MaxValue)
+                .FirstOrDefault();
+            if (npcRetry is not null)
+            {
+                RememberProposed(npcRetry.Guid);
+                return MakeGoal(GoalKind.Talk,
+                    new Selector { Guid = npcRetry.Guid, Name = npcRetry.Name },
+                    null, priority: 3,
+                    rationale: $"explore via dialog (recycle): {npcRetry.Name}");
+            }
+        }
 
         // 7) Default — explore.
         return MakeGoal(GoalKind.Explore, new Selector { Name = "anywhere" }, null,
