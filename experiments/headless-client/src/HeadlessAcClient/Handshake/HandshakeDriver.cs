@@ -482,6 +482,16 @@ internal sealed class HandshakeDriver : IDisposable
         // block alongside motionTarget / useSent / etc.
         GoalKind? lockedGoalKind = null;
 
+        // M1.6+ — schema-vs-LLM race fix. When LlmGoalPolicy has a
+        // call in flight, the schema-only picker at the bottom of
+        // the AP block must defer so the LLM result isn't bypassed
+        // by a hasty nearest-named lock. Safety timeout
+        // (MaxLlmDeferralSec) caps the wait so a stuck network
+        // call can't park the bot forever — past the cap, the
+        // schema-only picker fires as a fallback.
+        DateTime?            llmInflightSince = null;
+        const int            MaxLlmDeferralSec = 4;
+
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
         // rotation is REPLICATED (not duplicated) on both the AP and
@@ -1887,6 +1897,18 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
+                // M1.6+ — schema-vs-LLM deferral bookkeeping.
+                // Update llmInflightSince every tick: capture the
+                // first tick we see HasInflight true, clear it when
+                // the policy goes idle. The schema-only picker
+                // below consults this + MaxLlmDeferralSec to decide
+                // whether to defer or to take over as fallback.
+                var llmBusyNow = tactics.PolicyHasInflight;
+                if (llmBusyNow && llmInflightSince is null)
+                    llmInflightSince = DateTime.UtcNow;
+                else if (!llmBusyNow)
+                    llmInflightSince = null;
+
                 // Phase 5a: send one GameActionAutonomousPosition
                 // (0xF753) echoing our current server-asserted
                 // position back at the server. First outbound
@@ -1918,7 +1940,18 @@ internal sealed class HandshakeDriver : IDisposable
                     (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
                     worldState.Self is WorldObjectSnapshot self &&
                     self.CellId is uint selfCell &&
-                    selfCell != 0)
+                    selfCell != 0 &&
+                    // M1.6+ — defer to the LLM when it is mid-call.
+                    // Without this gate the schema-only picker
+                    // grabs the nearest-named NPC at packet rate
+                    // (~50ms) and locks motionTarget before the
+                    // LLM's ~1s response can land, so the LLM
+                    // result is never actuated (the LLM block's
+                    // gate requires motionTarget==null). Bound by
+                    // MaxLlmDeferralSec so a stuck network call
+                    // doesn't park the bot indefinitely.
+                    (llmInflightSince is not DateTime inflightSince ||
+                     (DateTime.UtcNow - inflightSince).TotalSeconds > MaxLlmDeferralSec))
                 {
                     autonomousPositionSent = true;
                     autonomousPositionPacketIndex = count;

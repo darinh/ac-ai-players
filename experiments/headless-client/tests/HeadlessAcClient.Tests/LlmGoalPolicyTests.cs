@@ -200,6 +200,84 @@ public class LlmGoalPolicyTests
         Assert.True(doc.RootElement.GetProperty("ok").GetBoolean());
     }
 
+    // ---- HasInflight: schema-vs-LLM race regression ----
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HasInflight_IsAlwaysFalse()
+    {
+        // Default-impl on IGoalPolicy; a synchronous policy never
+        // has work in flight.
+        IGoalPolicy policy = new NoQuestKnowledgePolicy();
+        Assert.False(policy.HasInflight);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_HasInflight_TrueDuringCall_FalseAfter()
+    {
+        // Use a TaskCompletionSource so the SendAsync Task does NOT
+        // complete synchronously; otherwise the in-flight window
+        // closes before the test can observe it. We complete the
+        // TCS from a background thread after asserting HasInflight.
+        var tcs = new TaskCompletionSource<HttpResponseMessage>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var http = new HttpClient(new AsyncStubHandler((_, _) => tcs.Task));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
+
+        // Before any call: idle.
+        Assert.False(policy.HasInflight);
+
+        // Kicks off the async call; the TCS is uncompleted so the
+        // policy's inner Task is pending.
+        var first = policy.ProposeGoal(BuildHostileWorld(), new EventStream(), null);
+        Assert.Null(first);
+        Assert.True(policy.HasInflight);
+
+        // Release and let the call complete, then consume.
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new { message = new { content = "{\"kind\":\"Explore\",\"target\":{},\"rationale\":\"x\",\"priority\":3}" } },
+            },
+        });
+        tcs.SetResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(canned),
+        });
+        await policy.WaitForInFlightAsync();
+        var afterDrain = policy.ProposeGoal(BuildHostileWorld(), new EventStream(), null);
+        Assert.NotNull(afterDrain);
+
+        // Post-consume: idle again.
+        Assert.False(policy.HasInflight);
+    }
+
+    [Fact]
+    public void TacticsExecutor_PolicyHasInflight_DelegatesToPolicy()
+    {
+        // The Motor's deferral gate reads this property. Verify the
+        // pass-through against a fake policy whose flag we toggle.
+        var fake = new ToggleablePolicy();
+        var tactics = new HeadlessAcClient.Tactics.TacticsExecutor(
+            fake, new InMemoryWeenieRepo(), training: null);
+
+        Assert.False(tactics.PolicyHasInflight);
+        fake.InflightFlag = true;
+        Assert.True(tactics.PolicyHasInflight);
+        fake.InflightFlag = false;
+        Assert.False(tactics.PolicyHasInflight);
+    }
+
+    private sealed class ToggleablePolicy : IGoalPolicy
+    {
+        public bool InflightFlag;
+        public string Source => "test:toggle";
+        public bool HasInflight => InflightFlag;
+        public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
+            => currentGoal;
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
@@ -256,6 +334,14 @@ public class LlmGoalPolicyTests
         public StubHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> fn) => _fn = fn;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
             => Task.FromResult(_fn(request, cancellationToken));
+    }
+
+    private sealed class AsyncStubHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _fn;
+        public AsyncStubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> fn) => _fn = fn;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => _fn(request, cancellationToken);
     }
 
     private sealed class InMemoryWeenieRepo : IWeenieRepository
