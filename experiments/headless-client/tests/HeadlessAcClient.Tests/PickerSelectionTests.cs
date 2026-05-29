@@ -44,7 +44,8 @@ public class PickerSelectionTests
 
     private static WorldObjectSnapshot Snap(
         uint guid, string name, float x,
-        uint? itemType = null, uint? descFlags = null, uint? containerGuid = null) =>
+        uint? itemType = null, uint? descFlags = null,
+        uint? containerGuid = null, uint? wielderGuid = null) =>
         new(guid)
         {
             Name = name,
@@ -53,6 +54,7 @@ public class PickerSelectionTests
             ItemType = itemType,
             ObjectDescriptionFlags = descFlags,
             ContainerGuid = containerGuid,
+            WielderGuid = wielderGuid,
         };
 
     [Fact]
@@ -204,5 +206,44 @@ public class PickerSelectionTests
             counts, PickupItemTypeMask);
         Assert.NotNull(picked);
         Assert.Equal(0x900u, picked!.Guid);
+    }
+
+    [Fact]
+    public void ExcludesItemsWieldedBySelf()
+    {
+        // WielderGuid == self → item is currently equipped (weapon,
+        // shield, jewellery). Regression from sliceW01 run-02: a
+        // re-login flow surfaces an already-wielded Training Spadone
+        // at d=0u with no ContainerGuid and no satisfied-wcid record
+        // (server doesn't replay WieldObject for items wielded across
+        // the session boundary). The picker MUST drop it via
+        // WielderGuid==self or it bricks on a 0-unit walk to itself.
+        var wielded = Snap(0xA00, "Training Spadone", x: 0f,
+            itemType: ItemTypeMeleeWeapon, wielderGuid: SelfGuid);
+        var farNpc  = Snap(0xA01, "Greeter", x: 50f,
+            itemType: ItemTypeCreature);
+        var picked = PickerSelection.PickNearest(
+            new[] { wielded, farNpc }, Self(), SelfGuid,
+            new Dictionary<string, int>(), PickupItemTypeMask);
+        Assert.NotNull(picked);
+        Assert.Equal(0xA01u, picked!.Guid);
+    }
+
+    [Fact]
+    public void ItemsWieldedByOthersAreNotExcluded()
+    {
+        // A weapon held by another character (NPC/player) is a
+        // legitimate world object the picker may walk toward —
+        // the wielder filter is "ME specifically", not "anyone".
+        const uint otherWielder = 0x50000099u;
+        var theirSword = Snap(0xB00, "Bronze Long Sword", x: 4f,
+            itemType: ItemTypeMeleeWeapon, wielderGuid: otherWielder);
+        var farNpc = Snap(0xB01, "Greeter", x: 30f,
+            itemType: ItemTypeCreature);
+        var picked = PickerSelection.PickNearest(
+            new[] { theirSword, farNpc }, Self(), SelfGuid,
+            new Dictionary<string, int>(), PickupItemTypeMask);
+        Assert.NotNull(picked);
+        Assert.Equal(0xB00u, picked!.Guid);
     }
 }

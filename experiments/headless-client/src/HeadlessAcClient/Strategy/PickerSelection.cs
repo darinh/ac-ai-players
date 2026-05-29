@@ -19,11 +19,21 @@
 // override at any time.
 //
 // MECHANICAL FILTERS PRESERVED (loop-prevention, not priority):
-//   - Drop objects flagged as inside the bot's own bag
-//     (ContainerGuid == selfGuid). They typically have no CellId
-//     and so are excluded by WithinRadius anyway, but the
-//     belt-and-braces filter protects against servers that leave
-//     CellId populated on a contained item.
+//   - Drop objects physically attached to the bot — i.e. the bot's
+//     own bag contents (ContainerGuid == selfGuid) OR items the bot
+//     currently wields (WielderGuid == selfGuid). Both are
+//     "owned/equipped by me" in the wire schema sense and are not
+//     legitimate motion targets. ContainerGuid covers starter
+//     inventory and looted items not yet equipped; WielderGuid
+//     covers actively wielded weapons/shields/jewellery. They
+//     typically have no CellId and so are excluded by WithinRadius
+//     anyway, but the belt-and-braces filter protects against:
+//       (a) servers that leave CellId populated on a contained item,
+//       (b) re-login flows where the bot reconnects with already-
+//           wielded gear AND that gear arrives via ObjectCreate
+//           with the bot's own CellId. Without this filter the
+//           pure-distance picker would lock onto the wielded item
+//           at d=0u and brick (sliceW01 run-02 lesson).
 //   - Drop pickups whose Name has already been picked up at least
 //     once. Visited-by-GUID exclusion (applied UPSTREAM by the
 //     caller) does not catch respawns that get a fresh GUID with
@@ -67,7 +77,10 @@ internal static class PickerSelection
     /// the file header.
     /// </param>
     /// <param name="self">The bot's own snapshot — distance origin.</param>
-    /// <param name="selfGuid">Bot character GUID for ContainerGuid checks.</param>
+    /// <param name="selfGuid">
+    /// Bot character GUID. Used to drop items physically attached
+    /// to the bot — ContainerGuid (bagged) or WielderGuid (wielded).
+    /// </param>
     /// <param name="pickupCountByName">
     /// Per-Name pickup counter. Any pickup-eligible candidate with
     /// count &gt; 0 is dropped (anti-respawn).
@@ -90,7 +103,7 @@ internal static class PickerSelection
         if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
 
         return inRange
-            .Where(s => !IsContainedInSelfBag(s, selfGuid))
+            .Where(s => !IsAttachedToSelf(s, selfGuid))
             .Where(s => !IsRespawnOfPickedItem(s, pickupCountByName, pickupItemTypeMask))
             .Select(s =>
             {
@@ -102,8 +115,9 @@ internal static class PickerSelection
             .FirstOrDefault();
     }
 
-    private static bool IsContainedInSelfBag(WorldObjectSnapshot s, uint selfGuid)
-        => s.ContainerGuid is uint cg && cg == selfGuid;
+    private static bool IsAttachedToSelf(WorldObjectSnapshot s, uint selfGuid)
+        => (s.ContainerGuid is uint cg && cg == selfGuid)
+        || (s.WielderGuid is uint wg && wg == selfGuid);
 
     private static bool IsRespawnOfPickedItem(
         WorldObjectSnapshot s,
