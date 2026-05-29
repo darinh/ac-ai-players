@@ -411,6 +411,12 @@ internal sealed class HandshakeDriver : IDisposable
         // sent one at spawn.
         uint? lastObservedSelfLandblock = null;
         bool loginCompleteResendNeeded = false;
+        // Commit B — track the last NavGraph node id the bot stood on.
+        // Updated on every RecordVisit so RecordObservation can anchor
+        // entity sightings to a real node, and RecordEdge can join the
+        // pre-teleport node to the post-teleport node when a landblock
+        // change occurs.
+        Guid lastVisitNodeId = Guid.Empty;
 
         // Strategy/Tactics layer. The LlmGoalPolicy compiles
         // observations (visible NPCs, inventory ShortDescs, popup
@@ -427,12 +433,13 @@ internal sealed class HandshakeDriver : IDisposable
         // sidecar for offline analysis and future fine-tuning. Sink
         // is fire-and-forget; write failures never take the bot down.
         var trainingSink = new JsonlTrainingSink();
-        // Slice D — capture spatial trajectory + observed landmarks +
-        // landblock-to-landblock exits to per-landblock JSON files
-        // under experiments/headless-client/data/nav/. Lets the bot
-        // revisit known areas in later sessions instead of re-mapping
-        // the same landblock every run.
-        var navGraph = new NavGraphRecorder();
+        // Commit B — capture spatial trajectory + observed landmarks
+        // + landblock-to-landblock edges in the persistent NavGraph
+        // (append-on-write JSONL at experiments/headless-client/data/
+        // nav/, replacing the per-landblock NavGraphRecorder JSON
+        // files). The graph is global across sessions, characters
+        // and accounts; the LLM/planner can query it for routes.
+        var navGraph = new NavGraph();
         IGoalPolicy goalPolicy;
         if (llmDisabled)
         {
@@ -734,19 +741,38 @@ internal sealed class HandshakeDriver : IDisposable
                             {
                                 _ = weenies.EnsureLoadedAsync(preloadWcid);
                             }
-                            // Slice D — record named objects as nav
-                            // landmarks anchored in the landblock
-                            // they live in. Lets the LLM later answer
+                            // Commit B — record named objects as nav
+                            // observations anchored to the bot's
+                            // current node. Lets the LLM later answer
                             // "where was Jonathan?" from cached graph
                             // data instead of needing to re-observe.
+                            // EntityKind is left Unknown for now —
+                            // wcid + name is enough for FindRouteToEntity
+                            // lookup; future work can infer the kind
+                            // from the weenie ObjectType bits.
+                            //
+                            // Landblock-match gate (rubber-duck finding):
+                            // ObjectCreate packets for the destination
+                            // landblock can arrive after a teleport but
+                            // BEFORE the per-loop self-position block
+                            // refreshes lastVisitNodeId. Without this
+                            // gate, a Holtburg NPC could be anchored to
+                            // an academy node, corrupting semantic
+                            // routing. Skip the observation when the
+                            // object's landblock doesn't match the bot's
+                            // currently-observed landblock.
                             if (oc.Physics.Position is { } lmPos &&
-                                !string.IsNullOrEmpty(oc.Weenie.Name))
+                                !string.IsNullOrEmpty(oc.Weenie.Name) &&
+                                lastVisitNodeId != Guid.Empty &&
+                                lastObservedSelfLandblock is uint selfLb &&
+                                (lmPos.LandblockId & 0xFFFF0000u) == selfLb)
                             {
-                                navGraph.RecordLandmark(
-                                    lmPos.LandblockId,
-                                    new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z),
+                                navGraph.RecordObservation(
+                                    lastVisitNodeId,
                                     oc.Weenie.WeenieClassId,
-                                    oc.Weenie.Name,
+                                    oc.Weenie.Name!,
+                                    new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z),
+                                    EntityKind.Unknown,
                                     DateTimeOffset.UtcNow);
                             }
                             break;
@@ -1222,6 +1248,7 @@ internal sealed class HandshakeDriver : IDisposable
                     lcTeleSelfCell != 0)
                 {
                     var lb = lcTeleSelfCell & 0xFFFF0000u;
+                    var landblockChanged = false;
                     if (lastObservedSelfLandblock is uint prevLb)
                     {
                         if (lb != prevLb && loginCompleteSent)
@@ -1244,35 +1271,77 @@ internal sealed class HandshakeDriver : IDisposable
                                 LandblockFrom = prevLb,
                                 LandblockTo = lb,
                             });
-                            // Slice D — record the inter-landblock
-                            // edge in the nav graph. "via_item" is
-                            // the most recent item the bot Used (a
-                            // Calling Stone, portal, etc.) — the
-                            // current pre-emptor doesn't surface
-                            // this directly, so we pass null and
-                            // future work can plumb it through.
-                            navGraph.RecordExit(
-                                prevLb, lb,
-                                new System.Numerics.Vector3(
-                                    lcTeleSelf.Position.X,
-                                    lcTeleSelf.Position.Y,
-                                    lcTeleSelf.Position.Z),
-                                viaItem: null,
-                                DateTimeOffset.UtcNow);
+                            // Commit B — the inter-landblock edge is
+                            // recorded below (after we have created the
+                            // arrival node via RecordVisit). Setting
+                            // landblockChanged here drives the post-
+                            // RecordVisit RecordEdge that joins the
+                            // pre-teleport node to the arrival node.
+                            landblockChanged = true;
                         }
                     }
+                    var prevNodeId = lastVisitNodeId;
+                    var lcTeleSelfPos = new System.Numerics.Vector3(
+                        lcTeleSelf.Position.X,
+                        lcTeleSelf.Position.Y,
+                        lcTeleSelf.Position.Z);
+                    if (landblockChanged)
+                    {
+                        // Same-landblock check in NavGraph.RecordVisit
+                        // already breaks the per-tick walked chain on a
+                        // landblock change, but call it explicitly so
+                        // the intent is visible: a cross-landblock
+                        // transition is NEVER a continuation of walking.
+                        navGraph.BreakWalkedChain();
+                    }
                     lastObservedSelfLandblock = lb;
-                    // Slice D — record self-position waypoint every
-                    // tick. NavGraphRecorder enforces minimum
-                    // spacing internally so we don't blow up file
-                    // size on a stationary bot.
-                    navGraph.RecordSelfPosition(
+                    // Commit B — record self-position waypoint every
+                    // observed self-update. NavGraph's per-tick gate
+                    // (MaxTickWalkMeters=2m + MergeRadius=4m) handles
+                    // node dedup and chain continuity internally so
+                    // the JSONL doesn't blow up on a stationary bot.
+                    lastVisitNodeId = navGraph.RecordVisit(
                         lcTeleSelfCell,
-                        new System.Numerics.Vector3(
-                            lcTeleSelf.Position.X,
-                            lcTeleSelf.Position.Y,
-                            lcTeleSelf.Position.Z),
+                        lcTeleSelfPos,
                         DateTimeOffset.UtcNow);
+                    if (landblockChanged &&
+                        prevNodeId != Guid.Empty &&
+                        prevNodeId != lastVisitNodeId)
+                    {
+                        // Best-effort kind: we don't (yet) know whether
+                        // the teleport came from an item (Calling Stone),
+                        // a world portal, an NPC trigger, or a spell.
+                        // UsedPortal is a safe default — fixed cost, same
+                        // semantics as a portal, doesn't poison the A*
+                        // heuristic. Future work: plumb the LLM-issued
+                        // goal's selected item/portal name through and
+                        // pass it as useItemName / useObjectGuid.
+                        //
+                        // Executor contract (see ac-ai-players#75): an
+                        // edge with useItemName == null AND useObjectGuid
+                        // == null is observational only. The future path
+                        // executor must treat such edges as a hint that
+                        // a transition happens here, then ask the LLM
+                        // for an action to dispatch. A* may include the
+                        // edge in a route; the executor stops at the
+                        // edge boundary and re-deliberates.
+                        try
+                        {
+                            navGraph.RecordEdge(
+                                prevNodeId,
+                                lastVisitNodeId,
+                                NavEdgeKind.UsedPortal,
+                                useItemName: null,
+                                useObjectGuid: null,
+                                DateTimeOffset.UtcNow);
+                        }
+                        catch (Exception edgeEx)
+                        {
+                            Console.Error.WriteLine(
+                                $"[nav] WARN cross-landblock RecordEdge failed: " +
+                                $"{edgeEx.GetType().Name}: {edgeEx.Message}");
+                        }
+                    }
                 }
 
                 // Phase 3.4: send GameActionLoginComplete (0x00A1) once
@@ -2789,7 +2858,8 @@ internal sealed class HandshakeDriver : IDisposable
         try
         {
             navGraph.Flush();
-            Console.WriteLine($"[nav] flushed {navGraph.LandblocksTracked} landblocks to {navGraph.Directory}");
+            Console.WriteLine($"[nav] graph snapshot: regions={navGraph.RegionCount} places={navGraph.PlaceCount} areas={navGraph.AreaCount} nodes={navGraph.NodeCount} edges={navGraph.EdgeCount} dir={navGraph.Directory}");
+            navGraph.Dispose();
         }
         catch (Exception navEx)
         {

@@ -206,6 +206,18 @@ internal sealed class NavGraph : IDisposable
     public float MaxAutoEdgeMeters { get; init; } = 8.0f;
 
     /// <summary>
+    /// Minimum wall-clock interval between successive JSONL writes of
+    /// the SAME deduped node. The bot's receive loop is much faster
+    /// than a real game tick (hundreds of self-position observations
+    /// per second), so a naive write-every-visit policy would blow up
+    /// nodes.jsonl while contributing zero new information beyond a
+    /// bumped LastSeenUtc / VisitCount. New nodes and chain transitions
+    /// always persist immediately; only the "stationary or wiggling
+    /// around the same merged node" case is throttled.
+    /// </summary>
+    public TimeSpan NodeRewriteInterval { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// No-op since the switch to append-on-write JSONL. Kept for
     /// back-compat with constructors that still pass it.
     /// </summary>
@@ -561,7 +573,17 @@ internal sealed class NavGraph : IDisposable
                 near.LastSeenUtc = utc;
                 near.VisitCount++;
                 nodeId = near.Id;
-                Append("nodes", NodeDto.From(near));
+                // Throttle persistence: re-writing an unchanged node
+                // every receive-loop iteration would balloon nodes.jsonl
+                // (the AC server pushes self-position MUCH faster than
+                // a game tick). Skip when the last persisted snapshot
+                // of THIS node is recent. New nodes and chain
+                // transitions below always persist immediately.
+                if (utc - near.LastPersistedUtc >= NodeRewriteInterval)
+                {
+                    near.LastPersistedUtc = utc;
+                    Append("nodes", NodeDto.From(near));
+                }
             }
             else
             {
@@ -577,6 +599,7 @@ internal sealed class NavGraph : IDisposable
                 };
                 n.LastSeenUtc = utc;
                 n.VisitCount = 1;
+                n.LastPersistedUtc = utc;
                 _nodes[n.Id] = n;
                 if (!_nodesByCell.TryGetValue(cellId, out var list))
                     _nodesByCell[cellId] = list = new();
@@ -1256,6 +1279,14 @@ internal sealed class NavNode
     public Guid? AreaId { get; set; }
     public HashSet<string> Tags { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<EntityObservation> Observations { get; } = new();
+
+    // In-memory only (not serialized). Used by RecordVisit to throttle
+    // re-persistence of an unchanged node when the bot is stationary or
+    // wiggling within MergeRadius. Reset to DateTimeOffset.MinValue on
+    // graph construction; on journal load the first dedup hit will
+    // re-persist (advancing LastSeenUtc) and update this stamp.
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTimeOffset LastPersistedUtc { get; set; } = DateTimeOffset.MinValue;
 }
 
 internal sealed class NavEdge

@@ -62,6 +62,23 @@ public sealed class NavGraphTests : IDisposable
         return last;
     }
 
+    /// <summary>
+    /// Count lines in a JSONL file held open by a live NavGraph
+    /// writer. NavGraph opens its writers with FileShare.Read, but
+    /// File.ReadAllLines uses FileShare.Read which doesn't permit the
+    /// existing FileAccess.Write handle to coexist. Open the file
+    /// ourselves with FileShare.ReadWrite to side-step the conflict.
+    /// </summary>
+    private static int CountJsonlLines(string path)
+    {
+        if (!File.Exists(path)) return 0;
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var rd = new StreamReader(fs);
+        var count = 0;
+        while (rd.ReadLine() is not null) count++;
+        return count;
+    }
+
     [Fact]
     public void RecordVisit_dedupes_nearby_positions_within_merge_radius()
     {
@@ -679,5 +696,78 @@ public sealed class NavGraphTests : IDisposable
         Assert.NotNull(g.FindRoute(acadExit, townArrive));
         // Inbound: NOT routable — no reverse edge exists.
         Assert.Null(g.FindRoute(townArrive, acadExit));
+    }
+
+    [Fact]
+    public void RecordVisit_throttles_node_rewrites_for_stationary_bot()
+    {
+        // Real receive loop fires RecordVisit on every observed self-
+        // position update — hundreds per second when the firehose is
+        // hot. A naive write-every-visit policy would balloon
+        // nodes.jsonl. Verify the dedup path persists at most once
+        // per NodeRewriteInterval for the SAME merged node.
+        var g = new NavGraph(_dir)
+        {
+            NodeRewriteInterval = TimeSpan.FromSeconds(10),
+        };
+        _graphs.Add(g);
+
+        const uint cell = 0x86020001u;
+        var pos = new Vector3(5, 0, 5);
+
+        // First visit creates the node + writes once.
+        var node = g.RecordVisit(cell, pos, _t0);
+
+        // 1000 rapid-fire dedup hits within the throttle window. Each
+        // returns the same node id; only the first should have actually
+        // appended to nodes.jsonl.
+        for (var i = 1; i <= 1000; i++)
+        {
+            var nid = g.RecordVisit(cell, pos, _t0.AddMilliseconds(i));
+            Assert.Equal(node, nid);
+        }
+        g.Flush();
+
+        var nodesJsonlPath = Path.Combine(_dir, "nodes.jsonl");
+        var firstWindowLines = CountJsonlLines(nodesJsonlPath);
+        // Acceptable: 1 line (the create). Definitely NOT 1001.
+        Assert.True(firstWindowLines <= 2,
+            $"expected at most ~1 node write in throttle window, got {firstWindowLines}");
+
+        // One visit past the throttle interval persists again.
+        g.RecordVisit(cell, pos, _t0.AddSeconds(15));
+        g.Flush();
+
+        var secondWindowLines = CountJsonlLines(nodesJsonlPath);
+        Assert.Equal(firstWindowLines + 1, secondWindowLines);
+    }
+
+    [Fact]
+    public void RecordVisit_always_persists_brand_new_nodes_regardless_of_throttle()
+    {
+        // The throttle applies only to dedup-hit re-writes. Brand-new
+        // nodes must always persist immediately so journal-restart
+        // never loses topology.
+        var g = new NavGraph(_dir)
+        {
+            NodeRewriteInterval = TimeSpan.FromHours(1),
+        };
+        _graphs.Add(g);
+
+        const uint cell = 0x86020001u;
+        var t = _t0;
+        // Step out in 6m increments — beyond MergeRadius (4m) so each
+        // visit creates a fresh node.
+        g.RecordVisit(cell, new Vector3(  0, 0, 0), t);
+        g.RecordVisit(cell, new Vector3( 10, 0, 0), t.AddMilliseconds(1));
+        g.RecordVisit(cell, new Vector3( 20, 0, 0), t.AddMilliseconds(2));
+        g.RecordVisit(cell, new Vector3( 30, 0, 0), t.AddMilliseconds(3));
+        g.Flush();
+
+        var path = Path.Combine(_dir, "nodes.jsonl");
+        var lines = CountJsonlLines(path);
+        // 4 fresh nodes, all persisted immediately.
+        Assert.True(lines >= 4,
+            $"expected >= 4 new-node writes, got {lines}");
     }
 }
