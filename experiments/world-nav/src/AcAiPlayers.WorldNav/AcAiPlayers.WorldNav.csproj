@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AcAiPlayers.WorldNav</RootNamespace>
+    <AssemblyName>AcAiPlayers.WorldNav</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- log4net is initialised via app config in consumers; suppress the
+         missing-config-file warning that ACE.DatLoader's log4net usage
+         would otherwise produce in pure-library consumers.
+         NU1902 = transitive log4net 2.0.17 has a known moderate-severity
+         CVE; ACE-bots pins it deliberately; not something we can fix
+         here. -->
+    <NoWarn>$(NoWarn);CS1591;NU1902</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AcAiPlayers.WorldNav.Tests" />
+    <InternalsVisibleTo Include="WorldNavBuilder" />
+  </ItemGroup>
+
+  <!--
+    Cross-repo project references to the ACE-bots fork's DatLoader.
+    The DAT file format is implemented there and we re-use it verbatim
+    rather than copying ~3000 lines of file-format code.
+
+    Per ADR-0010, the long-term home for navigation code is
+    `ACE.Mod.Pathfinding` (a Harmony mod that loads inside ACE.Server
+    and can therefore project-reference DatLoader directly). This
+    library is the early shared implementation that BOTH the future
+    mod and the headless client can consume.
+
+    Assumes ACE-bots is cloned as a sibling repo. If you move it, edit
+    the paths below.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\..\..\..\..\ACE-bots\Source\ACE.DatLoader\ACE.DatLoader.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\..\ACE-bots\Source\ACE.Entity\ACE.Entity.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\..\ACE-bots\Source\ACE.Common\ACE.Common.csproj" />
+  </ItemGroup>
+
+</Project>
