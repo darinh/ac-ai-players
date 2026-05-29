@@ -403,7 +403,11 @@ internal sealed class HandshakeDriver : IDisposable
         // fall through to the Use action.
         const uint           PickupItemTypeMask = 0xD96F;
         const int            WalkTickIntervalMs = 250;
-        const float          WalkSpeedUnitsPerSec = 2.5f;
+        // Phase 7e — switch from WalkForward to RunForward. Bot now
+        // moves at ~5 u/s instead of 2.5 u/s. Server gates run-speed
+        // on the Run motion + HoldKey.Run; AP-predicted self position
+        // must advance at the same rate or motion-done detection drifts.
+        const float          WalkSpeedUnitsPerSec = 5.0f;
         const int            MotionWallClockTimeoutSec = 30;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
@@ -1164,18 +1168,18 @@ internal sealed class HandshakeDriver : IDisposable
                 }
 
                 // Phase 5b — MoveToState START. Tell the server we're
-                // walking forward. Wait an additional grace window
+                // running forward. Wait an additional grace window
                 // after AutonomousPosition so the server has applied
                 // the position update before we layer motion on top.
                 //
-                // Per rubber-duck on this phase: WalkForward +
-                // CurrentHoldKey=Run gets remapped to RunForward
-                // server-side, so we use HoldKey.None to actually
-                // walk. Also: Player.OnMoveToState short-circuits on
-                // !FastTick (true for our NPK headless char), so we
-                // do NOT expect a continuous UpdatePosition stream —
-                // only a Motion broadcast back at us. That broadcast
-                // alone proves the wire format is accepted.
+                // Phase 7e: switched from WalkForward+HoldKey.None to
+                // RunForward+HoldKey.Run for ~2x locomotion speed.
+                // Predicted self-position step (WalkSpeedUnitsPerSec)
+                // bumped from 2.5 to 5.0 to match. Player.OnMoveToState
+                // short-circuits on !FastTick (true for our NPK headless
+                // char), so we do NOT expect a continuous UpdatePosition
+                // stream — only a Motion broadcast back at us. That
+                // broadcast alone proves the wire format is accepted.
                 if (autonomousPositionSent &&
                     !moveToStateStartSent &&
                     autonomousPositionPacketIndex >= 0 &&
@@ -1198,9 +1202,9 @@ internal sealed class HandshakeDriver : IDisposable
                     var fragSeq   = nextOutboundFragmentSequence++;
 
                     var motion = RawMotionStatePayload.ForwardMotion(
-                        holdKey: HoldKey.None,
+                        holdKey: HoldKey.Run,
                         stance:  MotionStance.NonCombat,
-                        command: MotionCommand.WalkForward,
+                        command: MotionCommand.RunForward,
                         speed:   1.0f);
 
                     // Phase 6 — use the locked rotation if we picked
@@ -1241,7 +1245,7 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine(
                         $"[observe]   -> PHASE5B START: GameActionMoveToState " +
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand|ForwardSpeed) " +
-                        $"holdKey=None stance=NonCombat cmd=WalkForward speed=1.0 " +
+                        $"holdKey=Run stance=NonCombat cmd=RunForward speed=1.0 " +
                         $"cell=0x{moveCell:X8} xyz=({moveSelf.Position.X:F2},{moveSelf.Position.Y:F2},{moveSelf.Position.Z:F2}) " +
                         $"rot=({moveRot.X:F3},{moveRot.Y:F3},{moveRot.Z:F3},{moveRot.W:F3}) " +
                         $"rotSource={(motionRotation is null ? "self" : "target-lock")} " +
