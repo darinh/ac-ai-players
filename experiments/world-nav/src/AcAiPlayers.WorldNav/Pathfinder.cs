@@ -252,6 +252,16 @@ public sealed class Pathfinder
     /// nearest to <paramref name="toWorld"/>; callers should treat the
     /// first and last Points as snap-to-graph approximations of the
     /// requested endpoints.
+    ///
+    /// Uses multi-source / multi-goal A*: snaps the world endpoints to
+    /// the K nearest walkable nodes (K =
+    /// <see cref="SnapCandidatesPerEndpoint"/>) and treats every start
+    /// candidate as a virtual source and every goal candidate as a
+    /// virtual sink. This is robust to a single nearest-node landing
+    /// in an intra-cell micro-component that is partitioned from the
+    /// bridges or from the rest of the room by static obstacles —
+    /// alternative snap candidates often lie in the cell's main
+    /// connected component and produce a successful path.
     /// </summary>
     /// <param name="walkableCells">
     /// Optional fog-of-war filter. When non-null, both endpoints must
@@ -264,33 +274,47 @@ public sealed class Pathfinder
         Vector3 toWorld,
         IReadOnlySet<uint>? walkableCells = null)
     {
-        var startRef = NearestWalkableNode(graph, fromWorld, walkableCells);
-        if (startRef is null)
+        var startCandidates = NearestWalkableNodes(
+            graph, fromWorld, SnapCandidatesPerEndpoint, walkableCells);
+        if (startCandidates.Count == 0)
             return EmptyWalkable("no walkable node near start position (try widening walkableCells or check the cell is loaded)");
-        var goalRef = NearestWalkableNode(graph, toWorld, walkableCells);
-        if (goalRef is null)
+        var goalCandidates = NearestWalkableNodes(
+            graph, toWorld, SnapCandidatesPerEndpoint, walkableCells);
+        if (goalCandidates.Count == 0)
             return EmptyWalkable("no walkable node near goal position");
 
-        var start = startRef.Value;
-        var goal = goalRef.Value;
-        var goalPos = graph.Cells[goal.CellId].WalkableNodes[goal.NodeIndex].PositionWorld;
+        // Use the FIRST (closest) goal candidate as the heuristic
+        // anchor. Multi-goal A* with the min-of-K heuristic would be
+        // ideal but more code; "anchor on closest goal" still respects
+        // A* admissibility because the heuristic underestimates cost
+        // to ANY goal in the goal-set as long as it underestimates
+        // cost to the anchor.
+        var goalAnchorPos = graph.Cells[goalCandidates[0].CellId]
+            .WalkableNodes[goalCandidates[0].NodeIndex].PositionWorld;
+        var goalSet = new HashSet<WalkableNodeRef>(goalCandidates);
 
-        if (start == goal)
+        // Single-node shortcut: if any start candidate is also a goal
+        // candidate, return immediately.
+        foreach (var s in startCandidates)
         {
-            return new WalkableResult
+            if (goalSet.Contains(s))
             {
-                Found = true,
-                Points = new[] { goalPos },
-                NodePath = new[] { goal },
-                TotalCost = 0,
-                VisitedNodes = 1,
-            };
+                var pos = graph.Cells[s.CellId].WalkableNodes[s.NodeIndex].PositionWorld;
+                return new WalkableResult
+                {
+                    Found = true,
+                    Points = new[] { pos },
+                    NodePath = new[] { s },
+                    TotalCost = 0,
+                    VisitedNodes = 1,
+                };
+            }
         }
 
         // Build a per-endpoint index of bridges so adjacency expansion
-        // is O(degree) instead of O(total bridges). For ~1400 bridges
-        // this is microseconds; cache externally if you call this in
-        // a tight loop.
+        // is O(degree) instead of O(total bridges). For ~12k bridges
+        // this is sub-millisecond; cache externally if you call this
+        // in a tight loop.
         var bridgesByEndpoint = new Dictionary<WalkableNodeRef, List<WalkableBridge>>();
         foreach (var b in graph.WalkableBridges)
         {
@@ -304,18 +328,36 @@ public sealed class Pathfinder
             listC.Add(b);
         }
 
-        var gScore = new Dictionary<WalkableNodeRef, float> { [start] = 0f };
+        var gScore = new Dictionary<WalkableNodeRef, float>();
         var cameFrom = new Dictionary<WalkableNodeRef, WalkableNodeRef>();
         var open = new PriorityQueue<WalkableNodeRef, float>();
-        var startPos = graph.Cells[start.CellId].WalkableNodes[start.NodeIndex].PositionWorld;
-        open.Enqueue(start, Vector3.Distance(startPos, goalPos));
+        // Sentinel value used by ReconstructWalkable to detect "this
+        // node is a virtual start" (no predecessor to follow).
+        var multiStart = new HashSet<WalkableNodeRef>();
+        foreach (var sc in startCandidates)
+        {
+            // Use distance from the requested world position to the
+            // snapped node as the initial g-cost. Two start candidates
+            // farther from the world position pay a higher initial
+            // cost, so A* naturally prefers the closer snap when both
+            // can reach the goal.
+            var scPos = graph.Cells[sc.CellId].WalkableNodes[sc.NodeIndex].PositionWorld;
+            float initG = Vector3.Distance(fromWorld, scPos);
+            if (gScore.TryGetValue(sc, out var prev) && prev <= initG) continue;
+            gScore[sc] = initG;
+            multiStart.Add(sc);
+            open.Enqueue(sc, initG + Vector3.Distance(scPos, goalAnchorPos));
+        }
+
         var visited = new HashSet<WalkableNodeRef>();
 
         while (open.TryDequeue(out var current, out _))
         {
             if (!visited.Add(current)) continue;
-            if (current == goal)
-                return ReconstructWalkable(graph, start, goal, cameFrom, gScore[goal], visited.Count);
+            if (goalSet.Contains(current))
+                return ReconstructWalkableMulti(
+                    graph, multiStart, current, cameFrom,
+                    gScore[current], visited.Count);
 
             var currentCell = graph.Cells[current.CellId];
             float currentG = gScore[current];
@@ -329,7 +371,7 @@ public sealed class Pathfinder
                 if (otherIdx < 0) continue;
                 var nbr = new WalkableNodeRef(current.CellId, otherIdx);
                 RelaxWalkable(graph, nbr, currentG + edge.DistanceUnits, current,
-                    gScore, cameFrom, open, goalPos);
+                    gScore, cameFrom, open, goalAnchorPos);
             }
 
             // 2) Cross-cell neighbours via WalkableBridges touching this node.
@@ -342,7 +384,7 @@ public sealed class Pathfinder
                         : new WalkableNodeRef(b.FromCellId, b.FromNodeIndex);
                     if (walkableCells is not null && !walkableCells.Contains(nbr.CellId)) continue;
                     RelaxWalkable(graph, nbr, currentG + b.DistanceUnits, current,
-                        gScore, cameFrom, open, goalPos);
+                        gScore, cameFrom, open, goalAnchorPos);
                 }
             }
         }
@@ -357,6 +399,16 @@ public sealed class Pathfinder
             FailureReason = "no walkable path between snapped nodes (graph partitioned at this resolution; check WalkableBridges / fog of war)",
         };
     }
+
+    /// <summary>
+    /// How many snap candidates per endpoint to feed into multi-source
+    /// / multi-goal A*. The nearest single walkable node is often in a
+    /// partitioned intra-cell micro-component; offering alternative
+    /// snap points lets A* escape via a sibling node in the cell's
+    /// main connected component. K=5 is generous; the A* runtime cost
+    /// is dominated by graph traversal, not start-set size.
+    /// </summary>
+    private const int SnapCandidatesPerEndpoint = 5;
 
     private static void RelaxWalkable(
         IndoorNavGraph graph,
@@ -408,6 +460,48 @@ public sealed class Pathfinder
     }
 
     /// <summary>
+    /// Multi-source variant of <see cref="ReconstructWalkable"/>:
+    /// follows <paramref name="cameFrom"/> from <paramref name="goal"/>
+    /// backward until we hit a node in <paramref name="multiStart"/>
+    /// (the set of virtual start candidates). The chain returned is
+    /// ordered start -> goal.
+    /// </summary>
+    private static WalkableResult ReconstructWalkableMulti(
+        IndoorNavGraph graph,
+        HashSet<WalkableNodeRef> multiStart,
+        WalkableNodeRef goal,
+        Dictionary<WalkableNodeRef, WalkableNodeRef> cameFrom,
+        float totalCost,
+        int visitedNodes)
+    {
+        var chain = new List<WalkableNodeRef> { goal };
+        var cursor = goal;
+        // Walk back until we hit one of the virtual sources. Virtual
+        // sources have no entry in cameFrom (we never wrote one for
+        // them), so a TryGetValue miss is the terminator.
+        while (!multiStart.Contains(cursor))
+        {
+            if (!cameFrom.TryGetValue(cursor, out var prev)) break;
+            cursor = prev;
+            chain.Add(cursor);
+        }
+        chain.Reverse();
+
+        var points = new List<Vector3>(chain.Count);
+        foreach (var n in chain)
+            points.Add(graph.Cells[n.CellId].WalkableNodes[n.NodeIndex].PositionWorld);
+
+        return new WalkableResult
+        {
+            Found = true,
+            Points = points,
+            NodePath = chain,
+            TotalCost = totalCost,
+            VisitedNodes = visitedNodes,
+        };
+    }
+
+    /// <summary>
     /// Find the walkable node in the graph closest to
     /// <paramref name="world"/> in 3D Euclidean distance, optionally
     /// restricted to cells in <paramref name="walkableCells"/>. Returns
@@ -438,6 +532,50 @@ public sealed class Pathfinder
             }
         }
         return best;
+    }
+
+    /// <summary>
+    /// Find up to <paramref name="k"/> walkable nodes in the graph
+    /// closest to <paramref name="world"/> in 3D Euclidean distance,
+    /// optionally restricted to cells in <paramref name="walkableCells"/>.
+    /// Returned list is ordered ascending by distance (closest first)
+    /// and may be empty if no eligible cell has walkable nodes.
+    ///
+    /// Used by <see cref="FindWalkablePath"/> to seed multi-source /
+    /// multi-goal A*. K alternative snap candidates are robust against
+    /// the single nearest landing in an intra-cell micro-component
+    /// that is partitioned from the rest of the room (a real failure
+    /// mode in the academy reference where signs and door columns
+    /// partition floor samples).
+    /// </summary>
+    public static IReadOnlyList<WalkableNodeRef> NearestWalkableNodes(
+        IndoorNavGraph graph,
+        Vector3 world,
+        int k,
+        IReadOnlySet<uint>? walkableCells = null)
+    {
+        if (k <= 0) return Array.Empty<WalkableNodeRef>();
+        var picks = new List<(WalkableNodeRef Ref, float DistSq)>(k * 4);
+        foreach (var (cellId, cell) in graph.Cells)
+        {
+            if (walkableCells is not null && !walkableCells.Contains(cellId)) continue;
+            for (int i = 0; i < cell.WalkableNodes.Count; i++)
+            {
+                var p = cell.WalkableNodes[i].PositionWorld;
+                float dx = p.X - world.X;
+                float dy = p.Y - world.Y;
+                float dz = p.Z - world.Z;
+                float d = dx * dx + dy * dy + dz * dz;
+                picks.Add((new WalkableNodeRef(cellId, i), d));
+            }
+        }
+        if (picks.Count == 0) return Array.Empty<WalkableNodeRef>();
+        picks.Sort((a, b) => a.DistSq.CompareTo(b.DistSq));
+        int take = System.Math.Min(k, picks.Count);
+        var result = new List<WalkableNodeRef>(take);
+        for (int i = 0; i < take; i++)
+            result.Add(picks[i].Ref);
+        return result;
     }
 
     private static WalkableResult EmptyWalkable(string reason) => new()

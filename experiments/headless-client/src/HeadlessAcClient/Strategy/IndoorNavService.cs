@@ -109,6 +109,22 @@ internal enum IndoorPathStatus
 }
 
 /// <summary>
+/// One step in an indoor path. Position is the world-XYZ to walk to;
+/// <see cref="CellId"/> identifies which static-graph cell owns the
+/// step; <see cref="Kind"/> distinguishes "I'm just crossing the
+/// room" (Floor) from "I'm passing through a structural doorway"
+/// (Doorway). Doorway steps with a non-null
+/// <see cref="ConnectionPolygonId"/> let the walk-tick locate the
+/// corresponding Door entity (if any) and dispatch USE before
+/// stepping through.
+/// </summary>
+internal readonly record struct IndoorWaypoint(
+    Vector3 Position,
+    uint CellId,
+    WalkableNodeKind Kind,
+    ushort? ConnectionPolygonId);
+
+/// <summary>
 /// Result of an <see cref="IndoorNavService.TryFindPath"/> call.
 /// Waypoints are XYZ positions to step through in order; the last
 /// waypoint is the snapped destination (may differ from the caller-
@@ -122,12 +138,12 @@ internal enum IndoorPathStatus
 /// </summary>
 internal readonly record struct IndoorPathResult(
     IndoorPathStatus Status,
-    IReadOnlyList<Vector3> Waypoints,
+    IReadOnlyList<IndoorWaypoint> Waypoints,
     IReadOnlySet<uint> PathCells,
     string? Reason)
 {
     public static IndoorPathResult Of(IndoorPathStatus status, string? reason = null)
-        => new(status, Array.Empty<Vector3>(),
+        => new(status, Array.Empty<IndoorWaypoint>(),
                (IReadOnlySet<uint>)new HashSet<uint>(), reason);
 }
 
@@ -395,11 +411,23 @@ internal sealed class IndoorNavService
                 IndoorPathStatus.NoPath, result.FailureReason));
 
         var pathCells = new HashSet<uint>();
-        foreach (var node in result.NodePath)
-            pathCells.Add(node.CellId);
+        var waypoints = new IndoorWaypoint[result.NodePath.Count];
+        for (int i = 0; i < result.NodePath.Count; i++)
+        {
+            var nref = result.NodePath[i];
+            pathCells.Add(nref.CellId);
+            var node = graph.Cells[nref.CellId].WalkableNodes[nref.NodeIndex];
+            waypoints[i] = new IndoorWaypoint(
+                Position: result.Points[i],
+                CellId: nref.CellId,
+                Kind: node.Kind,
+                ConnectionPolygonId: node.Kind == WalkableNodeKind.Doorway
+                    ? node.ConnectionPolygonId
+                    : null);
+        }
 
         return Record(new IndoorPathResult(
-            IndoorPathStatus.Success, result.Points, pathCells, null));
+            IndoorPathStatus.Success, waypoints, pathCells, null));
     }
 
     /// <summary>

@@ -114,8 +114,9 @@ public sealed class LandblockNavLoader
             var (centroidWorld, boundsWorld) = ComputeCellGeometry(raw);
             var obstacles = ComputeStaticObstacles(raw);
             var floors = ComputeFloorPolygons(raw);
-            var walkable = ComputeWalkableNodes(cellId, floors, obstacles);
-            var walkEdges = ComputeWalkableEdges(walkable, obstacles);
+            var floorNodes = ComputeWalkableNodes(cellId, floors, obstacles);
+            var (walkable, walkEdges) = AppendDoorwayNodesAndEdges(
+                cellId, floorNodes, floors, obstacles, connections);
             cells[cellId] = new IndoorCell
             {
                 CellId = cellId,
@@ -730,40 +731,28 @@ public sealed class LandblockNavLoader
     }
 
     /// <summary>
-    /// Maximum allowed XY distance between a walkable node and the
-    /// connection centroid it bridges through. Doorways usually have a
-    /// node within ~2u of the centroid; if the nearest node is farther
-    /// than this, we treat the doorway as not actually reachable from
-    /// either side and skip the bridge. Set generously to 6u — the
-    /// walkable-sample spacing is 1u so a 6u radius covers ~113 grid
-    /// cells, plenty for any practical doorway. Tighter values
-    /// partition the graph excessively in the academy reference.
-    /// </summary>
-    private const float WalkableBridgeMaxApproach = 6.0f;
-
-    /// <summary>
-    /// Build cross-cell walkable bridges by finding, for each
-    /// inter-cell <see cref="CellConnection"/> with both sides loaded
-    /// and the centroid resolved, the closest walkable node in each
-    /// cell to the connection centroid and emitting an undirected
-    /// bridge edge between them.
+    /// Build cross-cell walkable bridges by matching up Doorway
+    /// <see cref="WalkableNode"/>s on either side of each
+    /// <see cref="CellConnection"/>. Each loaded-both-sides connection
+    /// with a resolved centroid emits exactly ONE bridge.
     ///
-    /// Clearance is enforced on BOTH halves of the bridge: the
-    /// node-to-centroid segment in each cell must clear that cell's
-    /// static obstacles, and the approach distance must be reasonable
-    /// (<c>WalkableBridgeMaxApproach</c> units).
+    /// The owning side's Doorway node is found by exact
+    /// <see cref="WalkableNode.ConnectionPolygonId"/> match (the cell
+    /// built that node from THIS connection record). The other side's
+    /// Doorway node is found by world-position proximity to the
+    /// shared connection centroid — necessary because each cell has
+    /// its OWN PolygonId namespace for the shared doorway face and
+    /// the two sides almost never share a numeric ID.
     ///
-    /// De-duplicated by unordered cell-pair plus PolygonId so the same
-    /// physical doorway isn't bridged twice when both sides list it.
+    /// De-duplicated by unordered cell-pair plus node-index pair so
+    /// the same physical doorway isn't bridged twice when both sides
+    /// list it.
     /// </summary>
     private static List<WalkableBridge> ComputeWalkableBridges(
         IReadOnlyDictionary<uint, IndoorCell> cells)
     {
         var bridges = new List<WalkableBridge>();
-        // Dedup key = (minCellId, maxCellId, polygonId). A single
-        // doorway between cells A and B is recorded once on A side
-        // and once on B side; we want exactly one bridge for it.
-        var seen = new HashSet<(uint, uint, ushort)>();
+        var seen = new HashSet<(uint, int, uint, int)>();
 
         foreach (var cell in cells.Values)
         {
@@ -773,20 +762,24 @@ public sealed class LandblockNavLoader
                 if (connection.CentroidWorld is not Vector3 cc) continue;
                 if (!cells.TryGetValue(connection.OtherCellId, out var other)) continue;
 
-                var key = cell.CellId < other.CellId
-                    ? (cell.CellId, other.CellId, connection.PolygonId)
-                    : (other.CellId, cell.CellId, connection.PolygonId);
-                if (!seen.Add(key)) continue;
-
-                int fromIdx = NearestApproachableNode(cell, cc);
+                int fromIdx = FindDoorwayNodeIndex(cell, connection.PolygonId);
                 if (fromIdx < 0) continue;
-                int toIdx = NearestApproachableNode(other, cc);
+                // Each cell has its own PolygonId namespace for the
+                // shared doorway face — match the other side's
+                // Doorway node by world-position proximity to the
+                // shared centroid (XY only; Z differs because each
+                // side projects to its own floor plane).
+                int toIdx = FindDoorwayNodeByPositionXY(other, cc, DoorwayMatchToleranceUnits);
                 if (toIdx < 0) continue;
+
+                var (ca, na, cb, nb) = cell.CellId < other.CellId
+                    ? (cell.CellId, fromIdx, other.CellId, toIdx)
+                    : (other.CellId, toIdx, cell.CellId, fromIdx);
+                if (!seen.Add((ca, na, cb, nb))) continue;
 
                 var fromPos = cell.WalkableNodes[fromIdx].PositionWorld;
                 var toPos = other.WalkableNodes[toIdx].PositionWorld;
-                float cost =
-                    Vector3.Distance(fromPos, cc) + Vector3.Distance(cc, toPos);
+                float cost = Vector3.Distance(fromPos, toPos);
 
                 bridges.Add(new WalkableBridge(
                     FromCellId: cell.CellId,
@@ -802,43 +795,211 @@ public sealed class LandblockNavLoader
     }
 
     /// <summary>
-    /// Return the index of the walkable node in <paramref name="cell"/>
-    /// that is closest in 3D to <paramref name="target"/>, provided
-    /// the node lies within <see cref="WalkableBridgeMaxApproach"/>
-    /// XY units of the target. Returns -1 if no such node exists.
-    ///
-    /// NOTE: we deliberately do NOT clearance-check the bridge segment
-    /// against the cell's static obstacles. Doorway centroids sit on
-    /// the cell boundary and often coincide with door-frame columns,
-    /// sign posts, or other narrow furniture; the segment-vs-circle
-    /// test was rejecting ~14% of connections on the academy reference
-    /// and partitioning the walkable graph badly. The intra-cell
-    /// <see cref="ComputeWalkableEdges"/> step is the authoritative
-    /// obstacle-avoidance enforcer — bridges only need to identify a
-    /// reasonable entry/exit point, not guarantee that point is
-    /// reachable without clipping. A* still has to find an intra-cell
-    /// path between the bridge endpoint and any other node it cares
-    /// about, and those edges WILL enforce clearance.
+    /// Tolerance (XY world units) for matching the other-cell Doorway
+    /// node to this cell's connection centroid. Both DAT records for
+    /// a shared doorway face independently compute the centroid from
+    /// their own mesh + frame; numerical drift between the two is
+    /// usually well under 0.1u but can be larger for irregular
+    /// arches. 2.0u is generous enough to absorb that drift while
+    /// still preventing accidental matches across truly separate
+    /// adjacent doorways.
     /// </summary>
-    private static int NearestApproachableNode(IndoorCell cell, Vector3 target)
-    {
-        int best = -1;
-        float bestDistSq = float.PositiveInfinity;
-        float maxXyDistSq = WalkableBridgeMaxApproach * WalkableBridgeMaxApproach;
+    private const float DoorwayMatchToleranceUnits = 2.0f;
 
+    /// <summary>
+    /// Find the index of the Doorway <see cref="WalkableNode"/> in
+    /// <paramref name="cell"/> whose
+    /// <see cref="WalkableNode.ConnectionPolygonId"/> matches
+    /// <paramref name="polygonId"/>. Returns -1 if no such node exists
+    /// (e.g. the centroid failed to resolve for that connection so
+    /// <see cref="AppendDoorwayNodesAndEdges"/> didn't emit a doorway
+    /// node for it).
+    /// </summary>
+    private static int FindDoorwayNodeIndex(IndoorCell cell, ushort polygonId)
+    {
         for (int i = 0; i < cell.WalkableNodes.Count; i++)
         {
-            var p = cell.WalkableNodes[i].PositionWorld;
-            float dxx = p.X - target.X;
-            float dyy = p.Y - target.Y;
-            float xyDistSq = dxx * dxx + dyy * dyy;
-            if (xyDistSq > maxXyDistSq) continue;
-            float dz = p.Z - target.Z;
-            float distSq = xyDistSq + dz * dz;
-            if (distSq >= bestDistSq) continue;
-            best = i;
-            bestDistSq = distSq;
+            var n = cell.WalkableNodes[i];
+            if (n.Kind == WalkableNodeKind.Doorway && n.ConnectionPolygonId == polygonId)
+                return i;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Find the index of the Doorway <see cref="WalkableNode"/> in
+    /// <paramref name="cell"/> closest in world XY to
+    /// <paramref name="worldPos"/>, returning -1 if no Doorway node
+    /// is within <paramref name="toleranceUnits"/> in the XY plane.
+    /// Z is intentionally ignored because the two sides of the same
+    /// connection project to different floor planes (e.g. stair top
+    /// vs stair bottom).
+    /// </summary>
+    private static int FindDoorwayNodeByPositionXY(
+        IndoorCell cell, Vector3 worldPos, float toleranceUnits)
+    {
+        float tolSq = toleranceUnits * toleranceUnits;
+        int best = -1;
+        float bestSq = tolSq;
+        for (int i = 0; i < cell.WalkableNodes.Count; i++)
+        {
+            var n = cell.WalkableNodes[i];
+            if (n.Kind != WalkableNodeKind.Doorway) continue;
+            float dx = n.PositionWorld.X - worldPos.X;
+            float dy = n.PositionWorld.Y - worldPos.Y;
+            float dSq = dx * dx + dy * dy;
+            if (dSq <= bestSq)
+            {
+                bestSq = dSq;
+                best = i;
+            }
         }
         return best;
+    }
+
+    /// <summary>
+    /// Maximum XY distance between a doorway node (placed at the
+    /// connection centroid) and the floor nodes it may connect to via
+    /// intra-cell <see cref="WalkableEdge"/>s. Doorways are usually
+    /// reachable from any floor node within ~4–6u; 8u is generous to
+    /// account for rooms where the door is set back from the main
+    /// floor or where sampling left gaps right next to the threshold.
+    /// </summary>
+    private const float DoorwayConnectionRadius = 8.0f;
+
+    /// <summary>
+    /// Vertical step allowance from a doorway node to a candidate
+    /// floor node, in world Z units. More generous than
+    /// <see cref="WalkableStepMaxDz"/> because doorway centroids sit
+    /// at the polygon midpoint, which is often elevated relative to
+    /// the floor sill on either side (especially for arches).
+    /// </summary>
+    private const float DoorwayConnectionMaxDz = 2.0f;
+
+    /// <summary>
+    /// Append one Doorway <see cref="WalkableNode"/> per loaded-side
+    /// of each <see cref="CellConnection"/> with a resolved centroid,
+    /// and wire it into the intra-cell <see cref="WalkableEdge"/>
+    /// graph via LOS-checked edges to nearby Floor nodes.
+    ///
+    /// Why doorway nodes are structural (not just "the nearest floor
+    /// sample to the centroid"): A* over a sampled floor + cross-cell
+    /// bridges partitions badly when the nearest-to-centroid floor
+    /// sample lands in a disconnected micro-component cut off from
+    /// the rest of the room by a static obstacle (sign, column,
+    /// pillar) or by a sub-cell elevation step the
+    /// <see cref="WalkableStepMaxDz"/> gate rejects. Making the
+    /// doorway its own node — anchored at the canonical doorway XY
+    /// regardless of sampling — and connecting it to ALL floor nodes
+    /// within <see cref="DoorwayConnectionRadius"/> (LOS-checked)
+    /// guarantees the doorway is reachable from at least one floor
+    /// node per cell, AND lets A* enter/exit via whichever floor
+    /// node sits in the bot's connected component.
+    ///
+    /// The Doorway node ALSO carries the connection's PolygonId in
+    /// <see cref="WalkableNode.ConnectionPolygonId"/> so the runtime
+    /// consumer can correlate it with an observed Door entity and
+    /// dispatch USE-to-open BEFORE walking through.
+    /// </summary>
+    private static (List<WalkableNode> nodes, List<WalkableEdge> edges) AppendDoorwayNodesAndEdges(
+        uint cellId,
+        List<WalkableNode> floorNodes,
+        IReadOnlyList<FloorPolygon> floors,
+        IReadOnlyList<StaticObstacle> obstacles,
+        IReadOnlyList<CellConnection> connections)
+    {
+        var nodes = new List<WalkableNode>(floorNodes);
+        var edges = ComputeWalkableEdges(floorNodes, obstacles);
+
+        float cellMinFloorZ = float.PositiveInfinity;
+        foreach (var f in floors)
+            foreach (var v in f.VerticesWorld)
+                if (v.Z < cellMinFloorZ) cellMinFloorZ = v.Z;
+
+        foreach (var connection in connections)
+        {
+            // Skip doorways whose centroid we couldn't resolve (other
+            // landblock, missing DAT record, etc.). These don't get
+            // structural nodes — fog of war + cell-level routing
+            // handle the abstract crossing if needed.
+            if (connection.CentroidWorld is not Vector3 cc) continue;
+
+            // Project the doorway centroid down to floor level on
+            // THIS cell's side. Strategy:
+            //   1. If there's a floor polygon whose XY footprint
+            //      contains the centroid, use its plane Z (preferring
+            //      the highest one at-or-below the centroid Z so we
+            //      pick the floor under the doorway, not a balcony).
+            //   2. Else use the nearest floor node's Z (within
+            //      DoorwayConnectionRadius).
+            //   3. Else fall back to cellMinFloorZ.
+            int floorPolyIdx = -1;
+            float floorZ = cc.Z;
+            for (int pi = 0; pi < floors.Count; pi++)
+            {
+                if (floors[pi].VerticesWorld.Count < 3) continue;
+                if (!PointInPolygonXY(cc.X, cc.Y, floors[pi].VerticesWorld)) continue;
+                float z = ProjectZOntoPlane(cc.X, cc.Y, floors[pi]);
+                if (z <= cc.Z + 0.5f && (floorPolyIdx < 0 || z > floorZ))
+                {
+                    floorPolyIdx = pi;
+                    floorZ = z;
+                }
+            }
+            if (floorPolyIdx < 0)
+            {
+                float bestDistSq = DoorwayConnectionRadius * DoorwayConnectionRadius;
+                bool found = false;
+                for (int i = 0; i < floorNodes.Count; i++)
+                {
+                    var p = floorNodes[i].PositionWorld;
+                    float dxx = p.X - cc.X;
+                    float dyy = p.Y - cc.Y;
+                    float distSq = dxx * dxx + dyy * dyy;
+                    if (distSq <= bestDistSq)
+                    {
+                        bestDistSq = distSq;
+                        floorZ = p.Z;
+                        floorPolyIdx = floorNodes[i].FloorPolygonIndex;
+                        found = true;
+                    }
+                }
+                if (!found && !float.IsPositiveInfinity(cellMinFloorZ))
+                    floorZ = cellMinFloorZ;
+            }
+
+            var doorwayNode = new WalkableNode
+            {
+                CellId = cellId,
+                FloorPolygonIndex = floorPolyIdx,
+                PositionWorld = new Vector3(cc.X, cc.Y, floorZ),
+                Kind = WalkableNodeKind.Doorway,
+                ConnectionPolygonId = connection.PolygonId,
+            };
+            int doorwayIdx = nodes.Count;
+            nodes.Add(doorwayNode);
+
+            // Wire the doorway into the intra-cell graph: connect to
+            // every floor node within DoorwayConnectionRadius whose
+            // segment clears the obstacle field. Without these edges
+            // the doorway node would be isolated and A* couldn't
+            // enter/exit the cell through it.
+            for (int i = 0; i < floorNodes.Count; i++)
+            {
+                var fp = floorNodes[i].PositionWorld;
+                float dxx = fp.X - cc.X;
+                float dyy = fp.Y - cc.Y;
+                float xyDistSq = dxx * dxx + dyy * dyy;
+                if (xyDistSq > DoorwayConnectionRadius * DoorwayConnectionRadius) continue;
+                if (System.Math.Abs(fp.Z - floorZ) > DoorwayConnectionMaxDz) continue;
+                if (SegmentIntersectsAnyObstacleXY(cc.X, cc.Y, fp.X, fp.Y, obstacles)) continue;
+                float dist = Vector3.Distance(new Vector3(cc.X, cc.Y, floorZ), fp);
+                // Floor node i first (NodeA < NodeB convention since
+                // the doorway node is appended at the end).
+                edges.Add(new WalkableEdge(i, doorwayIdx, dist));
+            }
+        }
+
+        return (nodes, edges);
     }
 }

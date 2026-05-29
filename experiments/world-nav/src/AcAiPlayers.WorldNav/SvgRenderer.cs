@@ -170,6 +170,7 @@ public sealed class SvgRenderer
         sb.Append("  .obstacle-bound{fill:none;stroke:#660000;stroke-width:0.5;stroke-dasharray:2 2;opacity:0.7}\n");
         sb.Append("  .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}\n");
         sb.Append("  .walkable-node{fill:#0a4a0a;fill-opacity:0.85;stroke:none}\n");
+        sb.Append("  .walkable-doorway{fill:#d4a017;fill-opacity:0.95;stroke:#7a5b0a;stroke-width:0.25}\n");
         sb.Append("  .walkable-edge{stroke:#226622;stroke-width:0.15;stroke-opacity:0.4;fill:none}\n");
         sb.Append("  .walkable-bridge{stroke:#ff6600;stroke-width:0.6;stroke-opacity:0.7;fill:none}\n");
         sb.Append("  .path-trace{stroke:#cc00cc;stroke-width:1.6;stroke-opacity:0.9;fill:none}\n");
@@ -291,8 +292,16 @@ public sealed class SvgRenderer
             {
                 var nx = Wx(wn.PositionWorld.X);
                 var ny = Wy(wn.PositionWorld.Y);
-                sb.Append(CultureInfo.InvariantCulture,
-                    $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
+                if (wn.Kind == WalkableNodeKind.Doorway)
+                {
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<circle class=\"walkable-doorway\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"1.4\"/>\n");
+                }
+                else
+                {
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
+                }
             }
         }
 
@@ -637,8 +646,16 @@ public sealed class SvgRenderer
             {
                 var nx = Wx(wn.PositionWorld.X);
                 var ny = Wy(wn.PositionWorld.Y);
-                sb.Append(CultureInfo.InvariantCulture,
-                    $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
+                if (wn.Kind == WalkableNodeKind.Doorway)
+                {
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<circle class=\"walkable-doorway\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"1.4\"/>\n");
+                }
+                else
+                {
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
+                }
             }
         }
 

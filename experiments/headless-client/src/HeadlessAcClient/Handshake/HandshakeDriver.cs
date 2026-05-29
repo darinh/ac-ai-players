@@ -29,6 +29,8 @@ using HeadlessAcClient.Crypto;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.Strategy.Intent;
+
+using AcAiPlayers.WorldNav;
 using HeadlessAcClient.Tactics;
 using HeadlessAcClient.World;
 
@@ -576,10 +578,15 @@ internal sealed class HandshakeDriver : IDisposable
         // through Waypoints rather than aiming straight at the target.
         // motionIndoorPathAttempted is the "tried once" gate (we don't
         // re-plan every tick — Phase 3.2 may add replan triggers).
-        IReadOnlyList<Vector3>? motionIndoorPath = null;
+        IReadOnlyList<IndoorWaypoint>? motionIndoorPath = null;
         int                     motionIndoorPathIndex = 0;
         IReadOnlySet<uint>?     motionIndoorPathCells = null;
         bool                    motionIndoorPathAttempted = false;
+        // Door-USE dispatch tracking: per-door cooldown so we don't
+        // spam USE on the same door every walk-tick while waiting for
+        // it to open. Keyed by door object guid; value is the wall-
+        // clock tick we last dispatched USE.
+        var doorUseDispatchedAt = new Dictionary<uint, DateTime>();
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -3711,8 +3718,125 @@ internal sealed class HandshakeDriver : IDisposable
                                 motionIndoorPath is not null &&
                                 motionIndoorPathIndex < motionIndoorPath.Count - 1)
                             {
-                                stepTargetPos = motionIndoorPath[motionIndoorPathIndex];
+                                stepTargetPos = motionIndoorPath[motionIndoorPathIndex].Position;
                                 aimingAtWaypoint = true;
+                            }
+
+                            // Door-USE motor pre-emptor — part of the "walk"
+                            // mechanical action, NOT a strategic interaction.
+                            //
+                            // Architecture justification (audit override):
+                            // The hardcoded-knowledge audit on this commit
+                            // flagged this block as FORBIDDEN ("Motor
+                            // autonomously deciding to USE a target the
+                            // LLM did not request"). We push it anyway with
+                            // documented rationale per the audit skill's
+                            // documented escape-hatch:
+                            //
+                            //   1. Doors are nav INFRASTRUCTURE, not game
+                            //      content. They physically gate cell
+                            //      connections. The pathfinder explicitly
+                            //      routes through them.
+                            //   2. The LLM already pushed an Intent to walk
+                            //      to a target. Walking through a doorway
+                            //      requires opening the door first. USE-on-
+                            //      doorway is the mechanical "how" of
+                            //      executing the LLM's "what" — same role
+                            //      as steering, animation, or accepting
+                            //      portal teleport.
+                            //   3. The user explicitly directed this:
+                            //      "all doors should be their own node so
+                            //       there will be implicit instructions to
+                            //       open the door node" (verbatim quote
+                            //       in the original task message).
+                            //   4. The alternatives (multi-second LLM
+                            //      round-trip per door, or letting the bot
+                            //      bounce off doors) fail the litmus tests
+                            //      (academy traversal requires multiple
+                            //      door openings within seconds).
+                            //
+                            // The two constants below are MECHANICAL:
+                            //   - DoorMatchRadiusUnits = 3.0u: tolerance
+                            //     for matching a Doorway navigation node
+                            //     (placed at the cell-connection centroid)
+                            //     to the live Door entity (placed at the
+                            //     door's physics centroid). Sometimes the
+                            //     pathfinder centroid and the door
+                            //     entity's authoritative position differ
+                            //     by a meter or two depending on cell
+                            //     mesh resolution. 3u is the empirical
+                            //     match tolerance.
+                            //   - DoorUseCooldownSeconds = 30.0: a USE on
+                            //     an already-open door toggles it CLOSED
+                            //     (Door.cs:97-98). Without a cooldown,
+                            //     repeated walk-tick attempts in the same
+                            //     waypoint would close-then-reopen-then-
+                            //     close in a tight loop. The cooldown is
+                            //     a per-door "send USE at most once per
+                            //     30s" mechanical rate-limit, not a
+                            //     statement about door behavior.
+                            //
+                            // If we add other "nav infrastructure that
+                            // requires interaction to traverse" (lever-
+                            // gates, pressure plates, traversal portals)
+                            // they belong in the same motor-extension
+                            // pattern, NOT in autonomous picker logic.
+                            const float DoorMatchRadiusUnits = 3.0f;
+                            const double DoorUseCooldownSeconds = 30.0;
+                            if (aimingAtWaypoint &&
+                                motionIndoorPath is not null &&
+                                motionIndoorPathIndex < motionIndoorPath.Count &&
+                                motionIndoorPath[motionIndoorPathIndex].Kind == WalkableNodeKind.Doorway)
+                            {
+                                var doorWp = motionIndoorPath[motionIndoorPathIndex];
+                                WorldObjectSnapshot? nearDoor = null;
+                                float nearDoorDistSq = DoorMatchRadiusUnits * DoorMatchRadiusUnits;
+                                foreach (var snap in worldState.Objects.Values)
+                                {
+                                    var dflags = snap.ObjectDescriptionFlags ?? 0u;
+                                    if ((dflags & (uint)ObjectDescriptionFlag.Door) == 0) continue;
+                                    var ddx = snap.Position.X - doorWp.Position.X;
+                                    var ddy = snap.Position.Y - doorWp.Position.Y;
+                                    var ddSq = ddx * ddx + ddy * ddy;
+                                    if (ddSq <= nearDoorDistSq)
+                                    {
+                                        nearDoorDistSq = ddSq;
+                                        nearDoor = snap;
+                                    }
+                                }
+                                if (nearDoor is not null)
+                                {
+                                    bool onCooldown = doorUseDispatchedAt.TryGetValue(nearDoor.Guid, out var lastT)
+                                        && (DateTime.UtcNow - lastT).TotalSeconds < DoorUseCooldownSeconds;
+                                    if (!onCooldown)
+                                    {
+                                        doorUseDispatchedAt[nearDoor.Guid] = DateTime.UtcNow;
+                                        var doorPktSeq  = nextOutboundPacketSequence++;
+                                        var doorFragSeq = nextOutboundFragmentSequence++;
+                                        var doorBuf = new byte[GameActionUseMessage.PackedSize];
+                                        var doorLen = GameActionUseMessage.Pack(doorBuf, nearDoor.Guid);
+                                        var doorMsg = new OutboundPacket();
+                                        if (lastReceivedSeq != 0)
+                                            doorMsg.AddAckSequence(lastReceivedSeq);
+                                        doorMsg.AddBlobFragment(
+                                            fragSequence: doorFragSeq,
+                                            fragId: OutboundFragmentId,
+                                            queue: (ushort)GameMessageGroup.UIQueue,
+                                            gameMessagePayload: doorBuf.AsSpan(0, doorLen));
+                                        var doorSent = doorMsg.Pack(sendBuf, myClientId,
+                                                                    sequence: doorPktSeq, iteration: 1,
+                                                                    encrypt: true, cryptoSend: cryptoSend);
+                                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, doorSent),
+                                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                        var doorDist = MathF.Sqrt(nearDoorDistSq);
+                                        Console.WriteLine(
+                                            $"[motion] door-USE: opening door '{nearDoor.Name}' guid=0x{nearDoor.Guid:X8} " +
+                                            $"at ({nearDoor.Position.X:F1},{nearDoor.Position.Y:F1}) " +
+                                            $"distFromDoorway={doorDist:F2}u " +
+                                            $"waypoint={motionIndoorPathIndex + 1}/{motionIndoorPath.Count} " +
+                                            $"pktSeq={doorPktSeq} bytes={doorSent}");
+                                    }
+                                }
                             }
 
                             // Step in XY only; preserve self Z so we don't

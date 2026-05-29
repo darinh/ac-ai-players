@@ -37,6 +37,7 @@ bool showWalkableEdges = false;
 bool showWalkableBridges = false;
 bool quiet = false;
 bool diag = false;
+bool partition = false;
 Vector3? traceFrom = null;
 Vector3? traceTo = null;
 
@@ -77,9 +78,10 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--quiet": quiet = true; break;
         case "--diag": diag = true; break;
+        case "--partition": partition = true; break;
         case "-h":
         case "--help":
-            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--show-walkable-bridges] [--trace x,y,z x,y,z] [--diag] [--quiet]");
+            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--show-walkable-bridges] [--trace x,y,z x,y,z] [--partition] [--diag] [--quiet]");
             return 0;
         default:
             Console.Error.WriteLine($"unknown arg: {a}");
@@ -128,7 +130,7 @@ if (!quiet)
     Console.WriteLine($"  connections:  {graph.ConnectionCount}");
     Console.WriteLine($"  obstacles:    {graph.StaticObstacleCount} static primitives");
     Console.WriteLine($"  floor polys:  {graph.FloorPolygonCount} walkable surfaces");
-    Console.WriteLine($"  walk nodes:   {graph.WalkableNodeCount} grid-sampled stand points");
+    Console.WriteLine($"  walk nodes:   {graph.WalkableNodeCount} total ({graph.WalkableFloorNodeCount} floor + {graph.WalkableDoorwayNodeCount} doorway)");
     Console.WriteLine($"  walk edges:   {graph.WalkableEdgeCount} 8-neighbour intra-cell links");
     Console.WriteLine($"  walk bridges: {graph.WalkableBridgeCount} cross-cell doorway hops");
     Console.WriteLine($"  bounds:  X[{graph.BoundsWorld.MinX:0.##}..{graph.BoundsWorld.MaxX:0.##}] Y[{graph.BoundsWorld.MinY:0.##}..{graph.BoundsWorld.MaxY:0.##}] Z[{graph.BoundsWorld.MinZ:0.##}..{graph.BoundsWorld.MaxZ:0.##}]");
@@ -243,6 +245,117 @@ if (traceFrom is { } pf && traceTo is { } pt)
     {
         Console.Error.WriteLine($"trace: FAILED ({result.FailureReason}); visited={result.VisitedNodes}");
     }
+}
+
+if (partition)
+{
+    // Run A* between every ordered pair of distinct cell centroids
+    // (excluding self-pairs). Reports the success ratio + a handful
+    // of failing pairs so we can audit gaps in doorway-node coverage.
+    // This is O(N^2) where N is cell count; for academy (568) that's
+    // ~322k traces. We sample-cap to keep runtime sane.
+    var cellIds = graph.Cells.Keys.OrderBy(x => x).ToArray();
+    var rng = new Random(12345);
+    const int sampleCap = 2000;
+    var pairs = new List<(uint a, uint b)>();
+    for (int trials = 0; trials < sampleCap; trials++)
+    {
+        var a = cellIds[rng.Next(cellIds.Length)];
+        var b = cellIds[rng.Next(cellIds.Length)];
+        if (a == b) continue;
+        pairs.Add((a, b));
+    }
+    int hit = 0, miss = 0;
+    var pf2 = new Pathfinder();
+    var firstFails = new List<(uint a, uint b, string reason, int visited)>();
+    foreach (var (a, b) in pairs)
+    {
+        var cA = graph.Cells[a].CentroidWorld;
+        var cB = graph.Cells[b].CentroidWorld;
+        var r = pf2.FindWalkablePath(graph, cA, cB);
+        if (r.Found) hit++;
+        else
+        {
+            miss++;
+            if (firstFails.Count < 12)
+                firstFails.Add((a, b, r.FailureReason ?? "(no reason)", r.VisitedNodes));
+        }
+    }
+    Console.WriteLine($"partition: {hit}/{hit + miss} random pairs reachable ({(hit * 100.0 / Math.Max(1, hit + miss)):0.0}%)");
+    foreach (var f in firstFails)
+        Console.WriteLine($"  RAND FAIL  0x{f.a:X8} -> 0x{f.b:X8}  visited={f.visited}  reason={f.reason}");
+
+    // Focused check: only pairs that share a direct cross-cell
+    // bridge. If even these fail, the doorway-node wiring or
+    // floor-graph snap is broken at the cell scale, not the
+    // landblock scale.
+    var bridgePairs = graph.WalkableBridges
+        .Select(b => (a: System.Math.Min(b.FromCellId, b.ToCellId),
+                      b: System.Math.Max(b.FromCellId, b.ToCellId)))
+        .Distinct()
+        .ToArray();
+    int bhit = 0, bmiss = 0;
+    var bFails = new List<(uint a, uint b, string reason, int visited)>();
+    foreach (var (a, b) in bridgePairs)
+    {
+        var cA = graph.Cells[a].CentroidWorld;
+        var cB = graph.Cells[b].CentroidWorld;
+        var r = pf2.FindWalkablePath(graph, cA, cB);
+        if (r.Found) bhit++;
+        else
+        {
+            bmiss++;
+            if (bFails.Count < 12) bFails.Add((a, b, r.FailureReason ?? "(no reason)", r.VisitedNodes));
+        }
+    }
+    Console.WriteLine($"partition: {bhit}/{bhit + bmiss} BRIDGED pairs reachable ({(bhit * 100.0 / Math.Max(1, bhit + bmiss)):0.0}%)");
+    foreach (var f in bFails)
+        Console.WriteLine($"  BRIDGE FAIL  0x{f.a:X8} -> 0x{f.b:X8}  visited={f.visited}  reason={f.reason}");
+
+    // Per-cell connected-component analysis. Count CCs in the
+    // intra-cell walkable subgraph + record the largest-CC fraction
+    // so we can see how badly each cell is internally partitioned.
+    int badlyPartitioned = 0;
+    int hugeFragmentation = 0;
+    foreach (var kvp in graph.Cells)
+    {
+        var cell = kvp.Value;
+        int n = cell.WalkableNodes.Count;
+        if (n == 0) continue;
+        var adj = new List<int>[n];
+        for (int i = 0; i < n; i++) adj[i] = new List<int>();
+        foreach (var e in cell.WalkableEdges)
+        {
+            adj[e.NodeA].Add(e.NodeB);
+            adj[e.NodeB].Add(e.NodeA);
+        }
+        var comp = new int[n];
+        for (int i = 0; i < n; i++) comp[i] = -1;
+        int cc = 0;
+        int bestSize = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (comp[i] != -1) continue;
+            int size = 0;
+            var q = new Queue<int>();
+            q.Enqueue(i);
+            comp[i] = cc;
+            while (q.Count > 0)
+            {
+                int u = q.Dequeue();
+                size++;
+                foreach (var v in adj[u])
+                {
+                    if (comp[v] == -1) { comp[v] = cc; q.Enqueue(v); }
+                }
+            }
+            if (size > bestSize) bestSize = size;
+            cc++;
+        }
+        if (cc > 1) badlyPartitioned++;
+        if (bestSize < n / 2) hugeFragmentation++;
+    }
+    Console.WriteLine($"per-cell CC: {badlyPartitioned}/{graph.Cells.Count} cells have >1 component; {hugeFragmentation} cells have largest-CC < 50% of nodes");
 }
 
 var svg = new SvgRenderer().Render(graph, new SvgRenderer.Options

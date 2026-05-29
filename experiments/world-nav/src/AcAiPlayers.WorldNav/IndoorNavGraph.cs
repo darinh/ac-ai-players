@@ -182,16 +182,51 @@ public sealed class FloorPolygon
 }
 
 /// <summary>
-/// One grid-sampled walkable point inside an indoor cell. Produced by
-/// scanning each <see cref="FloorPolygon"/>'s XY footprint at a fixed
-/// spacing and keeping samples that are (a) inside the polygon and
-/// (b) outside every <see cref="StaticObstacle"/> in the same cell.
-/// The Z coord is the polygon's plane elevation at that XY (so on
-/// stair ramps successive samples form a sloped chain).
+/// What a <see cref="WalkableNode"/> represents in the graph. Floor
+/// nodes are grid-sampled points on a <see cref="FloorPolygon"/>;
+/// Doorway nodes are special structural nodes anchored at a
+/// <see cref="CellConnection"/> centroid that mark the canonical
+/// transit point between two cells. Doorway nodes also carry an
+/// implicit "open me first if a Door entity is attached" semantic
+/// — the path consumer is expected to dispatch a USE action on any
+/// observed Door whose position matches the doorway node before
+/// walking across the connection.
+/// </summary>
+public enum WalkableNodeKind
+{
+    /// <summary>Grid-sampled floor sample on a <see cref="FloorPolygon"/>.</summary>
+    Floor,
+
+    /// <summary>
+    /// Structural transit node anchored at a doorway centroid. There
+    /// is one Doorway node per side of every loaded-both-sides
+    /// <see cref="CellConnection"/>. Doorway nodes connect to nearby
+    /// Floor nodes in the same cell via <see cref="WalkableEdge"/>s
+    /// (so any path that wants to leave the cell through this doorway
+    /// MUST pass through this node first), and the two sibling
+    /// Doorway nodes for the same connection are linked across cells
+    /// by exactly one <see cref="WalkableBridge"/>.
+    /// </summary>
+    Doorway,
+}
+
+/// <summary>
+/// One walkable point inside an indoor cell. Two flavours:
 ///
-/// Walkable nodes are the substrate of the cell-interior pathfinder.
-/// A future Phase 2 step will connect them via 8-neighbour edges and
-/// the cell-graph A* will route through them instead of cell centroids.
+/// 1. <see cref="WalkableNodeKind.Floor"/> — grid-sampled point on
+///    a <see cref="FloorPolygon"/>. Produced by scanning each
+///    polygon's XY footprint at a fixed spacing and keeping samples
+///    that are (a) inside the polygon and (b) outside every
+///    <see cref="StaticObstacle"/> in the same cell. The Z coord is
+///    the polygon's plane elevation at that XY (so on stair ramps
+///    successive samples form a sloped chain).
+///
+/// 2. <see cref="WalkableNodeKind.Doorway"/> — structural node
+///    anchored at a <see cref="CellConnection"/> centroid (projected
+///    to floor level on the cell-interior side). Carries the
+///    connection's <see cref="ConnectionPolygonId"/> so the runtime
+///    consumer can correlate it with an observed Door entity and
+///    dispatch USE-to-open BEFORE walking across.
 /// </summary>
 public sealed class WalkableNode
 {
@@ -203,11 +238,31 @@ public sealed class WalkableNode
     /// — the polygon this sample sits on. Used so a per-cell micro-mesh
     /// can avoid bridging samples that belong to disconnected floor
     /// regions (e.g. a stair landing vs the main floor of the same cell).
+    /// For <see cref="WalkableNodeKind.Doorway"/> nodes this is the
+    /// polygon index whose plane was used to project the centroid to
+    /// floor level, or <c>-1</c> if no floor polygon was usable.
     /// </summary>
     public required int FloorPolygonIndex { get; init; }
 
     /// <summary>World-space sample position (Z taken from the polygon plane).</summary>
     public required Vector3 PositionWorld { get; init; }
+
+    /// <summary>
+    /// What this node represents. Floor by default for grid samples;
+    /// Doorway for the structural transit nodes anchored at connection
+    /// centroids. See <see cref="WalkableNodeKind"/> for semantics.
+    /// </summary>
+    public WalkableNodeKind Kind { get; init; } = WalkableNodeKind.Floor;
+
+    /// <summary>
+    /// For <see cref="WalkableNodeKind.Doorway"/> nodes, the
+    /// <see cref="CellConnection.PolygonId"/> of the connection this
+    /// node anchors. For Floor nodes, always null. The runtime
+    /// consumer uses (cellId, ConnectionPolygonId) to associate
+    /// dynamically observed Door entities with their static doorway
+    /// node so the path generator can emit "open this door" hints.
+    /// </summary>
+    public ushort? ConnectionPolygonId { get; init; }
 }
 
 /// <summary>
@@ -413,8 +468,16 @@ public sealed class IndoorNavGraph
     /// <summary>Total floor-polygon count across all cells (walkable surfaces).</summary>
     public int FloorPolygonCount => Cells.Values.Sum(c => c.FloorPolygons.Count);
 
-    /// <summary>Total walkable-node count across all cells (grid samples).</summary>
+    /// <summary>Total walkable-node count across all cells (Floor grid samples + Doorway structural nodes).</summary>
     public int WalkableNodeCount => Cells.Values.Sum(c => c.WalkableNodes.Count);
+
+    /// <summary>Total Floor-kind walkable-node count across all cells (grid samples on <see cref="FloorPolygon"/>s).</summary>
+    public int WalkableFloorNodeCount =>
+        Cells.Values.Sum(c => c.WalkableNodes.Count(n => n.Kind == WalkableNodeKind.Floor));
+
+    /// <summary>Total Doorway-kind walkable-node count across all cells (one per side of every connection-with-centroid).</summary>
+    public int WalkableDoorwayNodeCount =>
+        Cells.Values.Sum(c => c.WalkableNodes.Count(n => n.Kind == WalkableNodeKind.Doorway));
 
     /// <summary>Total walkable-edge count across all cells (intra-cell only).</summary>
     public int WalkableEdgeCount => Cells.Values.Sum(c => c.WalkableEdges.Count);

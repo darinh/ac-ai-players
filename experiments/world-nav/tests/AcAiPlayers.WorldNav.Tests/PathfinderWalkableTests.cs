@@ -259,4 +259,88 @@ public class PathfinderWalkableTests
         Assert.False(result.Found);
         Assert.NotNull(result.FailureReason);
     }
+
+    [Fact]
+    public void DoorwayNode_KindAndConnectionPolygonId_RoundTrip()
+    {
+        // A doorway WalkableNode must carry Kind=Doorway and a
+        // non-null ConnectionPolygonId so the headless-client's
+        // walk-tick can correlate the waypoint with a live Door
+        // entity and dispatch USE before traversing. This is the
+        // minimum schema invariant that the LandblockNavLoader
+        // promises to fulfill for every doorway node it inserts.
+        var floor = new WalkableNode
+        {
+            CellId = 0x0A,
+            FloorPolygonIndex = 0,
+            PositionWorld = new Vector3(0, 0, 0),
+        };
+        Assert.Equal(WalkableNodeKind.Floor, floor.Kind);
+        Assert.Null(floor.ConnectionPolygonId);
+
+        var doorway = new WalkableNode
+        {
+            CellId = 0x0A,
+            FloorPolygonIndex = -1,
+            PositionWorld = new Vector3(1, 2, 3),
+            Kind = WalkableNodeKind.Doorway,
+            ConnectionPolygonId = 42,
+        };
+        Assert.Equal(WalkableNodeKind.Doorway, doorway.Kind);
+        Assert.Equal((ushort)42, doorway.ConnectionPolygonId);
+    }
+
+    [Fact]
+    public void DoorwayNodeCount_AggregatorReflectsPerCellKindMix()
+    {
+        // IndoorNavGraph.WalkableDoorwayNodeCount and
+        // WalkableFloorNodeCount sum per-kind across all cells.
+        // Build a tiny graph with two cells, each with 2 floor
+        // nodes and 1 doorway, and assert the aggregates.
+        IndoorCell Make(uint id)
+        {
+            var nodes = new List<WalkableNode>
+            {
+                new() { CellId = id, FloorPolygonIndex = 0, PositionWorld = Vector3.Zero },
+                new() { CellId = id, FloorPolygonIndex = 0, PositionWorld = new Vector3(1, 0, 0) },
+                new()
+                {
+                    CellId = id,
+                    FloorPolygonIndex = -1,
+                    PositionWorld = new Vector3(0.5f, 0.5f, 0),
+                    Kind = WalkableNodeKind.Doorway,
+                    ConnectionPolygonId = 7,
+                },
+            };
+            return new IndoorCell
+            {
+                CellId = id,
+                LandblockId = (ushort)(id >> 16),
+                CellWithinLandblock = (ushort)(id & 0xFFFF),
+                OriginWorld = Vector3.Zero,
+                CentroidWorld = Vector3.Zero,
+                BoundsWorld = new NavBounds(0, 0, 1, 1, 0, 0),
+                Connections = new List<CellConnection>(),
+                StaticObstacles = new List<StaticObstacle>(),
+                FloorPolygons = new List<FloorPolygon>(),
+                WalkableNodes = nodes,
+                WalkableEdges = new List<WalkableEdge>(),
+                HasGeometry = true,
+            };
+        }
+        var graph = new IndoorNavGraph
+        {
+            LandblockId = 0x0001,
+            Cells = new Dictionary<uint, IndoorCell>
+            {
+                [0x0A] = Make(0x0A),
+                [0x0B] = Make(0x0B),
+            },
+            BoundsWorld = new NavBounds(0, 0, 1, 1, 0, 0),
+            WalkableBridges = new List<WalkableBridge>(),
+        };
+        Assert.Equal(6, graph.WalkableNodeCount);
+        Assert.Equal(4, graph.WalkableFloorNodeCount);
+        Assert.Equal(2, graph.WalkableDoorwayNodeCount);
+    }
 }
