@@ -423,6 +423,16 @@ internal sealed class HandshakeDriver : IDisposable
             Environment.GetEnvironmentVariable("AC_BOTS_LLM_DISABLE"),
             "1", StringComparison.Ordinal);
         var weenies = new WeenieRepository();
+        // Slice D — capture every LLM decision + outcome to a JSONL
+        // sidecar for offline analysis and future fine-tuning. Sink
+        // is fire-and-forget; write failures never take the bot down.
+        var trainingSink = new JsonlTrainingSink();
+        // Slice D — capture spatial trajectory + observed landmarks +
+        // landblock-to-landblock exits to per-landblock JSON files
+        // under experiments/headless-client/data/nav/. Lets the bot
+        // revisit known areas in later sessions instead of re-mapping
+        // the same landblock every run.
+        var navGraph = new NavGraphRecorder();
         IGoalPolicy goalPolicy;
         if (llmDisabled)
         {
@@ -434,7 +444,7 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies);
+                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink);
                 Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint})");
             }
             catch (Exception ex)
@@ -444,7 +454,7 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
         var eventStream = new EventStream();
-        var tactics = new TacticsExecutor(goalPolicy, weenies);
+        var tactics = new TacticsExecutor(goalPolicy, weenies, trainingSink);
         // Track which wcids we have already preloaded so we don't
         // hit the DB more than once per class. Concurrent fetches
         // are coalesced inside WeenieRepository.
@@ -723,6 +733,21 @@ internal sealed class HandshakeDriver : IDisposable
                                 preloadedWeenieWcids.Add(preloadWcid))
                             {
                                 _ = weenies.EnsureLoadedAsync(preloadWcid);
+                            }
+                            // Slice D — record named objects as nav
+                            // landmarks anchored in the landblock
+                            // they live in. Lets the LLM later answer
+                            // "where was Jonathan?" from cached graph
+                            // data instead of needing to re-observe.
+                            if (oc.Physics.Position is { } lmPos &&
+                                !string.IsNullOrEmpty(oc.Weenie.Name))
+                            {
+                                navGraph.RecordLandmark(
+                                    lmPos.LandblockId,
+                                    new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z),
+                                    oc.Weenie.WeenieClassId,
+                                    oc.Weenie.Name,
+                                    DateTimeOffset.UtcNow);
                             }
                             break;
                         case GameEventMessage ge:
@@ -1219,9 +1244,35 @@ internal sealed class HandshakeDriver : IDisposable
                                 LandblockFrom = prevLb,
                                 LandblockTo = lb,
                             });
+                            // Slice D — record the inter-landblock
+                            // edge in the nav graph. "via_item" is
+                            // the most recent item the bot Used (a
+                            // Calling Stone, portal, etc.) — the
+                            // current pre-emptor doesn't surface
+                            // this directly, so we pass null and
+                            // future work can plumb it through.
+                            navGraph.RecordExit(
+                                prevLb, lb,
+                                new System.Numerics.Vector3(
+                                    lcTeleSelf.Position.X,
+                                    lcTeleSelf.Position.Y,
+                                    lcTeleSelf.Position.Z),
+                                viaItem: null,
+                                DateTimeOffset.UtcNow);
                         }
                     }
                     lastObservedSelfLandblock = lb;
+                    // Slice D — record self-position waypoint every
+                    // tick. NavGraphRecorder enforces minimum
+                    // spacing internally so we don't blow up file
+                    // size on a stationary bot.
+                    navGraph.RecordSelfPosition(
+                        lcTeleSelfCell,
+                        new System.Numerics.Vector3(
+                            lcTeleSelf.Position.X,
+                            lcTeleSelf.Position.Y,
+                            lcTeleSelf.Position.Z),
+                        DateTimeOffset.UtcNow);
                 }
 
                 // Phase 3.4: send GameActionLoginComplete (0x00A1) once
@@ -2719,6 +2770,26 @@ internal sealed class HandshakeDriver : IDisposable
             Console.WriteLine($"[observe] WARNING: EnterWorldRequest sent but no 0xF7DF received within window");
         if (lastCharacterError is not null)
             Console.WriteLine($"[observe] LAST CharacterError observed: code=0x{lastCharacterError.ErrorCode:X4}");
+        // Slice D — flush nav graph + close training sink before
+        // returning. The bot may be killed by Ctrl-C between session
+        // end and the next run, so we want everything on disk.
+        try
+        {
+            navGraph.Flush();
+            Console.WriteLine($"[nav] flushed {navGraph.LandblocksTracked} landblocks to {navGraph.Directory}");
+        }
+        catch (Exception navEx)
+        {
+            Console.Error.WriteLine($"[nav] WARN final flush failed: {navEx.Message}");
+        }
+        try
+        {
+            trainingSink.Dispose();
+        }
+        catch (Exception tsEx)
+        {
+            Console.Error.WriteLine($"[training] WARN dispose failed: {tsEx.Message}");
+        }
         return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse,
             enterWorldRequestSent, enterWorldServerReady, enterWorldSent, lastCharacterError, chosenCharacterGuid);
     }

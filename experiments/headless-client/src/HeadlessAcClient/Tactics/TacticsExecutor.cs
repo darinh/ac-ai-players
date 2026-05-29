@@ -27,13 +27,15 @@ internal sealed class TacticsExecutor
 {
     private readonly IGoalPolicy _policy;
     private readonly IWeenieRepository _weenies;
+    private readonly ITrainingDataSink? _training;
 
     public Goal? CurrentGoal { get; private set; }
 
-    public TacticsExecutor(IGoalPolicy policy, IWeenieRepository weenies)
+    public TacticsExecutor(IGoalPolicy policy, IWeenieRepository weenies, ITrainingDataSink? training = null)
     {
         _policy = policy ?? throw new ArgumentNullException(nameof(policy));
         _weenies = weenies ?? throw new ArgumentNullException(nameof(weenies));
+        _training = training;
     }
 
     /// <summary>
@@ -103,6 +105,7 @@ internal sealed class TacticsExecutor
             GoalId = id,
             Text = $"{CurrentGoal.Kind}: {reason}",
         });
+        _training?.RecordOutcome(id, "completed", reason);
         CurrentGoal = null;
     }
 
@@ -123,6 +126,7 @@ internal sealed class TacticsExecutor
             GoalId = id,
             Text = $"{CurrentGoal.Kind}: {reason}",
         });
+        _training?.RecordOutcome(id, "failed", reason);
         CurrentGoal = null;
     }
 }

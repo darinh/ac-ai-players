@@ -26,3 +26,6 @@ node_modules/
 
 # Local-only: agent worktrees (see .github/skills/create-new-branch)
 .worktrees/
+
+# Local-only: headless-client telemetry sinks (LLM decisions + nav graph)
+experiments/headless-client/data/
