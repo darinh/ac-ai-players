@@ -55,6 +55,19 @@ internal enum EventKind
     // player would. ItemGuid = book guid (dedup key), Name = book
     // display name (e.g. "A List of Items"), Text = body content.
     BookText              = 13,
+    // Slice V (ac-ai-players#86): the schema-only picker began or
+    // changed an autonomous activity. ItemGuid = target guid, Name
+    // = target name, Text = "<source>: <reason>" (e.g.
+    // "in-range: nearest unvisited NPC"). Made salient so the LLM
+    // wakes up on the picker's choice rather than discovering it
+    // only when the bot has already finished investigating.
+    PickerActivityStarted = 14,
+    // Slice V: the picker either reached its target (and dispatched
+    // the action) or moved on to a different target. ItemGuid =
+    // the target guid that was being investigated. NOT salient on
+    // its own; the next PickerActivityStarted (if any) will wake
+    // the LLM if anything material happened.
+    PickerActivityCompleted = 15,
 }
 
 /// <summary>

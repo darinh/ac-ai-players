@@ -60,6 +60,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private long _lastEventConsideredSequence = -1;
     private DateTimeOffset _lastCalledAtUtc = DateTimeOffset.MinValue;
 
+    // Slice V (ac-ai-players#86): the picker's most-recent activity
+    // surfaced to the LLM as a parallel "## Autonomous picker
+    // activity" block in the prompt. Set by the driver each tick
+    // BEFORE ProposeGoal via SetCurrentPickerActivity. Null = picker
+    // is idle (no autonomous selection in flight).
+    private PickerActivity? _currentPickerActivity;
+
+    /// <summary>
+    /// Driver-driven setter. Called by HandshakeDriver each tick
+    /// before <see cref="ProposeGoal"/> so the LLM prompt's
+    /// "## Autonomous picker activity" block reflects what the
+    /// picker is doing RIGHT NOW. Null = picker is idle.
+    /// </summary>
+    public void SetCurrentPickerActivity(PickerActivity? activity)
+        => _currentPickerActivity = activity;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -209,7 +225,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
 
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -504,13 +520,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.NpcDialog
                               or EventKind.ServerMessage
                               or EventKind.ActionRejected
-                              or EventKind.BookText);
+                              or EventKind.BookText
+                              // Slice V (#86): picker began or
+                              // switched autonomous activity. Wake
+                              // the LLM so it can take strategic
+                              // control if the picker's choice is
+                              // off-plan. (Completed is NOT salient
+                              // — only Started churns deliberation.)
+                              or EventKind.PickerActivityStarted);
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
-        => BuildUserPrompt(world, events, currentGoal, stack: null);
+        => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null);
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
+        => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity: null);
+
+    internal static string BuildUserPrompt(
+        WorldStateProjection world,
+        EventStream events,
+        Goal? currentGoal,
+        IntentStack? stack,
+        PickerActivity? pickerActivity)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -613,6 +644,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("- STRATEGIC STACK: `## Intent stack` shows the bot's current strategic plan. The TOP intent is the active sub-goal; ancestors are paused waiting for it. Per-cycle goals should advance the TOP. PUSH a new intent when you discover a sub-task. POP_TOP when the sub-task is done and no completion predicate caught it (rare — predicates auto-pop). REPLACE_TOP when the intent was right-track-wrong-target. MARK_TOP_BLOCKED when you cannot make progress and want to record why (the next call you can pop or replace). Always echo `stack_revision` to detect races.");
             sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate that matches your termination criterion. Prefer server-authoritative ones (num_deaths, coin_value) when applicable — they survive crashes and are exact. Use *_total_* for absolute thresholds (\"reach level 5\"), *_since_push_* for deltas (\"kill 3 more\"). If none fits, use {\"$type\":\"never\"} + `predicate_request` (escape hatch).");
         }
+        sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the bot's schema-only picker is auto-driving an action toward the listed target because YOU had no per-cycle goal at that tick. This is a FALLBACK — the picker uses generic rules (nearest unvisited, backtrack via door) with no game knowledge. To take strategic control: emit a per-cycle goal targeting whatever you actually want (the picker's choice will be over-ridden on the next tick). If the picker's choice is on-plan, you can leave it alone — but emit a matching goal anyway so the bot's intent is RECORDED rather than implicit. NEVER assume the picker knows what it's doing strategically; it only knows what's nearby.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -629,6 +661,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (stack is not null)
         {
             sb.AppendLine(IntentStackOpsApplier.RenderStackForPrompt(stack));
+            sb.AppendLine();
+        }
+
+        if (pickerActivity is not null)
+        {
+            // Slice V (#86): parallel surface to the strategic
+            // Intent stack — exposes what the schema-only picker is
+            // auto-driving so the LLM can see and steer.
+            sb.AppendLine("## Autonomous picker activity");
+            sb.AppendLine(
+                $"- picker is investigating target 0x{pickerActivity.TargetGuid:X8} " +
+                $"(\"{pickerActivity.TargetName}\")");
+            sb.AppendLine($"- source: {pickerActivity.Source}");
+            sb.AppendLine($"- reason: {pickerActivity.Reason}");
+            var ageS = Math.Max(0, (int)Math.Round((DateTimeOffset.UtcNow - pickerActivity.StartedAtUtc).TotalSeconds));
+            sb.AppendLine($"- started: {ageS}s ago");
+            sb.AppendLine(
+                "- NOTE: this is the bot's autonomous fallback because you had no per-cycle goal " +
+                "at that moment. Emit a goal to take control; the picker will defer.");
             sb.AppendLine();
         }
 

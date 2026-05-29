@@ -326,6 +326,16 @@ internal sealed class HandshakeDriver : IDisposable
         const int            MaxActionsPerSession = 100;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
+        // Slice V (#86) — autonomous picker activity surface. The
+        // picker code paths below select + dispatch targets without
+        // pushing IntentStack frames (that's the architectural smell
+        // ac-ai-players#86 will eventually fix). Until then, we
+        // publish a single nullable PickerActivity record to the
+        // LLM's prompt so the LLM can SEE what the picker is auto-
+        // driving and decide whether to take strategic control by
+        // emitting an explicit per-cycle goal. Set on candidate
+        // selection, cleared when the picker picks nothing.
+        PickerActivity? pickerActivityCurrent = null;
         // Phase 6l — pickup→equip handoff. When PutItemInContainer is
         // sent for a wearable item, we stash (itemGuid → equipLocation
         // bitmask) here. On InventoryPutObjInContainer arrival for the
@@ -453,6 +463,12 @@ internal sealed class HandshakeDriver : IDisposable
         var intentIds   = new IntentIdAllocator();
         var botStats    = new BotStatistics();
         IGoalPolicy goalPolicy;
+        // Slice V (#86): if the active policy is LlmGoalPolicy, hold
+        // an extra typed reference so the picker can publish its
+        // autonomous activity into the LLM prompt. NoQuestKnowledgePolicy
+        // is unaffected (the schema-only fallback doesn't render an
+        // LLM prompt).
+        LlmGoalPolicy? llmPolicyForPickerSurface = null;
         if (llmDisabled)
         {
             goalPolicy = new NoQuestKnowledgePolicy();
@@ -463,7 +479,9 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink, intentStack, intentIds);
+                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink, intentStack, intentIds);
+                goalPolicy = llmPolicy;
+                llmPolicyForPickerSurface = llmPolicy;
                 Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
             }
             catch (Exception ex)
@@ -2489,6 +2507,13 @@ internal sealed class HandshakeDriver : IDisposable
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
+                    // Slice V (#86): track which picker chose, so we
+                    // can publish the autonomous activity to the LLM
+                    // prompt. Stays null if the LLM-driven paths
+                    // (combat lock, name override) take this tick —
+                    // those aren't autonomous picker activity.
+                    string? pickerSourceForActivity = null;
+                    string? pickerReasonForActivity = null;
                     // Phase 7f — combat lock. While we have an active
                     // melee target, refuse to pick anything else. If
                     // the target is still visible, target it again
@@ -2595,6 +2620,11 @@ internal sealed class HandshakeDriver : IDisposable
                             .ThenBy(t => t.d2)
                             .Select(t => t.snap)
                             .FirstOrDefault();
+                        if (candidate is not null)
+                        {
+                            pickerSourceForActivity = "in-range";
+                            pickerReasonForActivity = "schema-only picker (type+visited+distance scoring within search radius)";
+                        }
                     }
 
                     // Phase 7f.5 — EXPLORATION FALLBACK. When the
@@ -2692,6 +2722,8 @@ internal sealed class HandshakeDriver : IDisposable
                         {
                             var picked = allKnown[0];
                             candidate = picked.snap;
+                            pickerSourceForActivity = "fallback";
+                            pickerReasonForActivity = "no candidates in radius; widened scan across all known objects";
                             var dist = (float)Math.Sqrt(picked.d2);
                             var visTag = visitedTargetGuids.Contains(candidate.Guid) ? " [BACKTRACK]" : "";
                             Console.WriteLine(
@@ -2699,6 +2731,63 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"picked from {allKnown.Count} known objects: " +
                                 $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' prio={picked.prio} dist={dist:F2}u{visTag}");
                         }
+                    }
+
+                    // Slice V (#86) — publish autonomous picker
+                    // activity to the LLM prompt. The picker still
+                    // dispatches the action mechanically; this just
+                    // surfaces what it's doing so the LLM can see
+                    // and override. See PickerActivity.cs for why
+                    // we use a parallel surface instead of pushing
+                    // synthetic Intents.
+                    if (candidate is not null && pickerSourceForActivity is not null)
+                    {
+                        var prev = pickerActivityCurrent;
+                        if (prev is null || prev.TargetGuid != candidate.Guid)
+                        {
+                            if (prev is not null)
+                            {
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc      = DateTimeOffset.UtcNow,
+                                    Kind     = EventKind.PickerActivityCompleted,
+                                    ItemGuid = prev.TargetGuid,
+                                    Name     = prev.TargetName,
+                                });
+                            }
+                            pickerActivityCurrent = new PickerActivity
+                            {
+                                TargetGuid   = candidate.Guid,
+                                TargetName   = candidate.Name ?? string.Empty,
+                                Source       = pickerSourceForActivity,
+                                Reason       = pickerReasonForActivity ?? "",
+                                StartedAtUtc = DateTimeOffset.UtcNow,
+                            };
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.PickerActivityStarted,
+                                ItemGuid = candidate.Guid,
+                                Name     = candidate.Name,
+                                Text     = $"{pickerSourceForActivity}: {pickerReasonForActivity}",
+                            });
+                            llmPolicyForPickerSurface?.SetCurrentPickerActivity(pickerActivityCurrent);
+                        }
+                    }
+                    else if (candidate is null && pickerActivityCurrent is not null)
+                    {
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.PickerActivityCompleted,
+                            ItemGuid = pickerActivityCurrent.TargetGuid,
+                            Name     = pickerActivityCurrent.TargetName,
+                        });
+                        pickerActivityCurrent = null;
+                        llmPolicyForPickerSurface?.SetCurrentPickerActivity(null);
                     }
 
                     // Log all candidates at AP time for visibility (capped to 8 so

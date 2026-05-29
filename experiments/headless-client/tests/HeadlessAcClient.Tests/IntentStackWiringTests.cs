@@ -531,4 +531,74 @@ public class IntentStackWiringTests
             Visible = Array.Empty<VisibleObjectProjection>(),
             Inventory = Array.Empty<InventoryItemProjection>(),
         };
+
+    // ---- Slice V — autonomous picker activity surface (#86) ----
+
+    [Fact]
+    public void BuildUserPrompt_WithPickerActivity_RendersActivityBlock()
+    {
+        var activity = new PickerActivity
+        {
+            TargetGuid   = 0x8000ABCDu,
+            TargetName   = "Some Chest",
+            Source       = "in-range",
+            Reason       = "schema-only picker (type+visited+distance scoring within search radius)",
+            StartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-7),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: activity);
+
+        // The activity block header is followed by its first
+        // bullet line. The RULES section references the header
+        // inside backticks but never with this exact bullet
+        // sequence.
+        Assert.Contains("## Autonomous picker activity", prompt);
+        Assert.Contains("picker is investigating target 0x8000ABCD", prompt);
+        Assert.Contains("0x8000ABCD", prompt);
+        Assert.Contains("Some Chest", prompt);
+        Assert.Contains("in-range", prompt);
+        Assert.Contains("schema-only picker", prompt);
+        // RULES bullet teaches the LLM how to react to this block.
+        Assert.Contains("AUTONOMOUS PICKER", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WithoutPickerActivity_OmitsActivityBlock()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null);
+        // The activity block header must not be rendered. The
+        // RULES bullet that mentions "Autonomous picker activity"
+        // inside backticks is ALWAYS present and is not the
+        // section header we're checking for. The unique signal of
+        // a rendered block is the "picker is investigating target"
+        // line.
+        Assert.DoesNotContain("picker is investigating target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LegacyOverloads_RemainCompatible()
+    {
+        // 3-arg overload (pre-Slice R) and 4-arg overload (Slice R)
+        // must still build without picker activity wiring — Slice V
+        // is additive. The activity section header should not be
+        // rendered when no activity is supplied.
+        var p3 = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null);
+        var p4 = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack: null);
+        Assert.DoesNotContain("picker is investigating target", p3);
+        Assert.DoesNotContain("picker is investigating target", p4);
+    }
+
+    [Fact]
+    public void EventStream_PickerActivityStartedAndCompleted_RoundtripWithKindNumbers()
+    {
+        // The wire-protocol stability contract: PickerActivityStarted
+        // is 14 and PickerActivityCompleted is 15. Test sinks (the
+        // training-log JSON) depend on these numeric kinds being
+        // stable.
+        Assert.Equal(14, (int)EventKind.PickerActivityStarted);
+        Assert.Equal(15, (int)EventKind.PickerActivityCompleted);
+    }
 }
