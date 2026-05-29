@@ -140,6 +140,7 @@ public sealed class SvgRenderer
         sb.Append("  .obstacle-sphere{fill:#cc6633;fill-opacity:0.45;stroke:#663300;stroke-width:0.4}\n");
         sb.Append("  .obstacle-bound{fill:none;stroke:#660000;stroke-width:0.5;stroke-dasharray:2 2;opacity:0.7}\n");
         sb.Append("  .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}\n");
+        sb.Append("  .walkable-node{fill:#0a4a0a;fill-opacity:0.85;stroke:none}\n");
         sb.Append("  .stair-up{fill:#ff8a1a;stroke:#7a3a00;stroke-width:0.6}\n");
         sb.Append("  .stair-dn{fill:#7a3aff;stroke:#2a0066;stroke-width:0.6}\n");
         sb.Append("  .stair-label{font:8px sans-serif;fill:#2a0033;text-anchor:middle;dominant-baseline:central}\n");
@@ -231,6 +232,23 @@ public sealed class SvgRenderer
                 if (r < 0.6f) r = 0.6f; // keep tiny props visible at default zoom
                 sb.Append(CultureInfo.InvariantCulture,
                     $"<circle class=\"{cls}\" cx=\"{cx:0.##}\" cy=\"{cy:0.##}\" r=\"{r:0.##}\"/>\n");
+            }
+        }
+
+        // Walkable nodes (grid-sampled stand-here points). Drawn AFTER
+        // obstacles so the dark green dots overlay any obstacle that
+        // visually overlaps -- though in practice they were carved out
+        // at sample time so there should be no overlap. Each dot is
+        // one Vector3 the per-cell micro-pathfinder will eventually
+        // walk along.
+        foreach (var cell in floor.Cells)
+        {
+            foreach (var wn in cell.WalkableNodes)
+            {
+                var nx = Wx(wn.PositionWorld.X);
+                var ny = Wy(wn.PositionWorld.Y);
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
             }
         }
 
@@ -419,7 +437,7 @@ public sealed class SvgRenderer
         sb.Append(CssBlock());
         sb.Append("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {floors.Count} floors (highest at top)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walkable nodes, {floors.Count} floors (highest at top)</text>\n");
 
         float y = 40f;
         var panelOriginYByFloor = new Dictionary<int, float>(stacked.Count);
@@ -521,6 +539,18 @@ public sealed class SvgRenderer
             }
         }
 
+        // Walkable nodes (grid-sampled stand-here points).
+        foreach (var cell in graph.Cells.Values)
+        {
+            foreach (var wn in cell.WalkableNodes)
+            {
+                var nx = Wx(wn.PositionWorld.X);
+                var ny = Wy(wn.PositionWorld.Y);
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
+            }
+        }
+
         foreach (var cell in graph.Cells.Values)
         {
             var cc = cell.CentroidWorld;
@@ -569,7 +599,7 @@ public sealed class SvgRenderer
         }
 
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys (combined view)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walkable nodes (combined view)</text>\n");
         sb.Append("</svg>\n");
         return sb.ToString();
     }

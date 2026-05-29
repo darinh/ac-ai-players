@@ -108,11 +108,23 @@ public sealed class IndoorCell
     /// Vertices are projected to world space at load time.
     ///
     /// The bot only walks ON a floor polygon — walls, ceilings, and
-    /// near-vertical surfaces are excluded. Phase 2 walkable-node
-    /// sampling will scatter grid points across these polygons and
-    /// carve out static-obstacle footprints.
+    /// near-vertical surfaces are excluded. Walkable-node sampling
+    /// (see <see cref="WalkableNodes"/>) scatters grid points across
+    /// these polygons and carves out static-obstacle footprints.
     /// </summary>
     public required IReadOnlyList<FloorPolygon> FloorPolygons { get; init; }
+
+    /// <summary>
+    /// Grid-sampled walkable points inside this cell. Each node is a
+    /// world-space (X, Y, Z) position the bot's feet can stand on:
+    /// it falls inside one of the cell's <see cref="FloorPolygons"/>
+    /// and is NOT covered by any of its <see cref="StaticObstacles"/>'s
+    /// top-down footprints. These are the vertices the per-cell
+    /// micro-pathfinder will eventually walk along; for now they exist
+    /// as a visualization layer + the substrate for Phase 2 step 3
+    /// (8-connectivity edges between adjacent samples).
+    /// </summary>
+    public required IReadOnlyList<WalkableNode> WalkableNodes { get; init; }
 
     /// <summary>
     /// True if this cell's geometry was available in the DAT.
@@ -153,6 +165,35 @@ public sealed class FloorPolygon
     /// room).
     /// </summary>
     public required Vector3 NormalWorld { get; init; }
+}
+
+/// <summary>
+/// One grid-sampled walkable point inside an indoor cell. Produced by
+/// scanning each <see cref="FloorPolygon"/>'s XY footprint at a fixed
+/// spacing and keeping samples that are (a) inside the polygon and
+/// (b) outside every <see cref="StaticObstacle"/> in the same cell.
+/// The Z coord is the polygon's plane elevation at that XY (so on
+/// stair ramps successive samples form a sloped chain).
+///
+/// Walkable nodes are the substrate of the cell-interior pathfinder.
+/// A future Phase 2 step will connect them via 8-neighbour edges and
+/// the cell-graph A* will route through them instead of cell centroids.
+/// </summary>
+public sealed class WalkableNode
+{
+    /// <summary>Owning cell's full 32-bit ID.</summary>
+    public required uint CellId { get; init; }
+
+    /// <summary>
+    /// Index into the owning cell's <see cref="IndoorCell.FloorPolygons"/>
+    /// — the polygon this sample sits on. Used so a per-cell micro-mesh
+    /// can avoid bridging samples that belong to disconnected floor
+    /// regions (e.g. a stair landing vs the main floor of the same cell).
+    /// </summary>
+    public required int FloorPolygonIndex { get; init; }
+
+    /// <summary>World-space sample position (Z taken from the polygon plane).</summary>
+    public required Vector3 PositionWorld { get; init; }
 }
 
 /// <summary>
@@ -321,4 +362,7 @@ public sealed class IndoorNavGraph
 
     /// <summary>Total floor-polygon count across all cells (walkable surfaces).</summary>
     public int FloorPolygonCount => Cells.Values.Sum(c => c.FloorPolygons.Count);
+
+    /// <summary>Total walkable-node count across all cells (grid samples).</summary>
+    public int WalkableNodeCount => Cells.Values.Sum(c => c.WalkableNodes.Count);
 }

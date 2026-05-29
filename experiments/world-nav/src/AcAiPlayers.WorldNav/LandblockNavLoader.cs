@@ -114,6 +114,7 @@ public sealed class LandblockNavLoader
             var (centroidWorld, boundsWorld) = ComputeCellGeometry(raw);
             var obstacles = ComputeStaticObstacles(raw);
             var floors = ComputeFloorPolygons(raw);
+            var walkable = ComputeWalkableNodes(cellId, floors, obstacles);
             cells[cellId] = new IndoorCell
             {
                 CellId = cellId,
@@ -125,6 +126,7 @@ public sealed class LandblockNavLoader
                 Connections = connections,
                 StaticObstacles = obstacles,
                 FloorPolygons = floors,
+                WalkableNodes = walkable,
                 HasGeometry = raw.Mesh != null,
             };
         }
@@ -457,5 +459,149 @@ public sealed class LandblockNavLoader
     {
         public required EnvCell EnvCell { get; init; }
         public CellStruct? Mesh { get; init; }
+    }
+
+    /// <summary>
+    /// Spacing of the walkable-node grid in world units. AC's bot
+    /// footprint is roughly 0.5u radius; 1.0u spacing leaves a small
+    /// cushion between samples without bloating the SVG. Tunable
+    /// later — too coarse and the bot misses narrow corridors,
+    /// too fine and the per-cell node count explodes.
+    /// </summary>
+    private const float WalkableSampleSpacing = 1.0f;
+
+    /// <summary>
+    /// How far above a cell's lowest floor vertex a horizontal
+    /// PhysicsPolygon is allowed to be before we classify it as the
+    /// CEILING instead of a floor and stop sampling it. Bot standing
+    /// height is ~1.8u; allowing 4u keeps stair ramps + low mezzanines
+    /// in scope while skipping the cell ceiling 8-12u up.
+    /// </summary>
+    private const float CeilingSkipHeight = 4.0f;
+
+    /// <summary>
+    /// Grid-sample walkable points inside this cell. For every floor
+    /// polygon (skipping any that look like ceilings — see
+    /// <see cref="CeilingSkipHeight"/>) we scan a grid at
+    /// <see cref="WalkableSampleSpacing"/> resolution, drop samples
+    /// outside the polygon's XY footprint (ray-cast point-in-polygon),
+    /// drop samples covered by any static obstacle's circle footprint,
+    /// and project the remaining samples onto the polygon's plane to
+    /// get their Z.
+    /// </summary>
+    private static List<WalkableNode> ComputeWalkableNodes(
+        uint cellId,
+        IReadOnlyList<FloorPolygon> floors,
+        IReadOnlyList<StaticObstacle> obstacles)
+    {
+        var nodes = new List<WalkableNode>();
+        if (floors.Count == 0)
+            return nodes;
+
+        // Per-cell minimum floor Z is the reference for the
+        // ceiling-skip filter. Any polygon whose average vertex Z is
+        // more than CeilingSkipHeight above this is assumed to be the
+        // ceiling of the same room and gets skipped.
+        float cellMinFloorZ = float.PositiveInfinity;
+        foreach (var f in floors)
+            foreach (var v in f.VerticesWorld)
+                if (v.Z < cellMinFloorZ) cellMinFloorZ = v.Z;
+        float ceilingCutoff = cellMinFloorZ + CeilingSkipHeight;
+
+        for (int polyIdx = 0; polyIdx < floors.Count; polyIdx++)
+        {
+            var poly = floors[polyIdx];
+            if (poly.VerticesWorld.Count < 3) continue;
+
+            // Polygon avg Z vs ceiling cutoff.
+            float avgZ = 0f;
+            foreach (var v in poly.VerticesWorld) avgZ += v.Z;
+            avgZ /= poly.VerticesWorld.Count;
+            if (avgZ > ceilingCutoff) continue;
+
+            // XY bbox for the sample sweep.
+            float pMinX = float.PositiveInfinity, pMaxX = float.NegativeInfinity;
+            float pMinY = float.PositiveInfinity, pMaxY = float.NegativeInfinity;
+            foreach (var v in poly.VerticesWorld)
+            {
+                if (v.X < pMinX) pMinX = v.X;
+                if (v.X > pMaxX) pMaxX = v.X;
+                if (v.Y < pMinY) pMinY = v.Y;
+                if (v.Y > pMaxY) pMaxY = v.Y;
+            }
+
+            // Snap to the global integer-multiple grid so adjacent
+            // polygons in the same cell sample identical X/Y rows.
+            float startX = (float)System.Math.Ceiling(pMinX / WalkableSampleSpacing) * WalkableSampleSpacing;
+            float startY = (float)System.Math.Ceiling(pMinY / WalkableSampleSpacing) * WalkableSampleSpacing;
+
+            for (float x = startX; x <= pMaxX; x += WalkableSampleSpacing)
+            {
+                for (float y = startY; y <= pMaxY; y += WalkableSampleSpacing)
+                {
+                    if (!PointInPolygonXY(x, y, poly.VerticesWorld)) continue;
+                    if (PointInsideAnyObstacleXY(x, y, obstacles)) continue;
+                    float z = ProjectZOntoPlane(x, y, poly);
+                    nodes.Add(new WalkableNode
+                    {
+                        CellId = cellId,
+                        FloorPolygonIndex = polyIdx,
+                        PositionWorld = new Vector3(x, y, z),
+                    });
+                }
+            }
+        }
+        return nodes;
+    }
+
+    /// <summary>
+    /// Classic ray-cast point-in-polygon test (Jordan curve theorem).
+    /// Works for both convex and concave 2D polygons; doesn't care
+    /// about winding order.
+    /// </summary>
+    private static bool PointInPolygonXY(float x, float y, IReadOnlyList<Vector3> poly)
+    {
+        int n = poly.Count;
+        bool inside = false;
+        for (int i = 0, j = n - 1; i < n; j = i++)
+        {
+            float xi = poly[i].X, yi = poly[i].Y;
+            float xj = poly[j].X, yj = poly[j].Y;
+            bool intersect = ((yi > y) != (yj > y))
+                          && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
+    }
+
+    /// <summary>
+    /// True if the XY point sits inside any obstacle's top-down
+    /// circular footprint (cylinder, sphere, or bounding-cylinder
+    /// fallback — all rendered as circles).
+    /// </summary>
+    private static bool PointInsideAnyObstacleXY(float x, float y, IReadOnlyList<StaticObstacle> obstacles)
+    {
+        for (int i = 0; i < obstacles.Count; i++)
+        {
+            var o = obstacles[i];
+            float dx = x - o.CenterWorld.X;
+            float dy = y - o.CenterWorld.Y;
+            if (dx * dx + dy * dy <= o.Radius * o.Radius) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Solve the polygon's plane equation for Z given (x, y).
+    /// Plane: N . (P - V0) = 0
+    ///   => z = V0.Z - (N.X*(x-V0.X) + N.Y*(y-V0.Y)) / N.Z
+    /// Safe because <see cref="FloorNormalZThreshold"/> guarantees
+    /// |N.Z| >= 0.7 for every polygon that reaches this code path.
+    /// </summary>
+    private static float ProjectZOntoPlane(float x, float y, FloorPolygon poly)
+    {
+        var v0 = poly.VerticesWorld[0];
+        var n = poly.NormalWorld;
+        return v0.Z - (n.X * (x - v0.X) + n.Y * (y - v0.Y)) / n.Z;
     }
 }
