@@ -175,6 +175,17 @@ internal sealed record WieldObjectPayload(
         $"WieldObject(item=0x{ItemGuid:X8} loc=0x{NewLocation:X8} [{EquipMaskLabels.Label(NewLocation)}])";
 }
 
+internal sealed record PopupStringPayload(string Message)
+{
+    public override string ToString()
+    {
+        var preview = Message.Length > 240 ? Message[..240] + "..." : Message;
+        // Keep multi-line popups on a single log line.
+        var sanitized = preview.Replace("\r", "\\r").Replace("\n", "\\n");
+        return $"PopupString(\"{sanitized}\")";
+    }
+}
+
 internal static class EquipMaskLabels
 {
     // Verified against ACE-bots/Source/ACE.Entity/Enum/EquipMask.cs.
@@ -283,7 +294,8 @@ internal sealed record GameEventPayload(
     InventoryPutObjInContainerPayload?   InventoryPutObjInContainer,
     InventoryServerSaveFailedPayload?    InventoryServerSaveFailed,
     WieldObjectPayload?                  WieldObject,
-    TellPayload?                         Tell)
+    TellPayload?                         Tell,
+    PopupStringPayload?                  PopupString)
 {
     public override string ToString() => EventType switch
     {
@@ -297,6 +309,7 @@ internal sealed record GameEventPayload(
         GameEventType.InventoryServerSaveFailed    when InventoryServerSaveFailed  is { } x => x.ToString(),
         GameEventType.WieldObject                  when WieldObject                is { } x => x.ToString(),
         GameEventType.Tell                         when Tell                       is { } x => x.ToString(),
+        GameEventType.PopupString                  when PopupString                is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -331,6 +344,8 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { WieldObject = DecodeWieldObject(body) },
                 GameEventType.Tell =>
                     Empty(eventType) with { Tell = DecodeTell(body) },
+                GameEventType.PopupString =>
+                    Empty(eventType) with { PopupString = DecodePopupString(body) },
                 _ => null,
             };
         }
@@ -353,7 +368,8 @@ internal static class GameEventPayloadDecoder
             InventoryPutObjInContainer: null,
             InventoryServerSaveFailed: null,
             WieldObject: null,
-            Tell: null);
+            Tell: null,
+            PopupString: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -493,6 +509,20 @@ internal static class GameEventPayloadDecoder
         var chatType  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
         // u32 padding — ignored.
         return new TellPayload(message, senderName, senderId, targetId, chatType);
+    }
+
+    private static PopupStringPayload DecodePopupString(ReadOnlySpan<byte> body)
+    {
+        // Mirrors GameEventPopupString.cs: single string16L message.
+        // Used by NPCs to display popup dialog windows (quest text,
+        // tutorial instructions, etc.) — the academy training NPCs
+        // emit these on USE to teach the player about gear, combat,
+        // and the next training station to visit.
+        if (body.Length < 2)
+            throw new InvalidOperationException("body too short for PopupString");
+        var cursor = 0;
+        var message = ReadString16L(body, ref cursor);
+        return new PopupStringPayload(message);
     }
 
     /// <summary>
