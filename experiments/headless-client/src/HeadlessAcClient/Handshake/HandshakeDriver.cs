@@ -35,7 +35,7 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    private const int ObserveSeconds = 360;
+    private const int ObserveSeconds = 720;
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -304,8 +304,8 @@ internal sealed class HandshakeDriver : IDisposable
         // target the same item, and we cap total actions so we don't
         // loop forever in a dense room.
         DateTime?            useSentAt = null;
-        const int            PostActionCooldownSec = 4;
-        const int            MaxActionsPerSession = 16;
+        const int            PostActionCooldownSec = 2;
+        const int            MaxActionsPerSession = 30;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
         // Phase 6l — pickup→equip handoff. When PutItemInContainer is
