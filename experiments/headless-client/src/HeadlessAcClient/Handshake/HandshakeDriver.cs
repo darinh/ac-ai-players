@@ -35,7 +35,16 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    private const int ObserveSeconds = 1800;
+    // Phase 7f.5 — bumped from 1800 → 3600 (60 min). With the
+    // exploration fallback, the bot keeps making progress past 30
+    // min: in phase7f5-headless21-fullrun.log it killed 5 golems
+    // and got the Academy Exit Token within 23 cycles / 30 min,
+    // but ran out of time before reaching the Calling Stone (the
+    // exit mechanism, sometimes 60+u away across multiple cells).
+    // 60 min gives ~75-100 cycles of work, enough to reach the
+    // Calling Stone, USE the exit, and start surveying landblock
+    // 0x86020188 (the academy exit destination — needs research).
+    private const int ObserveSeconds = 3600;
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -392,6 +401,20 @@ internal sealed class HandshakeDriver : IDisposable
         //      already in Melee triggers ActionCancelled via the
         //      NextUseTime gate in Player_Combat.cs:744).
         const uint           HostileCreatureWcidSparringGolem = 12698u;
+        // Phase 7f.5 — Academy exit mechanism. The Calling Stone
+        // (wcid 5084) is the "portal" that consumes the Academy
+        // Exit Token and teleports the player to the academy's
+        // outdoor destination. We promote it above everything else
+        // in BOTH picker passes because (a) leaving the academy is
+        // the M1.6 goal once the bot has done basic training, and
+        // (b) the Calling Stone is sometimes in a corner of the
+        // start room and the bot's wandering can leave it for
+        // last — we want it engaged ASAP after we have the token.
+        // Verified in phase7f5-headless21-fullrun.log: bot saw
+        // 'Calling Stone' (guid 0x800003D4 wcid=5084 itemType=0x800)
+        // on first ObjectCreate but never picked it as candidate
+        // in 23 cycles / 30 min.
+        const uint           AcademyCallingStoneWcid = 5084u;
         const double         CombatRetryIntervalSec = 5.0;
         const double         AbandonOnNoDamageSec   = 60.0;
         uint?                combatTargetGuid = null;
@@ -1470,8 +1493,12 @@ internal sealed class HandshakeDriver : IDisposable
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
+                                var isAcademyExit = s.WeenieClassId == AcademyCallingStoneWcid;
                                 int prio;
-                                if (isNpc && !isHostile) prio = 0;
+                                // Phase 7f.5 — Academy Calling Stone is the
+                                // M1.6 exit mechanism; promote above all else.
+                                if (isAcademyExit) prio = -1;
+                                else if (isNpc && !isHostile) prio = 0;
                                 else if (isHostile) prio = 1;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 2;
@@ -1523,9 +1550,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
                                 var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
+                                var isAcademyExit = s.WeenieClassId == AcademyCallingStoneWcid;
                                 var isVisited = visitedTargetGuids.Contains(s.Guid);
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 // Exploration priorities (lower = better):
+                                //  -1: unvisited Academy Calling Stone (LEAVE!)
                                 //   0: unvisited hostile creature (kill for XP/loot)
                                 //   1: unvisited NPC (quest giver)
                                 //   2: unvisited door/portal (cross to new room)
@@ -1533,7 +1562,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 //   4: unvisited pickup we haven't farmed (apple)
                                 //   5: everything else (mostly filtered out below)
                                 int prio;
-                                if (!isVisited && isHostile) prio = 0;
+                                if (!isVisited && isAcademyExit) prio = -1;
+                                else if (!isVisited && isHostile) prio = 0;
                                 else if (!isVisited && isNpc) prio = 1;
                                 else if (!isVisited && (isDoor || isPortal)) prio = 2;
                                 else if (isDoor || isPortal) prio = 3;
