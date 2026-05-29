@@ -61,6 +61,66 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.TryParseGoal("not json at all", out _, out _));
     }
 
+    [Fact]
+    public void TryParseGoal_AcceptsDashlessGuid_FromLlama()
+    {
+        // Regression: Llama-3.3-70B (and others) emit `goal_id` as a
+        // 32-char dashless hex string. The default System.Text.Json
+        // Guid converter rejects this, silently dropping every Attack
+        // / Use / Talk goal the LLM emits. FlexibleGuidConverter on
+        // Goal.Id widens parsing to accept Guid.Parse's full grammar
+        // (D, N, B, P, X). Captured from a real failed response:
+        // collision01 run-01 decisions-20260529-183543.jsonl entry
+        // showing `goal_id: "d3c59293cfd04e2e8a587ca1a4c0af34"`.
+        var json = """
+        {
+          "goal_id": "d3c59293cfd04e2e8a587ca1a4c0af34",
+          "kind": "Attack",
+          "target": { "name": "Sparring Golem" },
+          "rationale": "Nearest monster in view",
+          "priority": 6
+        }
+        """;
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Attack, g!.Kind);
+        Assert.Equal(new System.Guid("d3c59293-cfd0-4e2e-8a58-7ca1a4c0af34"), g.Id);
+        Assert.Equal("Sparring Golem", g.Target.Name);
+    }
+
+    [Fact]
+    public void TryParseGoal_AcceptsBracedGuid()
+    {
+        var json = """
+        {
+          "goal_id": "{11111111-2222-3333-4444-555555555555}",
+          "kind": "Talk",
+          "target": { "name": "Greeter" },
+          "rationale": "x",
+          "priority": 3
+        }
+        """;
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(new System.Guid("11111111-2222-3333-4444-555555555555"), g!.Id);
+    }
+
+    [Fact]
+    public void TryParseGoal_RejectsMalformedGuid()
+    {
+        // A clearly-malformed guid (too short / non-hex) should still
+        // be rejected — we widened tolerance, not removed it.
+        var json = """
+        {
+          "goal_id": "not-a-guid-at-all",
+          "kind": "Talk",
+          "target": { "name": "Greeter" },
+          "rationale": "x",
+          "priority": 3
+        }
+        """;
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("Guid", err, System.StringComparison.OrdinalIgnoreCase);
+    }
+
     // ---- LlmGoalClient with mock HTTP ----
 
     [Fact]

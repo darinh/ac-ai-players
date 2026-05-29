@@ -323,6 +323,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (staleSinceCall)
         {
+            Console.WriteLine(
+                $"[llm-call] stale id={decisionId} latency={result.LatencyMs}ms " +
+                $"(salient event arrived during call; discarding response)");
             // Reset _lastCalledAtUtc to bypass MinCallInterval on the
             // next ProposeGoal — we want to re-call ASAP with fresh
             // observations.
@@ -399,6 +402,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (!TryParseGoal(result.Content, out var parsed, out var parseError))
         {
+            Console.WriteLine(
+                $"[llm-call] parse-error id={decisionId} latency={result.LatencyMs}ms " +
+                $"error={parseError ?? "(null)"} content-bytes={result.Content?.Length ?? 0}");
             _training?.RecordParseError(decisionId, parseError ?? "unknown");
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
@@ -438,6 +444,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         _training?.RecordEmittedGoal(decisionId, goal);
+        Console.WriteLine(
+            $"[llm-call] success id={decisionId} latency={result.LatencyMs}ms " +
+            $"goal=kind={goal.Kind} target={goal.Target}" +
+            (goal.Item is null ? "" : $" item={goal.Item}"));
         return goal;
     }
 

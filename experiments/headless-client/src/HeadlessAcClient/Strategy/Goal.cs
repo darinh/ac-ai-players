@@ -110,6 +110,7 @@ internal sealed record Selector
 internal sealed record Goal
 {
     [JsonPropertyName("goal_id")]
+    [JsonConverter(typeof(FlexibleGuidConverter))]
     public Guid Id { get; init; } = Guid.Empty;
 
     [JsonPropertyName("kind")]
