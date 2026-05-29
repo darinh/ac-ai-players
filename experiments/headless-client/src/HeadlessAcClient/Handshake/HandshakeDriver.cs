@@ -446,6 +446,22 @@ internal sealed class HandshakeDriver : IDisposable
         const int PostLoginCompleteGracePackets = 30;
         const int PostAutonomousPositionGracePackets = 30;
 
+        // Phase 7g — mid-session teleport recovery. When the bot
+        // teleports cross-landblock (e.g. Academy Calling Stone →
+        // Holtburg), the server again sets Teleporting=true on us
+        // and the AP handler short-circuits, exactly as on initial
+        // spawn. The cure (per memory + ACE.Server/Network/GameAction/
+        // Actions/GameActionLoginComplete.cs) is to re-send
+        // GameActionLoginComplete: its handler calls
+        // OnTeleportComplete() which clears the flag. We detect a
+        // mid-session teleport by watching for a change in the high-
+        // 16 bits of worldState.Self.CellId (the landblock id).
+        // `loginCompleteResendNeeded` flags the next LoginComplete
+        // block iteration to fire a fresh LC even though we already
+        // sent one at spawn.
+        uint? lastObservedSelfLandblock = null;
+        bool loginCompleteResendNeeded = false;
+
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
         // rotation is REPLICATED (not duplicated) on both the AP and
@@ -1080,6 +1096,31 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect world-state firehose to begin (PlayerCreate, PlayerDescription, landblock data, ...) - or 0xF659 CharacterError on validation failure");
                 }
 
+                // Phase 7g — mid-session teleport detector. Run BEFORE
+                // the LoginComplete block so the resend trigger has
+                // a chance to fire this same tick. We classify a
+                // landblock change (top-16 bits of CellId differ)
+                // as a mid-session teleport. First non-zero
+                // observation seeds the tracker (no resend fires).
+                if (worldState.Self is WorldObjectSnapshot lcTeleSelf &&
+                    lcTeleSelf.CellId is uint lcTeleSelfCell &&
+                    lcTeleSelfCell != 0)
+                {
+                    var lb = lcTeleSelfCell & 0xFFFF0000u;
+                    if (lastObservedSelfLandblock is uint prevLb)
+                    {
+                        if (lb != prevLb && loginCompleteSent)
+                        {
+                            Console.WriteLine(
+                                $"[teleport] mid-session landblock change " +
+                                $"0x{prevLb:X8} -> 0x{lb:X8}; queueing " +
+                                $"LoginComplete resend to clear Teleporting.");
+                            loginCompleteResendNeeded = true;
+                        }
+                    }
+                    lastObservedSelfLandblock = lb;
+                }
+
                 // Phase 3.4: send GameActionLoginComplete (0x00A1) once
                 // the server has bound our session.Player. The trigger
                 // is PlayerCreate (0xF746) for our own chosen guid —
@@ -1090,9 +1131,17 @@ internal sealed class HandshakeDriver : IDisposable
                 // be targeted, and other players see it as in-portal.
                 // See Source/ACE.Server/Network/GameAction/Actions/
                 //   GameActionLoginComplete.cs for the handler.
-                if (!loginCompleteSent && ownPlayerSeen && enterWorldSent)
+                //
+                // Phase 7g — also fires when `loginCompleteResendNeeded`
+                // is set by the mid-session teleport detector above,
+                // re-clearing Teleporting after a cross-landblock USE
+                // (Calling Stone, portals, recall spells, etc.).
+                if (enterWorldSent && ownPlayerSeen &&
+                    (!loginCompleteSent || loginCompleteResendNeeded))
                 {
+                    var isResend = loginCompleteSent && loginCompleteResendNeeded;
                     loginCompleteSent = true;
+                    loginCompleteResendNeeded = false;
                     loginCompletePacketIndex = count;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
@@ -1114,7 +1163,7 @@ internal sealed class HandshakeDriver : IDisposable
                                            encrypt: true, cryptoSend: cryptoSend);
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                    Console.WriteLine($"[observe]   -> PHASE3.4 SEND: GameActionLoginComplete (payload={lcLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    Console.WriteLine($"[observe]   -> PHASE3.4 SEND: GameActionLoginComplete (payload={lcLen}B) pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}{(isResend ? " [RESEND post-teleport]" : "")}");
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
 
@@ -1378,6 +1427,118 @@ internal sealed class HandshakeDriver : IDisposable
                         Console.WriteLine(
                             $"[motion] max actions per session ({MaxActionsPerSession}) reached; staying idle until observation window closes");
                     }
+                    }
+                }
+
+                // Phase 7g — inventory-USE pre-emptor for the Academy
+                // Calling Stone. The picker (below) only sees world
+                // objects via WithinRadius → WorldDistance.TrySquaredDistance,
+                // which requires CellId. Inventory items have no
+                // CellId/Position so they are silently dropped. The
+                // Calling Stone (wcid 5084) is granted at character
+                // creation and lives in our pack — we never need to
+                // walk to it. Per ACE Player_Use.HandleActionUseItem,
+                // a USE on an inventory item skips the move-to-chain
+                // and dispatches TryUseItem directly. Gem.UseGem then
+                // casts the gem's SpellDID; the Academy Calling Stone's
+                // PortalSummon teleports us to the assigned start town.
+                //
+                // Gating: requires the Academy Exit Token (wcid 29335)
+                // — Jonathan grants it on first USE during the academy
+                // intro. Without the token the stone's emote chain
+                // burns through visited-set without progress, so the
+                // bot must wait to advance the dialog chain first.
+                //
+                // State synthesis after send: motionTarget=stone,
+                // autonomousPositionSent=true (gate AP), motionDone=true
+                // (no walk to run), useSent=true + useSentAt=now (arm
+                // post-action cooldown). The cooldown reset block above
+                // will then own actionsCompleted++ and adding the stone
+                // guid to visitedTargetGuids (so we do not re-USE).
+                if (!autonomousPositionSent &&
+                    !useSent &&
+                    motionTarget is null &&
+                    combatTargetGuid is null &&
+                    actionsCompleted < MaxActionsPerSession &&
+                    loginCompleteSent &&
+                    !loginCompleteResendNeeded &&
+                    loginCompletePacketIndex >= 0 &&
+                    (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
+                    worldState.Self is WorldObjectSnapshot invSelf &&
+                    invSelf.CellId is uint invSelfCell &&
+                    invSelfCell != 0)
+                {
+                    var ownsExitToken = worldState.Objects.Values.Any(o =>
+                        o.WeenieClassId == AcademyExitTokenWcid &&
+                        o.ContainerGuid is uint tcg && tcg == invSelf.Guid);
+                    WorldObjectSnapshot? invStone = null;
+                    if (ownsExitToken)
+                    {
+                        invStone = worldState.Objects.Values.FirstOrDefault(o =>
+                            o.WeenieClassId == AcademyCallingStoneWcid &&
+                            o.ContainerGuid is uint scg && scg == invSelf.Guid &&
+                            !visitedTargetGuids.Contains(o.Guid));
+                    }
+                    else
+                    {
+                        // Diagnostic: distinguish "no stone" from
+                        // "stone present but token missing" so logs
+                        // tell us whether picker progress is gated by
+                        // the dialog chain (need Jonathan first) or
+                        // by stone visibility (decoder bug).
+                        var stonePresent = worldState.Objects.Values.Any(o =>
+                            o.WeenieClassId == AcademyCallingStoneWcid &&
+                            o.ContainerGuid is uint scg && scg == invSelf.Guid);
+                        if (stonePresent && actionsCompleted == 0)
+                        {
+                            // Log once at the start — repeated checks
+                            // every tick would spam.
+                            Console.WriteLine(
+                                $"[motion] PHASE7G note: Calling Stone in " +
+                                $"inventory but Academy Exit Token not yet " +
+                                $"owned; waiting for Jonathan dialog completion " +
+                                $"before USE.");
+                        }
+                    }
+                    if (invStone is not null)
+                    {
+                        var packetSeq = nextOutboundPacketSequence++;
+                        var fragSeq   = nextOutboundFragmentSequence++;
+
+                        var actionBuf  = new byte[GameActionUseMessage.PackedSize];
+                        var payloadLen = GameActionUseMessage.Pack(actionBuf, invStone.Guid);
+
+                        var msg = new OutboundPacket();
+                        if (lastReceivedSeq != 0)
+                            msg.AddAckSequence(lastReceivedSeq);
+                        msg.AddBlobFragment(
+                            fragSequence: fragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
+
+                        var sentLen = msg.Pack(sendBuf, myClientId,
+                                               sequence: packetSeq, iteration: 1,
+                                               encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                        motionTarget          = invStone;
+                        autonomousPositionSent = true;
+                        moveToStateStartSent  = true;
+                        moveToStateStopSent   = true;
+                        motionDone            = true;
+                        useSent               = true;
+                        useSentAt             = DateTime.UtcNow;
+
+                        Console.WriteLine(
+                            $"[motion] PHASE7G INVENTORY USE: Calling Stone " +
+                            $"guid=0x{invStone.Guid:X8} wcid={invStone.WeenieClassId} " +
+                            $"pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                        Console.WriteLine(
+                            $"[motion]      Expect: server casts PortalSummon, " +
+                            $"sets Teleporting=true, UpdatePosition to new landblock; " +
+                            $"the landblock-change detector will resend LoginComplete.");
                     }
                 }
 
