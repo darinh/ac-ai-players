@@ -253,6 +253,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
+        // Slice W.3 diagnostic — log every LLM kickoff so we can
+        // tell at a glance whether the LLM is being called, why,
+        // and how often. Without this the bot parks at "PICKER
+        // ARRIVED no-action" silently and the operator cannot
+        // distinguish "LLM never called" from "LLM called and
+        // failed silently into the fallback path".
+        var trigger = currentGoal is null
+            ? "no-current-goal"
+            : (hasNewSalient ? "new-salient-event"
+                : (pickerSteering ? "picker-steering"
+                    : (stuck ? "stuck-timeout" : "unknown")));
+        Console.WriteLine(
+            $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
+            $"prompt-bytes={userPrompt.Length} model={_client.Model}");
+
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart);
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
     }
@@ -318,6 +333,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (!result.Ok)
         {
+            // Slice W.3 diagnostic — surface the failure reason so
+            // the operator can tell auth-failed / parse-failed /
+            // transient-5xx / 429 apart at a glance. Previously this
+            // path silently returned the fallback goal with no log
+            // line, hiding any non-429 failure (e.g. no api key,
+            // model name typo, network blip) for the entire run.
+            Console.WriteLine(
+                $"[llm-call] FAILED id={decisionId} latency={result.LatencyMs}ms " +
+                $"error={result.Error ?? "(null)"}");
             // Slice T — 429 / rate-limit backoff trigger. The error
             // string from LlmGoalClient looks like "http 429: Too
             // Many Requests" (see Strategy/LlmGoalClient.cs error
