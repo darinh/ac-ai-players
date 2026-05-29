@@ -99,7 +99,7 @@ public class LlmGoalPolicyTests
     // ---- LlmGoalPolicy full path with mocked client + fallback ----
 
     [Fact]
-    public void LlmGoalPolicy_FallsBackToInnerOnHttpError()
+    public async Task LlmGoalPolicy_FallsBackToInnerOnHttpError()
     {
         var http = new HttpClient(new StubHandler((_, _) =>
             new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("boom") }));
@@ -108,7 +108,12 @@ public class LlmGoalPolicyTests
         var policy = new LlmGoalPolicy(llm, fallback, new InMemoryWeenieRepo());
 
         var world = BuildHostileWorld();
-        var goal = policy.ProposeGoal(world, new EventStream(), null);
+        var events = new EventStream();
+        var first = policy.ProposeGoal(world, events, null);
+        Assert.Null(first); // call kicked off, no result yet
+
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Attack, goal!.Kind); // fallback fired
@@ -116,7 +121,7 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void LlmGoalPolicy_UsesLlmResultWhenContentIsValidGoal()
+    public async Task LlmGoalPolicy_UsesLlmResultWhenContentIsValidGoal()
     {
         var goalJson = """
         {
@@ -137,7 +142,15 @@ public class LlmGoalPolicyTests
         var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
         var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
 
-        var goal = policy.ProposeGoal(BuildExitTokenWorld(), new EventStream(), null);
+        // First call kicks off the LLM Task and returns the (null) currentGoal.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var first = policy.ProposeGoal(world, events, null);
+        Assert.Null(first);
+
+        // Drain the in-flight call and ask again — now the LLM result is consumed.
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Give, goal!.Kind);
@@ -147,7 +160,7 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void LlmGoalPolicy_FallsBackOnGarbageContent()
+    public async Task LlmGoalPolicy_FallsBackOnGarbageContent()
     {
         var canned = JsonSerializer.Serialize(new
         {
@@ -158,7 +171,13 @@ public class LlmGoalPolicyTests
         var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
         var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
 
-        var goal = policy.ProposeGoal(BuildHostileWorld(), new EventStream(), null);
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+        var first = policy.ProposeGoal(world, events, null);
+        Assert.Null(first);
+
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
         Assert.NotNull(goal);
         Assert.StartsWith("fallback:", goal!.Source);
     }

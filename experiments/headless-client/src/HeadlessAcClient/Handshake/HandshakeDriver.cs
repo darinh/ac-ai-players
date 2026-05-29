@@ -27,6 +27,8 @@ using System.Threading.Tasks;
 
 using HeadlessAcClient.Crypto;
 using HeadlessAcClient.Protocol.GameMessages;
+using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Tactics;
 using HeadlessAcClient.World;
 
 namespace HeadlessAcClient.Protocol;
@@ -366,67 +368,15 @@ internal sealed class HandshakeDriver : IDisposable
         var                  inventoryEquipSent = new HashSet<uint>();
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
-        // golem (so we don't walk away mid-fight) and a retry timer
+        // creature (so we don't walk away mid-fight) and a retry timer
         // re-sends TargetedMeleeAttack every CombatRetryIntervalSec
         // until we observe the target dying (UpdateHealth==0) or
         // disappearing, or the wall-clock CombatTimeoutSec elapses.
-        // Hardcoded for now: only wcid 12698 (Sparring Golem) triggers
-        // combat. Bot is unarmed (no weapon equipped) — server uses
-        // bare-handed melee, falling back to UnarmedCombat skill.
-        //
-        // Phase 7f.1 — progress-based abandon. The 30s wall-clock
-        // timeout fires too early when the bot is making progress
-        // (3% damage per hit at unarmed L1). Switched to "no damage
-        // for AbandonOnNoDamageSec" — abandon a golem ONLY if we've
-        // failed to land ANY damage in this window. lastDamageAt is
-        // bumped whenever UpdateHealth shows healthFraction dropped.
-        //
-        // Phase 7f.2 — server-driven swing loop. AC1 melee is a
-        // CONTINUOUS server-side loop: one TargetedMeleeAttack
-        // packet starts a loop that auto-repeats Attack() until the
-        // target dies, AutoRepeatAttacks character option is off,
-        // bot moves out of range, or OnMoveComplete fires with a
-        // non-None status (Player_Move.cs:228 calls
-        // HandleActionCancelAttack). The slow motion cycle we run
-        // BREAKS the swing loop because each AP/MS packet causes
-        // OnMoveComplete to fire. To fix:
-        //   1) After first ATTACK on a target, suppress AP +
-        //      walk-tick + MS-START + MS-STOP packets (the server
-        //      auto-positions us via melee sticky distance).
-        //   2) Re-engage attack only via a periodic re-attack timer
-        //      (CombatRetryIntervalSec, set high enough to not
-        //      conflict with the server's animation cooldown).
-        //   3) Fast-fire packet bundles ONLY TargetedMeleeAttack
-        //      (NOT ChangeCombatMode — re-sending CombatMode while
-        //      already in Melee triggers ActionCancelled via the
-        //      NextUseTime gate in Player_Combat.cs:744).
-        const uint           HostileCreatureWcidSparringGolem = 12698u;
-        // Phase 7f.5 — Academy exit mechanism. The Calling Stone
-        // (wcid 5084) is the "portal" that consumes the Academy
-        // Exit Token and teleports the player to the academy's
-        // outdoor destination. We promote it above everything else
-        // in BOTH picker passes because (a) leaving the academy is
-        // the M1.6 goal once the bot has done basic training, and
-        // (b) the Calling Stone is sometimes in a corner of the
-        // start room and the bot's wandering can leave it for
-        // last — we want it engaged ASAP after we have the token.
-        // Verified in phase7f5-headless21-fullrun.log: bot saw
-        // 'Calling Stone' (guid 0x800003D4 wcid=5084 itemType=0x800)
-        // on first ObjectCreate but never picked it as candidate
-        // in 23 cycles / 30 min.
-        const uint           AcademyCallingStoneWcid = 5084u;
-        // Phase 7f.5b — Exit Token wcid. The Calling Stone REQUIRES
-        // an Academy Exit Token in inventory to teleport us out;
-        // USE'ing it without the token fails and burns the
-        // Calling Stone's guid into visitedTargetGuids forever.
-        // We gate the Calling Stone's prio=-1 promotion on actual
-        // ownership of an Exit Token (ObjectCreate of wcid 29335
-        // with ContainerGuid == self.Guid). If we don't own one
-        // yet, treat the Calling Stone like any other unvisited
-        // object (default to whatever its itemType prio would be).
-        // Jonathan grants the Exit Token on first USE; this is
-        // observed in phase7f5-headless21-fullrun.log cycle 3.
-        const uint           AcademyExitTokenWcid = 29335u;
+        // Hostile-creature detection now lives in the Tactics layer:
+        // the LLM (or schema fallback) emits Goal{Kind=Attack,...}
+        // and the action-send branch dispatches melee. Source code
+        // does NOT contain wcid literals (anti-hardcoding rule,
+        // EPIC #67/#68).
         const double         CombatRetryIntervalSec = 5.0;
         const double         AbandonOnNoDamageSec   = 60.0;
         uint?                combatTargetGuid = null;
@@ -462,34 +412,58 @@ internal sealed class HandshakeDriver : IDisposable
         uint? lastObservedSelfLandblock = null;
         bool loginCompleteResendNeeded = false;
 
-        // Phase 7h — GIVE-to-NPC table. Maps (NPC weenie class) →
-        // (item weenie class to GIVE to that NPC if owned). Filled
-        // from ace_world emote chain inspection. Initially:
-        //   - Jonathan (29324 academyguardexitholtburg) ← Academy
-        //     Exit Token (29335). Triggers academy-exit recall.
-        //   - Society Greeter (30991) ← Calling Stone (5084). Per
-        //     stone's ShortDesc: "Give this item to the Society
-        //     Greeter." Part of the academy quest chain.
-        //
-        // The pre-emptor (below) iterates this dict in declaration
-        // order, so the first qualifying pair (we own the item AND
-        // see the NPC in worldState) wins. To prioritize the exit
-        // over the Greeter handoff, Jonathan must come first. See
-        // ac-ai-players#66 for personality-driven prioritization.
-        var giveItemForNpcWcid = new Dictionary<uint, uint>
+        // Strategy/Tactics layer. The LlmGoalPolicy compiles
+        // observations (visible NPCs, inventory ShortDescs, popup
+        // strings) into a Goal that says "GIVE Academy Exit Token
+        // to Jonathan" without any wcid literals baked into source.
+        // The NoQuestKnowledgePolicy is a schema-only fallback used
+        // when the LLM call fails. Disable the LLM with
+        // AC_BOTS_LLM_DISABLE=1 to fall back to schema-only behavior.
+        var llmDisabled = string.Equals(
+            Environment.GetEnvironmentVariable("AC_BOTS_LLM_DISABLE"),
+            "1", StringComparison.Ordinal);
+        var weenies = new WeenieRepository();
+        IGoalPolicy goalPolicy;
+        if (llmDisabled)
         {
-            { 29324u, AcademyExitTokenWcid    },  // Jonathan ← Exit Token (academy exit)
-            { 30991u, AcademyCallingStoneWcid },  // Society Greeter ← Calling Stone
-        };
-        // (npcWcid, itemWcid) pairs that have completed a GIVE.
-        // Defensive guard against re-firing on the same pair if the
-        // server-side delete of the item from inventory hasn't
-        // propagated to our worldState by the next tick.
-        var giveCompletedPairs = new HashSet<(uint, uint)>();
-        // Set by the Phase 7h pre-emptor when we lock onto an NPC to
-        // GIVE. Consumed by the action-send block (replaces USE with
+            goalPolicy = new NoQuestKnowledgePolicy();
+            Console.WriteLine("[strategy] AC_BOTS_LLM_DISABLE=1 -> LLM disabled, using NoQuestKnowledgePolicy fallback only");
+        }
+        else
+        {
+            try
+            {
+                var llmClient = new LlmGoalClient();
+                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies);
+                Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint})");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[strategy] LlmGoalClient unavailable ({ex.GetType().Name}: {ex.Message}); using NoQuestKnowledgePolicy fallback only");
+                goalPolicy = new NoQuestKnowledgePolicy();
+            }
+        }
+        var eventStream = new EventStream();
+        var tactics = new TacticsExecutor(goalPolicy, weenies);
+        // Track which wcids we have already preloaded so we don't
+        // hit the DB more than once per class. Concurrent fetches
+        // are coalesced inside WeenieRepository.
+        var preloadedWeenieWcids = new HashSet<uint>();
+        // Track inventory adds we have surfaced to the EventStream so
+        // we don't re-emit InventoryItemAdded every tick. The
+        // InventoryPutObjInContainer ack is the canonical signal.
+        var observedInventoryAdds = new HashSet<uint>();
+        // Set by the LLM-driven pre-emptor when CurrentGoal.Kind ==
+        // Give. Consumed by the action-send block (replaces USE with
         // GiveObjectRequest). Cleared by the cooldown-reset block.
         uint? pendingGiveItemGuid = null;
+        // M1.6 — snapshot of the Goal.Kind at the moment the
+        // pre-emptor locked motion. Used by the action-send block
+        // (combat / use / give branch selection) so we don't read a
+        // stale tactics.CurrentGoal that may have advanced or
+        // cleared during the move. Cleared by the cooldown-reset
+        // block alongside motionTarget / useSent / etc.
+        GoalKind? lockedGoalKind = null;
 
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
@@ -719,6 +693,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // Trim huge welcome banners for log readability.
                             var preview = sm.Text.Length > 80 ? sm.Text.Substring(0, 80) + "..." : sm.Text;
                             Console.WriteLine($"[observe]   -> ServerMessage(chatType=0x{sm.ChatMessageType:X}): \"{preview}\"");
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.ServerMessage,
+                                Text = sm.Text,
+                                ChatType = (int)sm.ChatMessageType,
+                            });
                             break;
                         case ObjectCreateMessage oc:
                             var loc = oc.Physics.Position is { } pos
@@ -729,6 +711,19 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"itemType=0x{oc.Weenie.ItemType:X} name=\"{oc.Weenie.Name}\"" +
                                 $" wFlags=0x{(uint)oc.Weenie.Flags:X8}/0x{(uint)oc.Weenie.Flags2:X8}" +
                                 $" pFlags=0x{(uint)oc.Physics.DescriptionFlags:X6}{loc}");
+                            // Preload the weenie ShortDesc/LongDesc
+                            // strings in the background. The next LLM
+                            // call needs ShortDesc to reason about
+                            // "give this token to Jonathan" — without
+                            // this, projections see ShortDesc=null and
+                            // the LLM has nothing to compile from.
+                            // EnsureLoadedAsync coalesces concurrent
+                            // requests for the same wcid.
+                            if (oc.Weenie.WeenieClassId is uint preloadWcid &&
+                                preloadedWeenieWcids.Add(preloadWcid))
+                            {
+                                _ = weenies.EnsureLoadedAsync(preloadWcid);
+                            }
                             break;
                         case GameEventMessage ge:
                             var geDesc = ge.Payload is not null
@@ -746,6 +741,40 @@ internal sealed class HandshakeDriver : IDisposable
                             // (Player_Inventory.cs:1646).
                             if (ge.Payload?.InventoryPutObjInContainer is { } putAck)
                             {
+                                // Surface to the EventStream so the LLM
+                                // policy re-deliberates when a new item
+                                // joins inventory. The ObjectCreate
+                                // path above ALSO fires for fresh
+                                // items, but InventoryPutObjInContainer
+                                // is the canonical "you now own this"
+                                // server signal (catches give-acks and
+                                // pickup-acks alike).
+                                if (observedInventoryAdds.Add(putAck.ItemGuid))
+                                {
+                                    var ackSnap = worldState.TryGet(putAck.ItemGuid);
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.InventoryItemAdded,
+                                        ItemGuid = putAck.ItemGuid,
+                                        Wcid = ackSnap?.WeenieClassId,
+                                        Name = ackSnap?.Name,
+                                        ItemType = ackSnap?.ItemType,
+                                    });
+                                }
+                                // Eagerly stamp ContainerGuid on the
+                                // snapshot. Put-ack arrives before the
+                                // (re)broadcast ObjectCreate with the
+                                // new container linkage, so without
+                                // this the LLM projection's inventory
+                                // filter (ContainerGuid==self) misses
+                                // freshly-acquired items for one or
+                                // more LLM-call windows.
+                                if (worldState.TryGet(putAck.ItemGuid) is { } putSnap)
+                                {
+                                    putSnap.ContainerGuid = putAck.ContainerGuid;
+                                }
                                 // Phase 6n — count this pickup so the
                                 // picker doesn't keep chasing identical
                                 // quest-reward respawns of the same name.
@@ -796,6 +825,38 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
                                         $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
                                 }
+                            }
+                            // M1.6 — PopupString is the canonical
+                            // "the world is telling the player
+                            // something" message (NPC reply, quest
+                            // accept popup, "you cannot use that").
+                            // Always surface to the LLM event stream.
+                            if (ge.Payload?.PopupString is { } popup)
+                            {
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.PopupString,
+                                    Text = popup.Message,
+                                });
+                            }
+                            // M1.6 — Tell is per-character chat,
+                            // also frequently used by NPCs to deliver
+                            // dialog. Surface to event stream as
+                            // NpcDialog if from a non-self guid.
+                            if (ge.Payload?.Tell is { } tell &&
+                                tell.SenderId != chosenCharacterGuid)
+                            {
+                                var sourceSnap = worldState.TryGet(tell.SenderId);
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.NpcDialog,
+                                    Text = tell.Message,
+                                    Name = sourceSnap?.Name ?? tell.SenderName,
+                                });
                             }
                             // Phase 6n — wield ack: mark the slot mask
                             // and the wcid as satisfied so the picker
@@ -1145,6 +1206,19 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"0x{prevLb:X8} -> 0x{lb:X8}; queueing " +
                                 $"LoginComplete resend to clear Teleporting.");
                             loginCompleteResendNeeded = true;
+                            // M1.6 — surface to EventStream so the
+                            // LLM policy re-deliberates on the new
+                            // landblock (clears any stale "use
+                            // calling stone" goal that was tied to
+                            // the previous map).
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.LandblockChanged,
+                                LandblockFrom = prevLb,
+                                LandblockTo = lb,
+                            });
                         }
                     }
                     lastObservedSelfLandblock = lb;
@@ -1432,26 +1506,12 @@ internal sealed class HandshakeDriver : IDisposable
                     if (motionTarget is not null && motionTarget.Guid != combatTargetGuid)
                         visitedTargetGuids.Add(motionTarget.Guid);
 
-                    // Phase 7h — record completed GIVE pair so the
-                    // pre-emptor doesn't re-fire if the server-side
-                    // inventory delete hasn't reached our worldState
-                    // by the next pre-emptor pass. motionTarget here
-                    // is the NPC we GAVE to (pre-emptor set it).
-                    if (pendingGiveItemGuid is not null && motionTarget is not null &&
-                        motionTarget.WeenieClassId is uint giveNpcWc)
-                    {
-                        foreach (var p in giveItemForNpcWcid)
-                        {
-                            if (p.Key == giveNpcWc)
-                            {
-                                giveCompletedPairs.Add((p.Key, p.Value));
-                                Console.WriteLine(
-                                    $"[motion] PHASE7H GIVE COMPLETE: " +
-                                    $"npcWcid={p.Key} itemWcid={p.Value} added to giveCompletedPairs");
-                                break;
-                            }
-                        }
-                    }
+                    // Notify Tactics that the current goal completed.
+                    // Used by LlmGoalPolicy to surface a GoalCompleted
+                    // event on the EventStream and re-deliberate on
+                    // the next ProposeGoal call.
+                    if (motionTarget is not null)
+                        tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
 
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}'); " +
@@ -1473,6 +1533,7 @@ internal sealed class HandshakeDriver : IDisposable
                     lastSentWaypointPos = null;
                     walkTickAps = 0;
                     pendingGiveItemGuid = null;
+                    lockedGoalKind = null;
 
                     if (actionsCompleted >= MaxActionsPerSession)
                     {
@@ -1482,46 +1543,36 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
-                // Phase 7h — GIVE-to-NPC pre-emptor (replaces the
-                // earlier Phase 7g inventory-USE-on-Calling-Stone idea,
-                // which sent UseDone(ok) but produced no teleport: per
-                // ace_world DB the Calling Stone has no SpellDID; its
-                // intended use is GIVE to a Society Greeter / Training
-                // Master, not USE).
-                //
-                // Mechanism per ace_world weenie 29324 (Jonathan,
-                // academyguardexitholtburg):
-                //   cat=6 Give wcid=29335 (Academy Exit Token) →
-                //     Goto pick_coat_color (weighted GotoSet auto-picks
-                //     one of 10 coat color variants) →
-                //     Goto finalize_exit →
-                //     InqBoolStat RecallsDisabled →
-                //     TestSuccess RecallsDisabled =
-                //       Give wcid=49563 (facility hub portal gem) +
-                //       SetSanctuaryPosition cell=0xA9B40019 (84,7.1,94) +
-                //       EraseQuest AcademeyExitTokenGiven +
-                //       CastSpellInstant spell_Id=3815 (recall to fresh
-                //       sanctuary). The recall is the actual teleport.
-                //
-                // No coat-color dialog is needed because the server
-                // auto-selects via emote probabilities. We just need to
-                // GIVE the token. The server-side CreateMoveToChain
-                // walks our player to Jonathan automatically — but since
-                // a headless player without a real client tick has a
-                // history of physics-skipping, we still drive the walk
-                // ourselves (set motionTarget=Jonathan, send AP, run
-                // through MoveToState START / walk-tick / STOP, then
-                // send GIVE). This is the same pattern as the existing
-                // walk-and-USE flow used for other NPC interactions.
-                //
-                // Pre-emptor bypasses visitedTargetGuids (Jonathan was
-                // already USE'd in cycle 3 to receive the token) and
-                // ignores radius (worldState.Objects is a global view).
-                // giveCompletedPairs records (npcWcid, itemWcid) pairs
-                // that have completed at action-send time, defensively
-                // gating re-fires (the item is normally already gone
-                // from inventory after a successful GIVE, but this is
-                // belt-and-suspenders).
+                // M1.6 redo — LLM-driven goal pre-emptor (replaces
+                // the Phase 7h hardcoded {Jonathan ← Exit Token,
+                // Greeter ← Calling Stone} pair table). Per
+                // ac-ai-players#67/#68, source MUST NOT contain
+                // wcid literals or NPC name literals as decision
+                // inputs. Instead:
+                //   1. Build a WorldStateProjection from worldState
+                //      + the WeenieRepository (which has cached the
+                //      ShortDesc for every wcid we have seen so far,
+                //      thanks to the ObjectCreate preload below).
+                //   2. tactics.Tick asks the policy to deliberate.
+                //      LlmGoalPolicy kicks off an async GitHub Models
+                //      call on the first triggering tick (new event
+                //      OR no current goal) and returns the prior
+                //      goal until the call finishes; the next tick
+                //      after completion consumes the result. The
+                //      NoQuestKnowledgePolicy fallback handles LLM
+                //      failures / disabled-LLM mode without any
+                //      content awareness.
+                //   3. If the goal is actionable (Give / Use /
+                //      Attack / Pickup / Wield), we resolve its
+                //      target Selector to a live snapshot via
+                //      SelectorResolver, set motionTarget, and (for
+                //      Give) set pendingGiveItemGuid so the action-
+                //      send block dispatches GiveObjectRequest
+                //      instead of Use.
+                //   4. Goal kinds we do NOT pre-empt with — Explore,
+                //      GoTo, Talk — fall through to the schema-only
+                //      picker below, which handles wander + door /
+                //      portal traversal.
                 if (!autonomousPositionSent &&
                     !useSent &&
                     motionTarget is null &&
@@ -1531,83 +1582,176 @@ internal sealed class HandshakeDriver : IDisposable
                     !loginCompleteResendNeeded &&
                     loginCompletePacketIndex >= 0 &&
                     (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
-                    worldState.Self is WorldObjectSnapshot giveSelf &&
-                    giveSelf.CellId is uint giveSelfCell &&
-                    giveSelfCell != 0)
+                    worldState.Self is WorldObjectSnapshot tacticsSelf &&
+                    tacticsSelf.CellId is uint tacticsSelfCell &&
+                    tacticsSelfCell != 0)
                 {
-                    foreach (var pair in giveItemForNpcWcid)
+                    var projection = WorldStateProjection.FromWorldState(
+                        worldState, weenies, visibleRadius: 60f, maxVisible: 32);
+                    var goal = projection is null ? null : tactics.Tick(projection, eventStream);
+                    // Allowlist:
+                    //   - Give: walk to NPC, deliver item from bag.
+                    //   - Use:  branch on whether target is spatial
+                    //           or already in inventory (e.g. Calling
+                    //           Stone the bot is carrying).
+                    //   - Attack: walk to creature, dispatch melee.
+                    //   - Pickup: walk to landscape item, send Use
+                    //           (PutItemInContainer pathway).
+                    // NOT pre-empted:
+                    //   - Wield: the existing pickup→equip handoff
+                    //     pipeline (pendingEquip / GetAndWieldItem)
+                    //     handles this end-to-end. The LLM cannot
+                    //     improve on it AND the pre-emptor has no
+                    //     motor for it. If we ever need explicit
+                    //     wield-from-bag (re-equip best armor on
+                    //     login), add a dedicated dispatch here.
+                    //   - Explore / GoTo / Talk: fall through to the
+                    //     schema-only picker below.
+                    if (goal is not null &&
+                        (goal.Kind == GoalKind.Give ||
+                         goal.Kind == GoalKind.Use ||
+                         goal.Kind == GoalKind.Attack ||
+                         goal.Kind == GoalKind.Pickup))
                     {
-                        var npcWcid = pair.Key;
-                        var itemWcid = pair.Value;
-                        if (giveCompletedPairs.Contains((npcWcid, itemWcid))) continue;
+                        var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
+                        WorldObjectSnapshot? itemSnap = null;
+                        if (goal.Kind == GoalKind.Give)
+                        {
+                            itemSnap = tactics.ResolveItem(worldState);
+                            // Give requires the item to be in our
+                            // inventory. Resolver does not filter on
+                            // container; do that here.
+                            if (itemSnap is not null &&
+                                !(itemSnap.ContainerGuid is uint icg && icg == tacticsSelf.Guid))
+                            {
+                                itemSnap = null;
+                            }
+                        }
 
-                        var ownedItem = worldState.Objects.Values.FirstOrDefault(o =>
-                            o.WeenieClassId == itemWcid &&
-                            o.ContainerGuid is uint cg && cg == giveSelf.Guid);
-                        if (ownedItem is null) continue;
-
-                        var npc = worldState.Objects.Values.FirstOrDefault(o =>
-                            o.WeenieClassId == npcWcid &&
-                            o.CellId is uint nCell && nCell != 0 &&
-                            (o.Guid & 0xFF000000u) != 0x50000000u);
-                        if (npc is null) continue;
-
-                        float giveYaw = 0f;
-                        Quaternion giveRot;
-                        if (WorldHeading.TryYawToTarget(giveSelf, npc, out giveYaw))
-                            giveRot = WorldHeading.RotationFromYaw(giveYaw);
+                        // M1.6 — inventory-Use direct dispatch. If
+                        // the LLM resolved a Use to an item already
+                        // in our bag (e.g. Calling Stone we are
+                        // carrying), walking to its spatial position
+                        // is meaningless (it has none). Send the
+                        // GameActionUse straight to the server here
+                        // and clear the goal — no motor, no AP, no
+                        // motion lock. Pickup is excluded because
+                        // an item already in bag cannot be picked up.
+                        if (goal.Kind == GoalKind.Use &&
+                            targetSnap is not null &&
+                            targetSnap.ContainerGuid is uint useContainer &&
+                            useContainer == tacticsSelf.Guid)
+                        {
+                            var invUsePktSeq  = nextOutboundPacketSequence++;
+                            var invUseFragSeq = nextOutboundFragmentSequence++;
+                            var invUseBuf = new byte[GameActionUseMessage.PackedSize];
+                            var invUseLen = GameActionUseMessage.Pack(invUseBuf, targetSnap.Guid);
+                            var invUseMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                invUseMsg.AddAckSequence(lastReceivedSeq);
+                            invUseMsg.AddBlobFragment(
+                                fragSequence: invUseFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: invUseBuf.AsSpan(0, invUseLen));
+                            var invUseSent = invUseMsg.Pack(sendBuf, myClientId,
+                                                            sequence: invUsePktSeq, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, invUseSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL inventory-USE direct: " +
+                                $"item='{targetSnap.Name}' guid=0x{targetSnap.Guid:X8} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={invUsePktSeq} fragSeq={invUseFragSeq} bytes={invUseSent}");
+                            tactics.Clear("inventory-use dispatched", eventStream);
+                        }
                         else
-                            giveRot = giveSelf.Rotation;
+                        {
+                            var actionable =
+                                targetSnap is not null &&
+                                (goal.Kind != GoalKind.Give || itemSnap is not null) &&
+                                // Spatial actions require the target
+                                // to actually have a CellId. An NPC /
+                                // creature without a position cannot
+                                // be walked-to.
+                                (targetSnap is null ||
+                                 (targetSnap.CellId is uint tc && tc != 0u));
 
-                        motionTarget          = npc;
-                        motionRotation        = giveRot;
-                        pendingGiveItemGuid   = ownedItem.Guid;
-                        if (WorldDistance.TrySquaredDistance(giveSelf, npc, out var giveD2))
-                            motionInitialDistance = (float)Math.Sqrt(giveD2);
+                            if (!actionable)
+                            {
+                                Console.WriteLine(
+                                    $"[strategy] goal {goal.Kind} unresolved -- " +
+                                    $"target={(targetSnap is null ? "MISS" : "ok")} " +
+                                    $"item={(goal.Kind == GoalKind.Give ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
+                                    $"selector target={goal.Target} item={goal.Item}; " +
+                                    $"clearing and falling through to picker");
+                                tactics.Fail("selector resolved to no live object", eventStream);
+                            }
+                            else
+                            {
+                                float yaw = 0f;
+                                Quaternion rot;
+                                if (WorldHeading.TryYawToTarget(tacticsSelf, targetSnap!, out yaw))
+                                    rot = WorldHeading.RotationFromYaw(yaw);
+                                else
+                                    rot = tacticsSelf.Rotation;
 
-                        autonomousPositionSent = true;
-                        autonomousPositionPacketIndex = count;
+                                motionTarget   = targetSnap;
+                                motionRotation = rot;
+                                // Snapshot the goal kind at lock time
+                                // so the action-send branch dispatches
+                                // the correct verb even if Tactics
+                                // re-deliberates during motion.
+                                lockedGoalKind = goal.Kind;
+                                if (goal.Kind == GoalKind.Give)
+                                    pendingGiveItemGuid = itemSnap!.Guid;
+                                if (WorldDistance.TrySquaredDistance(tacticsSelf, targetSnap!, out var d2lock))
+                                    motionInitialDistance = (float)Math.Sqrt(d2lock);
 
-                        var apPacketSeq = nextOutboundPacketSequence++;
-                        var apFragSeq   = nextOutboundFragmentSequence++;
-                        var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
-                        var apLen = GameActionAutonomousPositionMessage.Pack(
-                            apBuf,
-                            cellId: giveSelfCell,
-                            pos:    giveSelf.Position,
-                            rot:    giveRot,
-                            instanceSequence:      giveSelf.SeqInstance      ?? 0,
-                            serverControlSequence: giveSelf.SeqServerControl ?? 0,
-                            teleportSequence:      giveSelf.SeqTeleport      ?? 0,
-                            forcePositionSequence: giveSelf.SeqForcePosition ?? 0,
-                            contact: true);
+                                autonomousPositionSent = true;
+                                autonomousPositionPacketIndex = count;
 
-                        var apMsg = new OutboundPacket();
-                        if (lastReceivedSeq != 0)
-                            apMsg.AddAckSequence(lastReceivedSeq);
-                        apMsg.AddBlobFragment(
-                            fragSequence: apFragSeq,
-                            fragId: OutboundFragmentId,
-                            queue: (ushort)GameMessageGroup.UIQueue,
-                            gameMessagePayload: apBuf.AsSpan(0, apLen));
-                        var apSent = apMsg.Pack(sendBuf, myClientId,
-                                                sequence: apPacketSeq, iteration: 1,
-                                                encrypt: true, cryptoSend: cryptoSend);
-                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSent),
-                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                var apPacketSeq = nextOutboundPacketSequence++;
+                                var apFragSeq   = nextOutboundFragmentSequence++;
+                                var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                var apLen = GameActionAutonomousPositionMessage.Pack(
+                                    apBuf,
+                                    cellId: tacticsSelfCell,
+                                    pos:    tacticsSelf.Position,
+                                    rot:    rot,
+                                    instanceSequence:      tacticsSelf.SeqInstance      ?? 0,
+                                    serverControlSequence: tacticsSelf.SeqServerControl ?? 0,
+                                    teleportSequence:      tacticsSelf.SeqTeleport      ?? 0,
+                                    forcePositionSequence: tacticsSelf.SeqForcePosition ?? 0,
+                                    contact: true);
 
-                        Console.WriteLine(
-                            $"[motion] PHASE7H GIVE TARGET LOCK: " +
-                            $"npc='{npc.Name}' wcid={npcWcid} guid=0x{npc.Guid:X8} " +
-                            $"cell=0x{(npc.CellId ?? 0):X8} dist={motionInitialDistance ?? float.NaN:F2}u; " +
-                            $"item='{ownedItem.Name}' wcid={itemWcid} guid=0x{ownedItem.Guid:X8}; " +
-                            $"sent AP yaw={giveYaw:F3}rad pktSeq={apPacketSeq} fragSeq={apFragSeq} totalBytes={apSent}");
-                        Console.WriteLine(
-                            $"[motion]      Expect: walk-and-GIVE flow drives MoveToState START → walk-tick AP → STOP → " +
-                            $"GameActionGiveObjectRequest(target=0x{npc.Guid:X8}, item=0x{ownedItem.Guid:X8}, amount=1). " +
-                            $"Then Jonathan's emote chain (Goto pick_coat_color → finalize_exit → CastSpellInstant 3815) " +
-                            $"recalls bot to landblock 0xA9B40019.");
-                        break;
+                                var apMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    apMsg.AddAckSequence(lastReceivedSeq);
+                                apMsg.AddBlobFragment(
+                                    fragSequence: apFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: apBuf.AsSpan(0, apLen));
+                                var apSent = apMsg.Pack(sendBuf, myClientId,
+                                                        sequence: apPacketSeq, iteration: 1,
+                                                        encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL LOCK kind={goal.Kind} " +
+                                    $"target='{targetSnap!.Name}' guid=0x{targetSnap.Guid:X8} " +
+                                    $"cell=0x{(targetSnap.CellId ?? 0):X8} " +
+                                    $"dist={motionInitialDistance ?? float.NaN:F2}u " +
+                                    (goal.Kind == GoalKind.Give
+                                        ? $"item='{itemSnap!.Name}' itemGuid=0x{itemSnap.Guid:X8} "
+                                        : "") +
+                                    $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                    $"sent AP yaw={yaw:F3}rad pktSeq={apPacketSeq} fragSeq={apFragSeq} bytes={apSent}");
+                            }
+                        }
                     }
                 }
 
@@ -1665,14 +1809,6 @@ internal sealed class HandshakeDriver : IDisposable
                     //          can starve us of door interactions until they
                     //          all join the visited set.
                     var apRot = self.Rotation;
-                    // Phase 7f.5b — Do we own an Academy Exit Token?
-                    // The Calling Stone consumes the token to teleport us
-                    // out; USE without the token fails and burns the
-                    // Calling Stone into visitedTargetGuids. Compute once
-                    // per AP tick so both picker passes share the result.
-                    var haveExitToken = worldState.Objects.Values.Any(o =>
-                        o.WeenieClassId == AcademyExitTokenWcid &&
-                        o.ContainerGuid is uint cg && cg == self.Guid);
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
@@ -1712,23 +1848,29 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else if (candidate is null)
                     {
-                        // Phase 7c/7f/7f.3 picker. Priorities:
-                        // - prio 0: friendly NPCs (Creature itemType
-                        //   0x10, not the hostile wcid). NPCs hand
-                        //   out academy quests, training weapons,
-                        //   and reward items. Bot MUST exhaust all
-                        //   NPCs in range before engaging hostiles —
-                        //   a bare-handed L1 cannot kill a Sparring
-                        //   Golem (verified in phase7f2 run-01: bot
-                        //   landed 2 hits over 720s, then died).
-                        // - prio 1: hostile creatures (wcid 12698
-                        //   Sparring Golem). Combat is gating on
-                        //   Academy Token, which only drops from
-                        //   golem corpses. Engage AFTER all NPCs.
-                        // - prio 2: unsatisfied-slot wearables,
-                        //   doors, portals, AND writables (signs).
-                        // - prio 3: non-wearable pickups (apples).
-                        // - prio 4: everything else.
+                        // Schema-only fallback picker. Wcid-keyed prio
+                        // nudges (hostile creature, academy exit) are
+                        // now Strategy-layer decisions (see LLM pre-
+                        // emptor above). The picker only uses
+                        // ItemType bitmasks + visited-set memory +
+                        // pickup-count anti-respawn — all generic
+                        // schema, no game content.
+                        //
+                        // Priorities (lower = better):
+                        //   prio 0: NPCs (Creature itemType 0x10).
+                        //   prio 2: unsatisfied-slot wearables, doors,
+                        //           portals, writables (signs).
+                        //   prio 3: non-wearable pickups (apples).
+                        //   prio 4: everything else (including
+                        //           creatures the bot has visited but
+                        //           that respawned).
+                        // Hostile-vs-friendly creature discrimination
+                        // is now done by the LLM via Strategy, NOT
+                        // here. Without an Attack goal from Strategy,
+                        // the picker treats a creature like any NPC —
+                        // the bot will walk up to it and try to USE
+                        // it, which is harmless (server returns "you
+                        // cannot use that").
                         candidate = inRange
                             .Select(s =>
                             {
@@ -1742,17 +1884,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-                                var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
-                                var isAcademyExit = s.WeenieClassId == AcademyCallingStoneWcid;
                                 int prio;
-                                // Phase 7f.5 — Academy Calling Stone is the
-                                // M1.6 exit mechanism; promote above all else.
-                                // Phase 7f.5b: ONLY when we already hold an
-                                // Exit Token. Otherwise USE fails and the
-                                // Calling Stone is permanently marked visited.
-                                if (isAcademyExit && haveExitToken) prio = -1;
-                                else if (isNpc && !isHostile) prio = 0;
-                                else if (isHostile) prio = 1;
+                                if (isNpc) prio = 0;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 2;
                                 else if (isWritable) prio = 2;
@@ -1802,25 +1935,22 @@ internal sealed class HandshakeDriver : IDisposable
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
-                                var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
-                                var isAcademyExit = s.WeenieClassId == AcademyCallingStoneWcid;
                                 var isVisited = visitedTargetGuids.Contains(s.Guid);
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 // Exploration priorities (lower = better):
-                                //  -1: unvisited Academy Calling Stone (LEAVE!)
-                                //   0: unvisited hostile creature (kill for XP/loot)
-                                //   1: unvisited NPC (quest giver)
-                                //   2: unvisited door/portal (cross to new room)
-                                //   3: visited door/portal (BACKTRACK through to re-stimulate cells)
-                                //   4: unvisited pickup we haven't farmed (apple)
-                                //   5: everything else (mostly filtered out below)
+                                //   0: unvisited NPC (quest giver / shopkeeper)
+                                //   1: unvisited door/portal (cross to new room)
+                                //   2: visited door/portal (BACKTRACK through
+                                //      to re-stimulate cells on the other side)
+                                //   3: unvisited pickup we haven't farmed
+                                //   4: unvisited creature (LLM will decide if
+                                //      it's hostile via Strategy layer)
+                                //   5: everything else (filtered out below)
                                 int prio;
-                                if (!isVisited && isAcademyExit && haveExitToken) prio = -1;
-                                else if (!isVisited && isHostile) prio = 0;
-                                else if (!isVisited && isNpc) prio = 1;
-                                else if (!isVisited && (isDoor || isPortal)) prio = 2;
-                                else if (isDoor || isPortal) prio = 3;
-                                else if (!isVisited && isPickup && !pickedBefore) prio = 4;
+                                if (!isVisited && isNpc) prio = 0;
+                                else if (!isVisited && (isDoor || isPortal)) prio = 1;
+                                else if (isDoor || isPortal) prio = 2;
+                                else if (!isVisited && isPickup && !pickedBefore) prio = 3;
                                 else prio = 5;
                                 return (snap: s, d2, prio, hasDist);
                             })
@@ -2118,13 +2248,13 @@ internal sealed class HandshakeDriver : IDisposable
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
                     var isPickup = (itemType & PickupItemTypeMask) != 0;
-                    // Phase 7f — hostile-creature detection. For the
-                    // spike we hardcode wcid 12698 (Sparring Golem)
-                    // since the academy quest gate is "kill golem,
-                    // loot Academy Token". Once combat is working we
-                    // can generalize via Tolerance / PlayerKiller /
-                    // hostile-faction flags.
-                    var isHostile = motionTarget.WeenieClassId == HostileCreatureWcidSparringGolem;
+                    // M1.6 redo — combat dispatch keys on the goal
+                    // kind locked at motion-lock time (NOT on the
+                    // live tactics.CurrentGoal, which may have
+                    // cleared mid-motion if the LLM re-deliberated).
+                    // wcid literals in source are forbidden by the
+                    // anti-hardcoding rule.
+                    var isHostile = lockedGoalKind == GoalKind.Attack;
                     var packetSeq = nextOutboundPacketSequence++;
 
                     int payloadLen;

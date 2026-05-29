@@ -56,6 +56,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private long _lastEventConsideredSequence = -1;
     private DateTimeOffset _lastCalledAtUtc = DateTimeOffset.MinValue;
 
+    /// <summary>
+    /// In-flight LLM call. ProposeGoal is called from the receive
+    /// loop and must NEVER block the loop on a 1s HTTP RTT, so we
+    /// kick off a Task on the first triggering tick and poll its
+    /// completion on subsequent ticks.
+    /// </summary>
+    private Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart)>? _inflight;
+
+    /// <summary>True iff an LLM call is currently in flight (no result consumed yet).</summary>
+    public bool HasInflight => _inflight is not null && !_inflight.IsCompleted;
+
+    /// <summary>
+    /// Test/diagnostic helper. Blocks until any in-flight LLM call
+    /// completes (or returns immediately if none). Production code
+    /// should NEVER call this from a hot loop — use ProposeGoal's
+    /// poll model instead.
+    /// </summary>
+    public async Task WaitForInFlightAsync()
+    {
+        var t = _inflight;
+        if (t is not null)
+        {
+            try { await t.ConfigureAwait(false); } catch { /* swallowed; ConsumeResult handles errors */ }
+        }
+    }
+
     public LlmGoalPolicy(LlmGoalClient client, IGoalPolicy fallback, IWeenieRepository weenies, ITrainingDataSink? training = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
@@ -68,60 +94,98 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
-        // Decide whether to deliberate. Cheap path:
-        //   - no current goal -> always deliberate
-        //   - new salient event since we last looked -> deliberate
-        //   - stuck-timer expired -> deliberate
-        //   - else keep current goal
         var nowUtc = DateTimeOffset.UtcNow;
+
+        // 1) Poll an in-flight call first — if it finished, consume it.
+        if (_inflight is not null && _inflight.IsCompleted)
+        {
+            var finished = _inflight;
+            _inflight = null;
+            return ConsumeResult(finished, world, events, currentGoal, nowUtc);
+        }
+
+        // 2) Still in flight: don't kick off another, don't change goal.
+        if (_inflight is not null)
+            return currentGoal;
+
+        // 3) Decide whether to kick off a new call.
         var hasNewSalient = HasNewSalientEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
+        var coalesce = nowUtc - _lastCalledAtUtc < MinCallInterval;
 
-        if (currentGoal is not null && !hasNewSalient && !stuck)
-            return currentGoal;
-
-        // Coalesce within MinCallInterval window.
-        if (nowUtc - _lastCalledAtUtc < MinCallInterval && currentGoal is not null)
-            return currentGoal;
+        if (currentGoal is not null && !hasNewSalient && !stuck) return currentGoal;
+        if (coalesce && currentGoal is not null)                 return currentGoal;
 
         _lastCalledAtUtc = nowUtc;
-        _lastEventConsideredSequence = events.NextSequence;
+        var eventSeqAtCallStart = events.NextSequence;
+        _lastEventConsideredSequence = eventSeqAtCallStart;
 
-        // Build prompt synchronously from the projection (already in hand).
         var userPrompt = BuildUserPrompt(world, events, currentGoal);
+        var projJson = JsonSerializer.Serialize(world);
+        var decisionId = Guid.NewGuid();
 
-        // Call synchronously via blocking wait. Tactics has its own
-        // tick budget; this is acceptable while we keep ProposeGoal
-        // strictly out of the receive hot loop (HandshakeDriver
-        // calls it from a dedicated deliberation cadence).
+        _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart);
+        return currentGoal; // keep doing whatever we were doing while the LLM thinks
+    }
+
+    private async Task<(LlmResult, Guid, string, string, long)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart)
+    {
         LlmResult result;
         try
         {
-            result = _client.CompleteAsync(SystemPrompt, userPrompt, CancellationToken.None)
-                .GetAwaiter().GetResult();
+            result = await _client.CompleteAsync(SystemPrompt, userPrompt, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             result = new LlmResult(false, "", "", 0, $"unhandled: {ex.Message}");
         }
+        return (result, decisionId, userPrompt, projJson, eventSeqAtCallStart);
+    }
 
-        // Always record the attempt to training-data, success or not.
-        var decisionId = Guid.NewGuid();
+    private Goal? ConsumeResult(
+        Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart)> finishedTask,
+        WorldStateProjection world,
+        EventStream events,
+        Goal? currentGoal,
+        DateTimeOffset nowUtc)
+    {
+        var (result, decisionId, userPrompt, projJson, eventSeqAtCallStart) = finishedTask.GetAwaiter().GetResult();
+
+        // M1.6 — stale-result detection. If a salient event arrived
+        // after we kicked off the LLM call, the world has moved past
+        // the prompt we sent. Acting on the result would lock the bot
+        // into stale plans (e.g. "give exit token to Jonathan" after
+        // a teleport already left the academy). Discard the result
+        // and force a fresh deliberation on the next tick. The
+        // training record still captures what the LLM produced so we
+        // can analyze stale-rate offline.
+        var staleSinceCall = HasSalientSinceSequence(events, eventSeqAtCallStart);
+
         _training?.RecordDecision(new TrainingDecision
         {
             Id = decisionId,
             CreatedAtUtc = nowUtc,
-            Trigger = stuck ? "stuck-timer" : (currentGoal is null ? "no-current-goal" : "new-event"),
+            Trigger = currentGoal is null ? "no-current-goal" : "new-event-or-stuck",
             Model = _client.Model,
             Endpoint = _client.Endpoint,
             SystemPrompt = SystemPrompt,
             UserPrompt = userPrompt,
-            WorldProjectionJson = JsonSerializer.Serialize(world),
+            WorldProjectionJson = projJson,
             LlmOk = result.Ok,
             LlmLatencyMs = result.LatencyMs,
             LlmRawResponse = result.RawResponse,
             LlmError = result.Error,
         });
+
+        if (staleSinceCall)
+        {
+            // Reset _lastCalledAtUtc to bypass MinCallInterval on the
+            // next ProposeGoal — we want to re-call ASAP with fresh
+            // observations.
+            _lastCalledAtUtc = DateTimeOffset.MinValue;
+            _lastEventConsideredSequence = -1;
+            return currentGoal;
+        }
 
         if (!result.Ok)
             return _fallback.ProposeGoal(world, events, currentGoal);
@@ -132,7 +196,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
-        // Tag with source + creation time.
         var goal = parsed! with
         {
             Source = Source,
@@ -142,6 +205,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         _training?.RecordEmittedGoal(decisionId, goal);
         return goal;
+    }
+
+    private static bool HasSalientSinceSequence(EventStream events, long sequenceFloor)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind is EventKind.PopupString
+                              or EventKind.InventoryItemAdded
+                              or EventKind.InventoryItemRemoved
+                              or EventKind.LandblockChanged
+                              or EventKind.NpcDialog
+                              or EventKind.ServerMessage);
     }
 
     private bool HasNewSalientEvent(EventStream events)
