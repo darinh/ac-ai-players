@@ -85,6 +85,30 @@ Small tasks (typo, one-liner, doc tweak) may commit directly on
 the current branch — the worktree overhead is not worth it. Use
 your judgment but err on the side of using the skill.
 
+## Skills (consult BEFORE ad-hoc reasoning)
+
+This repo vendors a set of reusable agent skills under
+[`.github/skills/`](.github/skills/INDEX.md). Read the index first
+when a task fits a known category. Highest-value triggers:
+
+- **Any bug, test failure, unexpected output** → invoke
+  [`systematic-debugging`](.github/skills/systematic-debugging/SKILL.md).
+  Iron Law: no fixes without root-cause investigation first. If
+  you've tried 3+ fixes without success, STOP and question the
+  architecture.
+- **About to claim "done"** → invoke
+  [`verification-before-completion`](.github/skills/verification-before-completion/SKILL.md).
+- **About to delegate to a sub-agent** → invoke
+  [`subagent-driven-development`](.github/skills/subagent-driven-development/SKILL.md)
+  to write the spec.
+- **Starting a Medium/Large task** → invoke
+  [`create-new-branch`](.github/skills/create-new-branch/SKILL.md)
+  (see "Branch workflow" below).
+- **About to merge a non-trivial change** → invoke
+  [`requesting-code-review`](.github/skills/requesting-code-review/SKILL.md).
+
+See [`INDEX.md`](.github/skills/INDEX.md) for the full list.
+
 ## GitHub Actions hygiene
 
 - Pin third-party actions to full 40-char commit SHAs (not
