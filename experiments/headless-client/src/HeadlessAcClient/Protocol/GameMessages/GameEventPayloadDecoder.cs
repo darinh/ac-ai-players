@@ -81,6 +81,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace HeadlessAcClient.Protocol.GameMessages;
@@ -183,6 +184,59 @@ internal sealed record PopupStringPayload(string Message)
         // Keep multi-line popups on a single log line.
         var sanitized = preview.Replace("\r", "\\r").Replace("\n", "\\n");
         return $"PopupString(\"{sanitized}\")";
+    }
+}
+
+internal sealed record BookPageSummary(
+    uint AuthorId,
+    string AuthorName,
+    string AuthorAccount,
+    uint Flags,
+    bool TextIncluded,
+    bool IgnoreAuthor,
+    string? PageText);
+
+internal sealed record BookDataResponsePayload(
+    uint BookId,
+    int MaxNumPages,
+    int NumPages,
+    int MaxNumCharsPerPage,
+    IReadOnlyList<BookPageSummary> Pages,
+    string Inscription,
+    uint AuthorId,
+    string AuthorName)
+{
+    public override string ToString()
+    {
+        var pageNote = Pages.Count > 0 && Pages[0].PageText is not null
+            ? $" pg0=\"{Sanitize(Pages[0].PageText!)}\""
+            : "";
+        return $"BookDataResponse(book=0x{BookId:X8} pages={NumPages}/{MaxNumPages} maxChars={MaxNumCharsPerPage} insc=\"{Sanitize(Inscription)}\" author=\"{AuthorName}\" hasText={Pages.Count(p => p.TextIncluded)}/{Pages.Count}{pageNote})";
+    }
+
+    private static string Sanitize(string s)
+    {
+        var preview = s.Length > 160 ? s[..160] + "..." : s;
+        return preview.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\"", "\\\"");
+    }
+}
+
+internal sealed record BookPageDataResponsePayload(
+    uint BookId,
+    int PageIndex,
+    uint AuthorId,
+    string AuthorName,
+    string AuthorAccount,
+    uint Flags,
+    bool TextIncluded,
+    bool IgnoreAuthor,
+    string PageText)
+{
+    public override string ToString()
+    {
+        var preview = PageText.Length > 240 ? PageText[..240] + "..." : PageText;
+        var sanitized = preview.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\"", "\\\"");
+        return $"BookPageDataResponse(book=0x{BookId:X8} page={PageIndex} author=\"{AuthorName}\" text=\"{sanitized}\")";
     }
 }
 
@@ -295,7 +349,9 @@ internal sealed record GameEventPayload(
     InventoryServerSaveFailedPayload?    InventoryServerSaveFailed,
     WieldObjectPayload?                  WieldObject,
     TellPayload?                         Tell,
-    PopupStringPayload?                  PopupString)
+    PopupStringPayload?                  PopupString,
+    BookDataResponsePayload?             BookDataResponse,
+    BookPageDataResponsePayload?         BookPageDataResponse)
 {
     public override string ToString() => EventType switch
     {
@@ -310,6 +366,8 @@ internal sealed record GameEventPayload(
         GameEventType.WieldObject                  when WieldObject                is { } x => x.ToString(),
         GameEventType.Tell                         when Tell                       is { } x => x.ToString(),
         GameEventType.PopupString                  when PopupString                is { } x => x.ToString(),
+        GameEventType.BookDataResponse             when BookDataResponse           is { } x => x.ToString(),
+        GameEventType.BookPageDataResponse         when BookPageDataResponse       is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -346,6 +404,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { Tell = DecodeTell(body) },
                 GameEventType.PopupString =>
                     Empty(eventType) with { PopupString = DecodePopupString(body) },
+                GameEventType.BookDataResponse =>
+                    Empty(eventType) with { BookDataResponse = DecodeBookDataResponse(body) },
+                GameEventType.BookPageDataResponse =>
+                    Empty(eventType) with { BookPageDataResponse = DecodeBookPageDataResponse(body) },
                 _ => null,
             };
         }
@@ -369,7 +431,9 @@ internal static class GameEventPayloadDecoder
             InventoryServerSaveFailed: null,
             WieldObject: null,
             Tell: null,
-            PopupString: null);
+            PopupString: null,
+            BookDataResponse: null,
+            BookPageDataResponse: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -523,6 +587,97 @@ internal static class GameEventPayloadDecoder
         var cursor = 0;
         var message = ReadString16L(body, ref cursor);
         return new PopupStringPayload(message);
+    }
+
+    private static BookDataResponsePayload DecodeBookDataResponse(ReadOnlySpan<byte> body)
+    {
+        // Mirrors GameEventBookDataResponse.cs (Book.ActOnUse and
+        // Player_Book.ReadBook are the two server-side senders).
+        // Wire layout:
+        //   u32  bookId
+        //   i32  maxNumPages
+        //   i32  numPages
+        //   i32  maxNumCharsPerPage
+        //   i32  pageCount
+        //   pageCount * {
+        //       u32   authorId
+        //       str16 authorName
+        //       str16 authorAccount   (always "beer good" for non-admin)
+        //       u32   flags           (always 0xFFFF0002 per server)
+        //       i32   textIncluded    (1 = page text follows)
+        //       i32   ignoreAuthor
+        //       (if textIncluded) str16 pageText
+        //   }
+        //   str16 inscription
+        //   u32   authorId (final; 0 if 0xFFFFFFFF on server side)
+        //   str16 authorName (final)
+        //
+        // Note: the initial BookDataResponse sent on ActOnUse has
+        // PageText == null for every page so textIncluded will be 0
+        // and the client must request each page via GameActionBook-
+        // PageData. The decoder handles both cases.
+        if (body.Length < 20) // 4 + 4 + 4 + 4 + 4
+            throw new InvalidOperationException("body too short for BookDataResponse");
+        var cursor = 0;
+        var bookId = ReadU32(body, ref cursor);
+        var maxNumPages = (int)ReadU32(body, ref cursor);
+        var numPages = (int)ReadU32(body, ref cursor);
+        var maxNumChars = (int)ReadU32(body, ref cursor);
+        var pageCount = (int)ReadU32(body, ref cursor);
+        var pages = new List<BookPageSummary>(Math.Max(0, pageCount));
+        for (int i = 0; i < pageCount; i++)
+        {
+            var authorId = ReadU32(body, ref cursor);
+            var authorName = ReadString16L(body, ref cursor);
+            var authorAccount = ReadString16L(body, ref cursor);
+            var flags = ReadU32(body, ref cursor);
+            var textIncluded = ReadU32(body, ref cursor) != 0;
+            var ignoreAuthor = ReadU32(body, ref cursor) != 0;
+            string? pageText = null;
+            if (textIncluded)
+                pageText = ReadString16L(body, ref cursor);
+            pages.Add(new BookPageSummary(authorId, authorName, authorAccount, flags, textIncluded, ignoreAuthor, pageText));
+        }
+        var inscription = ReadString16L(body, ref cursor);
+        var finalAuthorId = ReadU32(body, ref cursor);
+        var finalAuthorName = ReadString16L(body, ref cursor);
+        return new BookDataResponsePayload(bookId, maxNumPages, numPages, maxNumChars, pages, inscription, finalAuthorId, finalAuthorName);
+    }
+
+    private static BookPageDataResponsePayload DecodeBookPageDataResponse(ReadOnlySpan<byte> body)
+    {
+        // Mirrors GameEventBookPageDataResponse.cs. Wire layout:
+        //   u32  bookId
+        //   i32  pageIndex
+        //   u32  authorId
+        //   str16 authorName
+        //   str16 authorAccount  ("Password is cheese" for non-admin)
+        //   u32  flags           (always 0xFFFF0002)
+        //   i32  textIncluded    (always 1 per server)
+        //   i32  ignoreAuthor
+        //   str16 pageText
+        if (body.Length < 16)
+            throw new InvalidOperationException("body too short for BookPageDataResponse");
+        var cursor = 0;
+        var bookId = ReadU32(body, ref cursor);
+        var pageIndex = (int)ReadU32(body, ref cursor);
+        var authorId = ReadU32(body, ref cursor);
+        var authorName = ReadString16L(body, ref cursor);
+        var authorAccount = ReadString16L(body, ref cursor);
+        var flags = ReadU32(body, ref cursor);
+        var textIncluded = ReadU32(body, ref cursor) != 0;
+        var ignoreAuthor = ReadU32(body, ref cursor) != 0;
+        var pageText = ReadString16L(body, ref cursor);
+        return new BookPageDataResponsePayload(bookId, pageIndex, authorId, authorName, authorAccount, flags, textIncluded, ignoreAuthor, pageText);
+    }
+
+    private static uint ReadU32(ReadOnlySpan<byte> body, ref int cursor)
+    {
+        if (cursor + 4 > body.Length)
+            throw new InvalidOperationException($"u32 read OOB at cursor={cursor} len={body.Length}");
+        var v = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        cursor += 4;
+        return v;
     }
 
     /// <summary>

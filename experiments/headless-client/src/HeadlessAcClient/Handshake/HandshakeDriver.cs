@@ -1046,14 +1046,18 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        // Tri-priority with NPC promotion. Phase 6n adjusted:
-                        // - prio 0: unsatisfied-slot wearables, doors, portals
-                        // - prio 1: NPCs (Creature, itemType bit 0x10 set
-                        //   but not pickup-eligible). After basic gear is
-                        //   on, NPCs become important for quest progress.
+                        // Phase 7c picker. Priorities:
+                        // - prio 0: unsatisfied-slot wearables, doors,
+                        //   portals, AND writables (signs/books). Signs
+                        //   in the academy carry quest instructions
+                        //   (Token retrieval) that NPCs explicitly tell
+                        //   the player to read.
+                        // - prio 1: NPCs (Creature, itemType bit 0x10).
+                        //   Quest-givers, trainers, vendors.
                         // - prio 2: non-wearable pickups (apples, etc.),
-                        //   already-counted-once pickups
-                        // - prio 3: writables
+                        //   already-counted-once pickups.
+                        // - prio 3: anything else (e.g. already-USEd
+                        //   wcid creatures pushed down to lowest).
                         candidate = inRange
                             .Select(s =>
                             {
@@ -1070,10 +1074,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 int prio;
                                 if (isDoor || isPortal) prio = 0;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 0;
+                                else if (isWritable) prio = 0;
                                 else if (isNpc) prio = 1;
                                 else if (isPickup && !pickedBefore) prio = 2;
-                                else if (isWritable) prio = 3;
-                                else prio = 2;
+                                else prio = 3;
                                 return (snap: s, d2, prio);
                             })
                             .OrderBy(t => t.prio)
@@ -1413,6 +1417,30 @@ internal sealed class HandshakeDriver : IDisposable
                         pendingEquip[motionTarget.Guid] = equipLoc.Value;
                         if (motionTarget.WeenieClassId is uint wcid)
                             pendingEquipWcid[motionTarget.Guid] = wcid;
+                    }
+
+                    // Phase 7c — USE-side wcid satisfaction. After we
+                    // USE a Creature (NPC, training golem) or Writable
+                    // (sign, book), mark its wcid as satisfied so the
+                    // picker won't repeatedly walk to the next instance
+                    // of the same wcid. Without this, the 8 academy
+                    // Sparring Golems each get USE'd in turn — the bot
+                    // wastes the entire observe window swinging at
+                    // training dummies instead of progressing past them.
+                    // Quest-relevant NPCs (Samuel, Training Master) are
+                    // unique-wcid so this doesn't block returning to a
+                    // quest-giver. If we later need re-USE (e.g. accept
+                    // multiple quests from same NPC) we'll switch to a
+                    // per-guid "talked to" cooldown.
+                    if (!isPickup && motionTarget.WeenieClassId is uint useWcid)
+                    {
+                        var useType = motionTarget.ItemType ?? 0u;
+                        var isCreature = (useType & 0x00000010u) != 0;
+                        var isWritableUse = (useType & 0x00002000u) != 0;
+                        if (isCreature || isWritableUse)
+                        {
+                            satisfiedWeenieClasses.Add(useWcid);
+                        }
                     }
 
                     var sentLen = msg.Pack(sendBuf, myClientId,
