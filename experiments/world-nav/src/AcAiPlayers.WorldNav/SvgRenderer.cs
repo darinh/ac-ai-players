@@ -56,6 +56,7 @@ public sealed class SvgRenderer
         public float PixelsPerWorldUnit { get; init; } = DefaultPixelsPerWorldUnit;
         public bool ShowCellIds { get; init; } = true;
         public bool ShowConnectionIds { get; init; } = false;
+        public bool ShowWalkableEdges { get; init; } = false;
         public RenderMode Mode { get; init; } = RenderMode.Floors;
     }
 
@@ -141,6 +142,7 @@ public sealed class SvgRenderer
         sb.Append("  .obstacle-bound{fill:none;stroke:#660000;stroke-width:0.5;stroke-dasharray:2 2;opacity:0.7}\n");
         sb.Append("  .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}\n");
         sb.Append("  .walkable-node{fill:#0a4a0a;fill-opacity:0.85;stroke:none}\n");
+        sb.Append("  .walkable-edge{stroke:#226622;stroke-width:0.15;stroke-opacity:0.4;fill:none}\n");
         sb.Append("  .stair-up{fill:#ff8a1a;stroke:#7a3a00;stroke-width:0.6}\n");
         sb.Append("  .stair-dn{fill:#7a3aff;stroke:#2a0066;stroke-width:0.6}\n");
         sb.Append("  .stair-label{font:8px sans-serif;fill:#2a0033;text-anchor:middle;dominant-baseline:central}\n");
@@ -243,6 +245,17 @@ public sealed class SvgRenderer
         // walk along.
         foreach (var cell in floor.Cells)
         {
+            // Edges first (under the dots) so dots remain visible.
+            if (options.ShowWalkableEdges)
+            {
+                foreach (var e in cell.WalkableEdges)
+                {
+                    var na = cell.WalkableNodes[e.NodeA].PositionWorld;
+                    var nb = cell.WalkableNodes[e.NodeB].PositionWorld;
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<line class=\"walkable-edge\" x1=\"{Wx(na.X):0.##}\" y1=\"{Wy(na.Y):0.##}\" x2=\"{Wx(nb.X):0.##}\" y2=\"{Wy(nb.Y):0.##}\"/>\n");
+                }
+            }
             foreach (var wn in cell.WalkableNodes)
             {
                 var nx = Wx(wn.PositionWorld.X);
@@ -437,7 +450,7 @@ public sealed class SvgRenderer
         sb.Append(CssBlock());
         sb.Append("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walkable nodes, {floors.Count} floors (highest at top)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walk nodes ({graph.WalkableEdgeCount} edges), {floors.Count} floors (highest at top)</text>\n");
 
         float y = 40f;
         var panelOriginYByFloor = new Dictionary<int, float>(stacked.Count);
@@ -542,6 +555,16 @@ public sealed class SvgRenderer
         // Walkable nodes (grid-sampled stand-here points).
         foreach (var cell in graph.Cells.Values)
         {
+            if (options.ShowWalkableEdges)
+            {
+                foreach (var e in cell.WalkableEdges)
+                {
+                    var na = cell.WalkableNodes[e.NodeA].PositionWorld;
+                    var nb = cell.WalkableNodes[e.NodeB].PositionWorld;
+                    sb.Append(CultureInfo.InvariantCulture,
+                        $"<line class=\"walkable-edge\" x1=\"{Wx(na.X):0.##}\" y1=\"{Wy(na.Y):0.##}\" x2=\"{Wx(nb.X):0.##}\" y2=\"{Wy(nb.Y):0.##}\"/>\n");
+                }
+            }
             foreach (var wn in cell.WalkableNodes)
             {
                 var nx = Wx(wn.PositionWorld.X);
@@ -599,7 +622,7 @@ public sealed class SvgRenderer
         }
 
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walkable nodes (combined view)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {graph.WalkableNodeCount} walk nodes ({graph.WalkableEdgeCount} edges) (combined view)</text>\n");
         sb.Append("</svg>\n");
         return sb.ToString();
     }

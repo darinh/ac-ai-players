@@ -120,11 +120,25 @@ public sealed class IndoorCell
     /// it falls inside one of the cell's <see cref="FloorPolygons"/>
     /// and is NOT covered by any of its <see cref="StaticObstacles"/>'s
     /// top-down footprints. These are the vertices the per-cell
-    /// micro-pathfinder will eventually walk along; for now they exist
-    /// as a visualization layer + the substrate for Phase 2 step 3
-    /// (8-connectivity edges between adjacent samples).
+    /// micro-pathfinder walks along; <see cref="WalkableEdges"/>
+    /// stitches them into a graph.
     /// </summary>
     public required IReadOnlyList<WalkableNode> WalkableNodes { get; init; }
+
+    /// <summary>
+    /// 8-neighbour adjacency edges between this cell's
+    /// <see cref="WalkableNodes"/>. Each edge connects two nodes that
+    /// are one grid step apart (cardinal or diagonal) AND whose
+    /// straight-line segment clears every static-obstacle circle AND
+    /// whose Z difference is small enough that the bot can step
+    /// (no jumping over half-walls). Indices reference
+    /// <see cref="WalkableNodes"/>; the edge list is DEDUPLICATED so
+    /// each undirected (A, B) pair appears exactly once with
+    /// <c>NodeA &lt; NodeB</c>. Cross-cell edges (through doorways)
+    /// are NOT in this list — the cell-graph
+    /// <see cref="Connections"/> handle inter-cell hops.
+    /// </summary>
+    public required IReadOnlyList<WalkableEdge> WalkableEdges { get; init; }
 
     /// <summary>
     /// True if this cell's geometry was available in the DAT.
@@ -195,6 +209,14 @@ public sealed class WalkableNode
     /// <summary>World-space sample position (Z taken from the polygon plane).</summary>
     public required Vector3 PositionWorld { get; init; }
 }
+
+/// <summary>
+/// One undirected edge between two same-cell <see cref="WalkableNode"/>s.
+/// The line segment between the two nodes is guaranteed to clear every
+/// <see cref="StaticObstacle"/> in the cell and to have a small enough
+/// vertical step that the bot can walk it (no jumping).
+/// </summary>
+public readonly record struct WalkableEdge(int NodeA, int NodeB, float DistanceUnits);
 
 /// <summary>
 /// The shape of a static obstacle's footprint, as it appears in the
@@ -365,4 +387,7 @@ public sealed class IndoorNavGraph
 
     /// <summary>Total walkable-node count across all cells (grid samples).</summary>
     public int WalkableNodeCount => Cells.Values.Sum(c => c.WalkableNodes.Count);
+
+    /// <summary>Total walkable-edge count across all cells (intra-cell only).</summary>
+    public int WalkableEdgeCount => Cells.Values.Sum(c => c.WalkableEdges.Count);
 }

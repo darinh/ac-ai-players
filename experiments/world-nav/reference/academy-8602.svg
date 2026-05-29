@@ -13,6 +13,7 @@
   .obstacle-bound{fill:none;stroke:#660000;stroke-width:0.5;stroke-dasharray:2 2;opacity:0.7}
   .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}
   .walkable-node{fill:#0a4a0a;fill-opacity:0.85;stroke:none}
+  .walkable-edge{stroke:#226622;stroke-width:0.15;stroke-opacity:0.4;fill:none}
   .stair-up{fill:#ff8a1a;stroke:#7a3a00;stroke-width:0.6}
   .stair-dn{fill:#7a3aff;stroke:#2a0066;stroke-width:0.6}
   .stair-label{font:8px sans-serif;fill:#2a0033;text-anchor:middle;dominant-baseline:central}
@@ -24,7 +25,7 @@
   .title{font:bold 14px sans-serif;fill:#000}
 </style>
 <rect x="0" y="0" width="100%" height="100%" fill="#ffffff"/>
-<text class="title" x="24" y="22">Landblock 8602 — 568 cells, 1620 connections, 336 static obstacles, 1864 floor polys, 30290 walkable nodes, 5 floors (highest at top)</text>
+<text class="title" x="24" y="22">Landblock 8602 — 568 cells, 1620 connections, 336 static obstacles, 1864 floor polys, 30290 walk nodes (90479 edges), 5 floors (highest at top)</text>
 <rect class="floor-bg" x="24" y="40" width="1332" height="1636"/>
 <text class="floor-title" x="48" y="58">Floor 5  (Z 20.7..20.7u, 4 cells)</text>
 <rect class="cell" x="468" y="452" width="60" height="60"/>

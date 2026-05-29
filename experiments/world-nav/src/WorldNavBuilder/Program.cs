@@ -32,6 +32,7 @@ string datDir = @"C:\ACE\Dats";
 ushort landblock = 0x8602;
 string outPath = "academy.svg";
 bool showConnectionIds = false;
+bool showWalkableEdges = false;
 bool quiet = false;
 bool diag = false;
 
@@ -53,11 +54,12 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--out": outPath = Next(a); break;
         case "--show-connection-ids": showConnectionIds = true; break;
+        case "--show-walkable-edges": showWalkableEdges = true; break;
         case "--quiet": quiet = true; break;
         case "--diag": diag = true; break;
         case "-h":
         case "--help":
-            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--diag] [--quiet]");
+            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--diag] [--quiet]");
             return 0;
         default:
             Console.Error.WriteLine($"unknown arg: {a}");
@@ -107,6 +109,7 @@ if (!quiet)
     Console.WriteLine($"  obstacles:    {graph.StaticObstacleCount} static primitives");
     Console.WriteLine($"  floor polys:  {graph.FloorPolygonCount} walkable surfaces");
     Console.WriteLine($"  walk nodes:   {graph.WalkableNodeCount} grid-sampled stand points");
+    Console.WriteLine($"  walk edges:   {graph.WalkableEdgeCount} 8-neighbour intra-cell links");
     Console.WriteLine($"  bounds:  X[{graph.BoundsWorld.MinX:0.##}..{graph.BoundsWorld.MaxX:0.##}] Y[{graph.BoundsWorld.MinY:0.##}..{graph.BoundsWorld.MaxY:0.##}] Z[{graph.BoundsWorld.MinZ:0.##}..{graph.BoundsWorld.MaxZ:0.##}]");
 
     int withGeom = 0, withoutGeom = 0;
@@ -200,6 +203,7 @@ if (diag)
 var svg = new SvgRenderer().Render(graph, new SvgRenderer.Options
 {
     ShowConnectionIds = showConnectionIds,
+    ShowWalkableEdges = showWalkableEdges,
 });
 
 var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath));

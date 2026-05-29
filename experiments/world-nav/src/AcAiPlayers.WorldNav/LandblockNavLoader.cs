@@ -115,6 +115,7 @@ public sealed class LandblockNavLoader
             var obstacles = ComputeStaticObstacles(raw);
             var floors = ComputeFloorPolygons(raw);
             var walkable = ComputeWalkableNodes(cellId, floors, obstacles);
+            var walkEdges = ComputeWalkableEdges(walkable, obstacles);
             cells[cellId] = new IndoorCell
             {
                 CellId = cellId,
@@ -127,6 +128,7 @@ public sealed class LandblockNavLoader
                 StaticObstacles = obstacles,
                 FloorPolygons = floors,
                 WalkableNodes = walkable,
+                WalkableEdges = walkEdges,
                 HasGeometry = raw.Mesh != null,
             };
         }
@@ -603,5 +605,118 @@ public sealed class LandblockNavLoader
         var v0 = poly.VerticesWorld[0];
         var n = poly.NormalWorld;
         return v0.Z - (n.X * (x - v0.X) + n.Y * (y - v0.Y)) / n.Z;
+    }
+
+    /// <summary>
+    /// Maximum vertical step a bot can take between two adjacent
+    /// walkable nodes (in world Z units). Stairs and ramps in AC are
+    /// often steep — a 45-degree ramp at 1.0u XY spacing yields 1.0u
+    /// dz per step. Set to 1.0u to allow up to a 45-degree slope.
+    /// Same-cell only: the spatial hash de-dupes XY duplicates so
+    /// this can never produce vertical "elevator" edges between two
+    /// stacked nodes at the same XY. Different cells get their edges
+    /// via the cell-graph layer (CellConnection).
+    /// </summary>
+    private const float WalkableStepMaxDz = 1.0f;
+
+    /// <summary>
+    /// Connect each walkable node to its 8 grid neighbours when:
+    ///   (a) the neighbour exists (sample landed on the floor)
+    ///   (b) the vertical step |dz| &lt;= WalkableStepMaxDz
+    ///   (c) the XY line segment clears every static obstacle's
+    ///       circle (segment-vs-circle distance &gt; radius).
+    /// Returns deduplicated undirected edges (NodeA &lt; NodeB).
+    /// </summary>
+    private static List<WalkableEdge> ComputeWalkableEdges(
+        IReadOnlyList<WalkableNode> nodes,
+        IReadOnlyList<StaticObstacle> obstacles)
+    {
+        var edges = new List<WalkableEdge>();
+        if (nodes.Count < 2) return edges;
+
+        // Spatial hash keyed by integer grid coords so we can look up
+        // neighbours in O(1). We snap to the same WalkableSampleSpacing
+        // grid the sampler used, so positions land on exact integers
+        // after dividing.
+        var index = new Dictionary<(int gx, int gy), int>(nodes.Count);
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            var p = nodes[i].PositionWorld;
+            int gx = (int)System.Math.Round(p.X / WalkableSampleSpacing);
+            int gy = (int)System.Math.Round(p.Y / WalkableSampleSpacing);
+            // If two samples collide (e.g. floor + ceiling at same XY,
+            // though ceiling filter usually drops the latter), keep
+            // the first — edges still form a connected component for
+            // the surviving node, and the orphan stays isolated.
+            if (!index.ContainsKey((gx, gy)))
+                index[(gx, gy)] = i;
+        }
+
+        // 8 neighbour offsets: 4 cardinal (length 1) + 4 diagonal
+        // (length sqrt(2)). We only emit each undirected edge once
+        // by requiring the chosen offset's grid index to be strictly
+        // greater (so the OTHER node has a larger key).
+        var offsets = new (int dx, int dy, float dist)[]
+        {
+            (+1,  0, 1.0f),
+            (+1, +1, 1.41421356f),
+            ( 0, +1, 1.0f),
+            (-1, +1, 1.41421356f),
+        };
+
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            var a = nodes[i].PositionWorld;
+            int gx = (int)System.Math.Round(a.X / WalkableSampleSpacing);
+            int gy = (int)System.Math.Round(a.Y / WalkableSampleSpacing);
+
+            foreach (var (dx, dy, dist) in offsets)
+            {
+                if (!index.TryGetValue((gx + dx, gy + dy), out var j)) continue;
+                var b = nodes[j].PositionWorld;
+
+                // Vertical step gate (no jumping over half-walls).
+                if (System.Math.Abs(b.Z - a.Z) > WalkableStepMaxDz) continue;
+
+                // XY segment must clear every obstacle circle.
+                if (SegmentIntersectsAnyObstacleXY(a.X, a.Y, b.X, b.Y, obstacles)) continue;
+
+                edges.Add(new WalkableEdge(i, j, dist * WalkableSampleSpacing));
+            }
+        }
+
+        return edges;
+    }
+
+    /// <summary>
+    /// True if the XY segment (ax,ay)-(bx,by) passes within
+    /// <c>obstacle.Radius</c> of any obstacle's center. Standard
+    /// closest-point-on-segment formulation.
+    /// </summary>
+    private static bool SegmentIntersectsAnyObstacleXY(
+        float ax, float ay, float bx, float by,
+        IReadOnlyList<StaticObstacle> obstacles)
+    {
+        float dx = bx - ax;
+        float dy = by - ay;
+        float lenSq = dx * dx + dy * dy;
+        if (lenSq < 1e-10f) return false; // degenerate segment
+
+        for (int i = 0; i < obstacles.Count; i++)
+        {
+            var o = obstacles[i];
+            float cx = o.CenterWorld.X;
+            float cy = o.CenterWorld.Y;
+            // Project (cx,cy) onto segment, clamped to [0,1].
+            float t = ((cx - ax) * dx + (cy - ay) * dy) / lenSq;
+            if (t < 0f) t = 0f;
+            else if (t > 1f) t = 1f;
+            float px = ax + t * dx;
+            float py = ay + t * dy;
+            float ex = cx - px;
+            float ey = cy - py;
+            if (ex * ex + ey * ey <= o.Radius * o.Radius) return true;
+        }
+        return false;
     }
 }
