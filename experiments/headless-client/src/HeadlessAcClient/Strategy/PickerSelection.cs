@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// PickerSelection — Slice W.1 (ac-ai-players#86).
+// PickerSelection — Slice W.1 + W.2 (ac-ai-players#86, #87).
 //
 // The schema-only picker that drives the bot between LLM
 // deliberations. This used to encode a type-based PRIORITY LADDER
@@ -10,13 +10,20 @@
 // STRATEGIC judgement, not a mechanical one, and strategic choices
 // belong in the LLM.
 //
-// W.1 removes the in-range ladder. The picker now selects the
-// nearest mechanically-eligible candidate, period. Strategy is
-// the LLM's job (see ac-ai-players#86); the picker's job is to
-// give the bot something near to look at when the LLM hasn't
-// emitted a goal yet. The LLM sees what the picker is doing via
-// Slice V's "## Autonomous picker activity" prompt block and can
-// override at any time.
+// W.1 removed the in-range ladder. The in-range picker now selects
+// the nearest mechanically-eligible candidate, period.
+//
+// W.2 removes the *fallback* picker's ladder and visited-door
+// backtrack strategy. The fallback now picks the nearest known
+// off-screen object addressable from the bot's current landblock,
+// with the same mechanical filters as the in-range picker. No
+// type-based bumps. No backtrack-via-visited-door preference.
+// Strategic exploration is owned by the LLM: it sees a new
+// "## Exploration candidates" prompt block listing the same set
+// the fallback considers, and can emit `Explore{target=<guid|name>}`
+// to override the fallback's nearest-distance pick (the Explore
+// goal honors `target` selectors so the LLM can name a specific
+// landmark or visited door to backtrack through).
 //
 // MECHANICAL FILTERS PRESERVED (loop-prevention, not priority):
 //   - Drop objects physically attached to the bot — i.e. the bot's
@@ -46,13 +53,12 @@
 //   - "fresh corpse jumps to prio 0" loot bump.
 //   - "wearable with unfilled slot > door" preference.
 //   - "sign deserves prio 2 because reading > picking" preference.
+//   - "visited door earns prio 2 because backtracking re-stimulates
+//      cells" preference (W.2 — this WAS the rationale for the
+//      fallback's visited-door bump; the LLM now decides when
+//      backtracking is worthwhile via the candidate surface).
 //   All of those are strategic. The LLM has the RULES and the
-//   Slice V activity surface to make them.
-//
-// The fallback picker (HandshakeDriver, exploration branch) still
-// contains its own ladder + a visited-door backtrack. Removing it
-// is Slice W.2 (#86) — needs an LLM-owned Explore replacement
-// first so the bot doesn't get stranded when nothing is in radius.
+//   Slice V / W.2 surfaces to make them.
 
 using System;
 using System.Collections.Generic;
@@ -135,5 +141,98 @@ internal static class PickerSelection
             || isBookPickup;
         if (!isPickup) return false;
         return pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
+    }
+
+    /// <summary>
+    /// W.2 — fallback picker for exploration when the in-range queue
+    /// is empty. Returns the nearest mechanically-eligible
+    /// off-screen known object addressable from the bot's current
+    /// landblock, or null if nothing eligible remains.
+    ///
+    /// Mechanical filters (the same shape as <see cref="PickNearest"/>
+    /// plus addressability):
+    ///   - drop self / empty-name / player GUIDs (caller-applied
+    ///     in <paramref name="known"/>).
+    ///   - drop visited GUIDs (caller-applied via
+    ///     <paramref name="visitedGuids"/>; backtrack-via-visited-
+    ///     door is the LLM's job now, not the picker's).
+    ///   - drop satisfied weenie classes (caller-applied).
+    ///   - drop ContainerGuid==self / WielderGuid==self.
+    ///   - drop pickup-eligible respawns whose Name we've picked
+    ///     up at least once (anti-respawn).
+    ///   - drop objects whose CellId is not in the bot's current
+    ///     landblock (high-16-bits match). Reaching a different
+    ///     landblock requires server-side cell hand-off; chasing
+    ///     a remembered object 300u away in another building tends
+    ///     to either no-op or wander into closed-door geometry.
+    ///     Same-landblock keeps the pure-distance choice on a
+    ///     reachable target.
+    ///   - drop objects with no CellId (an item with no spatial
+    ///     position cannot be walked toward).
+    ///
+    /// NO type-based bumps. NO door / corpse / pickup preference.
+    /// Strategic exploration is the LLM's responsibility — it sees
+    /// the same candidate set via the "## Exploration candidates"
+    /// prompt block and can override by emitting Explore{target}.
+    /// </summary>
+    /// <param name="known">All known world objects (pre-filtered
+    /// by caller for self / empty-name / player / visited /
+    /// satisfied-wcid).</param>
+    /// <param name="self">Bot's own snapshot.</param>
+    /// <param name="selfGuid">Bot character GUID.</param>
+    /// <param name="selfLandblock">High-16-bits of bot's current
+    /// CellId (the "landblock"). Candidates with CellId in a
+    /// different landblock are excluded.</param>
+    /// <param name="pickupCountByName">Per-Name pickup counter.</param>
+    /// <param name="pickupItemTypeMask">ItemType bitmask for pickup
+    /// classification (anti-respawn filter).</param>
+    public static WorldObjectSnapshot? PickNearestFallback(
+        IEnumerable<WorldObjectSnapshot> known,
+        WorldObjectSnapshot self,
+        uint selfGuid,
+        uint selfLandblock,
+        IReadOnlyDictionary<string, int> pickupCountByName,
+        uint pickupItemTypeMask)
+    {
+        if (known is null) throw new ArgumentNullException(nameof(known));
+        if (self is null) throw new ArgumentNullException(nameof(self));
+        if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
+
+        return EnumerateFallbackCandidates(known, self, selfGuid, selfLandblock, pickupCountByName, pickupItemTypeMask)
+            .Select(t => t.snap)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// W.2 — enumerate the fallback picker's candidate set, sorted
+    /// nearest-first. Used by HandshakeDriver to both pick the
+    /// nearest target AND surface the top-N list to the LLM via
+    /// the "## Exploration candidates" prompt block.
+    /// </summary>
+    public static IEnumerable<(WorldObjectSnapshot snap, float distance)> EnumerateFallbackCandidates(
+        IEnumerable<WorldObjectSnapshot> known,
+        WorldObjectSnapshot self,
+        uint selfGuid,
+        uint selfLandblock,
+        IReadOnlyDictionary<string, int> pickupCountByName,
+        uint pickupItemTypeMask)
+    {
+        if (known is null) throw new ArgumentNullException(nameof(known));
+        if (self is null) throw new ArgumentNullException(nameof(self));
+        if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
+
+        return known
+            .Where(s => s.Guid != selfGuid)
+            .Where(s => !string.IsNullOrEmpty(s.Name))
+            .Where(s => !IsAttachedToSelf(s, selfGuid))
+            .Where(s => !IsRespawnOfPickedItem(s, pickupCountByName, pickupItemTypeMask))
+            .Where(s => s.CellId is uint sc && sc != 0u && (sc & 0xFFFF0000u) == (selfLandblock & 0xFFFF0000u))
+            .Select(s =>
+            {
+                WorldDistance.TrySquaredDistance(self, s, out var d2);
+                return (snap: s, d2);
+            })
+            .OrderBy(t => t.d2)
+            .Select(t => (t.snap, (float)Math.Sqrt(t.d2)));
     }
 }

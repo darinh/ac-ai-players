@@ -67,6 +67,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // is idle (no autonomous selection in flight).
     private PickerActivity? _currentPickerActivity;
 
+    // Slice W.2 (ac-ai-players#87): top-N exploration candidates the
+    // fallback picker is considering when the in-range queue is
+    // empty. Surfaced as "## Exploration candidates" in the prompt
+    // so the LLM can override the fallback's nearest-distance pick
+    // by emitting `Explore{target=<guid|name>}`. Empty list (or
+    // null) = no candidates / nothing to show.
+    private IReadOnlyList<ExplorationCandidate>? _currentExplorationCandidates;
+
     /// <summary>
     /// Driver-driven setter. Called by HandshakeDriver each tick
     /// before <see cref="ProposeGoal"/> so the LLM prompt's
@@ -75,6 +83,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     public void SetCurrentPickerActivity(PickerActivity? activity)
         => _currentPickerActivity = activity;
+
+    /// <summary>
+    /// Driver-driven setter for Slice W.2 candidate list. Called
+    /// before ProposeGoal when the in-range queue is empty and the
+    /// fallback picker has off-screen options. Null / empty = no
+    /// fallback candidates this tick.
+    /// </summary>
+    public void SetCurrentExplorationCandidates(IReadOnlyList<ExplorationCandidate>? candidates)
+        => _currentExplorationCandidates = candidates;
 
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
@@ -232,7 +249,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
 
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -553,10 +570,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
-        => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null);
+        => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
-        => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity: null);
+        => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity: null, explorationCandidates: null);
 
     internal static string BuildUserPrompt(
         WorldStateProjection world,
@@ -564,6 +581,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Goal? currentGoal,
         IntentStack? stack,
         PickerActivity? pickerActivity)
+        => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity, explorationCandidates: null);
+
+    internal static string BuildUserPrompt(
+        WorldStateProjection world,
+        EventStream events,
+        Goal? currentGoal,
+        IntentStack? stack,
+        PickerActivity? pickerActivity,
+        IReadOnlyList<ExplorationCandidate>? explorationCandidates)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -666,7 +692,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("- STRATEGIC STACK: `## Intent stack` shows the bot's current strategic plan. The TOP intent is the active sub-goal; ancestors are paused waiting for it. Per-cycle goals should advance the TOP. PUSH a new intent when you discover a sub-task. POP_TOP when the sub-task is done and no completion predicate caught it (rare — predicates auto-pop). REPLACE_TOP when the intent was right-track-wrong-target. MARK_TOP_BLOCKED when you cannot make progress and want to record why (the next call you can pop or replace). Always echo `stack_revision` to detect races.");
             sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate that matches your termination criterion. Prefer server-authoritative ones (num_deaths, coin_value) when applicable — they survive crashes and are exact. Use *_total_* for absolute thresholds (\"reach level 5\"), *_since_push_* for deltas (\"kill 3 more\"). If none fits, use {\"$type\":\"never\"} + `predicate_request` (escape hatch).");
         }
-        sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the bot's schema-only picker is auto-driving an action toward the listed target because YOU had no per-cycle goal at that tick. This is a FALLBACK — the picker uses generic rules (nearest unvisited, backtrack via door) with no game knowledge. To take strategic control: emit a per-cycle goal targeting whatever you actually want (the picker's choice will be over-ridden on the next tick). If the picker's choice is on-plan, you can leave it alone — but emit a matching goal anyway so the bot's intent is RECORDED rather than implicit. NEVER assume the picker knows what it's doing strategically; it only knows what's nearby.");
+        sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the bot's schema-only picker is auto-driving an action toward the listed target because YOU had no per-cycle goal at that tick. This is a FALLBACK — the picker is purely mechanical (nearest mechanically-eligible candidate by straight-line distance, with no game-knowledge preferences for type, content, doors, corpses, NPCs, or anything else). To take strategic control: emit a per-cycle goal targeting whatever you actually want. NEVER assume the picker knows what it's doing strategically; it only knows what's nearby.");
+        sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback picker is choosing the nearest off-screen object addressable from your current landblock. The TOP entry is the one the fallback will walk to. To pick a DIFFERENT candidate (e.g. backtrack through a visited door to re-stimulate a prior room, or skip a distant pickup in favour of a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` or `Explore{target: {name: \"...\"}}` with the candidate you want. The candidate guid is the most reliable selector (names duplicate). Visited candidates are marked — they're still legitimate Explore targets when you want to backtrack.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -702,6 +729,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- NOTE: this is the bot's autonomous fallback because you had no per-cycle goal " +
                 "at that moment. Emit a goal to take control; the picker will defer.");
+            sb.AppendLine();
+        }
+
+        if (explorationCandidates is not null && explorationCandidates.Count > 0)
+        {
+            // Slice W.2 (#87): the fallback picker's candidate set
+            // surfaced to the LLM. Listed nearest-first; the picker
+            // will walk to the top entry unless the LLM emits an
+            // Explore goal naming a different one. Visited
+            // candidates are flagged so the LLM can deliberately
+            // backtrack (the picker no longer auto-backtracks).
+            sb.AppendLine("## Exploration candidates (off-screen known objects in current landblock)");
+            foreach (var c in explorationCandidates)
+            {
+                var vis = c.Visited ? " VISITED" : "";
+                sb.AppendLine(
+                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8}{vis}");
+            }
+            sb.AppendLine(
+                "- NOTE: the in-range queue is empty. The fallback picker will walk to the TOP " +
+                "entry above by mechanical distance. To pick a different one, emit " +
+                "`Explore{target: {guid: \"0x...\"}}` (most reliable) or `Explore{target: {name: \"...\"}}`. " +
+                "Visited candidates are legitimate Explore targets when you want to backtrack.");
             sb.AppendLine();
         }
 

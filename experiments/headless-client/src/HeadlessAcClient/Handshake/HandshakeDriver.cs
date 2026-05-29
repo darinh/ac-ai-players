@@ -2184,25 +2184,82 @@ internal sealed class HandshakeDriver : IDisposable
                     //     LLM picked a different goal.
                     if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
-                        // Synthesize Explore target: farthest visible
-                        // object with a CellId that the bot hasn't
-                        // visited this session. Bias toward "go see
-                        // something new and far away" — the LLM only
-                        // picks Explore when it's already exhausted
-                        // the nearby options.
+                        // Slice W.2 (#87) — if the LLM emitted
+                        // `Explore{target}`, honor it: walk to that
+                        // specific candidate (typically chosen from
+                        // the "## Exploration candidates" prompt
+                        // block). Fall back to "farthest unvisited
+                        // in 200u" only when the goal has no target
+                        // or the target can't be resolved.
                         WorldObjectSnapshot? exploreTarget = null;
                         float bestDist = 0f;
-                        foreach (var snap in worldState.WithinRadius(tacticsSelf, 200f))
+
+                        if (goal.Target is not null)
                         {
-                            if (snap.Guid == tacticsSelf.Guid) continue;
-                            if (snap.CellId is not uint sc || sc == 0u) continue;
-                            if (visitedTargetGuids.Contains(snap.Guid)) continue;
-                            if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
-                            var d = (float)Math.Sqrt(dsq);
-                            if (d > bestDist)
+                            // Prefer GUID-addressed Explore (most
+                            // reliable — names duplicate). Pull from
+                            // the full known-object set so the LLM
+                            // can name an off-screen candidate.
+                            if (goal.Target.Guid is uint tg
+                                && worldState.Objects.TryGetValue(tg, out var byGuid)
+                                && byGuid.Guid != tacticsSelf.Guid
+                                && byGuid.CellId is uint bgc && bgc != 0u)
                             {
-                                bestDist = d;
-                                exploreTarget = snap;
+                                exploreTarget = byGuid;
+                                if (WorldDistance.TrySquaredDistance(tacticsSelf, byGuid, out var d2g))
+                                    bestDist = (float)Math.Sqrt(d2g);
+                            }
+                            else
+                            {
+                                // Other selector kinds (Name,
+                                // NameContains, Wcid, ItemTypeMask,
+                                // ShortDescContains) — delegate to
+                                // the canonical resolver so the
+                                // landblock-clip + own-guid filters
+                                // are consistent with the rest of
+                                // the Tactics layer.
+                                var resolved = SelectorResolver.ResolveSingleNearest(goal.Target, worldState, referencePoint: tacticsSelf);
+                                if (resolved is not null
+                                    && resolved.Guid != tacticsSelf.Guid
+                                    && resolved.CellId is uint rc && rc != 0u)
+                                {
+                                    exploreTarget = resolved;
+                                    if (WorldDistance.TrySquaredDistance(tacticsSelf, resolved, out var d2r))
+                                        bestDist = (float)Math.Sqrt(d2r);
+                                }
+                            }
+
+                            if (exploreTarget is null)
+                            {
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Explore{{target}} unresolved " +
+                                    $"(guid={(goal.Target.Guid is uint gt ? $"0x{gt:X8}" : "-")} " +
+                                    $"name={(goal.Target.Name ?? "-")} " +
+                                    $"wcid={(goal.Target.Wcid?.ToString() ?? "-")}); " +
+                                    $"falling back to farthest-unvisited in 200u");
+                            }
+                        }
+
+                        if (exploreTarget is null)
+                        {
+                            // Original Explore{anywhere} behaviour:
+                            // farthest unvisited within 200u. The
+                            // LLM picks Explore without a target
+                            // when it has no specific landmark in
+                            // mind; "go see something new and far
+                            // away" beats wandering randomly.
+                            foreach (var snap in worldState.WithinRadius(tacticsSelf, 200f))
+                            {
+                                if (snap.Guid == tacticsSelf.Guid) continue;
+                                if (snap.CellId is not uint sc || sc == 0u) continue;
+                                if (visitedTargetGuids.Contains(snap.Guid)) continue;
+                                if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
+                                var d = (float)Math.Sqrt(dsq);
+                                if (d > bestDist)
+                                {
+                                    bestDist = d;
+                                    exploreTarget = snap;
+                                }
                             }
                         }
 
@@ -2575,122 +2632,107 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
 
-                    // Phase 7f.5 — EXPLORATION FALLBACK. When the
-                    // normal picker (within MotionSearchRadius) finds
-                    // nothing, the bot would otherwise sit idle until
-                    // the observation window closes. That happened in
-                    // phase7f4-headless20-fullrun.log: bot killed one
-                    // golem, visited the corpse + 4 signs, then
-                    // reported inRange=0 from then on (every other
-                    // golem was filtered by the now-removed wcid
-                    // satisfaction; even with that fix, the bot can
-                    // still exhaust everything within 60u in a small
-                    // room). The fallback widens the search to ALL
-                    // known objects (no radius limit) and ALSO admits
-                    // visited doors/portals as re-traversal targets —
-                    // walking back through a door we used earlier
-                    // crosses cells and re-stimulates server-side
-                    // visibility on whatever's on the other side
-                    // (which may include the next set of unvisited
-                    // signs, NPCs, hostiles, or the academy exit
-                    // portal). The wearable / "pickedBefore" filters
-                    // still apply so we don't farm respawned apples.
+                    // Slice W.2 (ac-ai-players#87) — EXPLORATION
+                    // FALLBACK. When the in-range queue is empty,
+                    // pick the nearest mechanically-eligible known
+                    // object in the bot's CURRENT LANDBLOCK
+                    // (addressable in one motion). Pure-distance —
+                    // no NPC>corpse>door>pickup ladder, no visited-
+                    // door backtrack preference. The OLD fallback
+                    // encoded those as game knowledge; the audit
+                    // at .github/skills/audit-hardcoded-knowledge/
+                    // SKILL.md flagged the entire ladder + the
+                    // "backtrack via visited door" strategy as
+                    // FORBIDDEN. They're now the LLM's call,
+                    // surfaced via the "## Exploration candidates"
+                    // prompt block.
                     //
-                    // FIXME (ac-ai-players#86 — Slice W.2): this
-                    // ladder also encodes hardcoded game knowledge
-                    // (NPC > corpse > unvisited door > visited door >
-                    // pickup) plus a "backtrack via visited door"
-                    // strategy. It is intentionally LEFT IN PLACE
-                    // during Slice W.1 so the bot doesn't strand
-                    // itself the moment in-range goes empty. W.2
-                    // will replace the backtrack with an LLM-owned
-                    // Explore goal and reduce this fallback to a
-                    // motion-only nearest-known target.
+                    // Mechanical filters (in PickerSelection.
+                    // PickNearestFallback):
+                    //   - drop self / empty-name / player guids
+                    //   - drop visited GUIDs (LLM can request
+                    //     backtrack via Explore{target=visited})
+                    //   - drop satisfied weenie classes
+                    //   - drop ContainerGuid==self / WielderGuid==self
+                    //   - drop pickup respawns whose Name has been
+                    //     picked once (anti-respawn)
+                    //   - drop objects with no CellId
+                    //   - drop objects in a different landblock
+                    //     (addressability — the bot can't walk
+                    //     directly into another landblock without
+                    //     a cell hand-off; chasing a 300u
+                    //     remembered object across a building
+                    //     wall just wedges against geometry).
+                    //
+                    // The LLM sees the same candidate set via the
+                    // "## Exploration candidates" prompt block
+                    // (top N, sorted nearest-first) and can
+                    // override the picker's nearest pick by
+                    // emitting Explore{target=<guid|name>}.
+                    IReadOnlyList<ExplorationCandidate>? explorationCandidatesForLlm = null;
                     if (candidate is null &&
                         string.IsNullOrWhiteSpace(motionTargetNameOverride) &&
                         combatTargetGuid is null)
                     {
-                        var allKnown = worldState.Objects.Values
-                            .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
+                        var selfLandblock = (self.CellId ?? 0u) & 0xFFFF0000u;
+
+                        // Pre-filter for the picker (mirrors the
+                        // inRange pre-filters that aren't already
+                        // inside PickerSelection): visited / wcid-
+                        // satisfied / player guids. Keeps the
+                        // PickerSelection method generic.
+                        var fallbackPool = worldState.Objects.Values
                             .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
+                            .Where(s => !visitedTargetGuids.Contains(s.Guid))
                             .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
-                            .Select(s =>
-                            {
-                                var hasDist = WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
-                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
-                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
-                                // Slice P — corpses are time-sensitive
-                                // loot containers; surface unvisited
-                                // corpses ahead of pickups in the
-                                // exploration fallback too.
-                                var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
-                                // Slice U — see inRange picker above for
-                                // the rationale on Stuck/Openable bits.
-                                var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
-                                var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
-                                var isWritable  = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isContainer = s.ItemType is uint ct && (ct & 0x00000200u) != 0;
-                                var isInSelfBag = s.ContainerGuid is uint cg && cg == chosenCharacterGuid;
-                                var isBookPickup = isWritable && !isStuck && !isInSelfBag;
-                                var isSign       = isWritable && isStuck;
-                                var isLootChest  = isContainer && isOpenable && !isCorpse && !isInSelfBag;
-                                var isPickup = (s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isSign)
-                                    || isBookPickup;
-                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
-                                var isVisited = visitedTargetGuids.Contains(s.Guid);
-                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-                                // Exploration priorities (lower = better):
-                                //   0: unvisited NPC (quest giver / shopkeeper)
-                                //      OR unvisited corpse (fresh loot — Slice P).
-                                //   1: unvisited door/portal (cross to new room)
-                                //   2: visited door/portal (BACKTRACK through
-                                //      to re-stimulate cells on the other side)
-                                //   3: unvisited pickup we haven't farmed
-                                //      (Slice U: now includes pickup-eligible
-                                //      books — Writable AND NOT Stuck).
-                                //   4: unvisited creature (LLM will decide if
-                                //      it's hostile via Strategy layer)
-                                //   5: everything else (filtered out below)
-                                //
-                                // NOTE: Slice U previously bumped isLootChest
-                                // to prio=0 ("same loot urgency as a corpse").
-                                // The audit at .github/skills/audit-hardcoded-
-                                // knowledge/SKILL.md flagged that as game
-                                // knowledge and the bump is reverted. The
-                                // LLM RULES bullet for chests handles urgency
-                                // judgements. Tracked in ac-ai-players#86.
-                                int prio;
-                                if (!isVisited && isCorpse) prio = 0;
-                                else if (!isVisited && isNpc) prio = 0;
-                                else if (!isVisited && (isDoor || isPortal)) prio = 1;
-                                else if (isDoor || isPortal) prio = 2;
-                                else if (!isVisited && isPickup && !pickedBefore) prio = 3;
-                                else prio = 5;
-                                return (snap: s, d2, prio, hasDist);
-                            })
-                            // Drop the "everything else" bucket entirely to
-                            // avoid re-walking to visited signs / corpses /
-                            // farmed pickups in the fallback (they were the
-                            // exact things that filled visitedTargetGuids).
-                            .Where(t => t.prio < 5 && t.hasDist)
-                            .OrderBy(t => t.prio)
-                            .ThenBy(t => t.d2)
                             .ToList();
-                        if (allKnown.Count > 0)
+
+                        var ranked = PickerSelection.EnumerateFallbackCandidates(
+                            fallbackPool,
+                            self,
+                            chosenCharacterGuid,
+                            selfLandblock,
+                            pickupCountByName,
+                            PickupItemTypeMask).ToList();
+
+                        if (ranked.Count > 0)
                         {
-                            var picked = allKnown[0];
-                            candidate = picked.snap;
+                            candidate = ranked[0].snap;
                             pickerSourceForActivity = "fallback";
-                            pickerReasonForActivity = "no candidates in radius; widened scan across all known objects";
-                            var dist = (float)Math.Sqrt(picked.d2);
-                            var visTag = visitedTargetGuids.Contains(candidate.Guid) ? " [BACKTRACK]" : "";
+                            pickerReasonForActivity = "no candidates in radius; mechanical nearest known object in current landblock";
                             Console.WriteLine(
                                 $"[motion] EXPLORATION FALLBACK — no candidates in {MotionSearchRadius}u; " +
-                                $"picked from {allKnown.Count} known objects: " +
-                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' prio={picked.prio} dist={dist:F2}u{visTag}");
+                                $"mechanical nearest in landblock 0x{selfLandblock:X8}: " +
+                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' dist={ranked[0].distance:F2}u " +
+                                $"(of {ranked.Count} candidates)");
+                        }
+
+                        // Surface candidate set to the LLM (top
+                        // 10, including the picked one). Empty
+                        // list = the LLM block won't render. We
+                        // also surface candidates when the picker
+                        // found one because the LLM may want to
+                        // pick a DIFFERENT one (the picker's pick
+                        // is by mechanical distance only).
+                        if (ranked.Count > 0)
+                        {
+                            const int MaxCandidatesForLlm = 10;
+                            var top = ranked.Take(MaxCandidatesForLlm).Select(t => new ExplorationCandidate
+                            {
+                                Guid     = t.snap.Guid,
+                                Name     = t.snap.Name ?? string.Empty,
+                                Distance = t.distance,
+                                CellId   = t.snap.CellId ?? 0u,
+                                Visited  = visitedTargetGuids.Contains(t.snap.Guid),
+                            }).ToList();
+                            explorationCandidatesForLlm = top;
                         }
                     }
+                    // Publish (or clear) the candidate surface every
+                    // tick — stale lists are worse than empty ones
+                    // because the LLM may emit Explore{target} for
+                    // a candidate that no longer applies.
+                    llmPolicyForPickerSurface?.SetCurrentExplorationCandidates(explorationCandidatesForLlm);
 
                     // Slice V (#86) — publish autonomous picker
                     // activity to the LLM prompt. The picker still

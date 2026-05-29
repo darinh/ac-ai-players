@@ -58,8 +58,10 @@ internal sealed record PickerActivity
     /// Short human-readable reason. Kept generic — must NOT encode
     /// game knowledge ("looting fresh corpse", "talking to greeter").
     /// Allowed values come from a small fixed set in HandshakeDriver
-    /// describing the picker's MECHANICAL reason (nearest unvisited,
-    /// backtrack via door, etc).
+    /// describing the picker's MECHANICAL reason (e.g. "nearest
+    /// mechanically-eligible candidate", "mechanical nearest known
+    /// object in current landblock"). W.2 removed the visited-door
+    /// backtrack preference — that's the LLM's call now.
     /// </summary>
     public required string Reason { get; init; }
 

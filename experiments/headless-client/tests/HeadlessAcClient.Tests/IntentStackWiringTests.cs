@@ -601,4 +601,61 @@ public class IntentStackWiringTests
         Assert.Equal(14, (int)EventKind.PickerActivityStarted);
         Assert.Equal(15, (int)EventKind.PickerActivityCompleted);
     }
+
+    // ---- Slice W.2 — exploration candidates surface (#87) ----
+
+    [Fact]
+    public void BuildUserPrompt_WithExplorationCandidates_RendersCandidateBlock()
+    {
+        var candidates = new List<ExplorationCandidate>
+        {
+            new() { Guid = 0x80001111u, Name = "Holtburg Door", Distance = 42.5f, CellId = 0x12340002u, Visited = false },
+            new() { Guid = 0x80002222u, Name = "Entry Door",    Distance = 88.0f, CellId = 0x12340003u, Visited = true  },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: candidates);
+
+        Assert.Contains("## Exploration candidates", prompt);
+        Assert.Contains("0x80001111", prompt);
+        Assert.Contains("Holtburg Door", prompt);
+        Assert.Contains("dist=42.5u", prompt);
+        Assert.Contains("0x80002222", prompt);
+        Assert.Contains("Entry Door", prompt);
+        Assert.Contains("VISITED", prompt);
+        // RULES bullet teaches the LLM how to read it.
+        Assert.Contains("EXPLORATION CANDIDATES", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WithoutExplorationCandidates_OmitsCandidateBlock()
+    {
+        var p1 = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null);
+        var p2 = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: new List<ExplorationCandidate>());
+
+        // The RULES section references the header inside backticks
+        // ("## Exploration candidates" appears there too), so we
+        // can't check the bare header. The unique signal of a
+        // rendered block is the parenthetical suffix on the
+        // header AND the per-candidate "dist=" lines.
+        Assert.DoesNotContain("(off-screen known objects", p1);
+        Assert.DoesNotContain("(off-screen known objects", p2);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LegacyOverloads_OmitCandidateBlock()
+    {
+        // 3/4/5-arg overloads should never render the new block —
+        // it is opt-in via the 6-arg overload.
+        var p3 = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null);
+        var p4 = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack: null);
+        var p5 = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack: null, pickerActivity: null);
+        Assert.DoesNotContain("(off-screen known objects", p3);
+        Assert.DoesNotContain("(off-screen known objects", p4);
+        Assert.DoesNotContain("(off-screen known objects", p5);
+    }
 }
