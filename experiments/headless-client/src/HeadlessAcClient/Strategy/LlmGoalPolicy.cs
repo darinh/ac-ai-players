@@ -125,6 +125,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             currentGoal = null;
         }
 
+        // 2.6) Action-rejected guard. If the server told us our last
+        // action failed (WeenieErrorWithString surfaced as
+        // ActionRejected) since our last LLM look, drop currentGoal
+        // so the LLM is not anchored on the failed goal in the
+        // prompt's '## Current goal' section. Parallels the
+        // landblock-change guard above. Stops the loop observed in
+        // stalefix-run-01 where the Society Greeter kept rejecting
+        // the Calling Stone with TradeAiDoesntWant and the LLM kept
+        // re-emitting Give(Society Greeter, Calling Stone) forever.
+        if (currentGoal is not null && HasRejectionSince(events, _lastEventConsideredSequence))
+        {
+            Console.WriteLine(
+                $"[strategy] LlmGoalPolicy: ActionRejected since last look → " +
+                $"dropping rejected goal '{currentGoal.Kind} target={currentGoal.Target}' from prompt anchor");
+            currentGoal = null;
+        }
+
         // 3) Decide whether to kick off a new call.
         var hasNewSalient = HasNewSalientEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
@@ -233,7 +250,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.InventoryItemRemoved
                               or EventKind.LandblockChanged
                               or EventKind.NpcDialog
-                              or EventKind.ServerMessage);
+                              or EventKind.ServerMessage
+                              or EventKind.ActionRejected);
     }
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
@@ -244,6 +262,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
             .Any(e => e.Kind == EventKind.LandblockChanged);
+    }
+
+    internal static bool HasRejectionSince(EventStream events, long sequenceFloor)
+    {
+        // Same shape as HasLandblockChangeSince — look for an
+        // ActionRejected (server told us the last action failed)
+        // newer than our last LLM look.
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.ActionRejected);
     }
 
     private bool HasNewSalientEvent(EventStream events)
@@ -258,7 +286,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.GoalFailed
                               or EventKind.GoalExpired
                               or EventKind.NpcDialog
-                              or EventKind.ServerMessage);
+                              or EventKind.ServerMessage
+                              or EventKind.ActionRejected);
     }
 
     private static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
@@ -284,6 +313,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Prefer NAME selectors over wcid (wcids change between sessions).");
         sb.AppendLine("- If an inventory item's short_desc tells you what to do with it, follow it.");
         sb.AppendLine("- 'Give' requires both target (the NPC) and item (the thing being given).");
+        sb.AppendLine("- If a recent event is `ActionRejected`, the server refused that exact attempt. Do NOT immediately retry the same (kind, target, item) combination. Pick a different verb (e.g. Use instead of Give), a different item, or a different NPC. Read the rejection's `label` and `message` for the reason.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -333,6 +363,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (recent.Count == 0) sb.AppendLine("- (none)");
         else foreach (var e in recent) sb.AppendLine($"- {e}");
         sb.AppendLine();
+
+        // Pull out ActionRejected events into a dedicated section so
+        // the LLM cannot miss them in the 15-event tail. These are
+        // strong "don't retry that" signals from the server.
+        var rejections = events.Recent(50)
+            .Where(e => e.Kind == EventKind.ActionRejected)
+            .Take(5)
+            .ToList();
+        if (rejections.Count > 0)
+        {
+            sb.AppendLine("## Recent rejections (server refused these — do NOT retry the same combo)");
+            foreach (var r in rejections) sb.AppendLine($"- {r}");
+            sb.AppendLine();
+        }
 
         if (currentGoal is not null)
         {

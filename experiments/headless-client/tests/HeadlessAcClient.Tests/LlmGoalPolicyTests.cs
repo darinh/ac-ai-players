@@ -356,6 +356,125 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Current goal", requestBodies[1]);
     }
 
+    // ---- ActionRejected regression (stalefix-run-01) ----
+    //
+    // The bot was stuck in a loop emitting Give(Society Greeter,
+    // Calling Stone) → server rejected with WeenieError 0x046A
+    // (TradeAiDoesntWant) → LLM re-emitted the same goal forever
+    // because the rejection never made it to the prompt and the
+    // currentGoal anchor kept biasing the LLM. These tests cover
+    // the wire path (HandshakeDriver appends ActionRejected) at
+    // the policy level: salient detection + currentGoal drop +
+    // dedicated "Recent rejections" section in the prompt.
+
+    [Fact]
+    public void HasRejectionSince_DetectsEventAboveFloor()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "p" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        });
+
+        Assert.True(LlmGoalPolicy.HasRejectionSince(es, floor));
+        // Higher floor (after the rejection) should miss it.
+        Assert.False(LlmGoalPolicy.HasRejectionSince(es, es.NextSequence));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_ActionRejected_DropsCurrentGoalAndAddsRejectionSection()
+    {
+        // Two-call scenario matching the LandblockChange test:
+        //   1) First deliberation -> Give goal accepted, exposed via
+        //      the next ProposeGoal as currentGoal.
+        //   2) Push an ActionRejected event. Call ProposeGoal again
+        //      with the goal in hand. The policy must:
+        //        a) drop currentGoal from the prompt anchor
+        //        b) include a "## Recent rejections" section so the
+        //           LLM cannot miss the rejection signal.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Society Greeter" },
+          "item":   { "name": "Calling Stone" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Single(requestBodies);
+        Assert.DoesNotContain("## Recent rejections", requestBodies[0]);
+
+        // Simulate the server refusing the action.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A,
+            ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        });
+
+        var second = policy.ProposeGoal(world, events, firstGoal);
+        Assert.Equal(2, requestBodies.Count);
+        // a) currentGoal dropped from the prompt anchor
+        Assert.DoesNotContain("## Current goal", requestBodies[1]);
+        // b) dedicated rejection section present + non-empty
+        Assert.Contains("## Recent rejections", requestBodies[1]);
+        Assert.Contains("TradeAiDoesntWant", requestBodies[1]);
+        Assert.Contains("Society Greeter", requestBodies[1]);
+        // c) the prompt rules instruct against retry
+        Assert.Contains("ActionRejected", requestBodies[1]);
+    }
+
+    [Fact]
+    public void StreamEvent_ActionRejected_FormatsCleanly()
+    {
+        var ev = new StreamEvent
+        {
+            Sequence = 7, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        };
+        var s = ev.ToString();
+        Assert.Contains("ActionRejected", s);
+        Assert.Contains("0x046A", s);
+        Assert.Contains("TradeAiDoesntWant", s);
+        Assert.Contains("Society Greeter", s);
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;

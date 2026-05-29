@@ -1010,6 +1010,33 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"({WeenieErrorLabels.Label(atkDone.ErrorCode)})");
                                 }
                             }
+                            // M1.5 — surface WeenieErrorWithString
+                            // to the EventStream as an ActionRejected
+                            // event so the LLM can see the rejection
+                            // and pivot. Otherwise the LLM keeps
+                            // re-emitting the same Give/Use goal
+                            // forever (Society Greeter refusing the
+                            // Calling Stone with TradeAiDoesntWant
+                            // observed in stalefix-run-01). The
+                            // rubber-duck pass said skip the
+                            // deterministic anti-repeat gate for
+                            // now; the prompt + currentGoal drop in
+                            // LlmGoalPolicy is the minimal mechanical
+                            // repair.
+                            if (ge.Payload?.WeenieErrorWithString is { } wewe &&
+                                wewe.ErrorCode != 0)
+                            {
+                                var label = WeenieErrorLabels.Label(wewe.ErrorCode);
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.ActionRejected,
+                                    Text = wewe.Message,
+                                    ErrorCode = wewe.ErrorCode,
+                                    ErrorLabel = label,
+                                });
+                            }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
                             Console.WriteLine(

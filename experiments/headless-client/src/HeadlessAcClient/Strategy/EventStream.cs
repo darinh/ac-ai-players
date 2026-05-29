@@ -43,6 +43,11 @@ internal enum EventKind
     GoalExpired           = 9,
     NpcDialog             = 10,
     HealthChanged         = 11,
+    // Mechanical: the server told us our last action failed.
+    // Carries the raw WeenieError code + label + message string.
+    // Surfaced so the LLM can pivot off a stuck retry loop and so
+    // LlmGoalPolicy can drop the stale currentGoal anchor.
+    ActionRejected        = 12,
 }
 
 /// <summary>
@@ -91,6 +96,16 @@ internal sealed record StreamEvent
     [JsonPropertyName("health_fraction")]
     public float? HealthFraction { get; init; }
 
+    // For ActionRejected: raw WeenieError code (e.g. 0x046A) plus
+    // a human-readable label resolved from WeenieErrorLabels. The
+    // server's accompanying string is in Text. Optional so other
+    // event kinds aren't forced to carry it.
+    [JsonPropertyName("error_code")]
+    public uint? ErrorCode { get; init; }
+
+    [JsonPropertyName("error_label")]
+    public string? ErrorLabel { get; init; }
+
     public override string ToString() => Kind switch
     {
         EventKind.PopupString          => $"#{Sequence} PopupString \"{Truncate(Text, 120)}\"",
@@ -104,6 +119,7 @@ internal sealed record StreamEvent
         EventKind.GoalExpired          => $"#{Sequence} GoalExpired   id={GoalId:N}",
         EventKind.NpcDialog            => $"#{Sequence} NpcDialog from=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.HealthChanged        => $"#{Sequence} Health frac={HealthFraction:F2}",
+        EventKind.ActionRejected       => $"#{Sequence} ActionRejected code=0x{ErrorCode ?? 0:X4} label=\"{ErrorLabel ?? "?"}\" message=\"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 
