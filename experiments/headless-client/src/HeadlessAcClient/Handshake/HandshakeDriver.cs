@@ -60,6 +60,15 @@ internal sealed class HandshakeDriver : IDisposable
     private readonly string _password;
     private readonly string _characterName;
     private readonly Strategy.IndoorNavService _indoorNav;
+    /// <summary>
+    /// Phase 3.1 — per-session fog-of-war: indoor cells the bot has
+    /// directly perceived (its own cell, or any cell containing an
+    /// observed object). The indoor pathfinder uses this set to
+    /// restrict A* expansion so the bot never plans through cells
+    /// it hasn't seen, matching the project rule "static GEOMETRY
+    /// may be pre-loaded but dynamic content stays discovery-only".
+    /// </summary>
+    private readonly HashSet<uint> _seenIndoorCells = new();
 
     private Socket? _socket;
 
@@ -561,6 +570,16 @@ internal sealed class HandshakeDriver : IDisposable
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
+        // Phase 3.1 — indoor-nav path-following state. Once per motion
+        // lock we attempt to plan a collision-aware path through the
+        // static indoor mesh; if that succeeds, the walk-tick steps
+        // through Waypoints rather than aiming straight at the target.
+        // motionIndoorPathAttempted is the "tried once" gate (we don't
+        // re-plan every tick — Phase 3.2 may add replan triggers).
+        IReadOnlyList<Vector3>? motionIndoorPath = null;
+        int                     motionIndoorPathIndex = 0;
+        IReadOnlySet<uint>?     motionIndoorPathCells = null;
+        bool                    motionIndoorPathAttempted = false;
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -1891,6 +1910,13 @@ internal sealed class HandshakeDriver : IDisposable
                     prevSelfBeforeAp = null;
                     prevExpectedStepLen = 0f;
                     consecutiveBlockedTicks = 0;
+                    // Phase 3.1 — wipe the indoor-path cache so the
+                    // next motion lock plans a fresh path from the
+                    // bot's new position.
+                    motionIndoorPath = null;
+                    motionIndoorPathIndex = 0;
+                    motionIndoorPathCells = null;
+                    motionIndoorPathAttempted = false;
                     pendingGiveItemGuid = null;
                     lockedGoalKind = null;
 
@@ -3488,14 +3514,49 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.Self is WorldObjectSnapshot walkSelf &&
                     walkSelf.CellId is uint walkCell)
                 {
+                    // Phase 3.1 — refresh fog-of-war. Add every indoor
+                    // cell containing an observed object (including
+                    // our own) to the seen-cell set. We pay this
+                    // small O(N) cost per walk-tick (~30 objects in
+                    // the academy) rather than per-packet so it
+                    // doesn't dominate the receive loop.
+                    if (_indoorNav.IsEnabled)
+                    {
+                        foreach (var snap in worldState.Objects.Values)
+                        {
+                            if (snap.CellId is uint cid &&
+                                Strategy.IndoorNavService.IsIndoorCell(cid))
+                                _seenIndoorCells.Add(cid);
+                        }
+                    }
+
                     if (walkCell != motionLockedCellId)
                     {
-                        // Cell crossings out of scope for Phase 6b
-                        // (target apple is in same cell as bot).
-                        motionDone = true;
-                        Console.WriteLine($"[motion] walk-tick: self cell changed (was 0x{motionLockedCellId:X8} now 0x{walkCell:X8}) — stopping (cell crossings are Phase 6c work)");
+                        // Phase 3.1 — if we're following a multi-cell
+                        // indoor path AND the new cell is one the
+                        // planner expected to traverse, slide the
+                        // motion-lock forward instead of stopping.
+                        // The bot is exactly where we wanted it; the
+                        // remaining waypoints + the final approach
+                        // logic stay valid.
+                        if (motionIndoorPathCells is not null &&
+                            motionIndoorPathCells.Contains(walkCell))
+                        {
+                            Console.WriteLine(
+                                $"[motion] walk-tick: indoor-path cell crossing " +
+                                $"0x{motionLockedCellId:X8} -> 0x{walkCell:X8} (expected by planner; continuing)");
+                            motionLockedCellId = walkCell;
+                        }
+                        else
+                        {
+                            // Cell crossings out of scope for Phase 6b
+                            // (target apple is in same cell as bot).
+                            motionDone = true;
+                            Console.WriteLine($"[motion] walk-tick: self cell changed (was 0x{motionLockedCellId:X8} now 0x{walkCell:X8}) — stopping (cell crossings are Phase 6c work)");
+                        }
                     }
-                    else
+
+                    if (!motionDone && walkCell == motionLockedCellId)
                     {
                         // Slice S — blocked-motion detection. Before
                         // we compute and send another AP, check what
@@ -3572,24 +3633,129 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                         else if (!motionDone && liveTarget is not null)
                         {
+                            // Phase 3.1 — plan an indoor path once per
+                            // motion lock. If the planner returns a
+                            // collision-aware sequence of waypoints,
+                            // the step computation below aims at the
+                            // current waypoint instead of the target
+                            // itself; this is what lets the bot walk
+                            // AROUND furniture/walls and use doorways
+                            // instead of clipping through geometry.
+                            if (_indoorNav.IsEnabled &&
+                                !motionIndoorPathAttempted &&
+                                liveTarget.CellId is uint liveTargetCellId)
+                            {
+                                motionIndoorPathAttempted = true;
+                                var pathResult = _indoorNav.TryFindPath(
+                                    walkCell, walkSelf.Position,
+                                    liveTargetCellId, liveTarget.Position,
+                                    _seenIndoorCells);
+                                Console.WriteLine(
+                                    $"[motion] indoor-nav: {pathResult.Status} " +
+                                    $"waypoints={pathResult.Waypoints.Count} " +
+                                    $"cells={pathResult.PathCells.Count} " +
+                                    $"seen-cells={_seenIndoorCells.Count} " +
+                                    $"from=0x{walkCell:X8}@({walkSelf.Position.X:F1},{walkSelf.Position.Y:F1}) " +
+                                    $"to=0x{liveTargetCellId:X8}@({liveTarget.Position.X:F1},{liveTarget.Position.Y:F1}) " +
+                                    $"reason={pathResult.Reason ?? "(none)"}");
+                                if (pathResult.Status == Strategy.IndoorPathStatus.Success)
+                                {
+                                    motionIndoorPath = pathResult.Waypoints;
+                                    motionIndoorPathIndex = 0;
+                                    motionIndoorPathCells = pathResult.PathCells;
+                                }
+                                else if (pathResult.Status == Strategy.IndoorPathStatus.NoPath)
+                                {
+                                    // Per Phase 3 rubber-duck: do NOT
+                                    // silently straight-line on a real
+                                    // pathfinder failure — that's the
+                                    // wall-walking bug we're here to
+                                    // fix. Stop motion and emit an
+                                    // ActionRejected so dedup (LLM +
+                                    // NoQuestKnowledgePolicy) avoids
+                                    // retargeting the same unreachable
+                                    // guid.
+                                    motionDone = true;
+                                    Console.WriteLine(
+                                        $"[motion] indoor-nav: NO INDOOR PATH to 0x{motionTarget.Guid:X8} '{motionTarget.Name}' — stopping motion");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"NoIndoorPath: '{motionTarget.Name}' — indoor pathfinder found no walkable route ({pathResult.Reason ?? "unknown"})",
+                                        ItemGuid = motionTarget.Guid,
+                                        Name = motionTarget.Name,
+                                        ErrorCode = 0xFFFC,
+                                        ErrorLabel = "NoIndoorPath",
+                                    });
+                                }
+                                // Other statuses (Disabled, NotIndoor,
+                                // CrossLandblock, NoGraph) fall through
+                                // to straight-line motion below — those
+                                // are legitimate "indoor-nav doesn't
+                                // apply here" cases.
+                            }
+
+                            // Decide whether to aim at an intermediate
+                            // waypoint or the actual target. The path's
+                            // last waypoint is a snap-to-graph
+                            // approximation of the target, so once we
+                            // arrive at it, switch to aiming at the
+                            // real target position for the final
+                            // close-in (the existing stop-radius /
+                            // asymptote rules then govern arrival).
+                            Vector3 stepTargetPos = liveTarget.Position;
+                            bool aimingAtWaypoint = false;
+                            if (!motionDone &&
+                                motionIndoorPath is not null &&
+                                motionIndoorPathIndex < motionIndoorPath.Count - 1)
+                            {
+                                stepTargetPos = motionIndoorPath[motionIndoorPathIndex];
+                                aimingAtWaypoint = true;
+                            }
+
                             // Step in XY only; preserve self Z so we don't
                             // get flagged by Player_Tick's z-jump hacking
                             // check, and don't try to chase the apple's
                             // floor Z (~0.9) when we're at 0.0.
-                            var dx = liveTarget.Position.X - walkSelf.Position.X;
-                            var dy = liveTarget.Position.Y - walkSelf.Position.Y;
+                            var dx = stepTargetPos.X - walkSelf.Position.X;
+                            var dy = stepTargetPos.Y - walkSelf.Position.Y;
                             var lenXY = MathF.Sqrt(dx * dx + dy * dy);
-                            if (lenXY <= MotionStopRadius)
+
+                            // Phase 3.1 — intermediate-waypoint advance.
+                            // When chasing a waypoint (not the final
+                            // target), use a looser 1.5u XY threshold;
+                            // we don't need to be on top of it, just
+                            // close enough that the next waypoint is a
+                            // reasonable continuation. The terminal
+                            // stop radius (1.0u) only applies to the
+                            // real target.
+                            if (!motionDone && aimingAtWaypoint && lenXY <= 1.5f)
+                            {
+                                Console.WriteLine(
+                                    $"[motion] walk-tick: indoor-path waypoint {motionIndoorPathIndex + 1}/{motionIndoorPath!.Count} reached (distXY={lenXY:F2}u <= 1.50u) — advancing");
+                                motionIndoorPathIndex++;
+                                // Fall through to next walk-tick rather
+                                // than re-evaluate now; keeps the
+                                // existing once-per-tick pacing.
+                            }
+                            else if (motionDone)
+                            {
+                                // NoIndoorPath case already handled
+                                // above; skip the rest.
+                            }
+                            else if (!aimingAtWaypoint && lenXY <= MotionStopRadius)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {MotionStopRadius:F2}u) — stopping");
                             }
-                            else if (lenXY < 1e-4f)
+                            else if (!aimingAtWaypoint && lenXY < 1e-4f)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
                             }
-                            else if (lenXY - MotionStopRadius < 0.1f)
+                            else if (!aimingAtWaypoint && lenXY - MotionStopRadius < 0.1f)
                             {
                                 // Phase 6n — asymptote failsafe: when
                                 // the remaining gap is < 0.1u, server
@@ -3606,7 +3772,15 @@ internal sealed class HandshakeDriver : IDisposable
                             else
                             {
                                 var dt = WalkTickIntervalMs / 1000f;
-                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, lenXY - MotionStopRadius);
+                                // When aiming at an intermediate
+                                // waypoint, we don't reserve the
+                                // MotionStopRadius — the waypoint
+                                // itself is a valid floor sample to
+                                // stand on.
+                                var maxStep = aimingAtWaypoint
+                                    ? lenXY
+                                    : lenXY - MotionStopRadius;
+                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, maxStep);
                                 var stepX = dx / lenXY * stepLen;
                                 var stepY = dy / lenXY * stepLen;
                                 var newPos = new Vector3(

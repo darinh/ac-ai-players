@@ -113,14 +113,22 @@ internal enum IndoorPathStatus
 /// Waypoints are XYZ positions to step through in order; the last
 /// waypoint is the snapped destination (may differ from the caller-
 /// requested toXYZ if the request wasn't on the walkable mesh).
+/// <para>
+/// <see cref="PathCells"/> is the de-duplicated set of cells the
+/// path is expected to traverse. The caller uses this to suppress
+/// the walk-tick's default "stop on cell crossing" behaviour while
+/// we're following a known-good multi-cell path.
+/// </para>
 /// </summary>
 internal readonly record struct IndoorPathResult(
     IndoorPathStatus Status,
     IReadOnlyList<Vector3> Waypoints,
+    IReadOnlySet<uint> PathCells,
     string? Reason)
 {
     public static IndoorPathResult Of(IndoorPathStatus status, string? reason = null)
-        => new(status, Array.Empty<Vector3>(), reason);
+        => new(status, Array.Empty<Vector3>(),
+               (IReadOnlySet<uint>)new HashSet<uint>(), reason);
 }
 
 /// <summary>
@@ -322,7 +330,11 @@ internal sealed class IndoorNavService
             return Record(IndoorPathResult.Of(
                 IndoorPathStatus.NoPath, result.FailureReason));
 
+        var pathCells = new HashSet<uint>();
+        foreach (var node in result.NodePath)
+            pathCells.Add(node.CellId);
+
         return Record(new IndoorPathResult(
-            IndoorPathStatus.Success, result.Points, null));
+            IndoorPathStatus.Success, result.Points, pathCells, null));
     }
 }
