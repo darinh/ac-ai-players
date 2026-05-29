@@ -54,6 +54,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     public TimeSpan StuckTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// Hard deadline on a single LLM HTTP call. Belt-and-suspenders
+    /// for the HttpClient.Timeout inside LlmGoalClient: in the
+    /// flexguid01 run-01 spike, kickoff #20 never returned even
+    /// though the HttpClient timeout is 30s — the bot's `_inflight`
+    /// stayed non-null forever and no further LLM calls fired.
+    /// Cancellation here guarantees RunAsync resolves so the policy
+    /// can clear `_inflight` and resume deliberation.
+    /// </summary>
+    public TimeSpan LlmCallTimeout { get; init; } = TimeSpan.FromSeconds(60);
+
     /// <summary>System prompt sent on every call. Stable so the LLM caches it.</summary>
     public string SystemPrompt { get; init; } = DefaultSystemPrompt;
 
@@ -275,9 +286,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private async Task<(LlmResult, Guid, string, string, long)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart)
     {
         LlmResult result;
+        using var cts = new CancellationTokenSource(LlmCallTimeout);
         try
         {
-            result = await _client.CompleteAsync(SystemPrompt, userPrompt, CancellationToken.None).ConfigureAwait(false);
+            result = await _client.CompleteAsync(SystemPrompt, userPrompt, cts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cts.IsCancellationRequested)
+        {
+            // Hard-deadline guard. Without this, a hung HttpClient
+            // call leaves `_inflight` non-null forever and the bot
+            // never deliberates again (seen in flexguid01 run-01).
+            result = new LlmResult(false, "", "",
+                (int)LlmCallTimeout.TotalMilliseconds,
+                $"timeout after {LlmCallTimeout.TotalSeconds:F0}s");
         }
         catch (Exception ex)
         {
