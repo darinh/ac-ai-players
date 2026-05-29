@@ -1517,6 +1517,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
                             }
+                            else if (lenXY - MotionStopRadius < 0.1f)
+                            {
+                                // Phase 6n — asymptote failsafe: when
+                                // the remaining gap is < 0.1u, server
+                                // physics clamps our step so the bot
+                                // sits forever sending 0-step APs. Just
+                                // call it good and let the USE/PUT fire.
+                                // Server's actual UseRadius (0.6u) plus
+                                // the target's physics radius is the
+                                // real arrival bound; 1.1u is well
+                                // inside that for any NPC/door.
+                                motionDone = true;
+                                Console.WriteLine($"[motion] walk-tick: asymptote reached (distXY={lenXY:F3}u, gap={lenXY - MotionStopRadius:F3}u) — stopping");
+                            }
                             else
                             {
                                 var dt = WalkTickIntervalMs / 1000f;
