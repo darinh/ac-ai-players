@@ -316,15 +316,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         var (result, decisionId, userPrompt, projJson, eventSeqAtCallStart) = finishedTask.GetAwaiter().GetResult();
 
-        // M1.6 — stale-result detection. If a salient event arrived
-        // after we kicked off the LLM call, the world has moved past
-        // the prompt we sent. Acting on the result would lock the bot
-        // into stale plans (e.g. "give exit token to Jonathan" after
-        // a teleport already left the academy). Discard the result
-        // and force a fresh deliberation on the next tick. The
-        // training record still captures what the LLM produced so we
-        // can analyze stale-rate offline.
-        var staleSinceCall = HasSalientSinceSequence(events, eventSeqAtCallStart);
+        // Stale-result detection (narrow). If a plan-INVALIDATING
+        // event arrived after we kicked off the LLM call, the world
+        // has moved past the prompt we sent and the response would
+        // lock the bot into a stale plan. Discard, reset throttling,
+        // and force fresh deliberation next tick.
+        //
+        // CRITICAL: the trigger set (HasNewSalientEvent) is wide —
+        // chatty events like ServerMessage and NpcDialog SHOULD
+        // invite the LLM to think again. The discard set is narrow
+        // — only events that genuinely obsolete the in-flight
+        // response. Conflating the two (prior to this fix) caused
+        // 2/8 LLM calls in spike `bot_llama01` to be discarded
+        // mid-flight by the ServerMessage / NpcDialog firehose,
+        // making active combat impossible (every Attack goal
+        // would be cancelled by its own damage-number stream).
+        var staleSinceCall = HasPlanInvalidatingSince(events, eventSeqAtCallStart);
 
         _training?.RecordDecision(new TrainingDecision
         {
@@ -346,7 +353,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             Console.WriteLine(
                 $"[llm-call] stale id={decisionId} latency={result.LatencyMs}ms " +
-                $"(salient event arrived during call; discarding response)");
+                $"(plan-invalidating event arrived during call; discarding response)");
             // Reset _lastCalledAtUtc to bypass MinCallInterval on the
             // next ProposeGoal — we want to re-call ASAP with fresh
             // observations.
@@ -551,19 +558,63 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
-    private static bool HasSalientSinceSequence(EventStream events, long sequenceFloor)
+    /// <summary>
+    /// Returns true if any event newer than <paramref name="sequenceFloor"/>
+    /// is plan-invalidating: it makes the in-flight LLM response
+    /// (which was generated against an older world snapshot) unsafe
+    /// to act on. INTENTIONALLY narrower than the "wake the LLM"
+    /// trigger set — chatty events (ServerMessage, NpcDialog,
+    /// PopupString, BookText) and option-adding events
+    /// (InventoryItemAdded) should NOT cancel an in-flight call.
+    /// </summary>
+    /// <remarks>
+    /// Why each kind is included:
+    /// <list type="bullet">
+    /// <item>LandblockChanged — teleport / zone crossing makes all
+    /// positional context in the prompt wrong.</item>
+    /// <item>InventoryItemRemoved — an item the LLM may have named
+    /// as a goal target is gone.</item>
+    /// <item>ActionRejected — server denied something; we MUST
+    /// re-deliberate before issuing another action.</item>
+    /// <item>GoalCompleted / GoalFailed / GoalExpired — the active
+    /// goal context the LLM reasoned over no longer applies;
+    /// accepting the response could resurrect the just-finished
+    /// goal or retry a goal Tactics already proved impossible.</item>
+    /// </list>
+    /// Why each kind is excluded (deliberately):
+    /// <list type="bullet">
+    /// <item>ServerMessage / NpcDialog — chatty firehose during
+    /// combat or conversation; do not invalidate a strategic plan.</item>
+    /// <item>PopupString / BookText — informational; enrich
+    /// knowledge but don't obsolete the in-flight goal.</item>
+    /// <item>InventoryItemAdded — a new option appeared but the
+    /// in-flight plan is still valid; the next deliberation will
+    /// see the new item.</item>
+    /// <item>PickerActivityStarted / PickerArrivedNoAction —
+    /// picker-steering events; they wake the LLM but the in-flight
+    /// LLM call already reflects the most recent prompt-time
+    /// picker state.</item>
+    /// </list>
+    /// </remarks>
+    internal static bool HasPlanInvalidatingSince(EventStream events, long sequenceFloor)
     {
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
-            .Any(e => e.Kind is EventKind.PopupString
-                              or EventKind.InventoryItemAdded
-                              or EventKind.InventoryItemRemoved
-                              or EventKind.LandblockChanged
-                              or EventKind.NpcDialog
-                              or EventKind.ServerMessage
-                              or EventKind.ActionRejected
-                              or EventKind.BookText);
+            .Any(e => IsPlanInvalidatingKind(e.Kind));
     }
+
+    /// <summary>
+    /// The plan-invalidating event-kind classifier used by
+    /// <see cref="HasPlanInvalidatingSince"/>. See that method's
+    /// remarks for the include / exclude rationale.
+    /// </summary>
+    internal static bool IsPlanInvalidatingKind(EventKind kind) =>
+        kind is EventKind.LandblockChanged
+             or EventKind.InventoryItemRemoved
+             or EventKind.ActionRejected
+             or EventKind.GoalCompleted
+             or EventKind.GoalFailed
+             or EventKind.GoalExpired;
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
     {

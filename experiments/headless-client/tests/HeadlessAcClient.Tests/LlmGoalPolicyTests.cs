@@ -531,6 +531,132 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.HasRejectionSince(es, es.NextSequence));
     }
 
+    // ---- Stale-cascade narrowing (llama01 spike) ----
+    //
+    // Pre-fix, the predicate that decided "is this in-flight LLM
+    // response stale?" used the SAME wide kind-set as "should the
+    // LLM be woken?". The llama01 spike captured 2 of 8 LLM calls
+    // discarded mid-flight by ServerMessage / NpcDialog firehose,
+    // and the issue compounded badly during active combat (every
+    // Attack goal got cancelled by its own damage-number stream).
+    //
+    // Fix: split the discard predicate to a narrow plan-invalidating
+    // set — only events that genuinely obsolete the in-flight
+    // response. Trigger set stays wide.
+
+    [Fact]
+    public void IsPlanInvalidatingKind_TrueForInvalidatingKinds()
+    {
+        var invalidating = new[]
+        {
+            EventKind.LandblockChanged,
+            EventKind.InventoryItemRemoved,
+            EventKind.ActionRejected,
+            EventKind.GoalCompleted,
+            EventKind.GoalFailed,
+            EventKind.GoalExpired,
+        };
+        foreach (var kind in invalidating)
+        {
+            Assert.True(LlmGoalPolicy.IsPlanInvalidatingKind(kind),
+                $"{kind} should be classified as plan-invalidating.");
+        }
+    }
+
+    [Fact]
+    public void IsPlanInvalidatingKind_FalseForNonInvalidatingKinds()
+    {
+        var nonInvalidating = new[]
+        {
+            EventKind.PopupString,
+            EventKind.ServerMessage,
+            EventKind.NpcDialog,
+            EventKind.BookText,
+            EventKind.InventoryItemAdded,
+            EventKind.PickerActivityStarted,
+            EventKind.PickerActivityCompleted,
+            EventKind.PickerArrivedNoAction,
+            EventKind.GoalEmitted,
+            EventKind.HealthChanged,
+        };
+        foreach (var kind in nonInvalidating)
+        {
+            Assert.False(LlmGoalPolicy.IsPlanInvalidatingKind(kind),
+                $"{kind} should NOT be classified as plan-invalidating " +
+                "(it may wake the LLM but does not obsolete an in-flight response).");
+        }
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_IgnoresChattyFirehose()
+    {
+        // Simulate the llama01 spike's failure mode: in-flight LLM
+        // call kicked off at 'floor', followed by a torrent of
+        // chatty events. None should mark the in-flight response
+        // as stale.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, GoalId = Guid.NewGuid() });
+        var floor = es.NextSequence;
+
+        for (int i = 0; i < 20; i++)
+        {
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = $"You hit Sparring Golem for {i} damage." });
+        }
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Bystander", Text = "Look at the fight!" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "Area entered." });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InventoryItemAdded, Wcid = 1234, Name = "New Loot" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.BookText, Name = "Magic Tips", Text = "..." });
+
+        Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor));
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_DetectsInvalidatingKindAboveFloor()
+    {
+        // Verify the predicate flips when an invalidating event of
+        // each in-set kind appears above the floor, and resets when
+        // the floor is bumped past the invalidating event.
+        var invalidating = new[]
+        {
+            EventKind.LandblockChanged,
+            EventKind.InventoryItemRemoved,
+            EventKind.ActionRejected,
+            EventKind.GoalCompleted,
+            EventKind.GoalFailed,
+            EventKind.GoalExpired,
+        };
+        foreach (var kind in invalidating)
+        {
+            var es = new EventStream();
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "noise" });
+            var floor = es.NextSequence;
+            // Chatty event after floor should not yet flip the predicate.
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "more noise" });
+            Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor),
+                $"Plain ServerMessage above floor should not invalidate when probing {kind}.");
+
+            es.Append(new StreamEvent
+            {
+                Sequence = -1,
+                Utc = DateTimeOffset.UtcNow,
+                Kind = kind,
+                LandblockFrom = 0x8602,
+                LandblockTo = 0xA9B4,
+                Wcid = 9999,
+                Name = "Letter From Home",
+                ItemGuid = 0x8000047E,
+                ErrorCode = 0x046A,
+                ErrorLabel = "TradeAiDoesntWant",
+                Text = "rejection text",
+                GoalId = Guid.NewGuid(),
+            });
+            Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor),
+                $"{kind} above floor should be detected.");
+            Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, es.NextSequence),
+                $"Floor above the invalidating {kind} should miss it.");
+        }
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_ActionRejected_DropsCurrentGoalAndAddsRejectionSection()
     {
