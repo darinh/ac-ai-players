@@ -532,17 +532,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     internal static bool HasPickerActivityStartedSince(EventStream events, long sequenceFloor)
     {
-        // Slice W.1 (#86) — the picker switched autonomous activity
-        // since our last look. We treat this as a high-urgency
-        // signal that bypasses the normal MinCallInterval coalesce
-        // so the LLM can either confirm or override the picker's
-        // choice before the bot walks the entire path to the new
-        // target. Without this gate the picker can pick → walk →
-        // USE within one coalesce window and the LLM never gets
-        // a chance to steer.
+        // Slice W.1 (#86) / Slice W.3 (#88) — picker did something
+        // since our last look that the LLM needs to weigh in on
+        // BEFORE the next dispatch. Two cases:
+        //
+        // - PickerActivityStarted: picker switched its auto-driven
+        //   target. The bot will walk toward it; the LLM must get
+        //   a chance to confirm/override before arrival ends in a
+        //   verb dispatch.
+        // - PickerArrivedNoAction: picker walked to its target
+        //   without an LLM verb goal. The motor parked the bot
+        //   and sent NO opcode. The LLM has a narrow ~2s window
+        //   to name a verb before the picker moves on to the
+        //   next candidate. This MUST punch through coalesce.
+        //
+        // Both bypass the normal MinCallInterval coalesce gate.
+        // Function name kept for binary-compat with W.1; semantics
+        // are now "any picker-steering event since the floor".
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
-            .Any(e => e.Kind == EventKind.PickerActivityStarted);
+            .Any(e => e.Kind is EventKind.PickerActivityStarted
+                              or EventKind.PickerArrivedNoAction);
     }
 
     private bool HasNewSalientEvent(EventStream events)
@@ -566,7 +576,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               // control if the picker's choice is
                               // off-plan. (Completed is NOT salient
                               // — only Started churns deliberation.)
-                              or EventKind.PickerActivityStarted);
+                              or EventKind.PickerActivityStarted
+                              // Slice W.3 (#88): the picker walked
+                              // to its auto-locked target but no
+                              // LLM verb goal was in flight, so no
+                              // opcode was sent. Wake the LLM so
+                              // it can name a verb (Use/Talk/Pickup/
+                              // Attack) before the picker moves on
+                              // to the next target.
+                              or EventKind.PickerArrivedNoAction);
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
@@ -692,7 +710,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("- STRATEGIC STACK: `## Intent stack` shows the bot's current strategic plan. The TOP intent is the active sub-goal; ancestors are paused waiting for it. Per-cycle goals should advance the TOP. PUSH a new intent when you discover a sub-task. POP_TOP when the sub-task is done and no completion predicate caught it (rare — predicates auto-pop). REPLACE_TOP when the intent was right-track-wrong-target. MARK_TOP_BLOCKED when you cannot make progress and want to record why (the next call you can pop or replace). Always echo `stack_revision` to detect races.");
             sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate that matches your termination criterion. Prefer server-authoritative ones (num_deaths, coin_value) when applicable — they survive crashes and are exact. Use *_total_* for absolute thresholds (\"reach level 5\"), *_since_push_* for deltas (\"kill 3 more\"). If none fits, use {\"$type\":\"never\"} + `predicate_request` (escape hatch).");
         }
-        sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the bot's schema-only picker is auto-driving an action toward the listed target because YOU had no per-cycle goal at that tick. This is a FALLBACK — the picker is purely mechanical (nearest mechanically-eligible candidate by straight-line distance, with no game-knowledge preferences for type, content, doors, corpses, NPCs, or anything else). To take strategic control: emit a per-cycle goal targeting whatever you actually want. NEVER assume the picker knows what it's doing strategically; it only knows what's nearby.");
+        sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the bot's schema-only picker is auto-driving WHERE TO WALK because YOU had no per-cycle goal at that tick. The picker is purely mechanical (nearest mechanically-eligible candidate by straight-line distance) and OWNS NO VERBS. On arrival the motor sends NOTHING unless you have emitted a per-cycle Goal whose Kind names a verb (`Use`, `Talk`, `Pickup`, `Attack`, `Give`). If `picker has ARRIVED at target X` appears, the bot is parked next to X awaiting a verb from you. Emit `Use{target: name=\"X\"}`, `Talk{target: name=\"X\"}`, `Pickup{target: name=\"X\"}`, or `Attack{target: name=\"X\"}` against this target — or `Explore{target: name=\"<other>\"}` to redirect to a different visible candidate. Doing nothing parks the bot for ~2s then it picks the next-nearest candidate.");
+        sb.AppendLine("- TRANSITIONS — doors and portals: objects with the visible-nearby tag `door` or `portal` are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). A `door` typically toggles open/closed; a `portal` typically teleports you elsewhere — the exact behaviour comes from the server (read `short_desc` and the server-hints section for any hint text on the object). When the picker has arrived at a `door` or `portal` and you have no better verb to emit, `Use{}` it: that is how the bot transitions between rooms, buildings, and landblocks. If a door rejects `Use` with a Locked-style ActionRejected and you have any item in inventory whose `short_desc` calls itself a key (or whose name contains 'key'), retry as `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
         sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback picker is choosing the nearest off-screen object addressable from your current landblock. The TOP entry is the one the fallback will walk to. To pick a DIFFERENT candidate (e.g. backtrack through a visited door to re-stimulate a prior room, or skip a distant pickup in favour of a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` or `Explore{target: {name: \"...\"}}` with the candidate you want. The candidate guid is the most reliable selector (names duplicate). Visited candidates are marked — they're still legitimate Explore targets when you want to backtrack.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
@@ -718,17 +737,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // Slice V (#86): parallel surface to the strategic
             // Intent stack — exposes what the schema-only picker is
             // auto-driving so the LLM can see and steer.
+            // Slice W.3 (#88): when the picker has WALKED to its
+            // target and no verb goal was in flight, Arrived=true
+            // and the prompt switches to an "AWAITING VERB" form
+            // making explicit that the bot is parked and the LLM
+            // must name a verb (Use/Talk/Pickup/Attack/Explore) to
+            // either act or release the parking.
             sb.AppendLine("## Autonomous picker activity");
-            sb.AppendLine(
-                $"- picker is investigating target 0x{pickerActivity.TargetGuid:X8} " +
-                $"(\"{pickerActivity.TargetName}\")");
+            if (pickerActivity.Arrived)
+            {
+                sb.AppendLine(
+                    $"- picker has ARRIVED at target 0x{pickerActivity.TargetGuid:X8} " +
+                    $"(\"{pickerActivity.TargetName}\") and is awaiting a verb");
+            }
+            else
+            {
+                sb.AppendLine(
+                    $"- picker is investigating target 0x{pickerActivity.TargetGuid:X8} " +
+                    $"(\"{pickerActivity.TargetName}\")");
+            }
             sb.AppendLine($"- source: {pickerActivity.Source}");
             sb.AppendLine($"- reason: {pickerActivity.Reason}");
             var ageS = Math.Max(0, (int)Math.Round((DateTimeOffset.UtcNow - pickerActivity.StartedAtUtc).TotalSeconds));
             sb.AppendLine($"- started: {ageS}s ago");
-            sb.AppendLine(
-                "- NOTE: this is the bot's autonomous fallback because you had no per-cycle goal " +
-                "at that moment. Emit a goal to take control; the picker will defer.");
+            if (pickerActivity.Arrived)
+            {
+                sb.AppendLine(
+                    "- NOTE: the motor has NOT sent any opcode on arrival. The picker " +
+                    "owns WHERE TO STAND; the LLM owns WHAT TO DO. Emit `Use{target: ...}`, " +
+                    "`Talk{target: ...}`, `Pickup{target: ...}`, or `Attack{target: ...}` " +
+                    "against this target (or any visible alternative) to act. If you do " +
+                    "nothing, the picker will park here for ~2 seconds and then move on " +
+                    "to the next mechanically-nearest candidate.");
+            }
+            else
+            {
+                sb.AppendLine(
+                    "- NOTE: this is the bot's autonomous fallback because you had no per-cycle goal " +
+                    "at that moment. Emit a goal to take control; the picker will defer.");
+            }
             sb.AppendLine();
         }
 

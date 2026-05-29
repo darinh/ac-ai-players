@@ -3076,25 +3076,81 @@ internal sealed class HandshakeDriver : IDisposable
                         // Fall through to skip the rest of the block.
                         goto _slice_l_explore_done;
                     }
+
+                    // Slice W.3 (ac-ai-players#88) — action dispatch
+                    // is now GOAL-GATED. The picker is responsible
+                    // for WHERE to walk; the LLM (via a typed Goal
+                    // with a verb Kind) is responsible for WHAT to
+                    // do on arrival. Wire-type bits no longer choose
+                    // verbs. The verb table:
+                    //   lockedGoalKind == Attack  -> ATTACK bundle
+                    //   lockedGoalKind == Give    -> GIVE
+                    //                                (pendingGiveItemGuid
+                    //                                 set by Give-goal
+                    //                                 pre-emptor)
+                    //   lockedGoalKind == Pickup  -> PUTITEMINCONTAINER
+                    //   lockedGoalKind == Use     -> USE
+                    //   lockedGoalKind == Talk    -> USE (NPC talk
+                    //                                opens dialog by
+                    //                                Use on the NPC)
+                    //   lockedGoalKind == null    -> arrival-no-op
+                    //   (picker auto-lock without
+                    //   an LLM goal — emit
+                    //   PickerArrivedNoAction)
+                    // The arrival-no-op branch keeps the bot parked
+                    // for the post-action cooldown (~2s) while the
+                    // salient event wakes the LLM. If the LLM emits
+                    // a verb goal naming the same target before the
+                    // cooldown elapses, the next motion-lock cycle
+                    // walks distance ~0u and dispatches the verb.
+                    if (lockedGoalKind is null)
+                    {
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        var arrivedActivity = pickerActivityCurrent;
+                        var arrivedSource   = arrivedActivity?.Source ?? "unknown";
+                        var arrivedReason   = arrivedActivity?.Reason ?? "picker auto-lock without LLM verb goal";
+                        Console.WriteLine(
+                            $"[strategy] PICKER ARRIVED no-action: " +
+                            $"target='{motionTarget.Name}' guid=0x{motionTarget.Guid:X8} " +
+                            $"source={arrivedSource} " +
+                            $"(no opcode sent; awaiting LLM verb goal)");
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.PickerArrivedNoAction,
+                            ItemGuid = motionTarget.Guid,
+                            Name     = motionTarget.Name,
+                            Text     = $"{arrivedSource}: {arrivedReason}",
+                        });
+                        if (arrivedActivity is not null &&
+                            arrivedActivity.TargetGuid == motionTarget.Guid)
+                        {
+                            // Flag the live activity surface so the
+                            // LLM prompt's "## Autonomous picker
+                            // activity" block renders ARRIVED state
+                            // directly (not just inferred from the
+                            // event ring). Cleared automatically on
+                            // the next picker selection cycle when
+                            // a new PickerActivity replaces this one.
+                            pickerActivityCurrent = arrivedActivity with { Arrived = true };
+                            llmPolicyForPickerSurface?.SetCurrentPickerActivity(pickerActivityCurrent);
+                        }
+                        goto _slice_l_explore_done;
+                    }
+
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
-                    // Slice U — Writable items that are NOT Stuck (books
-                    // on a table, scrolls on the floor) take the
-                    // PUTITEMINCONTAINER path; signs (Writable + Stuck)
-                    // and openable chests/bookshelves stay on the USE
-                    // path below. Wire-protocol bits only.
-                    var dispatchDescFlags = motionTarget.ObjectDescriptionFlags ?? 0u;
-                    var dispatchIsStuck   = (dispatchDescFlags & (uint)ObjectDescriptionFlag.Stuck) != 0;
-                    var dispatchIsBookPickup = (itemType & 0x00002000u) != 0 && !dispatchIsStuck;
-                    var isPickup = ((itemType & PickupItemTypeMask) != 0) || dispatchIsBookPickup;
-                    // M1.6 redo — combat dispatch keys on the goal
-                    // kind locked at motion-lock time (NOT on the
-                    // live tactics.CurrentGoal, which may have
-                    // cleared mid-motion if the LLM re-deliberated).
-                    // wcid literals in source are forbidden by the
-                    // anti-hardcoding rule.
+                    // Slice W.3 — wire-type bits no longer choose the
+                    // verb. itemType is still computed because the
+                    // observe-log line below references it. isPickup
+                    // is now derived from the LOCKED GOAL KIND, not
+                    // from the item's wire type — verb ownership
+                    // moved to the LLM.
                     var isHostile = lockedGoalKind == GoalKind.Attack;
+                    var isPickup  = lockedGoalKind == GoalKind.Pickup;
                     var packetSeq = nextOutboundPacketSequence++;
 
                     int payloadLen;
@@ -3187,7 +3243,7 @@ internal sealed class HandshakeDriver : IDisposable
                             placement: 0);
                         fragSeq    = nextOutboundFragmentSequence++;
                     }
-                    else
+                    else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
                     {
                         actionName = "USE";
                         actionBuf  = new byte[GameActionUseMessage.PackedSize];
@@ -3225,6 +3281,21 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"cell=0x{useCorpseSelf.CellId ?? 0:X8}" +
                                 (useIsCorpse ? $" stats.corpses_opened={botStats.CorpsesOpened}" : ""));
                         }
+                    }
+                    else
+                    {
+                        // Slice W.3 defensive fallthrough — should be
+                        // unreachable. Explore + null are handled by
+                        // the short-circuits above; Attack/Give/Pickup
+                        // are explicit branches above; Use/Talk match
+                        // this if-chain. If a future GoalKind is added
+                        // without a dispatch branch, log and treat as
+                        // arrival-no-op rather than silently sending USE.
+                        Console.WriteLine(
+                            $"[strategy] PICKER ARRIVED unknown verb: " +
+                            $"lockedGoalKind={lockedGoalKind} target='{motionTarget.Name}' " +
+                            $"guid=0x{motionTarget.Guid:X8} (no opcode sent)");
+                        goto _slice_l_explore_done;
                     }
 
                     var msg = new OutboundPacket();

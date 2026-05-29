@@ -1525,6 +1525,172 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCallCount);
     }
 
+    // ---- Slice W.3 (#88) — arrived-no-action prompt + salience ----
+
+    [Fact]
+    public void BuildUserPrompt_PickerActivity_Investigating_RendersInvestigatingForm()
+    {
+        // Default (Arrived=false) — picker is en-route to the
+        // target. Prompt should NOT claim arrival; the fallback note
+        // about "Emit a goal to take control" stays.
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+        var activity = new PickerActivity
+        {
+            TargetGuid = 0x80000099u,
+            TargetName = "Some Object",
+            Source = "in-range",
+            Reason = "test",
+            StartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-3),
+            Arrived = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, currentGoal: null, stack: null, pickerActivity: activity);
+
+        // Section header rendered (the RULES section above also
+        // references the literal string inside backticks, so we
+        // assert on the start-of-line form which only the actual
+        // section uses — Environment.NewLine for cross-platform).
+        var nl = Environment.NewLine;
+        Assert.Contains($"{nl}## Autonomous picker activity{nl}", prompt);
+        Assert.Contains("picker is investigating target 0x80000099", prompt);
+        // The Arrived-form rendered line includes the specific guid
+        // ("- picker has ARRIVED at target 0x{guid:X8}"); the RULES
+        // bullet uses the placeholder "target X". Match on the
+        // guid-suffix to discriminate.
+        Assert.DoesNotContain("ARRIVED at target 0x80000099", prompt);
+        // Old fallback note text stays for investigating form.
+        Assert.Contains("Emit a goal to take control", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickerActivity_Arrived_RendersAwaitingVerbForm()
+    {
+        // Slice W.3: Arrived=true means motor parked next to target
+        // and sent NO opcode. Prompt MUST switch wording so LLM
+        // knows it's the ONLY thing keeping the bot from acting.
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+        var activity = new PickerActivity
+        {
+            TargetGuid = 0x800001CEu,
+            TargetName = "Jonathan",
+            Source = "in-range",
+            Reason = "schema-only picker (nearest mechanically-eligible candidate)",
+            StartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-46),
+            Arrived = true,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, currentGoal: null, stack: null, pickerActivity: activity);
+
+        Assert.Contains("picker has ARRIVED at target 0x800001CE", prompt);
+        Assert.Contains("Jonathan", prompt);
+        Assert.Contains("awaiting a verb", prompt);
+        // The arrived-form note must NOT keep the en-route "emit a
+        // goal to take control" wording (that implies bot is still
+        // moving). It MUST explicitly call out the parking window.
+        Assert.Contains("parked", prompt);
+        // Picker never auto-acts on Arrived — message must make
+        // clear motor did NOT send an opcode.
+        Assert.Contains("NOT sent any opcode", prompt);
+        // Investigating wording must NOT appear when arrived.
+        Assert.DoesNotContain("picker is investigating", prompt);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_PickerArrivedNoAction_BypassesCoalesce()
+    {
+        // Slice W.3 (#88): when picker arrives without a goal, the
+        // motor parks and emits PickerArrivedNoAction. The LLM MUST
+        // wake immediately even with an existing currentGoal in
+        // play — otherwise the 2s park-then-move-on window expires
+        // before deliberation completes and the picker walks away
+        // again, leaving the bot in a perpetual walking-but-not-
+        // doing loop. Pattern mirrors PickerActivityStarted.
+        var httpCallCount = 0;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        content = JsonSerializer.Serialize(new
+                        {
+                            goal_id = "11111111-2222-3333-4444-555555555555",
+                            kind = "Use",
+                            target = new { name = "Jonathan" },
+                            priority = 8,
+                            expires_in_seconds = 60,
+                        }),
+                    },
+                },
+            },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+        };
+
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Equal(1, httpCallCount);
+
+        // Coalesce window holds with no new salient event.
+        var stayed = policy.ProposeGoal(world, events, firstGoal);
+        Assert.Equal(1, httpCallCount);
+        Assert.Equal(firstGoal, stayed);
+
+        // PickerArrivedNoAction MUST punch through the coalesce gate.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            ItemGuid = 0x800001CEu,
+            Name = "Jonathan",
+            Text = "picker walked to target with no verb goal in flight",
+        });
+        policy.ProposeGoal(world, events, firstGoal);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, httpCallCount);
+    }
+
+    [Fact]
+    public void EventKind_PickerArrivedNoAction_IsDistinctFromStarted()
+    {
+        // Defensive: the two events must NOT collide. Started fires
+        // on EVERY picker target switch (high frequency, noisy);
+        // ArrivedNoAction fires only when the bot has WALKED to the
+        // target and there was no verb to dispatch (rare, salient,
+        // must wake LLM). Both are salient but downstream telemetry
+        // distinguishes them by kind, so the enum values must differ.
+        Assert.NotEqual(EventKind.PickerActivityStarted, EventKind.PickerArrivedNoAction);
+        Assert.NotEqual(EventKind.PickerActivityCompleted, EventKind.PickerArrivedNoAction);
+    }
+
+    private static int CountOccurrences(string haystack, string needle)
+    {
+        var count = 0;
+        var idx = 0;
+        while ((idx = haystack.IndexOf(needle, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += needle.Length;
+        }
+        return count;
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;

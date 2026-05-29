@@ -66,4 +66,17 @@ internal sealed record PickerActivity
     public required string Reason { get; init; }
 
     public required DateTimeOffset StartedAtUtc { get; init; }
+
+    /// <summary>
+    /// Slice W.3 (ac-ai-players#88): true once the picker has walked
+    /// to the target and the post-walk-done block fired WITHOUT a
+    /// matching LLM verb goal. In this state the motor sent no
+    /// opcode; the bot is parked next to the target waiting for
+    /// the LLM to name a verb (Use/Talk/Pickup/Attack). The flag
+    /// is rendered in the "## Autonomous picker activity" prompt
+    /// block so the LLM sees the awaiting-verb status directly,
+    /// not just by inference from the PickerArrivedNoAction event.
+    /// Default false (set by the post-walk-done block via `with`).
+    /// </summary>
+    public bool Arrived { get; init; }
 }

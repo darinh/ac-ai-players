@@ -68,6 +68,17 @@ internal enum EventKind
     // its own; the next PickerActivityStarted (if any) will wake
     // the LLM if anything material happened.
     PickerActivityCompleted = 15,
+    // Slice W.3 (ac-ai-players#88): the picker walked to its auto-
+    // locked target but no LLM goal named a verb to dispatch on
+    // arrival, so the motor sent nothing. ItemGuid = the target
+    // guid the bot is now standing next to, Name = its display
+    // name, Text = "<source>: <reason>" copied from the prior
+    // PickerActivityStarted. Salient — wakes the LLM so it can
+    // emit a verb goal (Use/Talk/Pickup/Attack) before the next
+    // picker pick moves the bot on. Without this event the LLM
+    // would only learn about the arrival by diffing successive
+    // Visible-nearby projections, which is too slow.
+    PickerArrivedNoAction   = 16,
 }
 
 /// <summary>
@@ -141,6 +152,7 @@ internal sealed record StreamEvent
         EventKind.HealthChanged        => $"#{Sequence} Health frac={HealthFraction:F2}",
         EventKind.ActionRejected       => $"#{Sequence} ActionRejected code=0x{ErrorCode ?? 0:X4} label=\"{ErrorLabel ?? "?"}\" message=\"{Truncate(Text, 120)}\"",
         EventKind.BookText             => $"#{Sequence} BookText name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8} \"{Truncate(Text, 120)}\"",
+        EventKind.PickerArrivedNoAction => $"#{Sequence} PickerArrivedNoAction guid=0x{ItemGuid ?? 0:X8} name=\"{Name}\" \"{Truncate(Text, 80)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 
