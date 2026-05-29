@@ -336,6 +336,19 @@ internal sealed class HandshakeDriver : IDisposable
         // so we can promote the class to satisfiedWeenieClasses when the
         // wield ack arrives.
         var                  pendingEquipWcid = new Dictionary<uint, uint>();
+        // Phase 7f.4 — startup equip-from-inventory pass. Items the
+        // server grants at character creation (Training Spadone via
+        // Two-Handed-Combat skill, Handy Healing Kit via Healing, etc.)
+        // arrive as ObjectCreate with ContainerGuid=self and
+        // WielderGuid=null. The pickup-equip path (Phase 6m) doesn't
+        // fire for these because there's no pickup - they're already
+        // in the bag. This set tracks guids we've already issued
+        // GetAndWieldItem for so a single tick re-scan doesn't spam
+        // duplicate equip requests while we wait for the WieldObject
+        // ack. The ack flips snap.WielderGuid != null which removes
+        // the item from the inventory-equip candidate set on the
+        // next tick.
+        var                  inventoryEquipSent = new HashSet<uint>();
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
         // golem (so we don't walk away mid-fight) and a retry timer
@@ -876,9 +889,18 @@ internal sealed class HandshakeDriver : IDisposable
                     // (CharacterHandler.cs:31-32 silently returns on
                     // mismatch). Take it from CharacterList (which the
                     // server itself populated via Session.Account).
+                    //
+                    // Train Healing+Jump+TwoHandedCombat so the server's
+                    // starter-gear loop (PlayerFactory.cs:225) grants
+                    // the Training Spadone (weapon), Handy Healing Kit,
+                    // and the Jump bundle (Calling Stone, Pyreal, Sack,
+                    // Bread, Ust, Letter From Home). Without these the
+                    // bot enters the academy bare-handed and dies on
+                    // first contact with a Sparring Golem.
                     var opt = new CharacterCreateMessage.Options(
                         Account: charList.Account,
-                        Name:    _characterName);
+                        Name:    _characterName,
+                        TrainedSkillIds: CharacterCreateMessage.DefaultTrainedSkillIds);
 
                     var packedSize = CharacterCreateMessage.MeasurePackedSize(opt);
                     if (packedSize > 448)
@@ -1116,6 +1138,105 @@ internal sealed class HandshakeDriver : IDisposable
                         $"[observe]   -> PHASE7F.2 RE-ATTACK: target=0x{ffCtg:X8} dist={Math.Sqrt(ffD2):F2}u " +
                         $"pktSeq={ffPacketSeq} fragSeq={ffFragSeq} totalBytes={ffSent} " +
                         $"(loop-keeper; server no-ops if Attacking==true)");
+                }
+
+                // Phase 7f.4 — INVENTORY-EQUIP PASS.
+                //
+                // The pickup-driven equip path (Phase 6m, lines ~641-705
+                // and ~1755-1760) only fires when we PICK UP a wearable
+                // off the landscape: the InventoryPutObjInContainer ack
+                // triggers a fresh GetAndWieldItem send. That path
+                // misses items the server grants at character creation
+                // via PlayerFactory's starter-gear loop (Training
+                // Spadone for the Two-Handed-Combat skill, Handy
+                // Healing Kit, etc.) — those items arrive as
+                // ObjectCreate with ContainerGuid=self,
+                // WielderGuid=null, ValidLocations!=0 and are never
+                // wielded.
+                //
+                // Fix: on every loop iteration, scan worldState for
+                // wearables-in-inventory that we haven't already
+                // asked the server to wield, and send GetAndWieldItem
+                // for the FIRST one we find (at most one per tick to
+                // avoid burst-sending five equip packets in the same
+                // millisecond — the server processes them in any
+                // order and we'd rather pace the swing).
+                //
+                // Gates:
+                //   - LoginComplete already sent (server has flushed
+                //     the initial ObjectCreate firehose by then).
+                //   - worldState.Self exists (we know our own guid).
+                //   - No active combat lock (don't interrupt a swing
+                //     loop by introducing animation cooldown jitter;
+                //     equip-from-inventory triggers wield animations
+                //     that share the NextUseTime budget with melee).
+                //
+                // Slot picking matches Phase 6m: lowest set bit of
+                // ValidLocations. Multi-slot wearables (rings:
+                // FingerWearLeft|Right) get the lowest, which is the
+                // canonical default the AC GUI uses.
+                //
+                // Tracking: inventoryEquipSent records guids we've
+                // already issued an equip request for; the snapshot
+                // refresh on WieldObject moves WielderGuid != null
+                // which excludes the item naturally from subsequent
+                // scans, so this set is belt-and-suspenders against
+                // re-issuing the equip while waiting for the ack.
+                if (loginCompleteSent &&
+                    combatTargetGuid is null &&
+                    worldState.Self is WorldObjectSnapshot ieSelf &&
+                    ieSelf.CellId is uint &&
+                    worldState.SelfGuid is uint ieSelfGuid)
+                {
+                    WorldObjectSnapshot? ieCandidate = null;
+                    uint                 ieEquipSlot = 0;
+                    foreach (var snap in worldState.Objects.Values)
+                    {
+                        if (snap.ContainerGuid is not uint cg || cg != ieSelfGuid) continue;
+                        if (snap.WielderGuid is not null) continue;
+                        if (snap.ValidLocations is not uint ivl || ivl == 0) continue;
+                        if (inventoryEquipSent.Contains(snap.Guid)) continue;
+                        var slot = ivl & (~ivl + 1);
+                        if (satisfiedEquipSlots.Contains(slot)) continue;
+                        if (snap.WeenieClassId is uint wcSat2 &&
+                            satisfiedWeenieClasses.Contains(wcSat2)) continue;
+
+                        ieCandidate = snap;
+                        ieEquipSlot = slot;
+                        break;
+                    }
+
+                    if (ieCandidate is not null)
+                    {
+                        inventoryEquipSent.Add(ieCandidate.Guid);
+                        if (ieCandidate.WeenieClassId is uint ieWc)
+                            pendingEquipWcid[ieCandidate.Guid] = ieWc;
+
+                        var iePacketSeq = nextOutboundPacketSequence++;
+                        var ieFragSeq   = nextOutboundFragmentSequence++;
+                        var ieBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                        var ieLen = GameActionGetAndWieldItemMessage.Pack(
+                            ieBuf,
+                            itemGuid: ieCandidate.Guid,
+                            equipLocation: (int)ieEquipSlot);
+                        var ieOut = new OutboundPacket();
+                        if (lastReceivedSeq != 0)
+                            ieOut.AddAckSequence(lastReceivedSeq);
+                        ieOut.AddBlobFragment(
+                            fragSequence: ieFragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: ieBuf.AsSpan(0, ieLen));
+                        var ieSent = ieOut.Pack(sendBuf, myClientId,
+                                                sequence: iePacketSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ieSent),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                        Console.WriteLine(
+                            $"[observe]   -> PHASE7F.4 SEND INVENTORY-EQUIP: GetAndWieldItem(item=0x{ieCandidate.Guid:X8} " +
+                            $"name='{ieCandidate.Name}' wcid={ieCandidate.WeenieClassId} slot=0x{ieEquipSlot:X}) " +
+                            $"pktSeq={iePacketSeq} fragSeq={ieFragSeq} totalBytes={ieSent}");
+                    }
                 }
 
                 // Phase 7f — combat retry. While combat lock is

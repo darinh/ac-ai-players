@@ -48,6 +48,15 @@ internal sealed class WorldObjectSnapshot
     public uint? ValidLocations { get; internal set; }
     public uint? CurrentWieldedLocation { get; internal set; }
 
+    // Container / wielder linkage (populated by ObjectCreate from the
+    // server's CreateObject serializer). For items the bot is given at
+    // character creation (Training Spadone, Healing Kit, etc.), the
+    // ObjectCreate carries ContainerGuid = self and WielderGuid = null
+    // - i.e. "in your bag, not yet equipped". The startup equip-from-
+    // inventory pass uses these to decide what to wield.
+    public uint? ContainerGuid { get; internal set; }
+    public uint? WielderGuid { get; internal set; }
+
     // Spatial state.
     public uint? CellId { get; internal set; }
     public Vector3 Position { get; internal set; }

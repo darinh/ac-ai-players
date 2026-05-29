@@ -10,6 +10,7 @@
 // Run once at startup from Program.cs. Throws on any mismatch.
 
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Text;
 
@@ -30,6 +31,7 @@ internal static class OutboundSelfCheck
         RunEncryptedSingleFragment();
         RunFragmentSizeGuards();
         RunCharacterCreateRoundTrip();
+        RunCharacterCreateWithTrainedSkillsRoundTrip();
         RunCharacterEnterWorldRequestRoundTrip();
         RunCharacterEnterWorldRoundTrip();
 
@@ -257,6 +259,67 @@ internal static class OutboundSelfCheck
         if (cur != actual)
             throw new InvalidOperationException(
                 $"CharacterCreate over/underread: cursor={cur} packed={actual}");
+    }
+
+    private static void RunCharacterCreateWithTrainedSkillsRoundTrip()
+    {
+        // Verify the TrainedSkillIds overlay path - default-fill
+        // every slot to Inactive, then flip only the requested skill
+        // indices to Trained. Catches bugs like an off-by-one in the
+        // slot loop, the stackalloc not being zeroed correctly, or
+        // an out-of-range index sneaking past the bounds check (which
+        // would silently corrupt an adjacent slot and trigger
+        // server-side ClientServerSkillsMismatch or
+        // InvalidSkillRequested).
+        var trained = new uint[] { 21, 22, 41 };
+        var opt = new GameMessages.CharacterCreateMessage.Options(
+            Account: "headless-test",
+            Name:    "Headless01",
+            TrainedSkillIds: trained);
+
+        var size = GameMessages.CharacterCreateMessage.MeasurePackedSize(opt);
+        var buf = new byte[size];
+        var actual = GameMessages.CharacterCreateMessage.Pack(buf, opt);
+        Require(actual == size,
+            $"CharacterCreate(trained): Pack returned {actual}; measured {size}");
+
+        // Locate the skill-count field by replaying the prefix layout.
+        var cur = 0;
+        ReadU32(buf, ref cur);                          // opcode
+        AcStrings.ReadString16L(buf, ref cur);          // account
+        cur += 4;                                       // unknown
+        cur += 4 + 4;                                   // heritage + gender
+        cur += 14 * 4 + 6 * 8;                          // appearance
+        cur += 4;                                       // template
+        cur += 6 * 4;                                   // 6 abilities
+        cur += 4 + 4;                                   // slot + classId
+
+        var skillCount = ReadU32(buf, ref cur);
+        Require(skillCount == GameMessages.CharacterCreateMessage.RequiredSkillCount,
+            $"CharacterCreate(trained): skillCount={skillCount}");
+
+        var expectTrained = new HashSet<uint>(trained);
+        for (var i = 0; i < GameMessages.CharacterCreateMessage.RequiredSkillCount; i++)
+        {
+            var v = ReadU32(buf, ref cur);
+            var want = expectTrained.Contains((uint)i)
+                ? GameMessages.CharacterCreateMessage.SACTrained
+                : GameMessages.CharacterCreateMessage.SACInactive;
+            Require(v == want,
+                $"CharacterCreate(trained): skill[{i}]={v} (want {want})");
+        }
+
+        // Out-of-range guard: an index >= 55 must be silently dropped,
+        // not throw or corrupt memory.
+        var optBad = new GameMessages.CharacterCreateMessage.Options(
+            Account: "headless-test",
+            Name:    "Headless01",
+            TrainedSkillIds: new uint[] { 999u });
+        var bufBad = new byte[GameMessages.CharacterCreateMessage.MeasurePackedSize(optBad)];
+        GameMessages.CharacterCreateMessage.Pack(bufBad, optBad);
+        // (No exception = pass. The serialized vector should be
+        // all-Inactive since 999 is dropped, but we don't re-scan;
+        // the trained-path coverage above is sufficient.)
     }
 
     private static void RunCharacterEnterWorldRequestRoundTrip()

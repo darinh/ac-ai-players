@@ -64,6 +64,8 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace HeadlessAcClient.Protocol.GameMessages;
 
@@ -90,6 +92,28 @@ internal static class CharacterCreateMessage
     public const uint SACTrained     = 2;
     public const uint SACSpecialized = 3;
 
+    // Skill IDs that we typically train on a fresh bot character so
+    // the server's starter-gear loop (PlayerFactory.cs:225) hands the
+    // bot items the academy expects. Sourced from starterGear.json:
+    //
+    //   21 = Healing            -> Handy Healing Kit
+    //   22 = Jump               -> Pyreal x10000, Sack, Calling Stone,
+    //                              Pathwarden Token, Bread, Ust, and
+    //                              the heritage Letter From Home
+    //   41 = Two Handed Combat  -> Training Spadone (wcid 41512) - a
+    //                              real weapon, so the bot is not
+    //                              bare-handed in the academy
+    //
+    // Total skill-credit cost is well within any heritage's 52-credit
+    // budget (Olthoi=68). Verified live in phase7f4-* test runs.
+    //
+    // Mirrors ACE-bots Source/ACE.Server/Bots/BotPlayerFactory.cs
+    // DefaultTrainedSkills (which has 21,22,24) plus skill 41 added
+    // for the starter weapon since 24 (Run) grants no gear in the
+    // current starterGear.json.
+    public static readonly IReadOnlyList<uint> DefaultTrainedSkillIds =
+        new uint[] { 21, 22, 41 };
+
     public sealed record Options(
         string Account,
         string Name,
@@ -108,10 +132,17 @@ internal static class CharacterCreateMessage
         uint   SelfAbility         = 10,
         uint   CharacterSlot       = 0,
         uint   ClassId             = 0,
-        // All 55 skills inactive - server skips Inactive entries
-        // without DAT lookup or training, so no risk of
-        // InvalidSkillRequested / FailedToTrainSkill.
-        uint?  SkillsOverride      = null,
+        // Per-slot SkillAdvancementClass override. If non-null, every
+        // skill index in the collection is flipped from Inactive to
+        // SACTrained when packed. All other slots stay Inactive.
+        // Replaces an earlier (buggy) SkillsOverride: uint? field that
+        // applied a single SAC value to ALL 55 slots indiscriminately
+        // - that would either grant nothing or fail PlayerFactory's
+        // SkillTable.SkillBaseHash lookup at startup. Indices outside
+        // [0, RequiredSkillCount) are silently dropped (defensive -
+        // the enum's stable, but a caller-side typo shouldn't
+        // terminate the session via ClientServerSkillsMismatch).
+        IReadOnlyCollection<uint>? TrainedSkillIds = null,
         uint   StartArea           = 0,    // index into StarterAreas[]
         bool   IsAdmin             = false,
         bool   IsSentinel          = false
@@ -182,10 +213,23 @@ internal static class CharacterCreateMessage
         // Skill count + 55 entries. Server invariant:
         // SkillAdvancementClasses.Count != 55 -> session termination.
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(pos), (uint)RequiredSkillCount); pos += 4;
-        var skillValue = opt.SkillsOverride ?? SACInactive;
+
+        // Build the SAC vector: start all Inactive, then flip each
+        // index in TrainedSkillIds to Trained. Out-of-range indices
+        // are dropped (see Options.TrainedSkillIds doc-comment).
+        Span<uint> sac = stackalloc uint[RequiredSkillCount];
+        for (var i = 0; i < RequiredSkillCount; i++) sac[i] = SACInactive;
+        if (opt.TrainedSkillIds is not null)
+        {
+            foreach (var id in opt.TrainedSkillIds)
+            {
+                if (id < (uint)RequiredSkillCount)
+                    sac[(int)id] = SACTrained;
+            }
+        }
         for (var i = 0; i < RequiredSkillCount; i++)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(pos), skillValue); pos += 4;
+            BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(pos), sac[i]); pos += 4;
         }
 
         pos += AcStrings.WriteString16L(dest.Slice(pos), opt.Name);

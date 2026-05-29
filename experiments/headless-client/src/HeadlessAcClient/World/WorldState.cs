@@ -206,6 +206,14 @@ internal sealed class WorldState
         snap.WeenieFlags2 = (uint)oc.Weenie.Flags2;
         snap.ValidLocations = oc.Weenie.ValidLocations;
         snap.CurrentWieldedLocation = oc.Weenie.CurrentlyWieldedLocation;
+        // ContainerGuid/WielderGuid: populate when the header carries
+        // them. ObjectCreate for landscape items omits both; for items
+        // in someone's bag the server sets ContainerGuid; for equipped
+        // items the server sets WielderGuid. Treat absence as "not in
+        // container / not wielded" by overwriting with null - the
+        // server re-emits ObjectCreate when the linkage changes.
+        snap.ContainerGuid = oc.Weenie.ContainerGuid;
+        snap.WielderGuid = oc.Weenie.WielderGuid;
 
         // Spatial/physics fields are gated by SeqObjectPosition
         // within the same instance epoch. After a ResetForNewInstance,
