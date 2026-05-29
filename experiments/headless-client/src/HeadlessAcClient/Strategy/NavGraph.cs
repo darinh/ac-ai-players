@@ -16,9 +16,52 @@
 //             (deduped within MergeRadius)
 //
 // Edges connect nodes. Each edge has a kind {Walked, CrossedBoundary,
-// UsedDoor, UsedPortal, UsedItem} and a cost. Pathfinding is Dijkstra
-// over the edge graph; layer separation (L0/L1/L2 HPA*) is implicit
-// in the edge-kind cost ordering, not a separate search structure.
+// UsedDoor, UsedPortal, UsedItem} and a cost. Pathfinding is A* over
+// the edge graph using a Euclidean (Pythagorean) heuristic on node
+// coordinates; admissibility comes from scaling the heuristic by the
+// minimum cost-per-meter observed across all edges (so when a graph
+// contains teleport-class edges with huge geometric span but tiny cost
+// — a portal cast in 5 s across 5 km — the heuristic scale collapses
+// toward 0 and A* degenerates to Dijkstra, which never pessimistically
+// prunes the portal shortcut). Layer separation (L0/L1/L2 HPA*) is
+// implicit in the edge-kind cost ordering, not a separate search
+// structure.
+//
+// Edge cost rule:
+//   * Walked / CrossedBoundary — distance-scaled (baseCost × meters).
+//     A continuous walk: longer = more expensive.
+//   * UsedDoor / UsedPortal / UsedItem — fixed (baseCost only). The
+//     geometric distance between endpoints is informational only;
+//     the cost is the action time (open the door, cast the portal,
+//     activate the item). Modeled as TWO SEPARATE NODES — the
+//     entrance position and the exit position — connected by ONE
+//     edge of the right kind. So a portal in Holtburg with exit in
+//     the academy is: HoltburgPortalEntranceNode → UsedPortal(cost≈5s)
+//     → AcademyPortalExitNode. The 5 km Euclidean gap between the
+//     two nodes' positions reflects reality (the bot really did move
+//     5 km of world space) but doesn't enter the edge cost. This
+//     mirrors how a human plans: "walk to the portal, take it, walk
+//     from where I end up to the destination" — three legs, two of
+//     them walking, one teleport.
+//
+// Path executor contract (consumer side, lives in HandshakeDriver):
+//
+//   1. Strategy picks a goal entity / node.
+//   2. Tactics calls FindRoute(here, goal) → NavRoute = ordered queue
+//      of NavRouteStep. Dequeue head; that's the next waypoint.
+//   3. Motor issues walk instructions toward the waypoint's Position,
+//      tick-by-tick. Each tick check: did distance-to-waypoint shrink?
+//      Player / creature blocking the lane is a real-game hazard.
+//   4. Arrival: dist ≤ MergeRadius → dequeue next waypoint.
+//   5. Stall (no progress for N consecutive ticks): use
+//      FindNodesWithin(currentCell, currentPos, radius) to enumerate
+//      reachable side-step candidates, call PenalizeEdge on the
+//      blocked edge so A* avoids it, and re-call FindRoute(sidestep,
+//      originalGoal). Splice the new route in front of the remaining
+//      queue and continue.
+//   6. On every tick, RecordVisit(currentCell, currentPos, utc) so
+//      the per-tick walkability chain keeps the graph honest about
+//      what was actually traversed.
 //
 // Each node also carries Observations — what entities (NPCs, items,
 // monsters, portals) were visible from that position, with relative
@@ -51,7 +94,7 @@ using System.Text.Json.Serialization;
 
 namespace HeadlessAcClient.Strategy;
 
-internal sealed class NavGraph
+internal sealed class NavGraph : IDisposable
 {
     /// <summary>
     /// Two visits closer than this in the same cell merge into the
@@ -61,15 +104,28 @@ internal sealed class NavGraph
     public float MergeRadiusMeters { get; init; } = 4.0f;
 
     /// <summary>
-    /// Auto-Walked-edge creation is suppressed if successive ticks
-    /// jump farther than this in the same landblock — protects against
-    /// teleport / slide / re-spawn within a landblock recording fake
-    /// walkable shortcuts. Cross-landblock jumps NEVER auto-edge.
+    /// Per-tick walkability gate. Consecutive RecordVisit calls within
+    /// this distance prove the bot WALKED between those positions
+    /// (not teleported / lag-corrected / sync'd). Walked edges only
+    /// form across a continuous chain of per-tick movements all under
+    /// this threshold. Default 2.0m fits typical AC tick rates
+    /// (5-10 Hz) and run speeds (3-6 m/s) with jitter headroom.
     /// </summary>
-    public float MaxAutoEdgeMeters { get; init; } = 20.0f;
+    public float MaxTickWalkMeters { get; init; } = 2.0f;
 
-    /// <summary>How often to flush dirty journals to disk.</summary>
-    public TimeSpan FlushInterval { get; init; } = TimeSpan.FromSeconds(15);
+    /// <summary>
+    /// Hard cap on the distance between two distinct nodes for an
+    /// auto-Walked edge. Even if the per-tick chain stayed continuous,
+    /// nodes farther apart than this require explicit RecordEdge —
+    /// belt-and-suspenders against pathological recorder drift.
+    /// </summary>
+    public float MaxAutoEdgeMeters { get; init; } = 8.0f;
+
+    /// <summary>
+    /// No-op since the switch to append-on-write JSONL. Kept for
+    /// back-compat with constructors that still pass it.
+    /// </summary>
+    public TimeSpan FlushInterval { get; init; } = TimeSpan.Zero;
 
     /// <summary>
     /// Default edge cost (seconds, used as Dijkstra weight) by kind.
@@ -107,15 +163,35 @@ internal sealed class NavGraph
     private readonly Dictionary<uint, NavRegion>  _regionByLandblock = new();
     private readonly Dictionary<uint, NavArea>    _areaByCell        = new();
     private readonly Dictionary<uint, List<NavNode>> _nodesByCell    = new();
+    // Adjacency index — per-node outgoing edges. Maintained on every
+    // AddOrRefreshEdgeLocked so the bot can ask "from here, where can
+    // I go?" in O(degree) without scanning all edges. Same edge object
+    // is shared with _edges; mutations to cost/lastVerified are visible
+    // through both views.
+    private readonly Dictionary<Guid, List<NavEdge>> _outgoingByNode = new();
 
     // Continuation state (per-graph-instance; resets across sessions
     // intentionally — chronological Walked edges should NOT span a
     // restart since intervening state is unknown).
     private Guid? _lastVisitNodeId;
+    private Vector3? _lastTickPosition;
+    private uint? _lastTickCellId;
 
-    private DateTimeOffset _lastFlushUtc = DateTimeOffset.MinValue;
-    private readonly HashSet<string> _dirtyJournals = new();
+    // Append-only JSONL writers, held open for the graph lifetime.
+    // Each Record* / Tag* / Ensure* call writes the affected entity
+    // immediately so a crash loses nothing past the last write.
+    private readonly Dictionary<string, StreamWriter> _writers = new();
     private bool _writeFailureLogged;
+    private bool _disposed;
+    // A* heuristic scale: the minimum observed (cost / geometric distance)
+    // across all edges seen so far. Initialized to +infinity (no edges
+    // yet → heuristic returns 0 → A* degenerates to Dijkstra, which is
+    // optimal). Updated downward on every AddOrRefreshEdgeLocked. This
+    // formulation keeps the heuristic admissible even when the graph
+    // contains fixed-cost teleport edges (UsedPortal=5.0 across a 5000m
+    // hop has cost/distance=0.001), which would otherwise blow past the
+    // edge cost and prune the optimal portal-shortcut route.
+    private float _minCostPerMeter = float.PositiveInfinity;
 
     public string Directory => _directory;
 
@@ -132,6 +208,7 @@ internal sealed class NavGraph
         {
             Console.Error.WriteLine($"[nav] WARN create dir failed: {ex.GetType().Name}: {ex.Message}");
         }
+        _minCostPerMeter = float.PositiveInfinity;
         TryLoadJournals();
     }
 
@@ -176,6 +253,57 @@ internal sealed class NavGraph
                 }
             }
             return best;
+        }
+    }
+
+    /// <summary>
+    /// Returns every node within <paramref name="radiusMeters"/> of
+    /// <paramref name="position"/>, sorted nearest-first. Searches the
+    /// given cell first, then every other cell in the same landblock
+    /// (so the path executor can find a fall-back waypoint when stuck
+    /// mid-walk, e.g. a player blocks the doorway and a sidestep node
+    /// in the adjacent outdoor cell is the way around).
+    /// </summary>
+    public IReadOnlyList<(NavNode Node, float Distance)> FindNodesWithin(
+        uint cellId, Vector3 position, float radiusMeters)
+    {
+        lock (_lock)
+        {
+            var landblock = cellId >> 16;
+            var hits = new List<(NavNode, float)>();
+            foreach (var (cid, list) in _nodesByCell)
+            {
+                if ((cid >> 16) != landblock) continue;
+                foreach (var n in list)
+                {
+                    var d = Vector3.Distance(n.Position, position);
+                    if (d <= radiusMeters) hits.Add((n, d));
+                }
+            }
+            hits.Sort((a, b) => a.Item2.CompareTo(b.Item2));
+            return hits;
+        }
+    }
+
+    /// <summary>
+    /// Soft-blocks an edge by multiplying its cost. Use when the path
+    /// executor detects the bot stopped making progress along this edge
+    /// (a player or creature blocking the path, locked door, NPC dialog
+    /// in progress). A* will route around it on the next FindRoute,
+    /// without permanently corrupting the graph — call
+    /// <see cref="RestoreEdgeCost"/> once the obstacle clears, or let
+    /// the next successful traversal refresh the minimum-observed cost.
+    /// </summary>
+    public void PenalizeEdge(Guid edgeId, float costMultiplier)
+    {
+        if (costMultiplier <= 1f) return;
+        lock (_lock)
+        {
+            if (_edges.TryGetValue(edgeId, out var e))
+            {
+                e.CostSeconds *= costMultiplier;
+                Append("edges", EdgeDto.From(e));
+            }
         }
     }
 
@@ -242,7 +370,7 @@ internal sealed class NavGraph
             var r = new NavRegion { Id = Guid.NewGuid(), LandblockId = landblockId };
             _regions[r.Id] = r;
             _regionByLandblock[landblockId] = r;
-            MarkDirty("regions");
+            Append("regions", RegionDto.From(r));
             return r.Id;
         }
     }
@@ -271,7 +399,7 @@ internal sealed class NavGraph
             {
                 var p = new NavPlace { Id = Guid.NewGuid(), RegionId = regionId, Kind = PlaceKind.Unknown };
                 _places[p.Id] = p;
-                MarkDirty("places");
+                Append("places", PlaceDto.From(p));
                 placeId = p.Id;
             }
             else
@@ -282,7 +410,7 @@ internal sealed class NavGraph
             var a = new NavArea { Id = Guid.NewGuid(), CellId = cellId, PlaceId = placeId, Kind = kind };
             _areas[a.Id] = a;
             _areaByCell[cellId] = a;
-            MarkDirty("areas");
+            Append("areas", AreaDto.From(a));
             return a.Id;
         }
     }
@@ -292,10 +420,15 @@ internal sealed class NavGraph
     /// <summary>
     /// Records the bot's current position. Returns the node Id —
     /// either an existing nearby node (visit-bumped) or a newly-
-    /// created one. Automatically adds a Walked edge from the previous
-    /// recorded visit if it was in the same landblock and within
-    /// MaxAutoEdgeMeters (suppressed across cells with too-large jumps
-    /// to avoid recording fake teleport shortcuts).
+    /// created one.
+    ///
+    /// Auto-Walked-edge formation requires a verified continuous
+    /// per-tick chain: the previous RecordVisit must have been within
+    /// MaxTickWalkMeters of this one (proving the bot WALKED, not
+    /// teleported or lag-corrected). Any tick that jumps farther
+    /// breaks the chain, and the next distinct node will NOT
+    /// auto-edge. The driver should call this every tick so the chain
+    /// stays continuous.
     /// </summary>
     public Guid RecordVisit(uint cellId, Vector3 position, DateTimeOffset utc)
     {
@@ -304,6 +437,27 @@ internal sealed class NavGraph
 
         lock (_lock)
         {
+            // Per-tick walkability gate. If we have a previous tick
+            // position and it's within MaxTickWalkMeters AND the cell
+            // is unchanged or both cells are outdoor terrain in the
+            // SAME landblock, the bot walked since the last tick —
+            // chain continues. Otherwise break the chain so no auto-
+            // edge forms across the gap. Same-landblock is required
+            // because cell-local positions aren't comparable across
+            // landblock boundaries (every landblock's origin is its
+            // own SW corner).
+            bool chainContinuous = false;
+            if (_lastTickPosition is Vector3 lastPos && _lastTickCellId is uint lastCell)
+            {
+                var sameLandblock = (lastCell >> 16) == (cellId >> 16);
+                var bothOutdoor = (lastCell & 0xFFFFu) < 0x100u &&
+                                  (cellId   & 0xFFFFu) < 0x100u;
+                var sameCellOrOutdoor = lastCell == cellId || (sameLandblock && bothOutdoor);
+                var tickDelta = Vector3.Distance(lastPos, position);
+                chainContinuous = sameCellOrOutdoor && tickDelta <= MaxTickWalkMeters;
+            }
+            if (!chainContinuous) _lastVisitNodeId = null;
+
             var areaId = EnsureAreaLocked(cellId, AreaKind.Unknown);
             Guid nodeId;
 
@@ -323,7 +477,7 @@ internal sealed class NavGraph
                 near.LastSeenUtc = utc;
                 near.VisitCount++;
                 nodeId = near.Id;
-                MarkDirty("nodes");
+                Append("nodes", NodeDto.From(near));
             }
             else
             {
@@ -344,27 +498,17 @@ internal sealed class NavGraph
                     _nodesByCell[cellId] = list = new();
                 list.Add(n);
                 nodeId = n.Id;
-                MarkDirty("nodes");
+                Append("nodes", NodeDto.From(n));
             }
 
-            // Auto-edge from previous visit if eligible. Conservative
-            // guards (rubber-duck flagged wall-shortcut risk):
-            //   * same landblock (cross-landblock = explicit only)
-            //   * within MaxAutoEdgeMeters (guards teleport-within-LB)
-            //   * either same cellId OR both cells are outdoor terrain
-            //     (low 16 bits < 0x100). Different indoor cells in the
-            //     same landblock = walled rooms; never auto-edge across
-            //     a potential wall. The driver must call RecordEdge
-            //     explicitly with UsedDoor / UsedPortal / UsedItem.
+            // Auto-edge: only when the per-tick chain has been
+            // continuous since the previous distinct node AND the
+            // straight-line distance is bounded (belt-and-suspenders).
             if (_lastVisitNodeId is Guid prev && prev != nodeId &&
                 _nodes.TryGetValue(prev, out var prevNode))
             {
-                var sameLandblock = prevNode.Landblock == (cellId >> 16);
-                var sameCell = prevNode.CellId == cellId;
-                var bothOutdoor = (prevNode.CellId & 0xFFFFu) < 0x100u &&
-                                  (cellId & 0xFFFFu) < 0x100u;
                 var dist = Vector3.Distance(prevNode.Position, position);
-                if (sameLandblock && dist <= MaxAutoEdgeMeters && (sameCell || bothOutdoor))
+                if (dist <= MaxAutoEdgeMeters)
                 {
                     AddOrRefreshEdgeLocked(prev, nodeId, NavEdgeKind.Walked,
                         useItemName: null, useObjectGuid: null,
@@ -374,8 +518,25 @@ internal sealed class NavGraph
             }
 
             _lastVisitNodeId = nodeId;
-            MaybeFlush(utc);
+            _lastTickPosition = position;
+            _lastTickCellId = cellId;
             return nodeId;
+        }
+    }
+
+    /// <summary>
+    /// Explicitly invalidate the per-tick chain so the next RecordVisit
+    /// will not auto-edge from the previous one. Call when the driver
+    /// KNOWS a non-walked transition just happened (portal use,
+    /// inventory item teleport, cross-landblock, login warp).
+    /// </summary>
+    public void BreakWalkedChain()
+    {
+        lock (_lock)
+        {
+            _lastVisitNodeId = null;
+            _lastTickPosition = null;
+            _lastTickCellId = null;
         }
     }
 
@@ -416,10 +577,11 @@ internal sealed class NavGraph
             {
                 existing.LastSeenUtc = utc;
                 existing.SightingCount++;
+                Append("observations", ObservationDto.From(fromNodeId, existing));
             }
             else
             {
-                node.Observations.Add(new EntityObservation
+                var obs = new EntityObservation
                 {
                     Wcid = wcid,
                     Name = name,
@@ -429,9 +591,10 @@ internal sealed class NavGraph
                     FirstSeenUtc = utc,
                     LastSeenUtc = utc,
                     SightingCount = 1,
-                });
+                };
+                node.Observations.Add(obs);
+                Append("observations", ObservationDto.From(fromNodeId, obs));
             }
-            MarkDirty("observations");
         }
     }
 
@@ -441,16 +604,31 @@ internal sealed class NavGraph
     /// inventory item teleport (Calling Stone, recall, gem), and
     /// passive landblock-boundary crossings. Walked edges are
     /// auto-created by RecordVisit; this method is for everything else.
+    ///
+    /// Cost rule by kind:
+    ///   * Walked / CrossedBoundary — baseCost × geometric distance
+    ///     (continuous traversal scales with how far you walked).
+    ///   * UsedDoor / UsedPortal / UsedItem — baseCost only
+    ///     (a fixed action time independent of endpoint separation;
+    ///     a portal can shortcut across the entire world for the same
+    ///     5-second cast time).
     /// </summary>
     public Guid RecordEdge(Guid fromNodeId, Guid toNodeId, NavEdgeKind kind,
                             string? useItemName, uint? useObjectGuid, DateTimeOffset utc)
     {
         lock (_lock)
         {
-            if (!_nodes.ContainsKey(fromNodeId) || !_nodes.ContainsKey(toNodeId))
+            if (!_nodes.TryGetValue(fromNodeId, out var fromNode) ||
+                !_nodes.TryGetValue(toNodeId,   out var toNode))
                 throw new ArgumentException("Edge endpoints must be existing nodes");
             var baseCost = EdgeKindBaseCost.GetValueOrDefault(kind, 1.0f);
-            return AddOrRefreshEdgeLocked(fromNodeId, toNodeId, kind, useItemName, useObjectGuid, baseCost, utc);
+            var cost = kind switch
+            {
+                NavEdgeKind.Walked           => baseCost * Math.Max(Vector3.Distance(fromNode.Position, toNode.Position), 0.1f),
+                NavEdgeKind.CrossedBoundary  => baseCost * Math.Max(Vector3.Distance(fromNode.Position, toNode.Position), 0.1f),
+                _                            => baseCost,
+            };
+            return AddOrRefreshEdgeLocked(fromNodeId, toNodeId, kind, useItemName, useObjectGuid, cost, utc);
         }
     }
 
@@ -462,7 +640,7 @@ internal sealed class NavGraph
         {
             if (!_regions.TryGetValue(regionId, out var r)) return;
             if (name is not null) r.Name = name;
-            MarkDirty("regions");
+            Append("regions", RegionDto.From(r));
         }
     }
 
@@ -474,7 +652,7 @@ internal sealed class NavGraph
             if (name is not null) p.Name = name;
             if (kind is not null) p.Kind = kind.Value;
             if (addTags is not null) foreach (var t in addTags) p.Tags.Add(t);
-            MarkDirty("places");
+            Append("places", PlaceDto.From(p));
         }
     }
 
@@ -488,7 +666,7 @@ internal sealed class NavGraph
             if (floor is not null) a.Floor = floor.Value;
             if (roomName is not null) a.RoomName = roomName;
             if (addTags is not null) foreach (var t in addTags) a.Tags.Add(t);
-            MarkDirty("areas");
+            Append("areas", AreaDto.From(a));
         }
     }
 
@@ -498,68 +676,85 @@ internal sealed class NavGraph
         {
             if (!_nodes.TryGetValue(nodeId, out var n)) return;
             if (addTags is not null) foreach (var t in addTags) n.Tags.Add(t);
-            MarkDirty("nodes");
+            Append("nodes", NodeDto.From(n));
         }
     }
 
     // ─── Pathfinding (Dijkstra over all edges) ───────────────────────
 
     /// <summary>
-    /// Dijkstra over the directed edge graph. Edge cost = the edge's
-    /// CostSeconds (set per-kind on creation; kind-based defaults bias
-    /// toward walking for short hops and portals for cross-region).
+    /// A* over the directed edge graph, with a Euclidean heuristic on
+    /// node coordinates. Edge cost = the edge's CostSeconds (set
+    /// per-kind on creation; kind-based defaults bias toward walking
+    /// for short hops and portals for cross-region).
+    ///
+    /// Heuristic admissibility: every edge's cost ≥ MinEdgeBaseCost ×
+    /// geometric distance, so MinEdgeBaseCost × straight-line distance
+    /// is a lower bound on the remaining cost. A* with an admissible
+    /// heuristic returns the same optimal path as Dijkstra but expands
+    /// far fewer nodes — especially on large open-world graphs.
     /// Returns null if no route exists.
     /// </summary>
     public NavRoute? FindRoute(Guid startNodeId, Guid goalNodeId)
     {
         lock (_lock)
         {
-            if (!_nodes.ContainsKey(startNodeId) || !_nodes.ContainsKey(goalNodeId)) return null;
+            if (!_nodes.TryGetValue(startNodeId, out var startNode) ||
+                !_nodes.TryGetValue(goalNodeId,  out var goalNode)) return null;
             if (startNodeId == goalNodeId)
-                return new NavRoute(new[] { new NavRouteStep(_nodes[startNodeId], null) }, 0f);
+                return new NavRoute(new[] { new NavRouteStep(startNode, null) }, 0f);
 
-            // Build adjacency once per call (small graphs; spike scale)
-            var adj = new Dictionary<Guid, List<NavEdge>>();
-            foreach (var e in _edges.Values)
-            {
-                if (!adj.TryGetValue(e.FromNodeId, out var list))
-                    adj[e.FromNodeId] = list = new();
-                list.Add(e);
-            }
-
-            var dist = new Dictionary<Guid, float> { [startNodeId] = 0f };
+            // Heuristic scale: 0 if no edges seen yet (Dijkstra), else
+            // the smallest cost-per-meter ratio observed across all
+            // edges (kept admissible by construction in
+            // AddOrRefreshEdgeLocked).
+            var hScale = float.IsPositiveInfinity(_minCostPerMeter) ? 0f : _minCostPerMeter;
+            var gScore   = new Dictionary<Guid, float> { [startNodeId] = 0f };
+            var fScore   = new Dictionary<Guid, float> { [startNodeId] = hScale * Vector3.Distance(startNode.Position, goalNode.Position) };
             var prevEdge = new Dictionary<Guid, NavEdge>();
-            var visited = new HashSet<Guid>();
-            // Naive O(V²) priority — V is small enough (< 10k) for the
-            // spike, and a real heap pulls in another dep we don't need.
-            while (true)
+            var open     = new HashSet<Guid> { startNodeId };
+            var closed   = new HashSet<Guid>();
+
+            // Naive O(V) min-pick over the open set — fine for the
+            // current node count (sub-10k); switch to a binary heap if
+            // the graph grows beyond that.
+            while (open.Count > 0)
             {
                 Guid? bestId = null;
-                var bestD = float.PositiveInfinity;
-                foreach (var (id, d) in dist)
+                var bestF = float.PositiveInfinity;
+                foreach (var id in open)
                 {
-                    if (!visited.Contains(id) && d < bestD)
+                    if (fScore.TryGetValue(id, out var f) && f < bestF)
                     {
                         bestId = id;
-                        bestD = d;
+                        bestF = f;
                     }
                 }
                 if (bestId is null) return null;
-                if (bestId.Value == goalNodeId) break;
-                visited.Add(bestId.Value);
+                var current = bestId.Value;
+                if (current == goalNodeId) break;
+                open.Remove(current);
+                closed.Add(current);
 
-                if (!adj.TryGetValue(bestId.Value, out var outs)) continue;
+                if (!_outgoingByNode.TryGetValue(current, out var outs)) continue;
+                var curG = gScore[current];
                 foreach (var e in outs)
                 {
-                    if (visited.Contains(e.ToNodeId)) continue;
-                    var nd = bestD + e.CostSeconds;
-                    if (!dist.TryGetValue(e.ToNodeId, out var cur) || nd < cur)
+                    if (closed.Contains(e.ToNodeId)) continue;
+                    var tentativeG = curG + e.CostSeconds;
+                    if (!gScore.TryGetValue(e.ToNodeId, out var existingG) || tentativeG < existingG)
                     {
-                        dist[e.ToNodeId] = nd;
+                        gScore[e.ToNodeId] = tentativeG;
                         prevEdge[e.ToNodeId] = e;
+                        var toNode = _nodes[e.ToNodeId];
+                        fScore[e.ToNodeId] = tentativeG +
+                            hScale * Vector3.Distance(toNode.Position, goalNode.Position);
+                        open.Add(e.ToNodeId);
                     }
                 }
             }
+
+            if (!gScore.ContainsKey(goalNodeId)) return null;
 
             // Reconstruct
             var stepsRev = new List<NavRouteStep>();
@@ -570,9 +765,32 @@ internal sealed class NavGraph
                 stepsRev.Add(new NavRouteStep(_nodes[cursor], e));
                 cursor = e.FromNodeId;
             }
-            stepsRev.Add(new NavRouteStep(_nodes[startNodeId], null));
+            stepsRev.Add(new NavRouteStep(startNode, null));
             stepsRev.Reverse();
-            return new NavRoute(stepsRev, dist[goalNodeId]);
+            return new NavRoute(stepsRev, gScore[goalNodeId]);
+        }
+    }
+
+    /// <summary>
+    /// Returns the outgoing edges (and their destination nodes) from
+    /// <paramref name="nodeId"/>. This is the "from here, where can I
+    /// go?" query the bot uses to enumerate immediate options without
+    /// scanning the whole edge table. Returns an empty list if the
+    /// node is unknown or has no outgoing edges.
+    /// </summary>
+    public IReadOnlyList<NavConnection> GetOutgoingConnections(Guid nodeId)
+    {
+        lock (_lock)
+        {
+            if (!_outgoingByNode.TryGetValue(nodeId, out var outs) || outs.Count == 0)
+                return Array.Empty<NavConnection>();
+            var result = new List<NavConnection>(outs.Count);
+            foreach (var e in outs)
+            {
+                if (_nodes.TryGetValue(e.ToNodeId, out var to))
+                    result.Add(new NavConnection(e, to));
+            }
+            return result;
         }
     }
 
@@ -604,12 +822,24 @@ internal sealed class NavGraph
     {
         lock (_lock)
         {
-            foreach (var kind in _dirtyJournals.ToArray())
+            foreach (var w in _writers.Values)
             {
-                TryWriteJournal(kind);
+                try { w.Flush(); } catch { /* best effort */ }
             }
-            _dirtyJournals.Clear();
-            _lastFlushUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    public void Dispose()
+    {
+        lock (_lock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            foreach (var w in _writers.Values)
+            {
+                try { w.Flush(); w.Dispose(); } catch { /* best effort */ }
+            }
+            _writers.Clear();
         }
     }
 
@@ -621,7 +851,7 @@ internal sealed class NavGraph
         var r = new NavRegion { Id = Guid.NewGuid(), LandblockId = landblock };
         _regions[r.Id] = r;
         _regionByLandblock[landblock] = r;
-        MarkDirty("regions");
+        Append("regions", RegionDto.From(r));
         return r.Id;
     }
 
@@ -636,14 +866,14 @@ internal sealed class NavGraph
         {
             var p = new NavPlace { Id = Guid.NewGuid(), RegionId = regionId, Kind = PlaceKind.Unknown };
             _places[p.Id] = p;
-            MarkDirty("places");
+            Append("places", PlaceDto.From(p));
             placeId = p.Id;
         }
         else placeId = place.Id;
         var a = new NavArea { Id = Guid.NewGuid(), CellId = cellId, PlaceId = placeId, Kind = kind };
         _areas[a.Id] = a;
         _areaByCell[cellId] = a;
-        MarkDirty("areas");
+        Append("areas", AreaDto.From(a));
         return a.Id;
     }
 
@@ -660,7 +890,8 @@ internal sealed class NavGraph
                 e.LastVerifiedUtc = utc;
                 // Use the minimum observed cost (best-known traversal).
                 if (cost < e.CostSeconds) e.CostSeconds = cost;
-                MarkDirty("edges");
+                UpdateMinCostPerMeterLocked(fromId, toId, e.CostSeconds);
+                Append("edges", EdgeDto.From(e));
                 return e.Id;
             }
         }
@@ -677,53 +908,41 @@ internal sealed class NavGraph
             LastVerifiedUtc = utc,
         };
         _edges[edge.Id] = edge;
-        MarkDirty("edges");
+        if (!_outgoingByNode.TryGetValue(fromId, out var outs))
+            _outgoingByNode[fromId] = outs = new();
+        outs.Add(edge);
+        UpdateMinCostPerMeterLocked(fromId, toId, cost);
+        Append("edges", EdgeDto.From(edge));
         return edge.Id;
     }
 
-    private void MarkDirty(string journal)
+    // Keeps the A* heuristic admissible by tracking the smallest
+    // observed cost-per-meter ratio across all edges. See the
+    // _minCostPerMeter field comment for why this matters.
+    private void UpdateMinCostPerMeterLocked(Guid fromId, Guid toId, float cost)
     {
-        _dirtyJournals.Add(journal);
-        if (DateTimeOffset.UtcNow - _lastFlushUtc >= FlushInterval)
-        {
-            foreach (var j in _dirtyJournals.ToArray()) TryWriteJournal(j);
-            _dirtyJournals.Clear();
-            _lastFlushUtc = DateTimeOffset.UtcNow;
-        }
+        if (!_nodes.TryGetValue(fromId, out var fromNode) ||
+            !_nodes.TryGetValue(toId,   out var toNode)) return;
+        var dist = Math.Max(0.1f, Vector3.Distance(fromNode.Position, toNode.Position));
+        var ratio = cost / dist;
+        if (ratio < _minCostPerMeter) _minCostPerMeter = ratio;
     }
 
-    private void MaybeFlush(DateTimeOffset utc)
+    private void Append(string kind, object dto)
     {
-        if (utc - _lastFlushUtc < FlushInterval) return;
-        foreach (var j in _dirtyJournals.ToArray()) TryWriteJournal(j);
-        _dirtyJournals.Clear();
-        _lastFlushUtc = utc;
-    }
-
-    private void TryWriteJournal(string kind)
-    {
-        var path = Path.Combine(_directory, $"{kind}.jsonl");
+        if (_disposed) return;
         try
         {
-            // Snapshot-rewrite: simpler than delta journal and keeps
-            // the file small for the spike. Each session rewrites the
-            // whole journal on every flush. Trade-off acknowledged:
-            // O(N) writes; revisit when N gets large.
-            using var fs = File.Create(path);
-            using var w  = new StreamWriter(fs);
-            switch (kind)
+            if (!_writers.TryGetValue(kind, out var w))
             {
-                case "regions":      foreach (var r in _regions.Values) w.WriteLine(JsonSerializer.Serialize(RegionDto.From(r), JsonOpts)); break;
-                case "places":       foreach (var p in _places.Values)  w.WriteLine(JsonSerializer.Serialize(PlaceDto.From(p),  JsonOpts)); break;
-                case "areas":        foreach (var a in _areas.Values)   w.WriteLine(JsonSerializer.Serialize(AreaDto.From(a),   JsonOpts)); break;
-                case "nodes":        foreach (var n in _nodes.Values)   w.WriteLine(JsonSerializer.Serialize(NodeDto.From(n),   JsonOpts)); break;
-                case "edges":        foreach (var e in _edges.Values)   w.WriteLine(JsonSerializer.Serialize(EdgeDto.From(e),   JsonOpts)); break;
-                case "observations":
-                    foreach (var n in _nodes.Values)
-                        foreach (var o in n.Observations)
-                            w.WriteLine(JsonSerializer.Serialize(ObservationDto.From(n.Id, o), JsonOpts));
-                    break;
+                var path = Path.Combine(_directory, $"{kind}.jsonl");
+                // FileShare.Read so external tools (jq, tail -f) can
+                // read the journal while the bot is running.
+                var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                w = new StreamWriter(fs) { AutoFlush = true };
+                _writers[kind] = w;
             }
+            w.WriteLine(JsonSerializer.Serialize(dto, dto.GetType(), JsonOpts));
         }
         catch (Exception ex)
         {
@@ -739,9 +958,12 @@ internal sealed class NavGraph
     {
         try
         {
+            // Stage 1: read every line of every journal. Same Id may
+            // appear multiple times across the file (append-on-write);
+            // last-wins dedup happens automatically via dict overwrite.
             LoadJournal("regions", line => {
                 var d = JsonSerializer.Deserialize<RegionDto>(line, JsonOpts);
-                if (d is not null) { var r = d.To(); _regions[r.Id] = r; _regionByLandblock[r.LandblockId] = r; }
+                if (d is not null) { var r = d.To(); _regions[r.Id] = r; }
             });
             LoadJournal("places", line => {
                 var d = JsonSerializer.Deserialize<PlaceDto>(line, JsonOpts);
@@ -749,25 +971,56 @@ internal sealed class NavGraph
             });
             LoadJournal("areas", line => {
                 var d = JsonSerializer.Deserialize<AreaDto>(line, JsonOpts);
-                if (d is not null) { var a = d.To(); _areas[a.Id] = a; _areaByCell[a.CellId] = a; }
+                if (d is not null) { var a = d.To(); _areas[a.Id] = a; }
             });
             LoadJournal("nodes", line => {
                 var d = JsonSerializer.Deserialize<NodeDto>(line, JsonOpts);
-                if (d is not null) {
-                    var n = d.To();
-                    _nodes[n.Id] = n;
-                    if (!_nodesByCell.TryGetValue(n.CellId, out var list)) _nodesByCell[n.CellId] = list = new();
-                    list.Add(n);
-                }
+                if (d is not null) { var n = d.To(); _nodes[n.Id] = n; }
             });
             LoadJournal("edges", line => {
                 var d = JsonSerializer.Deserialize<EdgeDto>(line, JsonOpts);
                 if (d is not null) { var e = d.To(); _edges[e.Id] = e; }
             });
+
+            // Stage 2: rebuild spatial / structural indexes from the
+            // deduplicated entity dictionaries.
+            foreach (var r in _regions.Values) _regionByLandblock[r.LandblockId] = r;
+            foreach (var a in _areas.Values)   _areaByCell[a.CellId] = a;
+            foreach (var n in _nodes.Values)
+            {
+                if (!_nodesByCell.TryGetValue(n.CellId, out var list))
+                    _nodesByCell[n.CellId] = list = new();
+                list.Add(n);
+            }
+            // Outgoing-edges adjacency: bucketize once after dedup so
+            // node-centric "where can I go from here?" queries are O(degree).
+            // Also re-seed the A* heuristic scale from the loaded edges.
+            foreach (var e in _edges.Values)
+            {
+                if (!_outgoingByNode.TryGetValue(e.FromNodeId, out var outs))
+                    _outgoingByNode[e.FromNodeId] = outs = new();
+                outs.Add(e);
+                UpdateMinCostPerMeterLocked(e.FromNodeId, e.ToNodeId, e.CostSeconds);
+            }
+
+            // Stage 3: observations — same-key dedup since the journal
+            // is append-only. Key: (NodeId, Wcid, Name, RoundedPos).
+            // Last-write-wins via dictionary overwrite, then attach.
+            var obsByKey = new Dictionary<(Guid, uint?, string, int, int, int), ObservationDto>();
             LoadJournal("observations", line => {
                 var d = JsonSerializer.Deserialize<ObservationDto>(line, JsonOpts);
-                if (d is not null && _nodes.TryGetValue(d.NodeId, out var n)) n.Observations.Add(d.ToObs());
+                if (d is null) return;
+                var key = (d.NodeId, d.Wcid, d.Name.ToLowerInvariant(),
+                    (int)Math.Round(d.RelativePosition.X),
+                    (int)Math.Round(d.RelativePosition.Y),
+                    (int)Math.Round(d.RelativePosition.Z));
+                obsByKey[key] = d;
             });
+            foreach (var d in obsByKey.Values)
+            {
+                if (_nodes.TryGetValue(d.NodeId, out var n))
+                    n.Observations.Add(d.ToObs());
+            }
         }
         catch (Exception ex)
         {
@@ -950,6 +1203,7 @@ internal sealed record EntitySighting(NavNode Node, EntityObservation Observatio
 
 internal sealed record NavRoute(IReadOnlyList<NavRouteStep> Steps, float TotalCostSeconds);
 internal sealed record NavRouteStep(NavNode Node, NavEdge? EdgeFromPrevious);
+internal sealed record NavConnection(NavEdge Edge, NavNode To);
 
 internal enum EntityKind  { Unknown, NPC, Player, Item, Mob, Portal, Door, Vendor, Healer, Lifestone, Corpse }
 internal enum AreaKind    { Unknown, Room, Hall, Plaza, Outdoor, Dungeon }
