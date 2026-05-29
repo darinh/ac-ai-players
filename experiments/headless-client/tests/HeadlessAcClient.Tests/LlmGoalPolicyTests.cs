@@ -533,6 +533,52 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsGoalRecentlyRejected_Blocked_MatchesByTargetName()
+    {
+        // Slice S — server-physics-clamped motion rejection. The
+        // walk-tick blocked-motion detector emits ActionRejected with
+        // ErrorLabel="Blocked" + Name=<motionTarget.Name> + ItemGuid
+        // when the bot fails to advance toward intent for N consecutive
+        // ticks. Dedup must catch goals targeting the same name so
+        // the LLM doesn't immediately re-pick a target it just learned
+        // is geometrically unreachable from current position.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFD, ErrorLabel = "Blocked",
+            Name = "Sparring Golem",
+            Text = "Blocked: 'Sparring Golem' — server physics held bot in place (3 ticks, actualMove<25% of expected)",
+            ItemGuid = 0x80001500u,
+        });
+
+        var attack = new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "Sparring Golem" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(attack, es));
+
+        // Different verb (Talk) on same target should ALSO dedup —
+        // the wall doesn't care which verb you intended.
+        var talk = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Sparring Golem" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(talk, es));
+
+        // Different target name should NOT dedup.
+        var other = new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "Olthoi Drudge" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(other, es));
+    }
+
+    [Fact]
     public void IsGoalRecentlyRejected_InventoryServerSaveFailed_MatchesByItemWcid()
     {
         // Mirrors HandshakeDriver's Slice J rejection for unreachable

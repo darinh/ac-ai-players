@@ -532,6 +532,12 @@ internal sealed class HandshakeDriver : IDisposable
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         int                  walkTickAps = 0;
+        // Slice S — blocked-motion detection state. Tracked across
+        // walk ticks within a single motion lock; reset whenever the
+        // lock is released (see ResetMotion block).
+        Vector3?             prevSelfBeforeAp = null;
+        float                prevExpectedStepLen = 0f;
+        int                  consecutiveBlockedTicks = 0;
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
@@ -572,6 +578,23 @@ internal sealed class HandshakeDriver : IDisposable
         // must advance at the same rate or motion-done detection drifts.
         const float          WalkSpeedUnitsPerSec = 5.0f;
         const int            MotionWallClockTimeoutSec = 30;
+        // Slice S — blocked-motion detection. Server-authoritative
+        // walkSelf.Position is updated by UpdatePosition packets from
+        // the server. After we send an AP(intent), if the server's
+        // next reported position has barely advanced from where we
+        // were before sending — well under the step we requested —
+        // server physics is clamping us against something (wall,
+        // closed door, mob, NPC, geometry). Stop after a short run
+        // of blocked ticks and surface ActionRejected so strategy
+        // re-deliberates instead of (a) continuing to send APs the
+        // server keeps clamping and (b) eventually drifting through
+        // the obstacle via accumulated AP creep. No hardcoded
+        // geometry: the detector only consumes server-reported self
+        // position, which is the same signal a real player's local
+        // physics engine consumes.
+        const float          BlockedMoveRatioThreshold = 0.25f;
+        const int            BlockedConsecutiveTicks   = 3;
+        const float          BlockedMinExpectedStep    = 0.30f;
         // Slice Q — corpse loot extraction. After the bot opens a
         // corpse via USE, the server emits ObjectCreate for each
         // contained item with ContainerGuid=corpse.Guid and NO world
@@ -1841,6 +1864,13 @@ internal sealed class HandshakeDriver : IDisposable
                     useSentAt = null;
                     lastSentWaypointPos = null;
                     walkTickAps = 0;
+                    // Slice S — clear blocked-motion bookkeeping so
+                    // a fresh lock starts with a clean slate (the
+                    // previous lock may have ended in a "stuck on
+                    // wall" state we don't want to inherit).
+                    prevSelfBeforeAp = null;
+                    prevExpectedStepLen = 0f;
+                    consecutiveBlockedTicks = 0;
                     pendingGiveItemGuid = null;
                     lockedGoalKind = null;
 
@@ -3242,14 +3272,80 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                        var liveTarget = worldState.WithinRadius(walkSelf, 999f)
-                            .FirstOrDefault(s => s.Guid == motionTarget.Guid);
-                        if (liveTarget is null)
+                        // Slice S — blocked-motion detection. Before
+                        // we compute and send another AP, check what
+                        // happened to the LAST AP we sent. We snapshot
+                        // walkSelf.Position INTO prevSelfBeforeAp just
+                        // before sending each AP. If the server-reported
+                        // position on this tick has barely moved from
+                        // that snapshot — well under the step length
+                        // we requested — server physics is holding us
+                        // against geometry (wall, closed door, mob,
+                        // obstacle). We tolerate a short run of these
+                        // because the FIRST tick after lock-on can be
+                        // a no-op (server hasn't started the motion
+                        // yet) and a single network blip can hide one
+                        // tick's worth of movement.
+                        if (prevSelfBeforeAp is Vector3 prevSelf &&
+                            prevExpectedStepLen >= BlockedMinExpectedStep)
+                        {
+                            var moveDx = walkSelf.Position.X - prevSelf.X;
+                            var moveDy = walkSelf.Position.Y - prevSelf.Y;
+                            var actualMove = MathF.Sqrt(moveDx * moveDx + moveDy * moveDy);
+                            if (actualMove < prevExpectedStepLen * BlockedMoveRatioThreshold)
+                            {
+                                consecutiveBlockedTicks++;
+                                Console.WriteLine(
+                                    $"[motion] walk-tick: BLOCKED (tick {consecutiveBlockedTicks}/{BlockedConsecutiveTicks}) " +
+                                    $"actualMoveXY={actualMove:F3}u expectedStep={prevExpectedStepLen:F2}u " +
+                                    $"ratio={(actualMove / prevExpectedStepLen):P0} " +
+                                    $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2}) " +
+                                    $"prevSelf=({prevSelf.X:F2},{prevSelf.Y:F2})");
+                                if (consecutiveBlockedTicks >= BlockedConsecutiveTicks)
+                                {
+                                    // Bot is clipping into an obstacle. Stop
+                                    // sending APs (the server WILL keep
+                                    // clamping and we MUST NOT trust any
+                                    // future accepted-far-away AP — that's
+                                    // the "teleports past obstacle" bug).
+                                    // Surface ActionRejected "Blocked" with
+                                    // the target's guid+name so dedup
+                                    // (LlmGoalPolicy + NoQuestKnowledgePolicy)
+                                    // can avoid retargeting the same guid.
+                                    motionDone = true;
+                                    Console.WriteLine(
+                                        $"[motion] walk-tick: BLOCKED for {consecutiveBlockedTicks} consecutive ticks — " +
+                                        $"target 0x{motionTarget.Guid:X8} '{motionTarget.Name}' is unreachable from current position; stopping motion");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"Blocked: '{motionTarget.Name}' — server physics held bot in place ({consecutiveBlockedTicks} ticks, actualMove<{BlockedMoveRatioThreshold:P0} of expected)",
+                                        ItemGuid = motionTarget.Guid,
+                                        Name = motionTarget.Name,
+                                        ErrorCode = 0xFFFD,
+                                        ErrorLabel = "Blocked",
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                // Healthy progress — reset the counter.
+                                consecutiveBlockedTicks = 0;
+                            }
+                        }
+
+                        var liveTarget = motionDone
+                            ? null
+                            : worldState.WithinRadius(walkSelf, 999f)
+                                .FirstOrDefault(s => s.Guid == motionTarget.Guid);
+                        if (!motionDone && liveTarget is null)
                         {
                             motionDone = true;
                             Console.WriteLine($"[motion] walk-tick: target 0x{motionTarget.Guid:X8} disappeared from world snapshot — stopping");
                         }
-                        else
+                        else if (!motionDone && liveTarget is not null)
                         {
                             // Step in XY only; preserve self Z so we don't
                             // get flagged by Player_Tick's z-jump hacking
@@ -3346,6 +3442,13 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
                                 walkTickAps++;
                                 lastSentWaypointPos = newPos;
+                                // Slice S — remember what we were BEFORE
+                                // this AP, and how big a step we asked
+                                // for. Next tick's blocked-detector
+                                // compares (current walkSelf - prevSelf)
+                                // against prevExpectedStepLen.
+                                prevSelfBeforeAp    = walkSelf.Position;
+                                prevExpectedStepLen = stepLen;
                                 Console.WriteLine(
                                     $"[motion] walk-tick #{walkTickAps}: AP " +
                                     $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2},{walkSelf.Position.Z:F2}) " +
