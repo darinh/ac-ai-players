@@ -770,4 +770,158 @@ public sealed class NavGraphTests : IDisposable
         Assert.True(lines >= 4,
             $"expected >= 4 new-node writes, got {lines}");
     }
+
+    // ─── AcCoords + NavNode world-coordinate awareness ───────────────
+
+    [Fact]
+    public void AcCoords_outdoor_holtburg_lifestone_matches_in_game_loc()
+    {
+        // Holtburg outdoor landblock = 0xA9B4 (LBX=0xA9=169, LBY=0xB4=180).
+        // Pick a cell-local position (88, 56) and verify the ACE
+        // GetMapCoords formula (globalY/240 - 102, globalX/240 - 102)
+        // reproduces the expected decimals exactly. Expected values
+        // are computed inline so the test self-documents the math and
+        // can't drift if someone rounds wrong.
+        const uint cellId = 0xA9B40000u | 0x0001u; // outdoor (low-16 < 0x100)
+        var pos = new Vector3(88f, 56f, 100f);
+
+        var (wx, wy) = AcCoords.ToGlobalXY(cellId, pos);
+        Assert.Equal(169 * 192 + 88, wx, 0.001f);
+        Assert.Equal(180 * 192 + 56, wy, 0.001f);
+
+        var map = AcCoords.ToMapCoords(cellId, pos);
+        Assert.NotNull(map);
+        var expectedNS = (180 * 192 + 56) / 240f - 102f; // ≈ 42.23
+        var expectedEW = (169 * 192 + 88) / 240f - 102f; // ≈ 33.57
+        Assert.Equal(expectedNS, map!.Value.NS, 0.001f);
+        Assert.Equal(expectedEW, map!.Value.EW, 0.001f);
+
+        // Sanity bracket against published Holtburg coords (~41N, 33E
+        // for the lifestone area). This is a sanity check, not a
+        // precision check — exact lifestone tile within 0xA9B4 isn't
+        // pinned by this test.
+        Assert.InRange(map.Value.NS, 41f, 43f);
+        Assert.InRange(map.Value.EW, 32f, 35f);
+    }
+
+    [Fact]
+    public void AcCoords_indoor_cell_has_global_xy_but_null_map_coords()
+    {
+        // Training academy spawn cell from live spike run 3:
+        // CellId = 0x860201AD. low-16 = 0x01AD = 429 ≥ 0x100 → INDOOR.
+        // World map coords must be null (ACE's GetMapCoords returns null
+        // for indoor cells), but landblock-relative global meters
+        // (WorldX/WorldY) are still meaningful and must be populated.
+        const uint cellId = 0x860201ADu;
+        var pos = new Vector3(50f, 75f, 0.5f);
+
+        Assert.True(AcCoords.IsIndoor(cellId));
+
+        var (wx, wy) = AcCoords.ToGlobalXY(cellId, pos);
+        Assert.Equal(0x86 * 192 + 50, wx, 0.001f);
+        Assert.Equal(0x02 * 192 + 75, wy, 0.001f);
+
+        var map = AcCoords.ToMapCoords(cellId, pos);
+        Assert.Null(map);
+    }
+
+    [Fact]
+    public void AcCoords_MapCoordsToGlobalXY_round_trips()
+    {
+        // NPC-direction parsing path: a quest text like "travel to
+        // 23.5N, 14.2E" must resolve to a global (X,Y) we can then
+        // route toward. Verify the inverse is exact by round-tripping
+        // through an outdoor cell.
+        const uint cellId = 0xA9B40010u; // outdoor in Holtburg
+        var pos = new Vector3(120f, 64f, 0f);
+
+        var forward = AcCoords.ToMapCoords(cellId, pos);
+        Assert.NotNull(forward);
+
+        var (wx2, wy2) = AcCoords.MapCoordsToGlobalXY(forward!.Value.NS, forward!.Value.EW);
+        var (wx, wy) = AcCoords.ToGlobalXY(cellId, pos);
+
+        Assert.Equal(wx, wx2, 0.01f);
+        Assert.Equal(wy, wy2, 0.01f);
+    }
+
+    [Fact]
+    public void NavNode_outdoor_populates_world_and_map_coords()
+    {
+        var g = NewGraph();
+        const uint cell = 0xA9B40001u; // outdoor Holtburg
+        var pos = new Vector3(88f, 56f, 100f);
+
+        var id = g.RecordVisit(cell, pos, _t0);
+        var node = g.FindNode(id);
+        Assert.NotNull(node);
+
+        var (wx, wy) = AcCoords.ToGlobalXY(cell, pos);
+        var expectedNS = (180 * 192 + 56) / 240f - 102f;
+        var expectedEW = (169 * 192 + 88) / 240f - 102f;
+        Assert.Equal(wx, node!.WorldX, 0.001f);
+        Assert.Equal(wy, node.WorldY, 0.001f);
+        Assert.NotNull(node.CoordNS);
+        Assert.NotNull(node.CoordEW);
+        Assert.Equal(expectedNS, node.CoordNS!.Value, 0.001f);
+        Assert.Equal(expectedEW, node.CoordEW!.Value, 0.001f);
+    }
+
+    [Fact]
+    public void NavNode_indoor_populates_world_xy_but_null_map_coords()
+    {
+        var g = NewGraph();
+        const uint cell = 0x860201ADu; // academy spawn (indoor)
+        var pos = new Vector3(50f, 75f, 0.5f);
+
+        var id = g.RecordVisit(cell, pos, _t0);
+        var node = g.FindNode(id);
+        Assert.NotNull(node);
+
+        Assert.Equal(0x86 * 192 + 50, node!.WorldX, 0.001f);
+        Assert.Equal(0x02 * 192 + 75, node.WorldY, 0.001f);
+        Assert.Null(node.CoordNS);
+        Assert.Null(node.CoordEW);
+    }
+
+    [Fact]
+    public void NavNode_world_coords_survive_journal_roundtrip()
+    {
+        // Persistence regression guard: WorldX/Y + CoordNS/EW must
+        // round-trip through nodes.jsonl, otherwise a fresh process
+        // would re-derive them (fine for now) but lose them entirely
+        // if the AcCoords formula ever drifts from what the writer
+        // used.
+        const uint outdoor = 0xA9B40010u;
+        const uint indoor  = 0x860201ADu;
+        var posOutdoor = new Vector3(100f, 100f, 50f);
+        var posIndoor  = new Vector3(20f, 30f, 0.5f);
+
+        Guid idOut, idIn;
+        using (var g = new NavGraph(_dir))
+        {
+            idOut = g.RecordVisit(outdoor, posOutdoor, _t0);
+            idIn  = g.RecordVisit(indoor,  posIndoor,  _t0);
+            g.Flush();
+        }
+
+        var g2 = NewGraph();
+        var nOut = g2.FindNode(idOut);
+        var nIn  = g2.FindNode(idIn);
+        Assert.NotNull(nOut);
+        Assert.NotNull(nIn);
+
+        var (oWx, oWy) = AcCoords.ToGlobalXY(outdoor, posOutdoor);
+        var oMap = AcCoords.ToMapCoords(outdoor, posOutdoor)!.Value;
+        Assert.Equal(oWx, nOut!.WorldX, 0.001f);
+        Assert.Equal(oWy, nOut.WorldY, 0.001f);
+        Assert.Equal(oMap.NS, nOut.CoordNS!.Value, 0.001f);
+        Assert.Equal(oMap.EW, nOut.CoordEW!.Value, 0.001f);
+
+        var (iWx, iWy) = AcCoords.ToGlobalXY(indoor, posIndoor);
+        Assert.Equal(iWx, nIn!.WorldX, 0.001f);
+        Assert.Equal(iWy, nIn.WorldY, 0.001f);
+        Assert.Null(nIn.CoordNS);
+        Assert.Null(nIn.CoordEW);
+    }
 }

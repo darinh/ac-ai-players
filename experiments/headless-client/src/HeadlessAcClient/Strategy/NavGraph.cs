@@ -588,6 +588,8 @@ internal sealed class NavGraph : IDisposable
             else
             {
                 var landblock = cellId >> 16;
+                var (wx, wy) = AcCoords.ToGlobalXY(cellId, position);
+                var map = AcCoords.ToMapCoords(cellId, position);
                 var n = new NavNode
                 {
                     Id = Guid.NewGuid(),
@@ -596,6 +598,10 @@ internal sealed class NavGraph : IDisposable
                     Position = position,
                     FirstSeenUtc = utc,
                     AreaId = areaId,
+                    WorldX = wx,
+                    WorldY = wy,
+                    CoordNS = map?.NS,
+                    CoordEW = map?.EW,
                 };
                 n.LastSeenUtc = utc;
                 n.VisitCount = 1;
@@ -1189,14 +1195,17 @@ internal sealed class NavGraph : IDisposable
 
     internal sealed record NodeDto(Guid Id, uint CellId, uint Landblock, Vec3Dto Position,
                                     DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc,
-                                    int VisitCount, Guid? AreaId, string[] Tags)
+                                    int VisitCount, Guid? AreaId, string[] Tags,
+                                    float WorldX, float WorldY, float? CoordNS, float? CoordEW)
     {
         public static NodeDto From(NavNode n) => new(n.Id, n.CellId, n.Landblock, Vec3Dto.From(n.Position),
-            n.FirstSeenUtc, n.LastSeenUtc, n.VisitCount, n.AreaId, n.Tags.ToArray());
+            n.FirstSeenUtc, n.LastSeenUtc, n.VisitCount, n.AreaId, n.Tags.ToArray(),
+            n.WorldX, n.WorldY, n.CoordNS, n.CoordEW);
         public NavNode To() {
             var n = new NavNode {
                 Id = Id, CellId = CellId, Landblock = Landblock, Position = Position.To(),
                 FirstSeenUtc = FirstSeenUtc, AreaId = AreaId,
+                WorldX = WorldX, WorldY = WorldY, CoordNS = CoordNS, CoordEW = CoordEW,
             };
             n.LastSeenUtc = LastSeenUtc;
             n.VisitCount = VisitCount;
@@ -1280,6 +1289,20 @@ internal sealed class NavNode
     public HashSet<string> Tags { get; } = new(StringComparer.OrdinalIgnoreCase);
     public List<EntityObservation> Observations { get; } = new();
 
+    // Absolute world coords (computed at node-creation time via AcCoords).
+    // - WorldX/WorldY: meters in Dereth's global frame. Always populated,
+    //   meaningful for indoor and outdoor nodes alike (every landblock
+    //   has a SW-corner origin).
+    // - CoordNS/CoordEW: in-game `/loc`-style decimal map coords. NULL
+    //   for indoor cells, since ACE's GetMapCoords returns null there.
+    // Used so NPC directions like "travel to 23.5N, 14.2E" can resolve
+    // to a target node, and so cross-landblock distances are computable
+    // without round-tripping through ToGlobal each time.
+    public required float WorldX { get; init; }
+    public required float WorldY { get; init; }
+    public float? CoordNS { get; init; }
+    public float? CoordEW { get; init; }
+
     // In-memory only (not serialized). Used by RecordVisit to throttle
     // re-persistence of an unchanged node when the bot is stationary or
     // wiggling within MergeRadius. Reset to DateTimeOffset.MinValue on
@@ -1324,3 +1347,62 @@ internal enum EntityKind  { Unknown, NPC, Player, Item, Mob, Portal, Door, Vendo
 internal enum AreaKind    { Unknown, Room, Hall, Plaza, Outdoor, Dungeon }
 internal enum PlaceKind   { Unknown, Town, Building, Dungeon, PortalHub, Outdoor }
 internal enum NavEdgeKind { Walked, CrossedBoundary, UsedDoor, UsedPortal, UsedItem }
+
+// ─── AC1 coordinate conversion ──────────────────────────────────────
+//
+// Canonical projection cross-checked against ACE source (read-only
+// reference, not a dependency):
+//   ACE.Entity/Position.cs               BlockLength=192 CellSide=8 CellLength=24
+//   ACE.Entity/LandblockId.cs            LandblockX = (raw>>24)&0xFF
+//                                        LandblockY = (raw>>16)&0xFF
+//   ACE.Server/Entity/PositionExtensions.cs
+//     ToGlobal:        globalX = LBX*192 + posX,  globalY = LBY*192 + posY
+//     GetMapCoords:    map = (globalX/240, globalY/240) - (102,102)
+//                      returns null when (cellId & 0xFFFF) >= 0x100 (indoor)
+//
+// Sign convention (matches in-game `/loc` and map):
+//   positive Y / CoordNS > 0  →  North
+//   positive X / CoordEW > 0  →  East
+//
+// We always populate WorldX/WorldY (they're meaningful even inside
+// dungeons — every landblock has a SW-corner origin). We only populate
+// CoordNS/CoordEW for OUTDOOR cells, because indoor cells aren't on
+// the surface map (ACE returns null for them in GetMapCoords).
+internal static class AcCoords
+{
+    public const int BlockLength = 192;   // landblock edge in meters
+    public const float MapUnit   = 240f;  // meters per in-game map unit
+    public const float DerethHalf = 102f; // map is 204 units, -102..+102
+
+    public static bool IsIndoor(uint cellId) => (cellId & 0xFFFFu) >= 0x100u;
+
+    public static (float WorldX, float WorldY) ToGlobalXY(uint cellId, Vector3 pos)
+    {
+        var lbx = (int)((cellId >> 24) & 0xFFu);
+        var lby = (int)((cellId >> 16) & 0xFFu);
+        return (lbx * BlockLength + pos.X, lby * BlockLength + pos.Y);
+    }
+
+    /// <summary>
+    /// Returns (NS, EW) decimal map coordinates matching the in-game
+    /// `/loc` display, or null for indoor cells (no surface-map
+    /// position). NS positive = North, EW positive = East.
+    /// </summary>
+    public static (float NS, float EW)? ToMapCoords(uint cellId, Vector3 pos)
+    {
+        if (IsIndoor(cellId)) return null;
+        var (gx, gy) = ToGlobalXY(cellId, pos);
+        return (gy / MapUnit - DerethHalf, gx / MapUnit - DerethHalf);
+    }
+
+    /// <summary>
+    /// Inverse of ToMapCoords: returns the global (X,Y) in meters of
+    /// the given surface-map (NS,EW) decimal coordinate. Use this to
+    /// resolve NPC directions like "travel to 23.5N, 14.2E" into a
+    /// world position the bot can navigate toward.
+    /// </summary>
+    public static (float WorldX, float WorldY) MapCoordsToGlobalXY(float ns, float ew)
+    {
+        return ((ew + DerethHalf) * MapUnit, (ns + DerethHalf) * MapUnit);
+    }
+}
