@@ -1621,9 +1621,10 @@ internal sealed class HandshakeDriver : IDisposable
                 //      send block dispatches GiveObjectRequest
                 //      instead of Use.
                 //   4. Goal kinds we do NOT pre-empt with — Explore,
-                //      GoTo, Talk — fall through to the schema-only
-                //      picker below, which handles wander + door /
-                //      portal traversal.
+                //      GoTo — fall through to the schema-only picker
+                //      below, which handles wander + door / portal
+                //      traversal. Talk IS pre-empted (mechanically
+                //      equivalent to USE on an NPC).
                 if (!autonomousPositionSent &&
                     !useSent &&
                     motionTarget is null &&
@@ -1656,11 +1657,22 @@ internal sealed class HandshakeDriver : IDisposable
                     //     motor for it. If we ever need explicit
                     //     wield-from-bag (re-equip best armor on
                     //     login), add a dedicated dispatch here.
-                    //   - Explore / GoTo / Talk: fall through to the
+                    //   - Explore / GoTo: fall through to the
                     //     schema-only picker below.
+                    //   - Talk: PRE-EMPTED. In AC, "talking to an NPC"
+                    //     is mechanically a USE message against the
+                    //     NPC's guid — the action-send branch defaults
+                    //     to USE for non-hostile / non-give / non-pickup
+                    //     targets, so the same walk-to-target codepath
+                    //     used for Use works identically for Talk. This
+                    //     lets the LLM's name-targeting hint
+                    //     (e.g. Talk{name="Jonathan"}) actually drive
+                    //     motion instead of falling through to the
+                    //     nearest-named picker.
                     if (goal is not null &&
                         (goal.Kind == GoalKind.Give ||
                          goal.Kind == GoalKind.Use ||
+                         goal.Kind == GoalKind.Talk ||
                          goal.Kind == GoalKind.Attack ||
                          goal.Kind == GoalKind.Pickup))
                     {
