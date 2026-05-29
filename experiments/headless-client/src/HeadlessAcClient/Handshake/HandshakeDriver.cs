@@ -2287,6 +2287,15 @@ internal sealed class HandshakeDriver : IDisposable
                                 var descFlags = s.ObjectDescriptionFlags ?? 0u;
                                 var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
                                 var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
+                                // Slice P — corpses are time-sensitive
+                                // loot containers (they decay). Bump
+                                // them up the priority list so the bot
+                                // pivots to loot immediately after a
+                                // kill rather than chasing the next
+                                // NPC and forgetting about the corpse.
+                                // Wire-protocol bit, not English-name
+                                // matching (no hardcoded knowledge).
+                                var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
@@ -2294,8 +2303,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
+                                var corpseVisited = isCorpse && visitedTargetGuids.Contains(s.Guid);
                                 int prio;
-                                if (isNpc) prio = 0;
+                                if (isCorpse && !corpseVisited) prio = 0;
+                                else if (isNpc) prio = 0;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 2;
                                 else if (isWritable) prio = 2;
@@ -2343,6 +2354,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 var descFlags = s.ObjectDescriptionFlags ?? 0u;
                                 var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
                                 var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
+                                // Slice P — corpses are time-sensitive
+                                // loot containers; surface unvisited
+                                // corpses ahead of pickups in the
+                                // exploration fallback too.
+                                var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
@@ -2350,6 +2366,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 // Exploration priorities (lower = better):
                                 //   0: unvisited NPC (quest giver / shopkeeper)
+                                //      OR unvisited corpse (fresh loot — Slice P)
                                 //   1: unvisited door/portal (cross to new room)
                                 //   2: visited door/portal (BACKTRACK through
                                 //      to re-stimulate cells on the other side)
@@ -2358,7 +2375,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 //      it's hostile via Strategy layer)
                                 //   5: everything else (filtered out below)
                                 int prio;
-                                if (!isVisited && isNpc) prio = 0;
+                                if (!isVisited && isCorpse) prio = 0;
+                                else if (!isVisited && isNpc) prio = 0;
                                 else if (!isVisited && (isDoor || isPortal)) prio = 1;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (!isVisited && isPickup && !pickedBefore) prio = 3;

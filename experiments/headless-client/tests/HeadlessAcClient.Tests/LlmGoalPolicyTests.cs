@@ -767,6 +767,28 @@ public class LlmGoalPolicyTests
         Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goal, es));
     }
 
+    // ---- Slice P (corpse-loot RULES bullet) ----
+    //
+    // The picker bumps unvisited corpses to priority bucket 0
+    // (alongside NPCs) so the bot pivots to loot a fresh corpse
+    // ahead of the next NPC. The LLM also needs a RULES bullet
+    // teaching it to Use a corpse and then Pickup contents. This
+    // test only asserts the bullet is present; the picker
+    // behaviour itself is covered by live spike telemetry (no
+    // unit-test seam without refactoring HandshakeDriver).
+
+    [Fact]
+    public void BuildUserPrompt_ContainsCorpseLootingRule()
+    {
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("Looting:", prompt);
+        Assert.Contains("corpse", prompt);
+        Assert.Contains("Use{target: name=\"<corpse name>\"}", prompt);
+        Assert.Contains("Pickup{target: name=\"<item>\"}", prompt);
+    }
+
     // ---- Slice G — server-hints prompt section regression ----
     //
     // In rejfix-run-01 the bot teleported to Holtburg, saw the Life
