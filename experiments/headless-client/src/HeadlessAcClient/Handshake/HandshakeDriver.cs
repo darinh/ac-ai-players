@@ -560,9 +560,26 @@ internal sealed class HandshakeDriver : IDisposable
         // must advance at the same rate or motion-done detection drifts.
         const float          WalkSpeedUnitsPerSec = 5.0f;
         const int            MotionWallClockTimeoutSec = 30;
+        // Slice Q — corpse loot extraction. After the bot opens a
+        // corpse via USE, the server emits ObjectCreate for each
+        // contained item with ContainerGuid=corpse.Guid and NO world
+        // Position. WithinRadius can't see them; we dispatch
+        // PUTITEMINCONTAINER directly. Tracker is proximity-gated:
+        // we store the player's XY position at open time and only
+        // loot when the bot has not wandered >LootContainerProximityRadius
+        // away. TTL bounds memory + handles the case where a corpse
+        // decays server-side without us hearing about it.
+        const int            LootContainerTtlSec = 90;
+        const float          LootContainerProximityRadius = 5.0f;
+        // PickupItemTypeMask (0xD96F) plus Misc (0x80) for trophy
+        // items (claws, teeth, etc.) which standard pickup excludes
+        // because Misc collides with Door — but inside a corpse the
+        // door false-positive risk vanishes.
+        const uint           LootItemTypeMask = 0xD9EF;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
+        var  recentlyOpenedContainers = new Dictionary<uint, (DateTime OpenedAt, Vector3 OpenedAtPos)>();
 
         // Multi-fragment messages (ObjectCreate for players with active
         // motion, LoginCompletion GameEvent, etc.) split across multiple
@@ -1823,6 +1840,175 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
+                // Slice Q — Container loot extraction pre-emptor.
+                // Runs BEFORE the LLM pre-emptor and the schema
+                // picker so that loot inside a freshly-opened corpse
+                // always wins over the next walking target. Slice P
+                // ensures the bot walks to the corpse and USEs it;
+                // the server then spawns ObjectCreate messages for
+                // each contained item with ContainerGuid=corpse.Guid
+                // and NO world Position. WithinRadius is position-
+                // based and excludes these items — they are
+                // invisible to the standard picker. This block
+                // scans for items inside any recently-opened corpse
+                // that the bot is still adjacent to (proximity-
+                // gated to ~5u) and dispatches PUTITEMINCONTAINER
+                // immediately, with NO walk (we just walked to the
+                // corpse and have not moved since). After dispatch
+                // we synthesize motion state so the post-action
+                // reset cascade (HandshakeDriver.cs ~L1759) fires
+                // after PostActionCooldownSec, marking the loot
+                // item visited and clearing motionTarget so the
+                // next pre-emptor iteration picks the NEXT item.
+                if (!autonomousPositionSent &&
+                    !useSent &&
+                    motionTarget is null &&
+                    combatTargetGuid is null &&
+                    actionsCompleted < MaxActionsPerSession &&
+                    loginCompleteSent &&
+                    !loginCompleteResendNeeded &&
+                    loginCompletePacketIndex >= 0 &&
+                    (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
+                    worldState.Self is WorldObjectSnapshot lootSelf &&
+                    lootSelf.CellId is uint lootSelfCell &&
+                    lootSelfCell != 0)
+                {
+                    // Evict TTL-stale tracked corpses.
+                    var lootCutoff = DateTime.UtcNow.AddSeconds(-LootContainerTtlSec);
+                    var lootToEvict = new List<uint>();
+                    foreach (var lkv in recentlyOpenedContainers)
+                    {
+                        if (lkv.Value.OpenedAt < lootCutoff)
+                            lootToEvict.Add(lkv.Key);
+                    }
+                    foreach (var lk in lootToEvict)
+                        recentlyOpenedContainers.Remove(lk);
+
+                    if (recentlyOpenedContainers.Count > 0)
+                    {
+                        // Build the set of corpse guids the bot is
+                        // still standing next to. A bot that has
+                        // wandered away from a corpse cannot be
+                        // sending PUT against items inside it (server
+                        // would reject; worse, in retail AC the
+                        // container auto-closes on player movement).
+                        var nearbyContainers = new HashSet<uint>();
+                        foreach (var lkv in recentlyOpenedContainers)
+                        {
+                            var dxL = lkv.Value.OpenedAtPos.X - lootSelf.Position.X;
+                            var dyL = lkv.Value.OpenedAtPos.Y - lootSelf.Position.Y;
+                            var distLootXY = MathF.Sqrt(dxL * dxL + dyL * dyL);
+                            if (distLootXY <= LootContainerProximityRadius)
+                                nearbyContainers.Add(lkv.Key);
+                        }
+
+                        if (nearbyContainers.Count > 0)
+                        {
+                            // First unlooted, loot-eligible item
+                            // inside any nearby container. Order by
+                            // guid for deterministic per-cycle
+                            // selection across multi-item loots.
+                            var lootItem = worldState.Objects.Values
+                                .Where(s => s.Guid != lootSelf.Guid)
+                                .Where(s => s.ContainerGuid is uint c && nearbyContainers.Contains(c))
+                                .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                                .Where(s => s.ItemType is uint t && (t & LootItemTypeMask) != 0)
+                                .OrderBy(s => s.Guid)
+                                .FirstOrDefault();
+
+                            if (lootItem is not null)
+                            {
+                                var lootPktSeq  = nextOutboundPacketSequence++;
+                                var lootFragSeq = nextOutboundFragmentSequence++;
+                                var lootBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                                var lootLen = GameActionPutItemInContainerMessage.Pack(
+                                    lootBuf,
+                                    itemGuid:      lootItem.Guid,
+                                    containerGuid: chosenCharacterGuid,
+                                    placement:     0);
+                                var lootMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    lootMsg.AddAckSequence(lastReceivedSeq);
+                                lootMsg.AddBlobFragment(
+                                    fragSequence: lootFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: lootBuf.AsSpan(0, lootLen));
+                                var lootSent = lootMsg.Pack(sendBuf, myClientId,
+                                                            sequence: lootPktSeq, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, lootSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                                // Hook the existing wearable equip
+                                // pipeline. If the loot is wearable
+                                // (ValidLocations != 0), the inventory
+                                // ack path will dispatch GetAndWieldItem
+                                // and the bot auto-equips upgraded gear.
+                                if (lootItem.ValidLocations is uint lvl && lvl != 0)
+                                {
+                                    var lEquipLoc = lvl & (~lvl + 1);
+                                    pendingEquip[lootItem.Guid] = lEquipLoc;
+                                    if (lootItem.WeenieClassId is uint lwc)
+                                        pendingEquipWcid[lootItem.Guid] = lwc;
+                                }
+
+                                Console.WriteLine(
+                                    $"[loot] Slice Q PUTITEMINCONTAINER (no walk): " +
+                                    $"item=0x{lootItem.Guid:X8} name='{lootItem.Name}' " +
+                                    $"itemType=0x{lootItem.ItemType ?? 0:X} " +
+                                    $"sourceContainer=0x{lootItem.ContainerGuid ?? 0:X8} " +
+                                    $"destContainer=0x{chosenCharacterGuid:X8} " +
+                                    $"payload={lootLen}B pktSeq={lootPktSeq} fragSeq={lootFragSeq} totalBytes={lootSent}");
+
+                                // Synthesize motion state. The post-
+                                // action reset cascade owns the
+                                // visitedTargetGuids.Add and gate
+                                // clear — set useSent=true so it
+                                // fires after PostActionCooldownSec.
+                                // Set autonomousPositionSent /
+                                // moveToStateStart / moveToStateStop
+                                // / motionDone so the AP-send, MS-
+                                // start, walk-tick, MS-stop and
+                                // dispatch blocks all skip on this
+                                // tick.
+                                motionTarget = lootItem;
+                                autonomousPositionSent = true;
+                                moveToStateStartSent = true;
+                                moveToStateStopSent = true;
+                                motionDone = true;
+                                motionStartedAt = DateTime.UtcNow;
+                                motionStoppedAt = DateTime.UtcNow;
+                                motionLockedCellId = lootSelfCell;
+                                useSent = true;
+                                useSentAt = DateTime.UtcNow;
+                            }
+                            else
+                            {
+                                // Pre-empt couldn't loot anything
+                                // in the nearby containers. Either
+                                // they're empty or all items have
+                                // been visited. Untrack now to keep
+                                // the dict small and avoid repeated
+                                // proximity scans of an empty corpse
+                                // for the rest of TTL.
+                                foreach (var nearbyCorpse in nearbyContainers)
+                                {
+                                    var anyLeftInside = worldState.Objects.Values.Any(s =>
+                                        s.ContainerGuid is uint c && c == nearbyCorpse &&
+                                        !visitedTargetGuids.Contains(s.Guid));
+                                    if (!anyLeftInside)
+                                    {
+                                        recentlyOpenedContainers.Remove(nearbyCorpse);
+                                        Console.WriteLine(
+                                            $"[loot] corpse 0x{nearbyCorpse:X8} fully looted / empty — untracking");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // M1.6 redo — LLM-driven goal pre-emptor (replaces
                 // the Phase 7h hardcoded {Jonathan ← Exit Token,
                 // Greeter ← Calling Stone} pair table). Per
@@ -2798,6 +2984,24 @@ internal sealed class HandshakeDriver : IDisposable
                         actionBuf  = new byte[GameActionUseMessage.PackedSize];
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
+
+                        // Slice Q — track USE on a corpse so the loot
+                        // pre-emptor can dispatch PUTITEMINCONTAINER
+                        // for items the server spawns inside it.
+                        // Wire-protocol bit only (Corpse=0x2000); no
+                        // English-name matching.
+                        var useDescFlags = motionTarget.ObjectDescriptionFlags ?? 0u;
+                        if ((useDescFlags & (uint)ObjectDescriptionFlag.Corpse) != 0 &&
+                            worldState.Self is WorldObjectSnapshot useCorpseSelf)
+                        {
+                            recentlyOpenedContainers[motionTarget.Guid] =
+                                (DateTime.UtcNow, useCorpseSelf.Position);
+                            Console.WriteLine(
+                                $"[loot] Slice Q tracking opened corpse guid=0x{motionTarget.Guid:X8} " +
+                                $"name='{motionTarget.Name}' at selfPos=" +
+                                $"({useCorpseSelf.Position.X:F2},{useCorpseSelf.Position.Y:F2}) " +
+                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8}");
+                        }
                     }
 
                     var msg = new OutboundPacket();
