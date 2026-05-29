@@ -471,6 +471,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // Inventory-USE dedup (2026-05-30): if the LLM emitted Use
+        // against an inventory item we've already USE'd in the
+        // recent event window, drop it. Motivating spike
+        // (bot_stalenarrow01) showed Llama-3.3-70B emitting
+        // Use{Letter From Home} 5 times in 3 min because the
+        // tutorial letter is non-consumable; the short_desc
+        // ("double-click to read") never goes away, so the LLM
+        // keeps re-emitting the same Use. This crowded out Attack
+        // emission (Sparring Golem at d=49u was visible + monster-
+        // tagged, weapon wielded, but never attacked). Falling
+        // through to the fallback gives the bot a chance to pick
+        // a different action.
+        if (IsInventoryUseRecentlyDispatched(goal, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Use kind={goal.Kind} target={goal.Target}" +
+                (goal.Item is null ? "" : $" item={goal.Item}") +
+                " — inventory item already USE'd recently; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: LLM Use targets recently-used inventory item");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         Console.WriteLine(
             $"[llm-call] success id={decisionId} latency={result.LatencyMs}ms " +
@@ -559,6 +582,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
+    /// True iff the goal is a <see cref="GoalKind.Use"/> whose
+    /// target or item matches an <see cref="EventKind.InventoryItemUsed"/>
+    /// event within the recent event window — meaning we already
+    /// dispatched a GameActionUse against the same inventory item
+    /// recently. Match key:
+    /// <list type="bullet">
+    /// <item>Item wcid (if the goal carries an Item).</item>
+    /// <item>Item name (case-insensitive exact match).</item>
+    /// <item>Target wcid (if the LLM put the item under target/
+    /// rather than item/, which the prompt does for inventory-USE).</item>
+    /// <item>Target name (case-insensitive exact).</item>
+    /// </list>
+    /// Only applies to <see cref="GoalKind.Use"/>; other verbs
+    /// (Pickup, Wield, Talk, Attack, Give) are unaffected — a
+    /// re-USE block on those would be wrong.
+    /// </summary>
+    /// <remarks>
+    /// Window matches <see cref="IsGoalRecentlyRejected"/> (30 events
+    /// ≈ 10 LLM decisions). For non-consumable inventory (notes,
+    /// letters, tutorial items) this prevents the runaway loop.
+    /// For consumables (potions, scrolls) the bot can re-USE after
+    /// the 30-event window scrolls past, which is fine for the
+    /// current academy/M3 scope; M4+ may want a wall-clock window
+    /// or an "item still in inventory unchanged" predicate.
+    /// </remarks>
+    internal static bool IsInventoryUseRecentlyDispatched(Goal goal, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Use) return false;
+        const int LookbackEvents = 30;
+
+        var targetName = goal.Target?.Name;
+        var targetWcid = goal.Target?.Wcid;
+        var itemName   = goal.Item?.Name;
+        var itemWcid   = goal.Item?.Wcid;
+
+        if (string.IsNullOrWhiteSpace(targetName) &&
+            string.IsNullOrWhiteSpace(itemName) &&
+            targetWcid is null && itemWcid is null)
+        {
+            return false;
+        }
+
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (ev.Kind != EventKind.InventoryItemUsed) continue;
+
+            if (itemWcid is uint iw && ev.Wcid == iw) return true;
+            if (targetWcid is uint tw && ev.Wcid == tw) return true;
+
+            if (!string.IsNullOrWhiteSpace(ev.Name))
+            {
+                if (!string.IsNullOrWhiteSpace(itemName) &&
+                    string.Equals(ev.Name, itemName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                if (!string.IsNullOrWhiteSpace(targetName) &&
+                    string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
     /// Returns true if any event newer than <paramref name="sequenceFloor"/>
     /// is plan-invalidating: it makes the in-flight LLM response
     /// (which was generated against an older world snapshot) unsafe
@@ -616,6 +707,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
 
+    /// <summary>
+    /// The "wake the LLM" event-kind classifier used by
+    /// <see cref="HasNewSalientEvent"/>. Wider than
+    /// <see cref="IsPlanInvalidatingKind"/> — it includes chatty
+    /// events whose only effect is to give the LLM something new
+    /// to react to (NpcDialog, ServerMessage, BookText) and
+    /// option-adding events (InventoryItemAdded), as well as the
+    /// picker-steering events that need a deliberation pass.
+    /// </summary>
+    /// <remarks>
+    /// EXCLUDED on purpose:
+    /// <list type="bullet">
+    /// <item><see cref="EventKind.InventoryItemUsed"/> — self-
+    /// emitted echo of our own dispatch; waking the LLM on it
+    /// would defeat the dedup it exists to power.</item>
+    /// <item><see cref="EventKind.PickerActivityCompleted"/> —
+    /// only Started churns deliberation; Completed is bookkeeping.</item>
+    /// </list>
+    /// </remarks>
+    internal static bool IsSalientKind(EventKind kind) =>
+        kind is EventKind.PopupString
+             or EventKind.InventoryItemAdded
+             or EventKind.LandblockChanged
+             or EventKind.GoalCompleted
+             or EventKind.GoalFailed
+             or EventKind.GoalExpired
+             or EventKind.NpcDialog
+             or EventKind.ServerMessage
+             or EventKind.ActionRejected
+             or EventKind.BookText
+             or EventKind.PickerActivityStarted
+             or EventKind.PickerArrivedNoAction;
+
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
     {
         // Recent() returns newest-first. Filter the suffix that's newer
@@ -666,31 +790,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Anything since our last look that's of a salient kind.
         return events.Recent()
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
-            .Any(e => e.Kind is EventKind.PopupString
-                              or EventKind.InventoryItemAdded
-                              or EventKind.LandblockChanged
-                              or EventKind.GoalCompleted
-                              or EventKind.GoalFailed
-                              or EventKind.GoalExpired
-                              or EventKind.NpcDialog
-                              or EventKind.ServerMessage
-                              or EventKind.ActionRejected
-                              or EventKind.BookText
-                              // Slice V (#86): picker began or
-                              // switched autonomous activity. Wake
-                              // the LLM so it can take strategic
-                              // control if the picker's choice is
-                              // off-plan. (Completed is NOT salient
-                              // — only Started churns deliberation.)
-                              or EventKind.PickerActivityStarted
-                              // Slice W.3 (#88): the picker walked
-                              // to its auto-locked target but no
-                              // LLM verb goal was in flight, so no
-                              // opcode was sent. Wake the LLM so
-                              // it can name a verb (Use/Talk/Pickup/
-                              // Attack) before the picker moves on
-                              // to the next target.
-                              or EventKind.PickerArrivedNoAction);
+            .Any(e => IsSalientKind(e.Kind));
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
@@ -809,6 +909,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Loot containers: openable chests, bookshelves, lockboxes and coffers show up in `Visible nearby` with the `chest` tag (they have the Container itemType bit AND the Openable description-flag, but unlike a corpse they don't decay). Treat them like a corpse: `Use{target: name=\"<chest name>\"}` to open, then `Pickup{target: name=\"<item>\"}` anything that appears inside. They commonly hold potions, scrolls, components, and starter gear in the academy. NEVER skip an unopened chest to chase the next NPC.");
         sb.AppendLine("- Reading vs taking writables: a `sign` (writable AND stuck — bolted to a wall) must be read in place with `Use{target: name=\"<sign>\"}`. A `book` (writable, NOT stuck — sitting on a table or floor) is pickup-able like any other item; prefer `Pickup{target: name=\"<book>\"}` so you can read it later and free up the spot for other observations. The `Visible nearby` tag is `sign` vs `book`.");
         sb.AppendLine("- LOOP-BREAK (Talk loop): If you have emitted `Talk{X}` 3 or more times in the last 10 goal emissions (see the Location & recency section below) AND no new inventory item has been added since AND no new unique server hint has appeared, STOP talking to X. Talk to a different visible NPC, or Use/Give an inventory item to a different target, or emit `Explore`.");
+        sb.AppendLine("- LOOP-BREAK (inventory-USE loop): If `## Recently used inventory items` lists an item as `still in inventory (not consumed)`, the policy WILL drop any Use goal you emit against that item. Do not emit Use{<that item>} again unless a new event (ActionRejected with a recovery hint, new NPC dialog, new server hint, or inventory change) gives concrete reason to retry. When the loop is broken pick a different action: if `Combat readiness` shows a wielded weapon and a `monster` in view, prefer `Attack`; if a visible NPC has not yet been talked to recently, prefer `Talk`; if a `pickup`-eligible item is visible, prefer `Pickup`; otherwise `Explore`.");
         sb.AppendLine("- LOOP-BREAK (town-stuck): If `minutes in current landblock` is greater than 5 AND `Combat readiness` shows `nearest monster: (none in view)` AND every visible creature is tagged `npc` (no `monster` tag anywhere in Visible nearby), you are STUCK INDOORS in a town. Stop cycling through NPCs — they have no more quests for you here. Emit `Explore{target: {name: \"anywhere\"}}` immediately. The schema picker will walk you through visible Doors and portals to discover new NPCs, monsters, and items. Combat XP, loot, and contracts happen OUTDOORS, not in town interiors. This rule OVERRIDES `Talk` and `Give` even when a new NPC is visible — talk-to-every-NPC is not progress when there are no monsters in view.");
         sb.AppendLine("- BLOCKED targets: an `ActionRejected` with label `Blocked` or `Unreachable` means the bot tried to walk to that target and server physics held it in place against geometry (a wall, a closed door, a barrier). Do NOT re-emit the same target — you will hit the same wall. Prefer a different visible target: if a Door is in the visible-nearby list, walk to or use the door first (it likely leads to the room your previous target is in). If no door is visible, emit `Explore` to discover a route around the obstacle. NEVER assume the bot can clip through obstacles.");
         if (stack is not null)
@@ -919,6 +1020,52 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"    short_desc: {i.ShortDesc}");
         }
         sb.AppendLine();
+
+        // 2026-05-30 — Inventory-USE recency surface. Renders
+        // recent EventKind.InventoryItemUsed events so the LLM can
+        // see "you already used this N times" and avoid re-emitting
+        // the same Use against a non-consumable. Without this, the
+        // policy-side dedup drops the goal but the LLM keeps
+        // generating it (wasting calls + crowding out other action
+        // emission). The "still in inventory" marker tells the LLM
+        // the item wasn't consumed, so re-using it is unlikely to
+        // produce a different outcome.
+        var recentInvUses = events.Recent(64)
+            .Where(e => e.Kind == EventKind.InventoryItemUsed)
+            .GroupBy(e => e.Name ?? $"wcid={e.Wcid}", StringComparer.OrdinalIgnoreCase)
+            .Select(g => new
+            {
+                Name = g.Key,
+                Wcid = g.First().Wcid,
+                Count = g.Count(),
+                LastSeq = g.Max(e => e.Sequence),
+            })
+            .OrderByDescending(x => x.LastSeq)
+            .Take(5)
+            .ToList();
+        if (recentInvUses.Count > 0)
+        {
+            sb.AppendLine("## Recently used inventory items");
+            foreach (var u in recentInvUses)
+            {
+                var stillHeld = world.Inventory.Any(i =>
+                    (u.Wcid is uint uw && i.Wcid == uw) ||
+                    string.Equals(i.Name, u.Name, StringComparison.OrdinalIgnoreCase));
+                var heldStr = stillHeld
+                    ? "still in inventory (not consumed)"
+                    : "no longer in inventory";
+                var wcidStr = u.Wcid is uint w2 ? $" wcid={w2}" : "";
+                sb.AppendLine($"- {u.Name}{wcidStr}: used x{u.Count} recently — {heldStr}");
+            }
+            sb.AppendLine(
+                "- NOTE: re-using an item that is still in your inventory unchanged " +
+                "is unlikely to produce a different outcome. The policy will drop " +
+                "repeat Use goals against any item listed above. Pick a different " +
+                "action — e.g. Talk/Give/Pickup/Attack — unless a new event " +
+                "(rejection, NPC dialog, server hint, inventory change) gives you a " +
+                "concrete reason to retry.");
+            sb.AppendLine();
+        }
 
         sb.AppendLine("## Visible nearby");
         if (world.Visible.Count == 0) sb.AppendLine("- (nothing)");

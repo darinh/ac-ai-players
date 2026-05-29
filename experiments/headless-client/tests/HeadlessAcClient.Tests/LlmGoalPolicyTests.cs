@@ -2014,4 +2014,288 @@ public class LlmGoalPolicyTests
         public WeenieStringRecord? TryGet(uint wcid) => null;
         public Task EnsureLoadedAsync(uint wcid, CancellationToken ct = default) => Task.CompletedTask;
     }
+
+    // ---- 2026-05-30 Inventory-USE dedup ----
+    //
+    // Stalenarrow01 spike captured the LLM emitting Use{Letter From
+    // Home} 5 times in 3 min against a non-consumable tutorial letter
+    // whose short_desc ("double-click to read") never goes away.
+    // That ~55% of all LLM-driven goals crowded out Attack emission
+    // against a visible Sparring Golem. Fix: record each inventory-
+    // USE dispatch as EventKind.InventoryItemUsed, drop subsequent
+    // Use goals against the same item in IsInventoryUseRecentlyDispatched,
+    // surface the recency to the LLM via a new prompt section.
+
+    private const uint LetterGuid = 0x8000047Eu;
+    private const uint LetterWcid = 8326u;
+
+    private static StreamEvent InvUsed(string name, uint wcid, uint guid) => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow,
+        Kind = EventKind.InventoryItemUsed,
+        ItemGuid = guid, Wcid = wcid, Name = name,
+    };
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_MatchesByItemWcid()
+    {
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Headless" },
+            Item = new Selector { Wcid = LetterWcid },
+        };
+        Assert.True(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_MatchesByItemName()
+    {
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Headless" },
+            Item = new Selector { Name = "letter from home" }, // case-insensitive
+        };
+        Assert.True(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_MatchesByTargetWhenLlmPutsItemAsTarget()
+    {
+        // The inventory-USE prompt path tells the LLM to use the item
+        // as `target` (with self as implicit), so the goal may carry
+        // the item under target.* rather than item.*. Dedup must match
+        // either shape.
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Letter From Home" },
+        };
+        Assert.True(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_IgnoresNonUseGoals()
+    {
+        // A re-USE block on Pickup/Wield/Talk/Attack/Give would be
+        // wrong; the dedup only fires for Use.
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var pickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Letter From Home" },
+        };
+        var wield = pickup with { Kind = GoalKind.Wield };
+        var talk = pickup with { Kind = GoalKind.Talk };
+        var attack = pickup with { Kind = GoalKind.Attack };
+        var give = new Goal
+        {
+            Kind = GoalKind.Give,
+            Target = new Selector { Name = "Jonathan" },
+            Item = new Selector { Name = "Letter From Home" },
+        };
+
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(pickup, es));
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(wield, es));
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(talk, es));
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(attack, es));
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(give, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_DifferentItem_DoesNotMatch()
+    {
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Calling Stone" }, // unrelated item
+        };
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_EmptyEvents_DoesNotMatch()
+    {
+        var es = new EventStream();
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Letter From Home" },
+        };
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_OldUse_OutsideWindow_DoesNotMatch()
+    {
+        // Push 30 unrelated events after the Use event so it falls
+        // out of the 30-event lookback (Recent(30) takes the 30
+        // newest, so the InvUsed at the head is no longer in scope).
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+        for (int i = 0; i < 35; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage, Text = $"filler {i}",
+            });
+        }
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Letter From Home" },
+        };
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void InventoryItemUsed_IsNotPlanInvalidating()
+    {
+        // Self-emitted echo must not invalidate in-flight LLM calls.
+        Assert.False(LlmGoalPolicy.IsPlanInvalidatingKind(EventKind.InventoryItemUsed));
+    }
+
+    [Fact]
+    public void InventoryItemUsed_IsNotSalient()
+    {
+        // Self-emitted echo must not wake the LLM (would defeat the
+        // dedup it exists to power).
+        Assert.False(LlmGoalPolicy.IsSalientKind(EventKind.InventoryItemUsed));
+    }
+
+    [Fact]
+    public void IsSalientKind_CoversExpectedSalientKinds()
+    {
+        // Mirror IsPlanInvalidatingKind_TrueForInvalidatingKinds —
+        // pin the salient set against accidental shrinkage that
+        // would break LLM deliberation triggering.
+        var salient = new[]
+        {
+            EventKind.PopupString,
+            EventKind.InventoryItemAdded,
+            EventKind.LandblockChanged,
+            EventKind.GoalCompleted,
+            EventKind.GoalFailed,
+            EventKind.GoalExpired,
+            EventKind.NpcDialog,
+            EventKind.ServerMessage,
+            EventKind.ActionRejected,
+            EventKind.BookText,
+            EventKind.PickerActivityStarted,
+            EventKind.PickerArrivedNoAction,
+        };
+        foreach (var kind in salient)
+        {
+            Assert.True(LlmGoalPolicy.IsSalientKind(kind),
+                $"{kind} should be classified as salient.");
+        }
+    }
+
+    [Fact]
+    public void IsSalientKind_ExcludesNonSalientKinds()
+    {
+        // PickerActivityCompleted is bookkeeping (only Started churns
+        // deliberation). InventoryItemUsed is a self-emitted echo.
+        // InventoryItemRemoved is plan-invalidating but not by itself
+        // a wakeup trigger (covered by ActionRejected / GoalFailed).
+        var notSalient = new[]
+        {
+            EventKind.Unknown,
+            EventKind.InventoryItemRemoved,
+            EventKind.GoalEmitted,
+            EventKind.HealthChanged,
+            EventKind.PickerActivityCompleted,
+            EventKind.InventoryItemUsed,
+        };
+        foreach (var kind in notSalient)
+        {
+            Assert.False(LlmGoalPolicy.IsSalientKind(kind),
+                $"{kind} should NOT be classified as salient.");
+        }
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersRecentInventoryUsesWithCountAndStillHeldMarker()
+    {
+        // Letter still in inventory → "still in inventory (not consumed)".
+        var world = BuildExitTokenWorld() with
+        {
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = LetterGuid, Name = "Letter From Home", Wcid = LetterWcid,
+                    ItemType = 0x100u, ShortDesc = "A letter from home — double-click to read.",
+                },
+            },
+        };
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.Contains("## Recently used inventory items", prompt);
+        Assert.Contains("Letter From Home", prompt);
+        Assert.Contains("used x3 recently", prompt);
+        Assert.Contains("still in inventory (not consumed)", prompt);
+        Assert.Contains("policy will drop", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersConsumedMarkerWhenItemGone()
+    {
+        // World inventory is empty (item was consumed after the
+        // recorded uses) → "no longer in inventory" so the LLM knows
+        // it's safe to retry-if-needed (e.g. consume another potion).
+        var world = BuildExitTokenWorld() with
+        {
+            Inventory = Array.Empty<InventoryItemProjection>(),
+        };
+        var es = new EventStream();
+        es.Append(InvUsed("Healing Potion", 9999u, 0x80000099u));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.Contains("Healing Potion", prompt);
+        Assert.Contains("no longer in inventory", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsRecencySection_WhenNoInventoryUses()
+    {
+        // The RULES bullet text mentions "## Recently used inventory
+        // items" by name; assert on the rendered list's NOTE block
+        // (only present when the section actually renders) and the
+        // per-line "used x" count marker (never in RULES).
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        Assert.DoesNotContain("policy will drop", prompt);
+        Assert.DoesNotContain("used x", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_IncludesInventoryUseLoopBreakRule()
+    {
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        Assert.Contains("LOOP-BREAK (inventory-USE loop)", prompt);
+    }
 }

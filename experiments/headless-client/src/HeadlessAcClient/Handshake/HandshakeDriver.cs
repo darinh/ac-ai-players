@@ -2416,6 +2416,23 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"item='{targetSnap.Name}' guid=0x{targetSnap.Guid:X8} " +
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={invUsePktSeq} fragSeq={invUseFragSeq} bytes={invUseSent}");
+                            // Inventory-USE dedup (2026-05-30): record the
+                            // dispatch so LlmGoalPolicy.IsInventoryUseRecentlyDispatched
+                            // can drop repeat goals against the same item.
+                            // Non-consumable tutorial letters in spike
+                            // bot_stalenarrow01 caused 5 Use{Letter From
+                            // Home} goals in 3 min and crowded out Attack
+                            // emission. NOT salient, NOT plan-invalidating
+                            // — purely a self-emitted echo for dedup.
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.InventoryItemUsed,
+                                ItemGuid = targetSnap.Guid,
+                                Wcid     = targetSnap.WeenieClassId,
+                                Name     = targetSnap.Name,
+                            });
                             tactics.Clear("inventory-use dispatched", eventStream);
                         }
                         else

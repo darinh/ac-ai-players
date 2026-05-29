@@ -79,6 +79,26 @@ internal enum EventKind
     // would only learn about the arrival by diffing successive
     // Visible-nearby projections, which is too slow.
     PickerArrivedNoAction   = 16,
+    // 2026-05-30 (inventory-USE dedup): the bot just dispatched a
+    // GameActionUse against an inventory item it carries (the
+    // "inventory-Use direct" path in HandshakeDriver — items in
+    // bag have no spatial position so they bypass the motor).
+    // Carries ItemGuid (the item's guid), Wcid, and Name.
+    //
+    // Used by LlmGoalPolicy.IsInventoryUseRecentlyDispatched to
+    // drop LLM goals that repeat Use{inventory item} against an
+    // item the bot has already USE'd in the recent event window —
+    // motivating case is non-consumable tutorial letters whose
+    // short_desc keeps instructing "double-click to read", causing
+    // the LLM to re-emit the same goal every deliberation and
+    // crowd out other actions (e.g. Attack against a visible
+    // monster).
+    //
+    // Deliberately NOT plan-invalidating (we just dispatched it
+    // ourselves) and NOT salient (does not wake the LLM). It's a
+    // self-emitted echo that exists solely for dedup + prompt
+    // rendering.
+    InventoryItemUsed       = 17,
 }
 
 /// <summary>
@@ -153,6 +173,7 @@ internal sealed record StreamEvent
         EventKind.ActionRejected       => $"#{Sequence} ActionRejected code=0x{ErrorCode ?? 0:X4} label=\"{ErrorLabel ?? "?"}\" message=\"{Truncate(Text, 120)}\"",
         EventKind.BookText             => $"#{Sequence} BookText name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8} \"{Truncate(Text, 120)}\"",
         EventKind.PickerArrivedNoAction => $"#{Sequence} PickerArrivedNoAction guid=0x{ItemGuid ?? 0:X8} name=\"{Name}\" \"{Truncate(Text, 80)}\"",
+        EventKind.InventoryItemUsed    => $"#{Sequence} InventoryUsed wcid={Wcid} name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8}",
         _                              => $"#{Sequence} {Kind}",
     };
 
