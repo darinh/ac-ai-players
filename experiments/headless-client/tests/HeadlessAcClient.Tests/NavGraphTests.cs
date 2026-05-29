@@ -633,4 +633,51 @@ public sealed class NavGraphTests : IDisposable
         Assert.True(route.TotalCostSeconds < 100f,
             $"expected portal route < 100 s, got {route.TotalCostSeconds}");
     }
+
+    [Fact]
+    public void RecordVisit_does_not_auto_create_reverse_walked_edge()
+    {
+        // Walked auto-edges are emitted only in the observed direction
+        // — A→B does not imply B→A. The bot must actually walk back
+        // to record the reverse edge. This protects against phantom
+        // reverse edges over one-way drops (cliffs, balcony jumps).
+        var g = NewGraph();
+        const uint cell = 0x86020001u;
+        var t = _t0;
+        var a = g.RecordVisit(cell, new Vector3(0, 0, 0), t);
+        var b = WalkVisit(g, cell, new Vector3(0, 0, 0), new Vector3(6, 0, 0), ref t);
+        Assert.NotEqual(a, b);
+        // Outgoing from a should include the walked edge toward b.
+        var outsA = g.GetOutgoingConnections(a);
+        Assert.Contains(outsA, o => o.To.Id == b && o.Edge.Kind == NavEdgeKind.Walked);
+        // Outgoing from b must NOT include any edge back to a — the bot
+        // never walked b→a.
+        var outsB = g.GetOutgoingConnections(b);
+        Assert.DoesNotContain(outsB, o => o.To.Id == a);
+        // FindRoute(b, a) returns null: no reverse path exists.
+        Assert.Null(g.FindRoute(b, a));
+    }
+
+    [Fact]
+    public void FindRoute_respects_one_way_portal_directionality()
+    {
+        // A one-way exit portal: academy → Holtburg works, but the
+        // reverse leg (Holtburg → academy) doesn't, because the
+        // academy-side portal doesn't exist for the return trip.
+        // Pre-condition: the planner must NOT fabricate the reverse
+        // route just because an academy → Holtburg edge exists.
+        var g = NewGraph();
+        const uint acadCell  = 0x86020001u;
+        const uint townCell  = 0xA9B40001u;
+        var t = _t0;
+        var acadExit   = g.RecordVisit(acadCell, new Vector3(   0, 0,   0), t);
+        g.BreakWalkedChain();
+        var townArrive = g.RecordVisit(townCell, new Vector3(5000, 0, 5000), t.AddSeconds(1));
+        // Only the outbound direction is recorded.
+        g.RecordEdge(acadExit, townArrive, NavEdgeKind.UsedPortal, "Exit Portal", null, t.AddSeconds(2));
+        // Outbound: routable.
+        Assert.NotNull(g.FindRoute(acadExit, townArrive));
+        // Inbound: NOT routable — no reverse edge exists.
+        Assert.Null(g.FindRoute(townArrive, acadExit));
+    }
 }

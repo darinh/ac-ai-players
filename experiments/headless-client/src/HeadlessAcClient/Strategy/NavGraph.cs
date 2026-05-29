@@ -27,6 +27,15 @@
 // implicit in the edge-kind cost ordering, not a separate search
 // structure.
 //
+// Edges are DIRECTED. (FromNodeId, ToNodeId) is an ordered pair; A→B
+// does not imply B→A exists. Walked auto-edges are emitted only in
+// the direction the bot actually traversed; the reverse edge appears
+// later if and only if the bot walks back. This is the correct model
+// for one-way game geometry: a cliff jump (drop down works, climb up
+// doesn't), a one-way exit portal (academy → Holtburg only), a
+// quest-fired teleport that fires once on first NPC interaction. The
+// graph must NOT assume reverse traversability without evidence.
+//
 // Edge cost rule:
 //   * Walked / CrossedBoundary — distance-scaled (baseCost × meters).
 //     A continuous walk: longer = more expensive.
@@ -43,6 +52,81 @@
 //     mirrors how a human plans: "walk to the portal, take it, walk
 //     from where I end up to the destination" — three legs, two of
 //     them walking, one teleport.
+//
+// Trips (executor-facing concept):
+//
+//   A "trip" is a contiguous walk-leg bounded by teleport-class edges
+//   (UsedDoor, UsedPortal, UsedItem). A NavRoute returned by FindRoute
+//   that contains K teleport edges is K+1 trips. Academy → Holtburg
+//   typically resolves to 2 trips: (academy spawn → Calling Stone)
+//   then UsedItem("Calling Stone") then (Holtburg arrival → goal).
+//   The executor walks each trip head-down, then at the trip boundary
+//   stops at the entrance node, fires the bound action (door click /
+//   portal use / item use), and waits for the position-discontinuity
+//   teleport event before starting the next trip from the exit node.
+//   NavRouteStep.EdgeFromPrevious.Kind tells the executor which kind
+//   of action to dispatch at each step boundary.
+//
+// Edge mortality (TODO, see ac-ai-players#76 — data model — and
+// ac-ai-players#75 — path executor that populates the fields). The
+// graph today treats every edge as permanent and unconditional. Three
+// real-game cases violate that and deserve future modeling. They form
+// TWO orthogonal axes: the MECHANISM (what action moves you — already
+// captured by NavEdgeKind) and the LIFECYCLE (how long the edge stays
+// valid — NOT yet captured).
+//
+//   1. Directional (HANDLED). Walked / UsedPortal / etc. are recorded
+//      only in the direction the bot actually traversed. A one-way
+//      academy → Holtburg exit portal will not produce a phantom
+//      reverse edge from the planner's perspective. This is the only
+//      one of the three already enforced by the data model.
+//
+//   2. Single-use / consumed (TODO). A Calling Stone is consumed on
+//      first use. A one-shot quest trigger fires once. An NPC who
+//      teleports you the first time you talk to them and never again.
+//      Recorded as normal UsedItem / UsedPortal edges, the planner
+//      will happily re-route through them. Future: UsesRemaining
+//      counter on edge, decremented by the executor on each attempt,
+//      with the executor calling PenalizeEdge(huge) when an attempt
+//      fails to act.
+//
+//   3. Time-bounded / ephemeral (TODO). A mage-summoned portal exists
+//      for ~30 seconds. A spell-summoned door, a temporary breach in
+//      a wall, a monster that's blocking a corridor — all transient.
+//      Recorded as a normal edge, the planner will route through an
+//      edge that vanished hours ago. Future: ExpiresUtc / TtlSeconds
+//      on edge, hard-filtered by the planner; observation logged for
+//      training data ("we once saw a summoned portal here at time T")
+//      but routing ignores expired edges.
+//
+// Portal TYPE matters because it pins down the lifecycle. The single
+// NavEdgeKind.UsedPortal is too coarse. Real portal subtypes the bot
+// will encounter:
+//
+//   * World portal — stationary world geometry (Holtburg lifestone
+//     portal, academy exit portals). Permanent. Re-usable both ways
+//     if both directions are observable (some are one-way).
+//   * NPC-triggered teleport — an NPC moves you on dialog success
+//     (Jonathan in the academy). Often single-use (gated by quest
+//     state); may be re-usable if the NPC re-offers the service.
+//   * Item-bound portal — using an inventory item moves you. Sub-cases:
+//       - Consumed on use (Calling Stone, single-use teleport gems).
+//       - Cooldown / charge-based (Recall stones, lifestone-tie).
+//   * Summoned portal — a mage spell ("Portal Summon Self") creates
+//     a portal object in the world for ~30 s. Ephemeral. Anyone in
+//     range can use it. Lifecycle bound to a wall-clock TTL.
+//   * Recall spell — built-in player spell (Lifestone Recall,
+//     Allegiance Recall, Bindstone Recall). No world object; cast
+//     from anywhere. Re-usable with cooldown.
+//
+// Future schema (not implemented yet): add NavEdgePortalSubtype enum
+// and NavEdgeLifecycle { Permanent, SingleUse, Cooldown, Ephemeral,
+// Conditional, Unknown } as orthogonal fields on the edge. Populate
+// from the LLM goal-compiler ("this is a Calling Stone, mark the
+// resulting edge SingleUse + Consumed") and from observed failures
+// (executor calls PenalizeEdge on a use attempt that the server
+// rejects). Until then, the planner is naively optimistic and the
+// executor must defend itself at runtime via stall + re-route.
 //
 // Path executor contract (consumer side, lives in HandshakeDriver):
 //
