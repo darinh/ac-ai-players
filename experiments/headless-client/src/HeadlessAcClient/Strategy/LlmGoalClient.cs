@@ -35,7 +35,14 @@ namespace HeadlessAcClient.Strategy;
 internal sealed class LlmGoalClient
 {
     private const string DefaultEndpoint = "https://models.github.ai/inference/chat/completions";
-    private const string DefaultModel    = "openai/gpt-4o-mini";
+
+    // meta/llama-3.3-70b-instruct verified working on GitHub Models
+    // (flexguid01-run-01 spike: 12/20 LLM kickoffs succeeded). The
+    // previous default `openai/gpt-4o-mini` is chronically 429-rate-
+    // limited on the same endpoint — every spike using it burned the
+    // Slice T backoff window within the first call. Override via
+    // AC_BOTS_LLM_MODEL env var if you need a specific model.
+    private const string DefaultModel    = "meta/llama-3.3-70b-instruct";
 
     private readonly HttpClient _http;
     private readonly string _endpoint;
