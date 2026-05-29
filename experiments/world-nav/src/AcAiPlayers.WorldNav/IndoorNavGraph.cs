@@ -3,13 +3,25 @@
 // IndoorNavGraph - the static indoor navmesh produced by
 // AcAiPlayers.WorldNav from a single landblock's EnvCell records.
 //
+// Vocabulary (consistent across this library):
+//   cell        - a room-sized indoor volume from client_cell_1.dat
+//                 (DAT type: EnvCell)
+//   connection  - the boundary between two adjacent cells (a doorway,
+//                 archway, or open opening). Connections are the edges
+//                 of the cell graph. (DAT type: CellPortal -- renamed
+//                 to "connection" in our domain model so we don't
+//                 collide with the in-game Portal world objects, which
+//                 are the swirly teleporters.)
+//   path        - the ordered sequence of cells (and the world-space
+//                 waypoints inside them) the bot walks to get from
+//                 one point to another. Produced by Pathfinder (A*).
+//
 // Per ADR-0010 / ac-ai-players#47, indoor navigation is A* over the
-// precomputed EnvCell.CellPortal graph: each portal carries
-// PolygonId / OtherCellId / OtherPortalId and the polygon centroid
-// (in world space) is the canonical waypoint. Cells are room-sized
-// volumes; the path through a multi-room building is a sequence of
-// (cell-interior point) -> (portal centroid) -> (cell-interior point)
-// -> (next portal centroid) -> ... transitions.
+// precomputed cell graph: each connection carries the polygon centroid
+// (in world space) which is the canonical waypoint at the boundary.
+// A path through a multi-room building is a sequence of
+// (cell-interior point) -> (connection point) -> (cell-interior
+// point) -> (next connection point) -> ... transitions.
 //
 // "Static" means: this navmesh comes purely from the DAT files. It
 // is the same for every player and every server iteration. It is
@@ -64,11 +76,29 @@ public sealed class IndoorCell
     public required NavBounds BoundsWorld { get; init; }
 
     /// <summary>
-    /// Portals (gateways) leading OUT of this cell to neighbouring
-    /// cells. Each portal corresponds to a doorway, archway, or
-    /// open boundary between two EnvCells.
+    /// Other cells this cell is connected to. Each connection
+    /// corresponds to a doorway, archway, or open boundary between
+    /// two adjacent cells. NOTE: this is distinct from the in-game
+    /// Portal world objects (swirly teleporters). The DAT type is
+    /// called CellPortal; we use "Connection" in our domain model.
     /// </summary>
-    public required IReadOnlyList<IndoorPortal> Portals { get; init; }
+    public required IReadOnlyList<CellConnection> Connections { get; init; }
+
+    /// <summary>
+    /// Static obstacles physically placed inside this cell (signs,
+    /// columns, furniture, lifestones, training dummies, etc.).
+    /// These come from <c>EnvCell.StaticObjects</c> in the DAT and
+    /// are part of the world's fixed geometry — they never move and
+    /// every player on every server sees them in the same place. We
+    /// extract the broad-phase collision primitives (CylSpheres,
+    /// Spheres) from each object's SetupModel and project them to
+    /// world space. The bot must route around them.
+    ///
+    /// NOT INCLUDED: dynamic obstacles (NPCs, mobs, players, items,
+    /// closed-but-openable doors) — those are runtime-sensed via
+    /// wire packets and never come from DAT.
+    /// </summary>
+    public required IReadOnlyList<StaticObstacle> StaticObstacles { get; init; }
 
     /// <summary>
     /// True if this cell's geometry was available in the DAT.
@@ -79,17 +109,78 @@ public sealed class IndoorCell
 }
 
 /// <summary>
-/// One gateway between two indoor cells. Edges in the nav graph.
+/// The shape of a static obstacle's footprint, as it appears in the
+/// SetupModel's broad-phase collision data.
 /// </summary>
-public sealed class IndoorPortal
+public enum ObstacleShape
 {
-    /// <summary>The cell this portal sits inside (the "from" cell).</summary>
+    /// <summary>Vertical cylinder. Top-down footprint = circle of <c>Radius</c>.</summary>
+    Cylinder,
+
+    /// <summary>Sphere. Top-down footprint = circle of <c>Radius</c>.</summary>
+    Sphere,
+
+    /// <summary>
+    /// Setup-level bounding cylinder used as a fallback when the
+    /// SetupModel declares no per-part CylSpheres or Spheres (rare
+    /// for placeable decorations but possible for "simple setup"
+    /// generated objects). Anchored at the stab origin with
+    /// <see cref="StaticObstacle.Radius"/> and
+    /// <see cref="StaticObstacle.Height"/> taken from
+    /// <c>SetupModel.Radius</c> / <c>SetupModel.Height</c>.
+    /// </summary>
+    BoundingCylinder,
+}
+
+/// <summary>
+/// One static-obstacle primitive in world space. Several
+/// StaticObstacle entries can come from a single Stab (a SetupModel
+/// is allowed to have multiple CylSpheres + Spheres). We flatten
+/// them so the consumer doesn't have to know about Setups.
+/// </summary>
+public sealed class StaticObstacle
+{
+    /// <summary>The Stab's SetupModel ID (0x02xxxxxx), for diagnostics.</summary>
+    public required uint SetupId { get; init; }
+
+    /// <summary>Which broad-phase primitive this entry came from.</summary>
+    public required ObstacleShape Shape { get; init; }
+
+    /// <summary>
+    /// World-space center of the primitive. For a CylSphere this is
+    /// the BASE of the cylinder (Z = floor); for a Sphere it is the
+    /// geometric center.
+    /// </summary>
+    public required Vector3 CenterWorld { get; init; }
+
+    /// <summary>XY-plane radius of the obstacle footprint, in world units.</summary>
+    public required float Radius { get; init; }
+
+    /// <summary>
+    /// Vertical extent. For Cylinder/BoundingCylinder this is the
+    /// height upward from <see cref="CenterWorld"/>. For Sphere it
+    /// is 0 (caller should treat the sphere as <c>Radius</c> tall).
+    /// </summary>
+    public required float Height { get; init; }
+}
+
+/// <summary>
+/// A connection between two adjacent indoor cells (a doorway,
+/// archway, or open opening). Connections are the edges of the cell
+/// graph; the bot walks across one connection to move from one cell
+/// to the next. Distinct from the in-game Portal world objects
+/// (teleporters); the DAT format calls these "CellPortals" but in
+/// our domain model we call them Connections to avoid that overload.
+/// </summary>
+public sealed class CellConnection
+{
+    /// <summary>The cell this connection belongs to (the "from" cell).</summary>
     public required uint OwnerCellId { get; init; }
 
     /// <summary>
-    /// The cell on the other side of this portal. May resolve to a
-    /// cell whose geometry we haven't loaded (e.g. across a landblock
-    /// boundary); use <see cref="OtherCellLoaded"/> to check.
+    /// The cell on the other side of this connection. May resolve to
+    /// a cell whose geometry we haven't loaded (e.g. across a
+    /// landblock boundary); use <see cref="OtherCellLoaded"/> to check.
     /// </summary>
     public required uint OtherCellId { get; init; }
 
@@ -101,16 +192,18 @@ public sealed class IndoorPortal
     public required bool OtherCellLoaded { get; init; }
 
     /// <summary>
-    /// Polygon ID of the portal in the owning cell's CellStruct.
-    /// Used for diagnostics; not currently used for routing.
+    /// Polygon ID of the connection opening in the owning cell's
+    /// CellStruct. Used for diagnostics; not currently used for
+    /// routing decisions.
     /// </summary>
     public required ushort PolygonId { get; init; }
 
     /// <summary>
-    /// World-space centroid of the portal polygon. This is the
-    /// canonical waypoint the bot walks TO when traversing this
-    /// portal. Null if the portal polygon could not be resolved
-    /// (e.g. missing Environment record in client_portal.dat).
+    /// World-space centroid of the connection polygon (the geometric
+    /// midpoint of the doorway / opening). This is the canonical
+    /// waypoint the bot walks TO when crossing this connection.
+    /// Null if the polygon could not be resolved (e.g. missing
+    /// Environment record in client_portal.dat).
     /// </summary>
     public required Vector3? CentroidWorld { get; init; }
 }
@@ -173,6 +266,9 @@ public sealed class IndoorNavGraph
     /// <summary>How many EnvCell records the loader successfully decoded.</summary>
     public int CellCount => Cells.Count;
 
-    /// <summary>How many portals across all cells (counts both directions if both sides loaded).</summary>
-    public int PortalCount => Cells.Values.Sum(c => c.Portals.Count);
+    /// <summary>Total connection count across all cells (counts both directions when both sides loaded).</summary>
+    public int ConnectionCount => Cells.Values.Sum(c => c.Connections.Count);
+
+    /// <summary>Total static-obstacle primitive count across all cells.</summary>
+    public int StaticObstacleCount => Cells.Values.Sum(c => c.StaticObstacles.Count);
 }

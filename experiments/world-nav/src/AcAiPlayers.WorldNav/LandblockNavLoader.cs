@@ -15,31 +15,43 @@
 //        - EnvironmentId (PortalDat file ID for the cell mesh prefab)
 //        - CellStructure (ushort: which CellStruct within Environment)
 //        - CellPortals (list of {PolygonId, OtherCellId, OtherPortalId})
+//          We model each of these as a CellConnection in our domain
+//          model -- the DAT name "portal" collides with the in-game
+//          Portal teleporter object.
 //   3. Load the Environment from PortalDat. Look up the CellStruct.
-//   4. For each CellPortal:
+//   4. For each CellPortal -> build one CellConnection:
 //        - Look up PhysicsPolygons[PolygonId].
 //        - LoadVertices(CellStruct.VertexArray) to populate vertex
 //          positions.
 //        - Compute vertex-centroid in cell-local coords.
 //        - Transform to world via Frame (Origin + rotate-by-Orientation).
-//      This world point is the portal's canonical waypoint.
+//      This world point is the connection's canonical waypoint.
 //   5. Compute the cell's geometric centroid from all PhysicsPolygons.
+//   5b. Read EnvCell.StaticObjects (list of Stab). Each Stab refers
+//       to a SetupModel (Stab.Id high byte 0x02) placed at Stab.Frame
+//       (local to the cell). Load the Setup, project its CylSpheres
+//       and Spheres to world coords via stab.Frame composed with
+//       cell.Position, and attach as StaticObstacles on the cell.
+//       Stabs whose Id is NOT a SetupModel (e.g. raw GfxObj-only
+//       refs at 0x01xxxxxx) are skipped — those would need BSP
+//       traversal which is out of scope for this layer.
 //   6. Resolve OtherCellId from cell-within-landblock-ushort to a full
 //      32-bit cell ID. In the DAT, CellPortal.OtherCellId stores only
 //      the low 16 bits when the target is in the same landblock; we
 //      OR in the landblock prefix.
-//      (Cross-landblock indoor portals are rare for early dungeons /
-//      academy and out of scope for the first pass. They surface as
+//      (Cross-landblock indoor connections are rare for early dungeons
+//      / academy and out of scope for the first pass. They surface as
 //      OtherCellLoaded = false.)
 //
 // Notes:
-//   - We do NOT walk the BSP tree or do triangle sampling. The portal
-//     centroid + cell centroid pair is a coarse but correct navmesh
-//     for first-cut A*; refinement (e.g. selecting non-blocking
-//     interior waypoints) is a later slice.
-//   - We use PhysicsPolygons (collision mesh) rather than Polygons
-//     (drawing mesh) so the waypoints sit on surfaces the bot can
-//     actually traverse.
+//   - We do NOT walk the BSP tree or do triangle sampling. The
+//     connection centroid + cell centroid pair is a coarse but correct
+//     navmesh for first-cut A*; refinement (e.g. selecting
+//     non-blocking interior waypoints) is a later slice.
+//   - We use PhysicsPolygons (collision mesh) for cell geometry so
+//     waypoints sit on surfaces the bot can actually traverse, but
+//     drawing-mesh Polygons for connection openings (most CellPortal
+//     openings live there, not in PhysicsPolygons).
 
 using System.Collections.Generic;
 using System.Linq;
@@ -81,25 +93,26 @@ public sealed class LandblockNavLoader
         var cells = new Dictionary<uint, IndoorCell>(capacity: rawCells.Count);
         foreach (var (cellId, raw) in rawCells)
         {
-            var portals = new List<IndoorPortal>(raw.EnvCell.CellPortals.Count);
-            foreach (var portal in raw.EnvCell.CellPortals)
+            var connections = new List<CellConnection>(raw.EnvCell.CellPortals.Count);
+            foreach (var cellPortal in raw.EnvCell.CellPortals)
             {
-                var otherFull = ((uint)landblockId << 16) | portal.OtherCellId;
+                var otherFull = ((uint)landblockId << 16) | cellPortal.OtherCellId;
                 Vector3? centroid = null;
                 if (raw.Mesh != null)
-                    centroid = TryComputePortalCentroidWorld(raw.Mesh, raw.EnvCell.Position, portal.PolygonId);
+                    centroid = TryComputeConnectionCentroidWorld(raw.Mesh, raw.EnvCell.Position, cellPortal.PolygonId);
 
-                portals.Add(new IndoorPortal
+                connections.Add(new CellConnection
                 {
                     OwnerCellId = cellId,
                     OtherCellId = otherFull,
                     OtherCellLoaded = loadedCellIds.Contains(otherFull),
-                    PolygonId = portal.PolygonId,
+                    PolygonId = cellPortal.PolygonId,
                     CentroidWorld = centroid,
                 });
             }
 
             var (centroidWorld, boundsWorld) = ComputeCellGeometry(raw);
+            var obstacles = ComputeStaticObstacles(raw);
             cells[cellId] = new IndoorCell
             {
                 CellId = cellId,
@@ -108,7 +121,8 @@ public sealed class LandblockNavLoader
                 OriginWorld = raw.EnvCell.Position.Origin,
                 CentroidWorld = centroidWorld,
                 BoundsWorld = boundsWorld,
-                Portals = portals,
+                Connections = connections,
+                StaticObstacles = obstacles,
                 HasGeometry = raw.Mesh != null,
             };
         }
@@ -118,8 +132,8 @@ public sealed class LandblockNavLoader
         {
             aggregatePoints.Add(new Vector3(cell.BoundsWorld.MinX, cell.BoundsWorld.MinY, cell.BoundsWorld.MinZ));
             aggregatePoints.Add(new Vector3(cell.BoundsWorld.MaxX, cell.BoundsWorld.MaxY, cell.BoundsWorld.MaxZ));
-            foreach (var portal in cell.Portals)
-                if (portal.CentroidWorld is { } pc)
+            foreach (var connection in cell.Connections)
+                if (connection.CentroidWorld is { } pc)
                     aggregatePoints.Add(pc);
         }
         var bounds = aggregatePoints.Count == 0
@@ -210,10 +224,10 @@ public sealed class LandblockNavLoader
         }
     }
 
-    private static Vector3? TryComputePortalCentroidWorld(CellStruct mesh, Frame frame, ushort polygonId)
+    private static Vector3? TryComputeConnectionCentroidWorld(CellStruct mesh, Frame frame, ushort polygonId)
     {
-        // Try drawing polygons first (where portals usually live),
-        // then fall back to physics polygons.
+        // Try drawing polygons first (where connection openings usually
+        // live), then fall back to physics polygons.
         if (!mesh.Polygons.TryGetValue(polygonId, out var poly)
             && !mesh.PhysicsPolygons.TryGetValue(polygonId, out poly))
         {
@@ -265,6 +279,98 @@ public sealed class LandblockNavLoader
         // System.Numerics rotates a vector by a unit quaternion via
         // Vector3.Transform(v, q).
         return frame.Origin + Vector3.Transform(local, frame.Orientation);
+    }
+
+    /// <summary>
+    /// Compose two rigid frames: an obstacle point given in stab-local
+    /// space goes through stabFrame (object -> cell-local) then through
+    /// cellFrame (cell-local -> world).
+    /// </summary>
+    private static Vector3 StabLocalToWorld(Vector3 local, Frame stabFrame, Frame cellFrame)
+    {
+        var cellLocal = stabFrame.Origin + Vector3.Transform(local, stabFrame.Orientation);
+        return cellFrame.Origin + Vector3.Transform(cellLocal, cellFrame.Orientation);
+    }
+
+    /// <summary>
+    /// Extract static-obstacle footprints for every Stab inside this
+    /// cell. Each Stab points at a SetupModel; we surface its
+    /// broad-phase collision primitives (CylSpheres + Spheres). If a
+    /// Setup has neither but advertises a bounding cylinder via its
+    /// own Radius/Height, fall back to that anchored at the stab origin.
+    /// </summary>
+    private List<StaticObstacle> ComputeStaticObstacles(RawCell raw)
+    {
+        var result = new List<StaticObstacle>();
+        foreach (var stab in raw.EnvCell.StaticObjects)
+        {
+            // DAT id-space: 0x01xxxxxx = GfxObj (mesh only), 0x02xxxxxx = SetupModel.
+            // Only SetupModels expose the CylSphere/Sphere primitives
+            // we need for a cheap top-down footprint; raw GfxObj stabs
+            // would require PhysicsBSP traversal and are skipped for now.
+            if ((stab.Id >> 24) != 0x02)
+                continue;
+
+            SetupModel? setup;
+            try
+            {
+                setup = _portalDat.ReadFromDat<SetupModel>(stab.Id);
+            }
+            catch
+            {
+                continue;
+            }
+            if (setup == null)
+                continue;
+
+            int before = result.Count;
+
+            foreach (var cs in setup.CylSpheres)
+            {
+                if (cs.Radius <= 0) continue;
+                var world = StabLocalToWorld(cs.Origin, stab.Frame, raw.EnvCell.Position);
+                result.Add(new StaticObstacle
+                {
+                    SetupId = stab.Id,
+                    Shape = ObstacleShape.Cylinder,
+                    CenterWorld = world,
+                    Radius = cs.Radius,
+                    Height = cs.Height,
+                });
+            }
+
+            foreach (var sp in setup.Spheres)
+            {
+                if (sp.Radius <= 0) continue;
+                var world = StabLocalToWorld(sp.Origin, stab.Frame, raw.EnvCell.Position);
+                result.Add(new StaticObstacle
+                {
+                    SetupId = stab.Id,
+                    Shape = ObstacleShape.Sphere,
+                    CenterWorld = world,
+                    Radius = sp.Radius,
+                    Height = 0f,
+                });
+            }
+
+            // Fallback: setup declared no per-part primitive but does
+            // advertise a bounding cylinder (Setup.Radius/Height).
+            // Anchor it at the stab origin so we still render *something*
+            // for objects whose collision lives only in PhysicsBSP.
+            if (result.Count == before && setup.Radius > 0)
+            {
+                var world = StabLocalToWorld(Vector3.Zero, stab.Frame, raw.EnvCell.Position);
+                result.Add(new StaticObstacle
+                {
+                    SetupId = stab.Id,
+                    Shape = ObstacleShape.BoundingCylinder,
+                    CenterWorld = world,
+                    Radius = setup.Radius,
+                    Height = setup.Height,
+                });
+            }
+        }
+        return result;
     }
 
     private sealed class RawCell

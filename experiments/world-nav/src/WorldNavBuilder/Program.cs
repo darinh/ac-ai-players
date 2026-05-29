@@ -31,8 +31,9 @@ Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 string datDir = @"C:\ACE\Dats";
 ushort landblock = 0x8602;
 string outPath = "academy.svg";
-bool showPortalIds = false;
+bool showConnectionIds = false;
 bool quiet = false;
+bool diag = false;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -51,11 +52,12 @@ for (int i = 0; i < args.Length; i++)
             landblock = ushort.Parse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
             break;
         case "--out": outPath = Next(a); break;
-        case "--show-portal-ids": showPortalIds = true; break;
+        case "--show-connection-ids": showConnectionIds = true; break;
         case "--quiet": quiet = true; break;
+        case "--diag": diag = true; break;
         case "-h":
         case "--help":
-            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-portal-ids] [--quiet]");
+            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--diag] [--quiet]");
             return 0;
         default:
             Console.Error.WriteLine($"unknown arg: {a}");
@@ -100,8 +102,9 @@ var graph = loader.Load(landblock);
 
 if (!quiet)
 {
-    Console.WriteLine($"  cells:   {graph.CellCount}");
-    Console.WriteLine($"  portals: {graph.PortalCount}");
+    Console.WriteLine($"  cells:        {graph.CellCount}");
+    Console.WriteLine($"  connections:  {graph.ConnectionCount}");
+    Console.WriteLine($"  obstacles:    {graph.StaticObstacleCount} static primitives");
     Console.WriteLine($"  bounds:  X[{graph.BoundsWorld.MinX:0.##}..{graph.BoundsWorld.MaxX:0.##}] Y[{graph.BoundsWorld.MinY:0.##}..{graph.BoundsWorld.MaxY:0.##}] Z[{graph.BoundsWorld.MinZ:0.##}..{graph.BoundsWorld.MaxZ:0.##}]");
 
     int withGeom = 0, withoutGeom = 0;
@@ -109,14 +112,24 @@ if (!quiet)
         if (cell.HasGeometry) withGeom++; else withoutGeom++;
     Console.WriteLine($"  geometry: {withGeom} loaded, {withoutGeom} missing");
 
-    int resolvedPortals = 0, danglingPortals = 0, unresolvedCentroid = 0;
+    int resolvedConns = 0, danglingConns = 0, unresolvedCentroid = 0;
     foreach (var cell in graph.Cells.Values)
-        foreach (var p in cell.Portals)
+        foreach (var c in cell.Connections)
         {
-            if (p.CentroidWorld == null) unresolvedCentroid++;
-            if (p.OtherCellLoaded) resolvedPortals++; else danglingPortals++;
+            if (c.CentroidWorld == null) unresolvedCentroid++;
+            if (c.OtherCellLoaded) resolvedConns++; else danglingConns++;
         }
-    Console.WriteLine($"  portal status: {resolvedPortals} resolved, {danglingPortals} dangling, {unresolvedCentroid} centroid-missing");
+    Console.WriteLine($"  connection status: {resolvedConns} resolved, {danglingConns} dangling, {unresolvedCentroid} centroid-missing");
+
+    int cylN = 0, sphN = 0, boundN = 0;
+    foreach (var cell in graph.Cells.Values)
+        foreach (var o in cell.StaticObstacles)
+        {
+            if (o.Shape == ObstacleShape.Cylinder) cylN++;
+            else if (o.Shape == ObstacleShape.Sphere) sphN++;
+            else boundN++;
+        }
+    Console.WriteLine($"  obstacle breakdown: {cylN} cylinders, {sphN} spheres, {boundN} setup-bound fallbacks");
 }
 
 if (graph.CellCount == 0)
@@ -125,9 +138,66 @@ if (graph.CellCount == 0)
     return 1;
 }
 
+if (diag)
+{
+    Console.WriteLine();
+    Console.WriteLine("=== diagnostic ===");
+
+    // Z histogram of cell centroids (1u bins).
+    var zhist = new SortedDictionary<int, int>();
+    foreach (var cell in graph.Cells.Values)
+    {
+        int bin = (int)Math.Floor(cell.CentroidWorld.Z);
+        zhist[bin] = zhist.TryGetValue(bin, out var v) ? v + 1 : 1;
+    }
+    Console.WriteLine($"cell-centroid Z histogram (Min={graph.BoundsWorld.MinZ:0.##} Max={graph.BoundsWorld.MaxZ:0.##}):");
+    foreach (var kv in zhist)
+        Console.WriteLine($"  Z={kv.Key,4}u : {kv.Value,4} cells  {new string('#', Math.Min(kv.Value, 60))}");
+
+    // Cells with the largest vertical extent (candidate stair / ramp cells).
+    Console.WriteLine();
+    Console.WriteLine("top-15 cells by vertical extent (Z span, candidate stair/ramp cells):");
+    var byExtent = graph.Cells.Values
+        .Where(c => c.HasGeometry)
+        .Select(c => (c, span: c.BoundsWorld.MaxZ - c.BoundsWorld.MinZ))
+        .OrderByDescending(t => t.span)
+        .Take(15);
+    foreach (var (c, span) in byExtent)
+        Console.WriteLine($"  0x{c.CellId:X8}  z-span={span,6:0.00}u  centroid=({c.CentroidWorld.X:0.0},{c.CentroidWorld.Y:0.0},{c.CentroidWorld.Z:0.0})  connections={c.Connections.Count}");
+
+    // Connections whose two endpoint cells are at noticeably different Z.
+    // These are inter-floor traversals (stairs, ramps, ladders, drops).
+    Console.WriteLine();
+    int totalConns = 0, interFloorConns = 0, sameFloorConns = 0;
+    var interFloorDetails = new List<(uint from, uint to, float dz, float pz)>();
+    foreach (var cell in graph.Cells.Values)
+    {
+        foreach (var c in cell.Connections)
+        {
+            totalConns++;
+            if (!c.OtherCellLoaded) continue;
+            var other = graph.Cells[c.OtherCellId];
+            float dz = other.CentroidWorld.Z - cell.CentroidWorld.Z;
+            if (Math.Abs(dz) >= 1.5f)
+            {
+                interFloorConns++;
+                interFloorDetails.Add((cell.CellId, c.OtherCellId, dz, c.CentroidWorld?.Z ?? cell.CentroidWorld.Z));
+            }
+            else
+            {
+                sameFloorConns++;
+            }
+        }
+    }
+    Console.WriteLine($"connection Z-delta breakdown: {sameFloorConns} same-floor (|dz|<1.5u), {interFloorConns} inter-floor (|dz|>=1.5u), total {totalConns}");
+    Console.WriteLine($"top-15 inter-floor connections (sorted by |dz|):");
+    foreach (var d in interFloorDetails.OrderByDescending(x => Math.Abs(x.dz)).Take(15))
+        Console.WriteLine($"  0x{d.from:X8} -> 0x{d.to:X8}  dz={d.dz,+7:0.00}u  conn-z={d.pz:0.0}");
+}
+
 var svg = new SvgRenderer().Render(graph, new SvgRenderer.Options
 {
-    ShowPortalIds = showPortalIds,
+    ShowConnectionIds = showConnectionIds,
 });
 
 var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath));
