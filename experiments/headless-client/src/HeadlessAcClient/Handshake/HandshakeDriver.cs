@@ -415,6 +415,18 @@ internal sealed class HandshakeDriver : IDisposable
         // on first ObjectCreate but never picked it as candidate
         // in 23 cycles / 30 min.
         const uint           AcademyCallingStoneWcid = 5084u;
+        // Phase 7f.5b — Exit Token wcid. The Calling Stone REQUIRES
+        // an Academy Exit Token in inventory to teleport us out;
+        // USE'ing it without the token fails and burns the
+        // Calling Stone's guid into visitedTargetGuids forever.
+        // We gate the Calling Stone's prio=-1 promotion on actual
+        // ownership of an Exit Token (ObjectCreate of wcid 29335
+        // with ContainerGuid == self.Guid). If we don't own one
+        // yet, treat the Calling Stone like any other unvisited
+        // object (default to whatever its itemType prio would be).
+        // Jonathan grants the Exit Token on first USE; this is
+        // observed in phase7f5-headless21-fullrun.log cycle 3.
+        const uint           AcademyExitTokenWcid = 29335u;
         const double         CombatRetryIntervalSec = 5.0;
         const double         AbandonOnNoDamageSec   = 60.0;
         uint?                combatTargetGuid = null;
@@ -1423,6 +1435,14 @@ internal sealed class HandshakeDriver : IDisposable
                     //          can starve us of door interactions until they
                     //          all join the visited set.
                     var apRot = self.Rotation;
+                    // Phase 7f.5b — Do we own an Academy Exit Token?
+                    // The Calling Stone consumes the token to teleport us
+                    // out; USE without the token fails and burns the
+                    // Calling Stone into visitedTargetGuids. Compute once
+                    // per AP tick so both picker passes share the result.
+                    var haveExitToken = worldState.Objects.Values.Any(o =>
+                        o.WeenieClassId == AcademyExitTokenWcid &&
+                        o.ContainerGuid is uint cg && cg == self.Guid);
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
@@ -1497,7 +1517,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 int prio;
                                 // Phase 7f.5 — Academy Calling Stone is the
                                 // M1.6 exit mechanism; promote above all else.
-                                if (isAcademyExit) prio = -1;
+                                // Phase 7f.5b: ONLY when we already hold an
+                                // Exit Token. Otherwise USE fails and the
+                                // Calling Stone is permanently marked visited.
+                                if (isAcademyExit && haveExitToken) prio = -1;
                                 else if (isNpc && !isHostile) prio = 0;
                                 else if (isHostile) prio = 1;
                                 else if (isDoor || isPortal) prio = 2;
@@ -1562,7 +1585,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 //   4: unvisited pickup we haven't farmed (apple)
                                 //   5: everything else (mostly filtered out below)
                                 int prio;
-                                if (!isVisited && isAcademyExit) prio = -1;
+                                if (!isVisited && isAcademyExit && haveExitToken) prio = -1;
                                 else if (!isVisited && isHostile) prio = 0;
                                 else if (!isVisited && isNpc) prio = 1;
                                 else if (!isVisited && (isDoor || isPortal)) prio = 2;
