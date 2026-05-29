@@ -31,6 +31,30 @@ social system the game supports.
 
 When all nine hold, the loop exits and the user is notified.
 
+## Never stop, never wait (operating rule)
+
+This loop is autonomous across sessions. The agent is the operator
+until the 9 done criteria hold. Concretely:
+
+- **Do NOT call `task_complete`** for individual milestones, PRs,
+  bug fixes, doc changes, or "good places to break." `task_complete`
+  is reserved for the moment all 9 done criteria are met, or for a
+  true blocker per the "True blockers" section.
+- **Do NOT call `ask_user`** for routine decisions. Pick the option
+  that best matches the user's stated preferences, write your
+  reasoning into the checkpoint, and proceed. Ask only when a true
+  blocker requires user-side action (credentials, hardware, schema
+  changes that need user sign-off).
+- **Do NOT stop tool-calling** at the end of a unit of work. When a
+  PR lands or a milestone closes, immediately query the todos table
+  or open issues for the next item and start it.
+- **Do checkpoint** before context exhaustion so the next session
+  resumes cleanly.
+
+The scheduled `pilot-loop` prompt is a backstop, not the primary
+mechanism. The primary mechanism is the agent that is currently
+running NOT stopping.
+
 ## Where state lives (read before each loop iteration)
 
 | Kind | Location | Purpose |
@@ -134,10 +158,14 @@ branch for risky work):
   built, what the log showed, what the next-smallest gap is.
 - Mirror landmark capability gains into `docs/pilot/README.md`'s
   milestone table.
-- **Context check:** if remaining context is low (say, < 25% by
-  rough estimate), stop after checkpointing. The scheduled kick will
-  start a fresh session that resumes from the checkpoint.
-- Otherwise: loop back to Phase 1.
+- **Context handoff (not "stop"):** the agent does NOT proactively
+  stop based on a context estimate. Checkpoint frequently so that
+  whenever the runtime terminates the session on its hard token
+  limit, the next session resumes cleanly. The scheduled
+  `pilot-loop` prompt is the cross-session continuity backstop;
+  the currently-running session does not get to choose when to
+  end. See the "Never stop, never wait" section.
+- Loop back to Phase 1.
 
 ## Anti-patterns (don't do these)
 
@@ -157,7 +185,25 @@ branch for risky work):
   later if needed.
 - **Stopping at a "good place to break."** Stop only when out of
   context, blocked by a true external dependency, or the success
-  criteria are met.
+  criteria are met. See the "Never stop, never wait" section above.
+- **Shipping cheats to skip exploration.** Pre-extracting cell
+  geometry from `EnvCell` / `BldPortal` DAT files (or any other
+  static client-DAT topology, weenie dumps, or server-internal
+  types) to give the bot eager knowledge of building interiors is
+  forbidden. The bot must discover topology by walking, the way a
+  human player does. The world map and similar in-game UI surfaces
+  are allowed because every human player has access to them. See
+  [`../adr/0012-no-cheating-bot-world-knowledge.md`](../adr/0012-no-cheating-bot-world-knowledge.md)
+  and the corresponding section in
+  [`../../AGENTS.md`](../../AGENTS.md).
+- **Hardcoded semantic string matching on bot-perceived text in
+  any language or localization.** Patterns like
+  `Name.Contains("Door")` or `text.StartsWith("You see")` — and
+  their equivalents in French, German, Korean, or any custom-
+  content server's strings — are cheating: they encode developer
+  knowledge of canonical content into the bot, breaking localized
+  servers and custom-named weenies. Use the typed wire flags for
+  structured perception, the LLM for semantic text.
 
 ## True blockers (acceptable reasons to stop and notify)
 
