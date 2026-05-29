@@ -919,6 +919,48 @@ internal sealed class HandshakeDriver : IDisposable
                                     Name = sourceSnap?.Name ?? tell.SenderName,
                                 });
                             }
+                            // Slice M — quest book / scroll / parchment
+                            // contents. The server returns this when the
+                            // bot Uses a Book itemType. Surface the full
+                            // page text (concatenated) so the LLM can
+                            // read quest directions, coordinates, item
+                            // lists the same way a player would. We
+                            // capture every BookDataResponse — the
+                            // LlmGoalPolicy section dedupes by BookId
+                            // newest-first so repeats don't bloat the
+                            // prompt.
+                            if (ge.Payload?.BookDataResponse is { } book)
+                            {
+                                var sb = new System.Text.StringBuilder();
+                                if (!string.IsNullOrEmpty(book.Inscription))
+                                    sb.AppendLine($"[Inscription] {book.Inscription}");
+                                for (int pi = 0; pi < book.Pages.Count; pi++)
+                                {
+                                    var pg = book.Pages[pi];
+                                    if (!pg.TextIncluded || pg.PageText is null) continue;
+                                    if (book.Pages.Count > 1)
+                                        sb.Append($"[Page {pi + 1}/{book.Pages.Count}] ");
+                                    sb.AppendLine(pg.PageText.Replace("\r", ""));
+                                }
+                                var bookText = sb.ToString().Trim();
+                                if (bookText.Length > 0)
+                                {
+                                    // Try to recover a human-readable
+                                    // book name from the WorldState (the
+                                    // ObjectCreate that delivered the
+                                    // book should have populated it).
+                                    var bookSnap = worldState.TryGet(book.BookId);
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.BookText,
+                                        ItemGuid = book.BookId,
+                                        Name = bookSnap?.Name ?? book.AuthorName ?? $"book-0x{book.BookId:X8}",
+                                        Text = bookText,
+                                    });
+                                }
+                            }
                             // Phase 6n — wield ack: mark the slot mask
                             // and the wcid as satisfied so the picker
                             // stops chasing duplicate copies of the

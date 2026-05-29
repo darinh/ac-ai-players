@@ -48,6 +48,13 @@ internal enum EventKind
     // Surfaced so the LLM can pivot off a stuck retry loop and so
     // LlmGoalPolicy can drop the stale currentGoal anchor.
     ActionRejected        = 12,
+    // Slice M: full text of a quest book / scroll / parchment the
+    // bot has Used. The server returns BookDataResponse with up to
+    // 1000 chars per page; we concatenate the pages so the LLM can
+    // read directions, item lists, and coordinates the way a human
+    // player would. ItemGuid = book guid (dedup key), Name = book
+    // display name (e.g. "A List of Items"), Text = body content.
+    BookText              = 13,
 }
 
 /// <summary>
@@ -120,6 +127,7 @@ internal sealed record StreamEvent
         EventKind.NpcDialog            => $"#{Sequence} NpcDialog from=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.HealthChanged        => $"#{Sequence} Health frac={HealthFraction:F2}",
         EventKind.ActionRejected       => $"#{Sequence} ActionRejected code=0x{ErrorCode ?? 0:X4} label=\"{ErrorLabel ?? "?"}\" message=\"{Truncate(Text, 120)}\"",
+        EventKind.BookText             => $"#{Sequence} BookText name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8} \"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 

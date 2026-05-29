@@ -251,7 +251,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.LandblockChanged
                               or EventKind.NpcDialog
                               or EventKind.ServerMessage
-                              or EventKind.ActionRejected);
+                              or EventKind.ActionRejected
+                              or EventKind.BookText);
     }
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
@@ -287,7 +288,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.GoalExpired
                               or EventKind.NpcDialog
                               or EventKind.ServerMessage
-                              or EventKind.ActionRejected);
+                              or EventKind.ActionRejected
+                              or EventKind.BookText);
     }
 
     private static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
@@ -489,6 +491,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"- ServerMessage[chat=0x{h.ChatType ?? 0:X}]: \"{Truncate(h.Text, 320)}\"");
             foreach (var h in npcHints)
                 sb.AppendLine($"- NpcDialog from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"");
+            sb.AppendLine();
+        }
+
+        // Slice M — quest book / scroll / parchment contents.
+        // Surfaced as its own section so the LLM can read directions,
+        // coordinates, and item requirement lists. Deduped by book
+        // guid (you can re-open the same book many times); keep the
+        // last 3 distinct books so a busy quest hub doesn't blow the
+        // token budget. Newest-first ordering.
+        var bookTexts = hintPool
+            .Where(e => e.Kind == EventKind.BookText && !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => e.ItemGuid ?? 0u)
+            .Select(g => g.OrderByDescending(e => e.Sequence).First())
+            .OrderByDescending(e => e.Sequence)
+            .Take(3)
+            .ToList();
+        if (bookTexts.Count > 0)
+        {
+            sb.AppendLine("## Quest book texts (newest first — read these for quest directions, item lists, coordinates)");
+            foreach (var b in bookTexts)
+            {
+                sb.AppendLine($"- BookText name=\"{b.Name}\" guid=0x{b.ItemGuid ?? 0:X8}:");
+                // 800 chars is generous: enough for the typical
+                // 1-page quest book that contains an item list +
+                // coordinate hint. Pages beyond this are usually
+                // flavor text.
+                sb.AppendLine($"    \"{Truncate(b.Text, 800)}\"");
+            }
             sb.AppendLine();
         }
 
