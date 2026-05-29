@@ -219,4 +219,234 @@ public sealed class Pathfinder
         VisitedNodes = 0,
         FailureReason = reason,
     };
+
+    // ------------------------------------------------------------------
+    // Walkable-node A*
+    // ------------------------------------------------------------------
+
+    /// <summary>
+    /// A single node in the unified walkable graph, identified by its
+    /// owning cell and its index inside that cell's WalkableNodes list.
+    /// </summary>
+    public readonly record struct WalkableNodeRef(uint CellId, int NodeIndex);
+
+    public sealed class WalkableResult
+    {
+        public required bool Found { get; init; }
+        /// <summary>Ordered world-space positions from start to goal. Empty if not found.</summary>
+        public required IReadOnlyList<Vector3> Points { get; init; }
+        /// <summary>Ordered node references corresponding to <see cref="Points"/>.</summary>
+        public required IReadOnlyList<WalkableNodeRef> NodePath { get; init; }
+        /// <summary>Total 3D Euclidean cost of the chosen path. 0 if not found.</summary>
+        public required float TotalCost { get; init; }
+        /// <summary>How many nodes A* settled before terminating.</summary>
+        public required int VisitedNodes { get; init; }
+        public string? FailureReason { get; init; }
+    }
+
+    /// <summary>
+    /// Run A* across the unified walkable-node graph (intra-cell
+    /// <see cref="WalkableEdge"/> + cross-cell <see cref="WalkableBridge"/>).
+    /// The returned path starts at the walkable node nearest to
+    /// <paramref name="fromWorld"/> and ends at the walkable node
+    /// nearest to <paramref name="toWorld"/>; callers should treat the
+    /// first and last Points as snap-to-graph approximations of the
+    /// requested endpoints.
+    /// </summary>
+    /// <param name="walkableCells">
+    /// Optional fog-of-war filter. When non-null, both endpoints must
+    /// resolve to walkable nodes whose cells are in this set, and A*
+    /// will not expand into any cell outside the set.
+    /// </param>
+    public WalkableResult FindWalkablePath(
+        IndoorNavGraph graph,
+        Vector3 fromWorld,
+        Vector3 toWorld,
+        IReadOnlySet<uint>? walkableCells = null)
+    {
+        var startRef = NearestWalkableNode(graph, fromWorld, walkableCells);
+        if (startRef is null)
+            return EmptyWalkable("no walkable node near start position (try widening walkableCells or check the cell is loaded)");
+        var goalRef = NearestWalkableNode(graph, toWorld, walkableCells);
+        if (goalRef is null)
+            return EmptyWalkable("no walkable node near goal position");
+
+        var start = startRef.Value;
+        var goal = goalRef.Value;
+        var goalPos = graph.Cells[goal.CellId].WalkableNodes[goal.NodeIndex].PositionWorld;
+
+        if (start == goal)
+        {
+            return new WalkableResult
+            {
+                Found = true,
+                Points = new[] { goalPos },
+                NodePath = new[] { goal },
+                TotalCost = 0,
+                VisitedNodes = 1,
+            };
+        }
+
+        // Build a per-endpoint index of bridges so adjacency expansion
+        // is O(degree) instead of O(total bridges). For ~1400 bridges
+        // this is microseconds; cache externally if you call this in
+        // a tight loop.
+        var bridgesByEndpoint = new Dictionary<WalkableNodeRef, List<WalkableBridge>>();
+        foreach (var b in graph.WalkableBridges)
+        {
+            var a = new WalkableNodeRef(b.FromCellId, b.FromNodeIndex);
+            var c = new WalkableNodeRef(b.ToCellId, b.ToNodeIndex);
+            if (!bridgesByEndpoint.TryGetValue(a, out var listA))
+                bridgesByEndpoint[a] = listA = new List<WalkableBridge>();
+            listA.Add(b);
+            if (!bridgesByEndpoint.TryGetValue(c, out var listC))
+                bridgesByEndpoint[c] = listC = new List<WalkableBridge>();
+            listC.Add(b);
+        }
+
+        var gScore = new Dictionary<WalkableNodeRef, float> { [start] = 0f };
+        var cameFrom = new Dictionary<WalkableNodeRef, WalkableNodeRef>();
+        var open = new PriorityQueue<WalkableNodeRef, float>();
+        var startPos = graph.Cells[start.CellId].WalkableNodes[start.NodeIndex].PositionWorld;
+        open.Enqueue(start, Vector3.Distance(startPos, goalPos));
+        var visited = new HashSet<WalkableNodeRef>();
+
+        while (open.TryDequeue(out var current, out _))
+        {
+            if (!visited.Add(current)) continue;
+            if (current == goal)
+                return ReconstructWalkable(graph, start, goal, cameFrom, gScore[goal], visited.Count);
+
+            var currentCell = graph.Cells[current.CellId];
+            float currentG = gScore[current];
+
+            // 1) Intra-cell neighbours via this cell's WalkableEdges.
+            foreach (var edge in currentCell.WalkableEdges)
+            {
+                int otherIdx = edge.NodeA == current.NodeIndex
+                    ? edge.NodeB
+                    : edge.NodeB == current.NodeIndex ? edge.NodeA : -1;
+                if (otherIdx < 0) continue;
+                var nbr = new WalkableNodeRef(current.CellId, otherIdx);
+                RelaxWalkable(graph, nbr, currentG + edge.DistanceUnits, current,
+                    gScore, cameFrom, open, goalPos);
+            }
+
+            // 2) Cross-cell neighbours via WalkableBridges touching this node.
+            if (bridgesByEndpoint.TryGetValue(current, out var attached))
+            {
+                foreach (var b in attached)
+                {
+                    var nbr = b.FromCellId == current.CellId && b.FromNodeIndex == current.NodeIndex
+                        ? new WalkableNodeRef(b.ToCellId, b.ToNodeIndex)
+                        : new WalkableNodeRef(b.FromCellId, b.FromNodeIndex);
+                    if (walkableCells is not null && !walkableCells.Contains(nbr.CellId)) continue;
+                    RelaxWalkable(graph, nbr, currentG + b.DistanceUnits, current,
+                        gScore, cameFrom, open, goalPos);
+                }
+            }
+        }
+
+        return new WalkableResult
+        {
+            Found = false,
+            Points = Array.Empty<Vector3>(),
+            NodePath = Array.Empty<WalkableNodeRef>(),
+            TotalCost = 0,
+            VisitedNodes = visited.Count,
+            FailureReason = "no walkable path between snapped nodes (graph partitioned at this resolution; check WalkableBridges / fog of war)",
+        };
+    }
+
+    private static void RelaxWalkable(
+        IndoorNavGraph graph,
+        WalkableNodeRef neighbour,
+        float tentativeG,
+        WalkableNodeRef predecessor,
+        Dictionary<WalkableNodeRef, float> gScore,
+        Dictionary<WalkableNodeRef, WalkableNodeRef> cameFrom,
+        PriorityQueue<WalkableNodeRef, float> open,
+        Vector3 goalPos)
+    {
+        if (gScore.TryGetValue(neighbour, out var prevG) && tentativeG >= prevG)
+            return;
+        gScore[neighbour] = tentativeG;
+        cameFrom[neighbour] = predecessor;
+        var pos = graph.Cells[neighbour.CellId].WalkableNodes[neighbour.NodeIndex].PositionWorld;
+        open.Enqueue(neighbour, tentativeG + Vector3.Distance(pos, goalPos));
+    }
+
+    private static WalkableResult ReconstructWalkable(
+        IndoorNavGraph graph,
+        WalkableNodeRef start,
+        WalkableNodeRef goal,
+        Dictionary<WalkableNodeRef, WalkableNodeRef> cameFrom,
+        float totalCost,
+        int visitedNodes)
+    {
+        var chain = new List<WalkableNodeRef> { goal };
+        var cursor = goal;
+        while (cursor != start)
+        {
+            cursor = cameFrom[cursor];
+            chain.Add(cursor);
+        }
+        chain.Reverse();
+
+        var points = new List<Vector3>(chain.Count);
+        foreach (var n in chain)
+            points.Add(graph.Cells[n.CellId].WalkableNodes[n.NodeIndex].PositionWorld);
+
+        return new WalkableResult
+        {
+            Found = true,
+            Points = points,
+            NodePath = chain,
+            TotalCost = totalCost,
+            VisitedNodes = visitedNodes,
+        };
+    }
+
+    /// <summary>
+    /// Find the walkable node in the graph closest to
+    /// <paramref name="world"/> in 3D Euclidean distance, optionally
+    /// restricted to cells in <paramref name="walkableCells"/>. Returns
+    /// null when no cell with walkable nodes is in scope.
+    /// </summary>
+    public static WalkableNodeRef? NearestWalkableNode(
+        IndoorNavGraph graph,
+        Vector3 world,
+        IReadOnlySet<uint>? walkableCells = null)
+    {
+        WalkableNodeRef? best = null;
+        float bestSq = float.PositiveInfinity;
+        foreach (var (cellId, cell) in graph.Cells)
+        {
+            if (walkableCells is not null && !walkableCells.Contains(cellId)) continue;
+            for (int i = 0; i < cell.WalkableNodes.Count; i++)
+            {
+                var p = cell.WalkableNodes[i].PositionWorld;
+                float dx = p.X - world.X;
+                float dy = p.Y - world.Y;
+                float dz = p.Z - world.Z;
+                float d = dx * dx + dy * dy + dz * dz;
+                if (d < bestSq)
+                {
+                    bestSq = d;
+                    best = new WalkableNodeRef(cellId, i);
+                }
+            }
+        }
+        return best;
+    }
+
+    private static WalkableResult EmptyWalkable(string reason) => new()
+    {
+        Found = false,
+        Points = Array.Empty<Vector3>(),
+        NodePath = Array.Empty<WalkableNodeRef>(),
+        TotalCost = 0,
+        VisitedNodes = 0,
+        FailureReason = reason,
+    };
 }

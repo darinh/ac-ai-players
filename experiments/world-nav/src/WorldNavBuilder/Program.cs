@@ -16,6 +16,7 @@
 // (AcAiPlayers.WorldNav) is the long-lived artifact.
 
 using System.Globalization;
+using System.Numerics;
 using System.Text;
 
 using ACE.DatLoader;
@@ -33,8 +34,22 @@ ushort landblock = 0x8602;
 string outPath = "academy.svg";
 bool showConnectionIds = false;
 bool showWalkableEdges = false;
+bool showWalkableBridges = false;
 bool quiet = false;
 bool diag = false;
+Vector3? traceFrom = null;
+Vector3? traceTo = null;
+
+static Vector3 ParseV3(string s, string flag)
+{
+    var parts = s.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length != 3)
+        throw new ArgumentException($"{flag} expects three comma-separated floats (x,y,z), got '{s}'");
+    return new Vector3(
+        float.Parse(parts[0], CultureInfo.InvariantCulture),
+        float.Parse(parts[1], CultureInfo.InvariantCulture),
+        float.Parse(parts[2], CultureInfo.InvariantCulture));
+}
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -55,11 +70,16 @@ for (int i = 0; i < args.Length; i++)
         case "--out": outPath = Next(a); break;
         case "--show-connection-ids": showConnectionIds = true; break;
         case "--show-walkable-edges": showWalkableEdges = true; break;
+        case "--show-walkable-bridges": showWalkableBridges = true; break;
+        case "--trace":
+            traceFrom = ParseV3(Next(a), "--trace from");
+            traceTo = ParseV3(Next(a), "--trace to");
+            break;
         case "--quiet": quiet = true; break;
         case "--diag": diag = true; break;
         case "-h":
         case "--help":
-            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--diag] [--quiet]");
+            Console.WriteLine("WorldNavBuilder --dat <dir> --landblock <hex> --out <svg> [--show-connection-ids] [--show-walkable-edges] [--show-walkable-bridges] [--trace x,y,z x,y,z] [--diag] [--quiet]");
             return 0;
         default:
             Console.Error.WriteLine($"unknown arg: {a}");
@@ -110,6 +130,7 @@ if (!quiet)
     Console.WriteLine($"  floor polys:  {graph.FloorPolygonCount} walkable surfaces");
     Console.WriteLine($"  walk nodes:   {graph.WalkableNodeCount} grid-sampled stand points");
     Console.WriteLine($"  walk edges:   {graph.WalkableEdgeCount} 8-neighbour intra-cell links");
+    Console.WriteLine($"  walk bridges: {graph.WalkableBridgeCount} cross-cell doorway hops");
     Console.WriteLine($"  bounds:  X[{graph.BoundsWorld.MinX:0.##}..{graph.BoundsWorld.MaxX:0.##}] Y[{graph.BoundsWorld.MinY:0.##}..{graph.BoundsWorld.MaxY:0.##}] Z[{graph.BoundsWorld.MinZ:0.##}..{graph.BoundsWorld.MaxZ:0.##}]");
 
     int withGeom = 0, withoutGeom = 0;
@@ -135,6 +156,11 @@ if (!quiet)
             else boundN++;
         }
     Console.WriteLine($"  obstacle breakdown: {cylN} cylinders, {sphN} spheres, {boundN} setup-bound fallbacks");
+
+    int cellsWithNoWalk = 0;
+    foreach (var cell in graph.Cells.Values)
+        if (cell.WalkableNodes.Count == 0) cellsWithNoWalk++;
+    Console.WriteLine($"  cells with no walkable nodes: {cellsWithNoWalk} of {graph.CellCount}");
 }
 
 if (graph.CellCount == 0)
@@ -200,10 +226,31 @@ if (diag)
         Console.WriteLine($"  0x{d.from:X8} -> 0x{d.to:X8}  dz={d.dz,+7:0.00}u  conn-z={d.pz:0.0}");
 }
 
+var pathTrace = Array.Empty<Vector3>();
+if (traceFrom is { } pf && traceTo is { } pt)
+{
+    var result = new Pathfinder().FindWalkablePath(graph, pf, pt);
+    if (result.Found)
+    {
+        pathTrace = result.Points.ToArray();
+        if (!quiet)
+        {
+            Console.WriteLine($"trace: {pathTrace.Length} waypoints, cost={result.TotalCost:0.0}u, visited={result.VisitedNodes}");
+            Console.WriteLine($"       start={pathTrace[0]:0.0} goal={pathTrace[^1]:0.0}");
+        }
+    }
+    else if (!quiet)
+    {
+        Console.Error.WriteLine($"trace: FAILED ({result.FailureReason}); visited={result.VisitedNodes}");
+    }
+}
+
 var svg = new SvgRenderer().Render(graph, new SvgRenderer.Options
 {
     ShowConnectionIds = showConnectionIds,
     ShowWalkableEdges = showWalkableEdges,
+    ShowWalkableBridges = showWalkableBridges,
+    PathTrace = pathTrace,
 });
 
 var outDir = Path.GetDirectoryName(Path.GetFullPath(outPath));

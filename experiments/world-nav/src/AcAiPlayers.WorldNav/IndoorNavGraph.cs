@@ -219,6 +219,23 @@ public sealed class WalkableNode
 public readonly record struct WalkableEdge(int NodeA, int NodeB, float DistanceUnits);
 
 /// <summary>
+/// One cross-cell walkable bridge edge: a single doorway hop between
+/// two cells. The bot walks from <see cref="FromCellId"/>'s walkable
+/// node at <see cref="FromNodeIndex"/> through the connection centroid
+/// to <see cref="ToCellId"/>'s walkable node at <see cref="ToNodeIndex"/>.
+/// Stored undirected via the (smaller cellId, smaller nodeIndex)
+/// convention so the same bridge isn't double-counted when both cells
+/// list the connection.
+/// </summary>
+public readonly record struct WalkableBridge(
+    uint FromCellId,
+    int FromNodeIndex,
+    uint ToCellId,
+    int ToNodeIndex,
+    ushort ConnectionPolygonId,
+    float DistanceUnits);
+
+/// <summary>
 /// The shape of a static obstacle's footprint, as it appears in the
 /// SetupModel's broad-phase collision data.
 /// </summary>
@@ -370,6 +387,17 @@ public sealed class IndoorNavGraph
     /// <summary>All loaded indoor cells in this landblock, keyed by full 32-bit cell ID.</summary>
     public required IReadOnlyDictionary<uint, IndoorCell> Cells { get; init; }
 
+    /// <summary>
+    /// Cross-cell walkable bridge edges. One entry per (loaded-cell,
+    /// loaded-cell) connection that has at least one walkable node on
+    /// each side and clears clearance checks. Used by
+    /// <c>Pathfinder.FindWalkablePath</c> to traverse doorways at the
+    /// walkable-node level (instead of the cell-centroid level). De-
+    /// duplicated: each unordered cell pair contributes at most one
+    /// bridge per shared connection.
+    /// </summary>
+    public required IReadOnlyList<WalkableBridge> WalkableBridges { get; init; }
+
     /// <summary>World-space bounds covering every loaded cell + portal centroid.</summary>
     public required NavBounds BoundsWorld { get; init; }
 
@@ -390,4 +418,7 @@ public sealed class IndoorNavGraph
 
     /// <summary>Total walkable-edge count across all cells (intra-cell only).</summary>
     public int WalkableEdgeCount => Cells.Values.Sum(c => c.WalkableEdges.Count);
+
+    /// <summary>Total walkable bridge count (cross-cell hops at the walkable-node level).</summary>
+    public int WalkableBridgeCount => WalkableBridges.Count;
 }

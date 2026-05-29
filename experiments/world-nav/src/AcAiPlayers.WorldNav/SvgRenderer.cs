@@ -57,6 +57,18 @@ public sealed class SvgRenderer
         public bool ShowCellIds { get; init; } = true;
         public bool ShowConnectionIds { get; init; } = false;
         public bool ShowWalkableEdges { get; init; } = false;
+        /// <summary>
+        /// Draw cross-cell <see cref="WalkableBridge"/> segments as
+        /// faint orange lines (within the same floor only — inter-floor
+        /// bridges are already represented by the stair indicators).
+        /// </summary>
+        public bool ShowWalkableBridges { get; init; } = false;
+        /// <summary>
+        /// Optional ordered world-space points to overlay as a magenta
+        /// polyline. Intended for visualising the result of
+        /// <see cref="Pathfinder.FindWalkablePath"/>. Empty = no overlay.
+        /// </summary>
+        public IReadOnlyList<Vector3> PathTrace { get; init; } = Array.Empty<Vector3>();
         public RenderMode Mode { get; init; } = RenderMode.Floors;
     }
 
@@ -125,6 +137,22 @@ public sealed class SvgRenderer
         return floors;
     }
 
+    private static bool PointInFloor(Vector3 p, FloorGroup floor)
+    {
+        // Z first: a path that descends through a stair belongs to
+        // whichever floor's Z-band contains each endpoint. Use a small
+        // tolerance so endpoints sitting exactly on a floor's MinZ
+        // (e.g. a stair-bottom node) still register.
+        const float zTol = 0.5f;
+        if (p.Z < floor.MinZ - zTol || p.Z > floor.MaxZ + zTol) return false;
+        // XY: cells in this floor cover a (possibly non-rectangular)
+        // region of XY, but the floor's overall bounding box is a fast
+        // and accurate enough approximation for clipping diagnostic
+        // overlays.
+        var b = floor.XyBounds;
+        return p.X >= b.MinX && p.X <= b.MaxX && p.Y >= b.MinY && p.Y <= b.MaxY;
+    }
+
     private static string CssBlock()
     {
         var sb = new StringBuilder();
@@ -143,6 +171,9 @@ public sealed class SvgRenderer
         sb.Append("  .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}\n");
         sb.Append("  .walkable-node{fill:#0a4a0a;fill-opacity:0.85;stroke:none}\n");
         sb.Append("  .walkable-edge{stroke:#226622;stroke-width:0.15;stroke-opacity:0.4;fill:none}\n");
+        sb.Append("  .walkable-bridge{stroke:#ff6600;stroke-width:0.6;stroke-opacity:0.7;fill:none}\n");
+        sb.Append("  .path-trace{stroke:#cc00cc;stroke-width:1.6;stroke-opacity:0.9;fill:none}\n");
+        sb.Append("  .path-endpoint{fill:#cc00cc;stroke:#660066;stroke-width:0.6}\n");
         sb.Append("  .stair-up{fill:#ff8a1a;stroke:#7a3a00;stroke-width:0.6}\n");
         sb.Append("  .stair-dn{fill:#7a3aff;stroke:#2a0066;stroke-width:0.6}\n");
         sb.Append("  .stair-label{font:8px sans-serif;fill:#2a0033;text-anchor:middle;dominant-baseline:central}\n");
@@ -263,6 +294,43 @@ public sealed class SvgRenderer
                 sb.Append(CultureInfo.InvariantCulture,
                     $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
             }
+        }
+
+        // Cross-cell walkable bridges (within this floor only).
+        if (options.ShowWalkableBridges)
+        {
+            foreach (var br in graph.WalkableBridges)
+            {
+                if (!cellSet.Contains(br.FromCellId) || !cellSet.Contains(br.ToCellId)) continue;
+                if (!graph.Cells.TryGetValue(br.FromCellId, out var fc)) continue;
+                if (!graph.Cells.TryGetValue(br.ToCellId, out var tc)) continue;
+                var a = fc.WalkableNodes[br.FromNodeIndex].PositionWorld;
+                var c = tc.WalkableNodes[br.ToNodeIndex].PositionWorld;
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<line class=\"walkable-bridge\" x1=\"{Wx(a.X):0.##}\" y1=\"{Wy(a.Y):0.##}\" x2=\"{Wx(c.X):0.##}\" y2=\"{Wy(c.Y):0.##}\"/>\n");
+            }
+        }
+
+        // Path trace polyline (any segment whose endpoint cell is in
+        // this floor; cross-floor segments will appear in both panels).
+        if (options.PathTrace.Count >= 2)
+        {
+            var trace = options.PathTrace;
+            for (int i = 0; i + 1 < trace.Count; i++)
+            {
+                var a = trace[i];
+                var c = trace[i + 1];
+                if (!PointInFloor(a, floor) && !PointInFloor(c, floor)) continue;
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<line class=\"path-trace\" x1=\"{Wx(a.X):0.##}\" y1=\"{Wy(a.Y):0.##}\" x2=\"{Wx(c.X):0.##}\" y2=\"{Wy(c.Y):0.##}\"/>\n");
+            }
+            // Endpoint discs at start/end if they lie in this floor.
+            if (PointInFloor(trace[0], floor))
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<circle class=\"path-endpoint\" cx=\"{Wx(trace[0].X):0.##}\" cy=\"{Wy(trace[0].Y):0.##}\" r=\"2.2\"/>\n");
+            if (PointInFloor(trace[^1], floor))
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<circle class=\"path-endpoint\" cx=\"{Wx(trace[^1].X):0.##}\" cy=\"{Wy(trace[^1].Y):0.##}\" r=\"2.2\"/>\n");
         }
 
         // Connection links and markers.
@@ -572,6 +640,35 @@ public sealed class SvgRenderer
                 sb.Append(CultureInfo.InvariantCulture,
                     $"<circle class=\"walkable-node\" cx=\"{nx:0.##}\" cy=\"{ny:0.##}\" r=\"0.6\"/>\n");
             }
+        }
+
+        if (options.ShowWalkableBridges)
+        {
+            foreach (var br in graph.WalkableBridges)
+            {
+                if (!graph.Cells.TryGetValue(br.FromCellId, out var fc)) continue;
+                if (!graph.Cells.TryGetValue(br.ToCellId, out var tc)) continue;
+                var a = fc.WalkableNodes[br.FromNodeIndex].PositionWorld;
+                var c = tc.WalkableNodes[br.ToNodeIndex].PositionWorld;
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<line class=\"walkable-bridge\" x1=\"{Wx(a.X):0.##}\" y1=\"{Wy(a.Y):0.##}\" x2=\"{Wx(c.X):0.##}\" y2=\"{Wy(c.Y):0.##}\"/>\n");
+            }
+        }
+
+        if (options.PathTrace.Count >= 2)
+        {
+            var trace = options.PathTrace;
+            for (int i = 0; i + 1 < trace.Count; i++)
+            {
+                var a = trace[i];
+                var c = trace[i + 1];
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<line class=\"path-trace\" x1=\"{Wx(a.X):0.##}\" y1=\"{Wy(a.Y):0.##}\" x2=\"{Wx(c.X):0.##}\" y2=\"{Wy(c.Y):0.##}\"/>\n");
+            }
+            sb.Append(CultureInfo.InvariantCulture,
+                $"<circle class=\"path-endpoint\" cx=\"{Wx(trace[0].X):0.##}\" cy=\"{Wy(trace[0].Y):0.##}\" r=\"2.2\"/>\n");
+            sb.Append(CultureInfo.InvariantCulture,
+                $"<circle class=\"path-endpoint\" cx=\"{Wx(trace[^1].X):0.##}\" cy=\"{Wy(trace[^1].Y):0.##}\" r=\"2.2\"/>\n");
         }
 
         foreach (var cell in graph.Cells.Values)
