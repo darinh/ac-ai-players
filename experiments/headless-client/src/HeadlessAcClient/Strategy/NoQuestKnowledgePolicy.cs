@@ -51,6 +51,22 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         EventStream events,
         Goal? currentGoal)
     {
+        // Slice J — collect the set of recently-rejected target
+        // guids so we skip them in candidate selection. Avoids
+        // looping on a Bruised Apple the bot can't physically reach
+        // (geometry blocked or out of pickup range).
+        //
+        // Window: last 32 events of kind ActionRejected. Each entry
+        // carries the ItemGuid that the server (or our walk-timeout)
+        // reported. Guids age out of the window naturally as new
+        // events accumulate, so a target the bot revisits later (new
+        // landblock, different geometry) is fair game again.
+        var recentlyRejectedGuids = events
+            .RecentOfKind(EventKind.ActionRejected, 32)
+            .Where(e => e.ItemGuid is uint)
+            .Select(e => e.ItemGuid!.Value)
+            .ToHashSet();
+
         // 1) Health-critical: drop everything if frac < 0.3.
         if (world.Self.HealthFraction is float hf && hf < 0.3f)
             return MakeGoal(GoalKind.Wait, new Selector { Name = "self" }, null,
@@ -59,6 +75,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // 2) Combat — nearest observed-hostile creature.
         var hostile = world.Visible
             .Where(v => v.IsCreature && v.ObservedHostile)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (hostile is not null)
@@ -70,6 +87,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // 3) Wield: any inventory item with ValidLocations set and not yet wielded.
         var unwielded = world.Inventory
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
+            .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .OrderByDescending(i => i.ValidLocations) // weapons/armor first roughly
             .FirstOrDefault();
         if (unwielded is not null)
@@ -82,6 +100,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // 4) Pickup: nearest pickup-eligible (by ItemType mask) on the ground.
         var pickup = world.Visible
             .Where(v => v.ItemType is uint it && (it & ItemTypeMasks.Pickup) != 0)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (pickup is not null)
@@ -98,7 +117,8 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    use "the newest InventoryItemAdded event since last seen" so
         //    the trigger is observation-derived, not content-keyed.
         var newest = events.RecentOfKind(EventKind.InventoryItemAdded, 1).FirstOrDefault();
-        if (newest is { Sequence: var seq } && seq > _lastInventoryEventSeen && newest.ItemGuid is uint g)
+        if (newest is { Sequence: var seq } && seq > _lastInventoryEventSeen && newest.ItemGuid is uint g
+            && !recentlyRejectedGuids.Contains(g))
         {
             _lastInventoryEventSeen = seq;
             var matchingInv = world.Inventory.FirstOrDefault(i => i.Guid == g);
@@ -113,6 +133,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    talking emits PopupString, feeding the LLM next round.
         var npc = world.Visible
             .Where(v => v.IsCreature && !v.ObservedHostile)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (npc is not null)

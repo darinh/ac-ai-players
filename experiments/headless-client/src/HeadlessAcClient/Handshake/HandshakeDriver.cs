@@ -1084,6 +1084,40 @@ internal sealed class HandshakeDriver : IDisposable
                                     ErrorLabel = label,
                                 });
                             }
+                            // Slice J — InventoryServerSaveFailed
+                            // surfaces as ActionRejected so the LLM
+                            // and fallback policy can both avoid the
+                            // failing item (e.g. pickup of an apple
+                            // the bot can't physically reach). The
+                            // ItemGuid identifies the target item so
+                            // the policy can dedupe by guid, not by
+                            // verb/name.
+                            if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
+                                isf.ErrorType != 0)
+                            {
+                                var invLabel = WeenieErrorLabels.Label(isf.ErrorType);
+                                // Look up the item's name from the
+                                // visible-world snapshot so the LLM
+                                // sees a human-readable rejection.
+                                string? isfName = null;
+                                if (worldState.Self is WorldObjectSnapshot isfSelf)
+                                {
+                                    isfName = worldState.WithinRadius(isfSelf, 999f)
+                                        .FirstOrDefault(s => s.Guid == isf.ItemGuid)?.Name;
+                                }
+                                isfName ??= "(unknown)";
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.ActionRejected,
+                                    Text = $"Inventory action failed on '{isfName}': {invLabel}",
+                                    ItemGuid = isf.ItemGuid,
+                                    Name = isfName,
+                                    ErrorCode = isf.ErrorType,
+                                    ErrorLabel = invLabel,
+                                });
+                            }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
                             Console.WriteLine(
@@ -2752,6 +2786,27 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     motionDone = true;
                     Console.WriteLine($"[motion] walk-tick: wall-clock timeout {MotionWallClockTimeoutSec}s elapsed — stopping");
+                    // Slice J — surface unreachable target as
+                    // ActionRejected so the LLM and the fallback
+                    // policy can both avoid retargeting the same
+                    // guid (otherwise we loop on geometry-blocked
+                    // pickups like the academy Bruised Apple at
+                    // d=4.9u behind a wall). Carries ItemGuid +
+                    // Name so policies can dedupe by guid.
+                    if (motionTarget is not null)
+                    {
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc = DateTimeOffset.UtcNow,
+                            Kind = EventKind.ActionRejected,
+                            Text = $"Unreachable: '{motionTarget.Name}' (walk timeout {MotionWallClockTimeoutSec}s)",
+                            ItemGuid = motionTarget.Guid,
+                            Name = motionTarget.Name,
+                            ErrorCode = 0xFFFE,
+                            ErrorLabel = "Unreachable",
+                        });
+                    }
                 }
 
                 if (!motionDone &&

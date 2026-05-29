@@ -505,6 +505,53 @@ public class StrategyFoundationTests
         Assert.NotNull(goal);
         Assert.NotEqual(GoalKind.Give, goal!.Kind);
     }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsPickup_WhenTargetRecentlyRejected()
+    {
+        // Slice J — the fallback used to loop on the same Bruised
+        // Apple guid when the server rejected the pickup (geometry
+        // blocked or out of physical reach). Now ActionRejected
+        // events carrying ItemGuid cause the policy to skip that
+        // guid on subsequent ticks; with only one pickup candidate
+        // and no other actionable goal, it falls through to Explore.
+        const uint AppleGuid = 0x800004DC;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = AppleGuid, Name = "Bruised Apple", Wcid = 5090u,
+                    ItemType = 0x20u, Distance = 4.9f, IsCreature = false,
+                    ObservedHostile = false,
+                },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Text = "Unreachable: 'Bruised Apple' (walk timeout 30s)",
+            ItemGuid = AppleGuid,
+            Name = "Bruised Apple",
+            ErrorCode = 0xFFFE,
+            ErrorLabel = "Unreachable",
+        });
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Pickup, goal!.Kind);
+    }
 }
 
 /// <summary>
