@@ -108,6 +108,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (_inflight is not null)
             return currentGoal;
 
+        // 2.5) Stale-goal-on-teleport guard. If the bot crossed a
+        // landblock boundary since our last LLM look, the prior goal
+        // was derived for a world we are no longer in. Drop it from
+        // the prompt anchor so the LLM re-deliberates from the new
+        // observations rather than re-emitting (e.g.) the academy
+        // Give-to-Society-Greeter goal after a Free Ride teleport
+        // to Holtburg. The SelectorResolver landblock filter is the
+        // belt; this is the suspenders that stop the LLM from
+        // burning tokens re-proposing the same dead goal.
+        if (currentGoal is not null && HasLandblockChangeSince(events, _lastEventConsideredSequence))
+        {
+            Console.WriteLine(
+                $"[strategy] LlmGoalPolicy: landblock change detected → " +
+                $"dropping stale goal '{currentGoal.Kind} target={currentGoal.Target}' from prompt anchor");
+            currentGoal = null;
+        }
+
         // 3) Decide whether to kick off a new call.
         var hasNewSalient = HasNewSalientEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
@@ -217,6 +234,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.LandblockChanged
                               or EventKind.NpcDialog
                               or EventKind.ServerMessage);
+    }
+
+    internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
+    {
+        // Recent() returns newest-first. Filter the suffix that's newer
+        // than our last look for any LandblockChanged event. sequenceFloor
+        // of -1 (the initial state) accepts any event.
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.LandblockChanged);
     }
 
     private bool HasNewSalientEvent(EventStream events)

@@ -269,6 +269,93 @@ public class LlmGoalPolicyTests
         Assert.False(tactics.PolicyHasInflight);
     }
 
+    // ---- Stale-goal-on-teleport regression (racefix-run-01) ----
+
+    [Fact]
+    public void HasLandblockChangeSince_DetectsEventAboveFloor()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "p" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged, Text = "lb=0xA9B4" });
+
+        Assert.True(LlmGoalPolicy.HasLandblockChangeSince(es, floor));
+        // Higher floor (after the landblock event) should miss it.
+        Assert.False(LlmGoalPolicy.HasLandblockChangeSince(es, es.NextSequence));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_LandblockChange_DropsStaleCurrentGoalFromPrompt()
+    {
+        // Two-call scenario:
+        //   1) Initial deliberation produces a Give(Jonathan, Token) goal.
+        //   2) After consume, push a LandblockChanged event and call
+        //      ProposeGoal again with that goal in hand. The policy must
+        //      kick off a fresh LLM call with currentGoal stripped from
+        //      the prompt anchor (no "## Current goal" section). This is
+        //      what stops the LLM from regurgitating the academy goal
+        //      after a teleport to Holtburg.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Jonathan" },
+          "item":   { "name": "Academy Exit Token" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            // Disable rate-limit coalescing so the second call fires
+            // immediately rather than getting deferred.
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        // Call 1: kick off, drain, consume → goal in hand.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Single(requestBodies);
+        // Sanity: the first call DID include currentGoal=null so no anchor.
+        Assert.DoesNotContain("## Current goal", requestBodies[0]);
+
+        // Now simulate a teleport: append a LandblockChanged event after
+        // the prior call's _lastEventConsideredSequence floor was set.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.LandblockChanged,
+            Text = "lb=0xA9B4 (Holtburg)",
+        });
+
+        // Call 2: with the stale goal in hand. Expect kick-off with
+        // currentGoal stripped from the prompt (no anchor on Jonathan).
+        var second = policy.ProposeGoal(world, events, firstGoal);
+        // Returns the prior goal (kept until new result arrives), but
+        // the HTTP call has been issued.
+        Assert.Equal(2, requestBodies.Count);
+        Assert.DoesNotContain("## Current goal", requestBodies[1]);
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;

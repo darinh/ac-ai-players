@@ -14,6 +14,18 @@
 //     ShortDesc from WeenieRepository. Selector with this set
 //     requires `weenies` non-null; if null the field is ignored.
 //
+// Locality filter:
+//   When the optional `actor` snapshot is non-null and has a
+//   populated CellId, world-space candidates (those without a
+//   ContainerGuid, i.e. not in someone's inventory) are restricted
+//   to actor's current landblock (top 16 bits of CellId). This
+//   prevents stale snapshots from prior landblocks (e.g. the
+//   academy Society Greeter after a Free Ride teleport to
+//   Holtburg) from resolving for a bot that has since moved away
+//   — the server doesn't always emit ObjectDelete for objects
+//   that fall out of broadcast range, so WorldState accumulates
+//   them indefinitely.
+//
 // Per the architecture rule, this resolver does NOT bake game
 // content. It only matches what was observed at runtime.
 
@@ -30,7 +42,8 @@ internal static class SelectorResolver
     public static IReadOnlyList<WorldObjectSnapshot> Resolve(
         Selector sel,
         WorldState world,
-        IWeenieRepository? weenies = null)
+        IWeenieRepository? weenies = null,
+        WorldObjectSnapshot? actor = null)
     {
         if (sel is null) throw new ArgumentNullException(nameof(sel));
         if (sel.IsEmpty) return Array.Empty<WorldObjectSnapshot>();
@@ -42,6 +55,7 @@ internal static class SelectorResolver
             .Where(o => MatchesWcid(o, sel))
             .Where(o => MatchesItemTypeMask(o, sel))
             .Where(o => MatchesShortDescContains(o, sel, weenies))
+            .Where(o => MatchesSameLandblockAsActor(o, actor))
             .ToList();
     }
 
@@ -51,7 +65,11 @@ internal static class SelectorResolver
         WorldObjectSnapshot? referencePoint = null,
         IWeenieRepository? weenies = null)
     {
-        var all = Resolve(sel, world, weenies);
+        // Use referencePoint as the actor for the locality filter:
+        // a single-nearest resolution is asking "what should this
+        // actor act on?", so confining to the actor's landblock is
+        // the right default.
+        var all = Resolve(sel, world, weenies, actor: referencePoint);
         if (all.Count == 0) return null;
         if (referencePoint is null) return all[0];
 
@@ -91,5 +109,24 @@ internal static class SelectorResolver
         var rec = weenies.TryGet(wcid);
         return rec?.ShortDesc is not null &&
                rec.ShortDesc.Contains(s.ShortDescContains, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesSameLandblockAsActor(
+        WorldObjectSnapshot o, WorldObjectSnapshot? actor)
+    {
+        // No actor or actor has no cell yet -> can't filter, accept.
+        if (actor is null) return true;
+        if (actor.CellId is not uint actorCell || actorCell == 0u) return true;
+
+        // Items being carried (inventory) have a ContainerGuid set and
+        // typically no meaningful CellId. They travel with their owner,
+        // so they are always "local" to whoever carries them.
+        if (o.ContainerGuid is uint c && c != 0u) return true;
+
+        // World-space object: require same landblock (top 16 bits).
+        // Objects with no CellId yet (just-created, partial info) are
+        // accepted; the next snapshot update will populate the cell.
+        if (o.CellId is not uint oCell || oCell == 0u) return true;
+        return (oCell & 0xFFFF0000u) == (actorCell & 0xFFFF0000u);
     }
 }

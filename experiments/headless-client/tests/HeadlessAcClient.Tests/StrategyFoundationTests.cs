@@ -195,6 +195,73 @@ public class StrategyFoundationTests
         Assert.Equal(ItemGuid, withRepo[0].Guid);
     }
 
+    // Regression for racefix-run-01: after Jonathan Free Ride teleported
+    // the bot to Holtburg (landblock 0xA9B4), the academy Society Greeter
+    // snapshot stayed in WorldState (server never sent ObjectDelete) and
+    // SelectorResolver kept resolving it as the LLM goal target at
+    // dist=34904u. The locality filter on the actor's landblock prevents
+    // resolution to objects in foreign landblocks while keeping inventory
+    // items (carried, ContainerGuid set) addressable from anywhere.
+    [Fact]
+    public void SelectorResolver_FiltersOutObjectsInForeignLandblock()
+    {
+        const uint AcademyCellId  = 0x860201ADu; // landblock 0x8602
+        const uint HoltburgCellId = 0xA9B400ABu; // landblock 0xA9B4
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        // Self has moved to Holtburg.
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: HoltburgCellId);
+        // Stale academy NPC snapshot still in WorldState.
+        SeedSnapshot(ws, NpcGuid, "Society Greeter", wcid: 30991u, itemType: 0x10u, cellId: AcademyCellId);
+        // Inventory item: ContainerGuid=self, CellId=0 (carried).
+        SeedSnapshot(ws, ItemGuid, "Calling Stone", wcid: 29336u, itemType: 0x800u, cellId: 0u, containerGuid: SelfGuid);
+
+        var self = ws.TryGet(SelfGuid);
+        Assert.NotNull(self);
+
+        // With actor=null (legacy contract): NPC still matches (backward compat).
+        var noFilter = SelectorResolver.Resolve(new Selector { Name = "Society Greeter" }, ws);
+        Assert.Single(noFilter);
+
+        // With actor=self in Holtburg: the academy NPC is dropped.
+        var filtered = SelectorResolver.Resolve(
+            new Selector { Name = "Society Greeter" }, ws, weenies: null, actor: self);
+        Assert.Empty(filtered);
+
+        // ResolveSingleNearest wires referencePoint as the locality actor.
+        var nearest = SelectorResolver.ResolveSingleNearest(
+            new Selector { Name = "Society Greeter" }, ws, referencePoint: self);
+        Assert.Null(nearest);
+
+        // Carried inventory items resolve regardless of landblock.
+        var carried = SelectorResolver.Resolve(
+            new Selector { Name = "Calling Stone" }, ws, weenies: null, actor: self);
+        Assert.Single(carried);
+        Assert.Equal(ItemGuid, carried[0].Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_AcceptsSameLandblockObjectsWithDifferentCells()
+    {
+        // Two cells inside the same landblock (top 16 bits = 0x8602) must
+        // both resolve when the actor is in that landblock — locality is
+        // landblock-scoped, not cell-scoped.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, NpcGuid, "Jonathan", wcid: 29324u, itemType: 0x10u, cellId: 0x860201FFu);
+        SeedSnapshot(ws, MobGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x860202ABu);
+
+        var self = ws.TryGet(SelfGuid);
+        var npc = SelectorResolver.Resolve(
+            new Selector { Name = "Jonathan" }, ws, weenies: null, actor: self);
+        Assert.Single(npc);
+        var mob = SelectorResolver.Resolve(
+            new Selector { Name = "Sparring Golem" }, ws, weenies: null, actor: self);
+        Assert.Single(mob);
+    }
+
     [Fact]
     public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
     {
