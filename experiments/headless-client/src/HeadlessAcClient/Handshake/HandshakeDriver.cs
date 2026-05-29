@@ -482,28 +482,111 @@ internal sealed class HandshakeDriver : IDisposable
         // block alongside motionTarget / useSent / etc.
         GoalKind? lockedGoalKind = null;
 
-        // Issue #79 — track the most-recent server-bound action so
-        // that an inbound WeenieError / WeenieErrorWithString can be
-        // attributed to a specific goal dispatch. Without this the
-        // LLM never sees rejections in its prompt and re-emits the
-        // same goal in a tight loop (e.g. Give{Calling Stone →
-        // Society Greeter} after the Greeter said no).
+        // Issue #79 — track recent server-bound actions so that an
+        // inbound WeenieError / WeenieErrorWithString (or non-zero
+        // AttackDone.ErrorCode) can be attributed to a specific goal
+        // dispatch. Without this the LLM never sees rejections in
+        // its prompt and re-emits the same goal in a tight loop
+        // (e.g. Give{Calling Stone → Society Greeter} after the
+        // Greeter said no).
+        //
+        // We keep a small bounded list rather than a single slot so
+        // that:
+        //   (a) the 2s post-action cooldown reset doesn't drop a
+        //       pending dispatch before its 60s attribution window
+        //       expires (so a late server error still gets matched);
+        //   (b) if two actions are dispatched before either rejects,
+        //       we don't cross-attribute (the second overwrites the
+        //       first in a single-slot model).
         //
         // Set at two sites:
-        //   - inventory-USE direct (line ~1799)
+        //   - inventory-USE direct (line ~1899)
         //   - spatial action send (after the unified send block)
-        // Cleared in the cooldown-reset block alongside motionTarget.
+        // Pruned on every receive (entries older than the 60s
+        // window are dropped). Removed individually after a
+        // successful attribution so a second error in the same
+        // window doesn't double-attribute the same dispatch.
         //
         // Kind is a stringified GoalKind for direct comparison with
         // StreamEvent.RejectedGoalKind in the LLM rejection guard.
-        (string Kind, uint TargetGuid, string? TargetName, uint? ItemGuid, string? ItemName, DateTime DispatchedAtUtc)? lastDispatchedAction = null;
-        // Window for attributing an inbound WeenieError to the most
-        // recent dispatch. Tuned for typical AC server processing
-        // latency (Player_Tick CreateMoveToChain + EmoteManager
-        // dispatch). Long enough to catch multi-step rejection
-        // chains, short enough not to false-attribute a rejection
-        // from a delayed unrelated event.
+        var pendingDispatches = new List<(string Kind, uint TargetGuid, string? TargetName, uint? ItemGuid, string? ItemName, DateTime DispatchedAtUtc)>();
+        // Window for attributing an inbound WeenieError to a recent
+        // dispatch. Tuned for typical AC server processing latency
+        // (Player_Tick CreateMoveToChain + EmoteManager dispatch).
+        // Long enough to catch multi-step rejection chains, short
+        // enough not to false-attribute a rejection from a delayed
+        // unrelated event. Also bounds the size of the pending list.
         const double LastDispatchedAttributionWindowSec = 60.0;
+        // Hard cap on the pending-dispatch list (defense in depth).
+        const int MaxPendingDispatches = 16;
+
+        // Issue #79 — record a dispatch on the pending list. Drops
+        // expired entries (>60s) opportunistically and enforces the
+        // hard cap so a bug elsewhere can't grow the list unboundedly.
+        void RecordPendingDispatch(string kind, uint targetGuid, string? targetName, uint? itemGuid, string? itemName)
+        {
+            var nowUtcLocal = DateTime.UtcNow;
+            pendingDispatches.RemoveAll(d =>
+                (nowUtcLocal - d.DispatchedAtUtc).TotalSeconds > LastDispatchedAttributionWindowSec);
+            // Hard cap defense — drop the oldest if at limit.
+            while (pendingDispatches.Count >= MaxPendingDispatches)
+                pendingDispatches.RemoveAt(0);
+            pendingDispatches.Add((kind, targetGuid, targetName, itemGuid, itemName, nowUtcLocal));
+        }
+
+        // Issue #79 — attribute an inbound server-rejection (WeenieError /
+        // WeenieErrorWithString / non-zero AttackDone.ErrorCode) to the
+        // OLDEST un-attributed pending dispatch within the 60s window.
+        // Oldest-first matches AC's mostly-serial processing model:
+        // requests reach Player_Tick in order, so the first rejection
+        // is most likely for the first un-acknowledged request. On
+        // attribution, append a GoalRejected StreamEvent and remove
+        // the dispatch from the pending list so a second error in
+        // the same window doesn't double-attribute.
+        bool TryAttributeRejection(uint errCode, string? rejErrText)
+        {
+            if (errCode == 0) return false;
+            var nowUtcLocal = DateTime.UtcNow;
+            int matchIdx = -1;
+            for (int i = 0; i < pendingDispatches.Count; i++)
+            {
+                if ((nowUtcLocal - pendingDispatches[i].DispatchedAtUtc).TotalSeconds
+                    <= LastDispatchedAttributionWindowSec)
+                {
+                    matchIdx = i;
+                    break;
+                }
+            }
+            if (matchIdx < 0) return false;
+            var lda = pendingDispatches[matchIdx];
+            pendingDispatches.RemoveAt(matchIdx);
+
+            var errLabel = WeenieErrorLabels.Label(errCode);
+            // Compose a human-readable text for the LLM. The label
+            // is the most informative scalar; the server text (if any)
+            // adds nuance — concatenate both when both are present.
+            var rejText = rejErrText is null ? errLabel : $"{errLabel}: {rejErrText}";
+            eventStream.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.GoalRejected,
+                Text = rejText,
+                Name = lda.TargetName,
+                ItemGuid = lda.ItemGuid,
+                ItemName = lda.ItemName,
+                ErrorCode = errCode,
+                RejectedGoalKind = lda.Kind,
+            });
+            Console.WriteLine(
+                $"[strategy] GoalRejected attributed: kind={lda.Kind} " +
+                $"target=\"{lda.TargetName}\" " +
+                (lda.ItemName is null ? "" : $"item=\"{lda.ItemName}\" ") +
+                $"error=0x{errCode:X4} ({errLabel})" +
+                (rejErrText is null ? "" : $" \"{rejErrText}\"") +
+                $" (pending={pendingDispatches.Count})");
+            return true;
+        }
 
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
@@ -1014,6 +1097,11 @@ internal sealed class HandshakeDriver : IDisposable
                             // OutOfRange, NotMeleeWeapon (we have
                             // none — unarmed should still work),
                             // YouCanNotAttackThisCreature, SkillTooLow.
+                            //
+                            // Issue #79 — also surface AttackDone-
+                            // carried error codes as GoalRejected so
+                            // the LLM stops re-emitting Attack on the
+                            // same target. Code-review #2.
                             if (ge.Payload?.AttackDone is { } atkDone)
                             {
                                 if (atkDone.ErrorCode != 0)
@@ -1021,6 +1109,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     Console.WriteLine(
                                         $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
                                         $"({WeenieErrorLabels.Label(atkDone.ErrorCode)})");
+                                    TryAttributeRejection(atkDone.ErrorCode, null);
                                 }
                             }
                             // Issue #79 — surface server rejections to
@@ -1041,55 +1130,13 @@ internal sealed class HandshakeDriver : IDisposable
                             // server-side rendered string. Most info
                             // for the LLM is in the code+label; the
                             // string adds context when present.
-                            uint? rejErrCode = null;
-                            string? rejErrText = null;
                             if (ge.Payload?.WeenieErrorWithString is { } wewS)
                             {
-                                rejErrCode = wewS.ErrorCode;
-                                rejErrText = wewS.Message;
+                                TryAttributeRejection(wewS.ErrorCode, wewS.Message);
                             }
                             else if (ge.Payload?.WeenieError is { } we)
                             {
-                                rejErrCode = we.ErrorCode;
-                            }
-                            if (rejErrCode is uint errCode &&
-                                errCode != 0 &&
-                                lastDispatchedAction is { } lda &&
-                                (DateTime.UtcNow - lda.DispatchedAtUtc).TotalSeconds
-                                    <= LastDispatchedAttributionWindowSec)
-                            {
-                                var errLabel = WeenieErrorLabels.Label(errCode);
-                                // Compose a human-readable text for
-                                // the LLM. The label is the most
-                                // informative scalar; the server text
-                                // (if any) adds nuance — concatenate
-                                // both when both are present.
-                                var rejText = rejErrText is null
-                                    ? errLabel
-                                    : $"{errLabel}: {rejErrText}";
-                                eventStream.Append(new StreamEvent
-                                {
-                                    Sequence = 0,
-                                    Utc = DateTimeOffset.UtcNow,
-                                    Kind = EventKind.GoalRejected,
-                                    Text = rejText,
-                                    Name = lda.TargetName,
-                                    ItemGuid = lda.ItemGuid,
-                                    ItemName = lda.ItemName,
-                                    ErrorCode = errCode,
-                                    RejectedGoalKind = lda.Kind,
-                                });
-                                Console.WriteLine(
-                                    $"[strategy] GoalRejected attributed: kind={lda.Kind} " +
-                                    $"target=\"{lda.TargetName}\" " +
-                                    (lda.ItemName is null ? "" : $"item=\"{lda.ItemName}\" ") +
-                                    $"error=0x{errCode:X4} ({errLabel})" +
-                                    (rejErrText is null ? "" : $" \"{rejErrText}\""));
-                                // Consume the attribution so a second
-                                // rejection in the same window doesn't
-                                // double-attribute. The next dispatch
-                                // will rebind lastDispatchedAction.
-                                lastDispatchedAction = null;
+                                TryAttributeRejection(we.ErrorCode, null);
                             }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
@@ -1745,7 +1792,11 @@ internal sealed class HandshakeDriver : IDisposable
                     walkTickAps = 0;
                     pendingGiveItemGuid = null;
                     lockedGoalKind = null;
-                    lastDispatchedAction = null;
+                    // NB: do NOT clear pendingDispatches here. The 60s
+                    // attribution window must outlive the 2s post-action
+                    // cooldown so a late server WeenieError still maps
+                    // back to the action that triggered it. The list
+                    // self-prunes on add and on each attribution.
 
                     if (actionsCompleted >= MaxActionsPerSession)
                     {
@@ -1895,13 +1946,16 @@ internal sealed class HandshakeDriver : IDisposable
                             // "target" the LLM picked IS the item;
                             // mirror that in the tracking so the
                             // rejection guard's name comparison fires.
-                            lastDispatchedAction = (
-                                Kind: "Use",
-                                TargetGuid: targetSnap.Guid,
-                                TargetName: targetSnap.Name,
-                                ItemGuid: (uint?)null,
-                                ItemName: (string?)null,
-                                DispatchedAtUtc: DateTime.UtcNow);
+                            // Use the LLM's goal kind (e.g. Talk, Use)
+                            // verbatim — collapsing to "Use" would
+                            // make the LlmGoalPolicy.MatchesRecentRejection
+                            // guard miss repeat Talk goals.
+                            RecordPendingDispatch(
+                                kind: goal.Kind.ToString(),
+                                targetGuid: targetSnap.Guid,
+                                targetName: targetSnap.Name,
+                                itemGuid: null,
+                                itemName: null);
                             tactics.Clear("inventory-use dispatched", eventStream);
                         }
                         else
@@ -2708,28 +2762,34 @@ internal sealed class HandshakeDriver : IDisposable
 
                     // Issue #79 — record this dispatch so an inbound
                     // WeenieError can be attributed back to the goal.
-                    // For Give, look up the item's name via worldState
-                    // (snapshots persist after the inventory put-ack).
-                    // For Attack/Use the actionName matches the LLM-
-                    // emitted GoalKind verb directly.
-                    string? rejectedKind = isHostile
-                        ? "Attack"
-                        : (pendingGiveItemGuid is not null
-                            ? "Give"
-                            : (isPickup ? "Pickup" : "Use"));
+                    // Source of truth for the kind is lockedGoalKind
+                    // (set at motion-lock time, line ~1944, from the
+                    // LLM's actual goal kind). Collapsing to "Use"
+                    // would make the LlmGoalPolicy rejection guard
+                    // miss repeat Talk goals (Talk-on-NPC dispatches
+                    // through the same USE codepath but is its own
+                    // GoalKind). Fall back to the action-type heuristic
+                    // only if lockedGoalKind is null (defensive — the
+                    // pre-emptor always sets it before this branch
+                    // fires).
+                    var rejectedKind = lockedGoalKind?.ToString()
+                        ?? (isHostile
+                            ? "Attack"
+                            : (pendingGiveItemGuid is not null
+                                ? "Give"
+                                : (isPickup ? "Pickup" : "Use")));
                     string? itemNameForTrack = null;
                     if (pendingGiveItemGuid is uint trackGiveItemGuid &&
                         worldState.TryGet(trackGiveItemGuid) is { } trackItemSnap)
                     {
                         itemNameForTrack = trackItemSnap.Name;
                     }
-                    lastDispatchedAction = (
-                        Kind: rejectedKind,
-                        TargetGuid: motionTarget.Guid,
-                        TargetName: motionTarget.Name,
-                        ItemGuid: pendingGiveItemGuid,
-                        ItemName: itemNameForTrack,
-                        DispatchedAtUtc: DateTime.UtcNow);
+                    RecordPendingDispatch(
+                        kind: rejectedKind,
+                        targetGuid: motionTarget.Guid,
+                        targetName: motionTarget.Name,
+                        itemGuid: pendingGiveItemGuid,
+                        itemName: itemNameForTrack);
                 }
 
                 // Periodic world-state heartbeat — once every 100

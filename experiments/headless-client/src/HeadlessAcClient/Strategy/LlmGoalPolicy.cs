@@ -201,13 +201,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // a freshly-rejected action. Catch it here and route to the
         // fallback so the bot tries something different instead of
         // hammering the same dispatch in an infinite loop.
+        //
+        // Rubber-duck #2: do NOT reset _lastCalledAtUtc / _lastEventConsideredSequence
+        // here. Resetting would force the next ProposeGoal tick to
+        // immediately re-call the LLM with the same rejection still
+        // top-of-mind, and if the LLM keeps emitting the same goal
+        // we'd burn LLM tokens in a tight spin. Instead, keep the
+        // normal MinCallInterval cooldown and "considered up to
+        // sequence N" mark — the next genuine salient event (or the
+        // StuckTimeout) will trigger a fresh deliberation.
         if (MatchesRecentRejection(parsed!, world.RecentRejections))
         {
             _training?.RecordParseError(decisionId, $"rejected-repeat: {parsed!.Kind} {SelectorName(parsed.Target)} item={SelectorName(parsed.Item)}");
-            // Force the next ProposeGoal to re-call immediately with
-            // fresh observations rather than reusing the rejected goal.
-            _lastCalledAtUtc = DateTimeOffset.MinValue;
-            _lastEventConsideredSequence = -1;
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 

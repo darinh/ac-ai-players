@@ -267,4 +267,42 @@ public class RejectionFeedbackTests
         var rejs = new List<RejectionProjection> { MakeRej("Give", "NPC", item: null) };
         Assert.False(LlmGoalPolicy.MatchesRecentRejection(goal, rejs));
     }
+
+    // CR-1 regression — Talk-on-NPC dispatches through the USE
+    // wire codepath but is its own GoalKind. The dispatch site
+    // must record "Talk" (not "Use") so the guard matches a
+    // re-emitted Talk goal. Mirror test for both directions to
+    // make the contract explicit.
+    [Fact]
+    public void Match_TalkSameTarget_True()
+    {
+        var goal = new Goal
+        {
+            Id = Guid.NewGuid(),
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Jonathan" },
+            Rationale = "x",
+        };
+        var rejs = new List<RejectionProjection> { MakeRej("Talk", "Jonathan", item: null) };
+        Assert.True(LlmGoalPolicy.MatchesRecentRejection(goal, rejs));
+    }
+
+    [Fact]
+    public void Match_TalkGoalAgainstUseRejection_False()
+    {
+        // If the dispatch site mistakenly recorded the kind as "Use"
+        // (the buggy pre-fix behavior), a fresh Talk goal would
+        // legitimately fail to match — this test pins that contract
+        // so a future regression that swaps Talk back to Use shows
+        // up as a green test that should be red.
+        var goal = new Goal
+        {
+            Id = Guid.NewGuid(),
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Jonathan" },
+            Rationale = "x",
+        };
+        var rejs = new List<RejectionProjection> { MakeRej("Use", "Jonathan", item: null) };
+        Assert.False(LlmGoalPolicy.MatchesRecentRejection(goal, rejs));
+    }
 }
