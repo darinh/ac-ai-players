@@ -85,6 +85,58 @@ Small tasks (typo, one-liner, doc tweak) may commit directly on
 the current branch — the worktree overhead is not worth it. Use
 your judgment but err on the side of using the skill.
 
+## Hardcoded knowledge audit (MANDATORY for bot code changes)
+
+Every commit by an AI agent that touches the bot's decision-making
+code MUST pass an adversarial review for **hardcoded game
+knowledge** before `git push`. This is binding, not advisory.
+
+The architecture (Pilot Track) is:
+
+- LLM (Strategy) decides WHAT to do → pushes Intents.
+- IntentStack persists strategic decisions across ticks.
+- Goal = tactical decomposition of the current top Intent.
+- Motor (HandshakeDriver picker + action dispatch +
+  `BotPlayer.cs` tick in `ACE-bots`) executes Goals.
+
+Source code MAY:
+- Decode wire-protocol bits into named projection properties
+  (`IsContainer`, `IsOpenable`, `IsStuck`).
+- Mechanically execute a Goal/Intent (walk to coord, send
+  opcode).
+- Maintain bookkeeping the LLM cannot do (ack queues, revision
+  counters, eviction TTLs).
+
+Source code MAY NOT:
+- Assign priorities or urgency to in-game object types
+  (`if (isChest) prio = 0`).
+- Hardcode lists of NPC names, quest names, wcids, landblocks.
+- Decide on its own to interact with a target the LLM has not
+  asked it to interact with (the picker autonomously walking to
+  the nearest NPC counts).
+- Encode rules of thumb the LLM should learn from the prompt.
+
+How to comply (per commit):
+
+1. Stage changes (`git add`), then commit locally.
+2. Invoke the
+   [`audit-hardcoded-knowledge`](.github/skills/audit-hardcoded-knowledge/SKILL.md)
+   skill against the local commit SHA. Use the canonical prompt
+   in that SKILL.md verbatim.
+3. If the audit returns FORBIDDEN findings, fix in the same
+   commit (revert the bump, move the rule to the prompt, refactor
+   into an Intent push) OR amend to remove offending hunks.
+4. Only push after a clean audit.
+
+This applies to commits in `ac-ai-players` (this repo) AND the
+companion `darinh/ACE-bots` fork. Doc-only commits, test-only
+commits, dependency bumps, and CI config changes are exempt.
+
+History: this discipline was added after the Slice U incident,
+where chest-loot priority bumps slipped into the picker as
+`prio = 0 // chest = loot-critical`. The audit caught it on a
+retrospective pass; this rule prevents future incidents.
+
 ## GitHub Actions hygiene
 
 - Pin third-party actions to full 40-char commit SHAs (not
