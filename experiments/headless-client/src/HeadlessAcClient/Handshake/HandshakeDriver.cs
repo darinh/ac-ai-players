@@ -305,7 +305,13 @@ internal sealed class HandshakeDriver : IDisposable
         // loop forever in a dense room.
         DateTime?            useSentAt = null;
         const int            PostActionCooldownSec = 2;
-        const int            MaxActionsPerSession = 30;
+        // Phase 7f.5 — bumped from 30 → 100. With the exploration
+        // fallback the bot can keep finding new things to do well
+        // past 30 actions (whole academy has ~50+ named objects:
+        // 10 golems, 3-5 NPCs, ~20 signs, 5-6 doors, ~10 wearables).
+        // The 30s damage-watchdog still protects against per-fight
+        // runaways; this just lets the session-length budget breathe.
+        const int            MaxActionsPerSession = 100;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
         // Phase 6l — pickup→equip handoff. When PutItemInContainer is
@@ -448,7 +454,14 @@ internal sealed class HandshakeDriver : IDisposable
         // center keeps us comfortably inside the pickup threshold
         // without overshooting through the item collision.
         const float          MotionStopRadius = 1.0f;
-        const float          MotionSearchRadius = 30f;
+        // Phase 7f.5 — bumped from 30 → 60. Academy rooms are
+        // sometimes 40-50u across; a 30u radius left the bot blind
+        // to half a room from a corner position. With 60u we pull in
+        // every named object in any sparring/training room from any
+        // position inside the room. Combined with the exploration
+        // fallback (post-picker), this prevents the "idle at corner"
+        // dead state observed in phase7f4-headless20-fullrun.log.
+        const float          MotionSearchRadius = 60f;
         // Phase 6f: discriminate pickup-eligible items from interact-
         // only objects via the ItemType bitmask
         // (ACE.Entity.Enum.ItemType). Pickup mask covers MeleeWeapon
@@ -756,7 +769,17 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"[combat] target 0x{ctgHealth:X8} DEAD (health={updHealth.HealthFraction:F3}); " +
                                             $"clearing combat lock.");
                                         visitedTargetGuids.Add(ctgHealth);
-                                        satisfiedWeenieClasses.Add(HostileCreatureWcidSparringGolem);
+                                        // Phase 7f.5 — DO NOT add the wcid to
+                                        // satisfiedWeenieClasses. Each Sparring
+                                        // Golem is an independent target; killing
+                                        // one does not mean the bot should skip
+                                        // the other 9 in the room. visitedTargetGuids
+                                        // (per-guid) is the right granularity.
+                                        // (Phase 7f originally added the wcid
+                                        // satisfaction to break a 1-golem-only
+                                        // bare-handed-stuck loop; now that the
+                                        // bot has a Spadone, that defense is
+                                        // counter-productive.)
                                         combatTargetGuid = null;
                                         combatStartedAt = null;
                                         lastCombatAttackAt = null;
@@ -1076,9 +1099,11 @@ internal sealed class HandshakeDriver : IDisposable
                         Console.WriteLine(
                             $"[combat] NO-PROGRESS abandon after {sinceLastDamage:F0}s with no damage on 0x{ctgWatch:X8} " +
                             $"lastHealth={lastObservedTargetHealthFraction?.ToString("F3") ?? "<none>"}; " +
-                            $"adding to visited+satisfied so picker moves on.");
+                            $"adding to visited so picker moves on (NOT poisoning wcid — other " +
+                            $"individuals of the same type may still be killable, e.g. different " +
+                            $"position/armor state). Phase 7f.5 changed this from wcid-satisfaction " +
+                            $"to per-guid visited so multi-mob rooms aren't exited after one bad fight.");
                         visitedTargetGuids.Add(ctgWatch);
-                        satisfiedWeenieClasses.Add(HostileCreatureWcidSparringGolem);
                         combatTargetGuid = null;
                         combatStartedAt = null;
                         lastCombatAttackAt = null;
@@ -1459,6 +1484,82 @@ internal sealed class HandshakeDriver : IDisposable
                             .ThenBy(t => t.d2)
                             .Select(t => t.snap)
                             .FirstOrDefault();
+                    }
+
+                    // Phase 7f.5 — EXPLORATION FALLBACK. When the
+                    // normal picker (within MotionSearchRadius) finds
+                    // nothing, the bot would otherwise sit idle until
+                    // the observation window closes. That happened in
+                    // phase7f4-headless20-fullrun.log: bot killed one
+                    // golem, visited the corpse + 4 signs, then
+                    // reported inRange=0 from then on (every other
+                    // golem was filtered by the now-removed wcid
+                    // satisfaction; even with that fix, the bot can
+                    // still exhaust everything within 60u in a small
+                    // room). The fallback widens the search to ALL
+                    // known objects (no radius limit) and ALSO admits
+                    // visited doors/portals as re-traversal targets —
+                    // walking back through a door we used earlier
+                    // crosses cells and re-stimulates server-side
+                    // visibility on whatever's on the other side
+                    // (which may include the next set of unvisited
+                    // signs, NPCs, hostiles, or the academy exit
+                    // portal). The wearable / "pickedBefore" filters
+                    // still apply so we don't farm respawned apples.
+                    if (candidate is null &&
+                        string.IsNullOrWhiteSpace(motionTargetNameOverride) &&
+                        combatTargetGuid is null)
+                    {
+                        var allKnown = worldState.Objects.Values
+                            .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
+                            .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
+                            .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
+                            .Select(s =>
+                            {
+                                var hasDist = WorldDistance.TrySquaredDistance(self, s, out var d2);
+                                var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
+                                var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
+                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
+                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
+                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
+                                var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
+                                var isVisited = visitedTargetGuids.Contains(s.Guid);
+                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
+                                // Exploration priorities (lower = better):
+                                //   0: unvisited hostile creature (kill for XP/loot)
+                                //   1: unvisited NPC (quest giver)
+                                //   2: unvisited door/portal (cross to new room)
+                                //   3: visited door/portal (BACKTRACK through to re-stimulate cells)
+                                //   4: unvisited pickup we haven't farmed (apple)
+                                //   5: everything else (mostly filtered out below)
+                                int prio;
+                                if (!isVisited && isHostile) prio = 0;
+                                else if (!isVisited && isNpc) prio = 1;
+                                else if (!isVisited && (isDoor || isPortal)) prio = 2;
+                                else if (isDoor || isPortal) prio = 3;
+                                else if (!isVisited && isPickup && !pickedBefore) prio = 4;
+                                else prio = 5;
+                                return (snap: s, d2, prio, hasDist);
+                            })
+                            // Drop the "everything else" bucket entirely to
+                            // avoid re-walking to visited signs / corpses /
+                            // farmed pickups in the fallback (they were the
+                            // exact things that filled visitedTargetGuids).
+                            .Where(t => t.prio < 5 && t.hasDist)
+                            .OrderBy(t => t.prio)
+                            .ThenBy(t => t.d2)
+                            .ToList();
+                        if (allKnown.Count > 0)
+                        {
+                            var picked = allKnown[0];
+                            candidate = picked.snap;
+                            var dist = (float)Math.Sqrt(picked.d2);
+                            var visTag = visitedTargetGuids.Contains(candidate.Guid) ? " [BACKTRACK]" : "";
+                            Console.WriteLine(
+                                $"[motion] EXPLORATION FALLBACK — no candidates in {MotionSearchRadius}u; " +
+                                $"picked from {allKnown.Count} known objects: " +
+                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' prio={picked.prio} dist={dist:F2}u{visTag}");
+                        }
                     }
 
                     // Log all candidates at AP time for visibility (capped to 8 so
