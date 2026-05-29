@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AcAiPlayers.WorldNav/AcAiPlayers.WorldNav.csproj" />
+    <Project Path="src/WorldNavBuilder/WorldNavBuilder.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AcAiPlayers.WorldNav.Tests/AcAiPlayers.WorldNav.Tests.csproj" />
+  </Folder>
+</Solution>

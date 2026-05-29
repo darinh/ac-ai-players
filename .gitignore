@@ -33,3 +33,7 @@ node_modules/
 # Local-only: runtime artifacts written by headless-client spikes
 # (nav memo + LLM training jsonl). Source lives in the worktrees.
 experiments/headless-client/data/
+
+# Local-only: regeneratable output from WorldNavBuilder. Reference
+# outputs live in experiments/world-nav/reference/ instead.
+experiments/world-nav/data/
