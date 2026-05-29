@@ -1001,13 +1001,30 @@ internal sealed class HandshakeDriver : IDisposable
                             // OutOfRange, NotMeleeWeapon (we have
                             // none — unarmed should still work),
                             // YouCanNotAttackThisCreature, SkillTooLow.
+                            //
+                            // Slice H — surface non-zero AttackDone as an
+                            // ActionRejected event so the LLM can pivot
+                            // (e.g. wrong target classification → switch
+                            // verb / target). Without this the bot can
+                            // sit in the 60s no-damage stall after a bad
+                            // Attack goal with no learning signal.
                             if (ge.Payload?.AttackDone is { } atkDone)
                             {
                                 if (atkDone.ErrorCode != 0)
                                 {
+                                    var attackLabel = WeenieErrorLabels.Label(atkDone.ErrorCode);
                                     Console.WriteLine(
                                         $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
-                                        $"({WeenieErrorLabels.Label(atkDone.ErrorCode)})");
+                                        $"({attackLabel})");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"Attack rejected: {attackLabel}",
+                                        ErrorCode = atkDone.ErrorCode,
+                                        ErrorLabel = attackLabel,
+                                    });
                                 }
                             }
                             // M1.5 — surface WeenieErrorWithString

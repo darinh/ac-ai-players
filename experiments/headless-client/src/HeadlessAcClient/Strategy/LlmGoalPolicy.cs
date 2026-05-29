@@ -315,6 +315,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- 'Give' requires both target (the NPC) and item (the thing being given).");
         sb.AppendLine("- If a recent event is `ActionRejected`, the server refused that exact attempt. Do NOT immediately retry the same (kind, target, item) combination. Pick a different verb (e.g. Use instead of Give), a different item, or a different NPC. Read the rejection's `label` and `message` for the reason.");
         sb.AppendLine("- Read `## Server hints` closely. Phrases like \"Double click X\" or \"Use X to ...\" tell you EXACTLY what verb to use on what target. If an object is visible nearby AND the server has instructed you to use it, emit `Use{target: name=\"X\"}`. The server is your tutorial; do not ignore its instructions in favor of pure exploration.");
+        sb.AppendLine("- Combat: creatures tagged `monster` are appropriate combat targets and grant XP and loot. Creatures tagged `npc` are civilians — talk to or trade with them, do NOT attack. If a `monster` is visible nearby AND a weapon is wielded (visible in inventory as `wielded@...`) AND no server hint or item short_desc gives a more specific quest action, emit `Attack{target: name=\"X\"}` on the nearest monster. Combat is the primary source of XP outside of NPC quests.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -345,7 +346,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.Append($"- {v.Name}");
             if (v.Wcid is uint vw) sb.Append($" (wcid={vw}");
             else sb.Append(" (");
-            if (v.IsCreature) sb.Append(" creature");
+            if (v.IsCreature)
+            {
+                // Slice H — discriminate combat targets from civilians.
+                // `monster` = server-flagged Attackable AND no custom
+                // radar blip color AND not Vendor/Healer. `npc` = any
+                // other creature (civilians, shopkeepers, healers).
+                // Both signals come from the wire; we never hardcode
+                // wcid lists or English-name matches.
+                if (v.IsMonster) sb.Append(" monster");
+                else             sb.Append(" npc");
+            }
             if (v.IsPortal)   sb.Append(" portal");
             if (v.IsDoor)     sb.Append(" door");
             if (v.IsCorpse)   sb.Append(" corpse");
@@ -356,6 +367,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (v.ObservedHostile) sb.Append(" HOSTILE");
             if (v.Distance is float d) sb.Append($" d={d:F1}");
             sb.AppendLine(")");
+        }
+        sb.AppendLine();
+
+        // Slice H — Combat readiness summary. Surfaces the three
+        // pieces of state the LLM needs to decide whether to engage:
+        // weapon, monster proximity, hostile incoming. Health is
+        // intentionally omitted until WorldStateProjection actually
+        // populates HealthFraction reliably (currently null in most
+        // ticks — rubber-duck flagged this).
+        var weaponWielded = world.Inventory.Any(i => i.WieldedAt is uint w && w != 0);
+        var nearestMonster = world.Visible
+            .Where(v => v.IsMonster)
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        var observedHostile = world.Visible.FirstOrDefault(v => v.ObservedHostile);
+        sb.AppendLine("## Combat readiness");
+        sb.AppendLine($"- weapon: {(weaponWielded ? "wielded" : "NOT wielded")}");
+        if (nearestMonster is not null)
+        {
+            var dStr = nearestMonster.Distance is float dm ? $" d={dm:F1}" : "";
+            sb.AppendLine($"- nearest monster: {nearestMonster.Name}{dStr}");
+        }
+        else
+        {
+            sb.AppendLine("- nearest monster: (none in view)");
+        }
+        if (observedHostile is not null)
+        {
+            sb.AppendLine($"- observed hostile: {observedHostile.Name} (it has attacked you — fight back or flee)");
         }
         sb.AppendLine();
 

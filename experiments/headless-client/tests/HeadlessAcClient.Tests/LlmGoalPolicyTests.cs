@@ -663,6 +663,193 @@ public class LlmGoalPolicyTests
         Assert.True(secondHintAt < firstHintAt, "newer hint should appear earlier (newest-first)");
     }
 
+    [Fact]
+    public async Task LlmGoalPolicy_VisibleNearby_TagsMonsterVsNpc()
+    {
+        // Slice H — server-derived friend/foe classification must appear
+        // as `monster` vs `npc` tags in the prompt's Visible nearby
+        // section. Both tags come from wire data (IsAttackable +
+        // HasRadarBlipColor), never from hardcoded wcid/name lists.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Attack",
+          "target": { "name": "Sparring Golem" },
+          "item":   null,
+          "priority": 6,
+          "rationale": "monster nearby"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildAcademyCombatWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+        Assert.Single(requestBodies);
+
+        var body = requestBodies[0];
+        // Body is JSON-encoded — the user prompt sits inside
+        // messages[1].content with newlines escaped. Decode it so we
+        // can slice on real line boundaries.
+        using var doc = JsonDocument.Parse(body);
+        var prompt = doc.RootElement
+            .GetProperty("messages")[1]
+            .GetProperty("content")
+            .GetString()!;
+        var visIdx = prompt.IndexOf("## Visible nearby", StringComparison.Ordinal);
+        Assert.True(visIdx >= 0);
+        // Slice the prompt to just the Visible nearby section so we
+        // assert tags only where they belong (otherwise RULES line
+        // mentioning `monster` would mask a missing tag bug).
+        var afterVis = prompt.IndexOf("##", visIdx + 1, StringComparison.Ordinal);
+        var visBlock = afterVis > visIdx ? prompt.Substring(visIdx, afterVis - visIdx) : prompt.Substring(visIdx);
+
+        // Monster line: Sparring Golem must be tagged `monster`, not
+        // generic `creature`, and not `npc`.
+        var golemIdx = visBlock.IndexOf("Sparring Golem", StringComparison.Ordinal);
+        Assert.True(golemIdx >= 0, "Sparring Golem missing from Visible nearby");
+        var golemLineEnd = visBlock.IndexOf('\n', golemIdx);
+        if (golemLineEnd < 0) golemLineEnd = visBlock.Length;
+        var golemLine = visBlock.Substring(golemIdx, golemLineEnd - golemIdx);
+        Assert.Contains("monster", golemLine);
+        Assert.DoesNotContain(" npc", golemLine);
+
+        // NPC line: Jonathan must be tagged `npc`, not `monster`.
+        var jonIdx = visBlock.IndexOf("Jonathan", StringComparison.Ordinal);
+        Assert.True(jonIdx >= 0, "Jonathan missing from Visible nearby");
+        var jonathanLineEnd = visBlock.IndexOf('\n', jonIdx);
+        if (jonathanLineEnd < 0) jonathanLineEnd = visBlock.Length;
+        var jonathanLine = visBlock.Substring(jonIdx, jonathanLineEnd - jonIdx);
+        Assert.Contains(" npc", jonathanLine);
+        Assert.DoesNotContain("monster", jonathanLine);
+
+        // Slice H RULES line is present (so the LLM knows what `monster` means).
+        Assert.Contains("Combat: creatures tagged `monster`", prompt);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_CombatReadiness_SectionReflectsState()
+    {
+        // Slice H — Combat readiness section must summarize weapon
+        // status + nearest monster so the LLM has an at-a-glance
+        // "should I fight now?" signal.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Attack",
+          "target": { "name": "Sparring Golem" },
+          "item":   null,
+          "priority": 6,
+          "rationale": "combat ready"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildAcademyCombatWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        var crIdx = body.IndexOf("## Combat readiness", StringComparison.Ordinal);
+        Assert.True(crIdx >= 0);
+        var afterCr = body.IndexOf("##", crIdx + 1, StringComparison.Ordinal);
+        var crBlock = afterCr > crIdx ? body.Substring(crIdx, afterCr - crIdx) : body.Substring(crIdx);
+
+        // Weapon line — inventory has a wielded item so should say "wielded".
+        Assert.Contains("weapon: wielded", crBlock);
+        // Monster line — Sparring Golem is nearest monster in BuildAcademyCombatWorld.
+        Assert.Contains("nearest monster: Sparring Golem", crBlock);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_CombatReadiness_NoMonster_NoWeapon()
+    {
+        // Slice H — Combat readiness section must handle the empty
+        // case cleanly (no wielded weapon, no monster in view) so the
+        // LLM never sees malformed text and over-interprets a missing
+        // line.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Jonathan" },
+          "item":   { "name": "Academy Exit Token" },
+          "priority": 8,
+          "rationale": "ShortDesc"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        // BuildExitTokenWorld has Jonathan (npc, not monster), an
+        // un-wielded inventory item — no weapon, no monster.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        var crIdx = body.IndexOf("## Combat readiness", StringComparison.Ordinal);
+        Assert.True(crIdx >= 0);
+        var afterCr = body.IndexOf("##", crIdx + 1, StringComparison.Ordinal);
+        var crBlock = afterCr > crIdx ? body.Substring(crIdx, afterCr - crIdx) : body.Substring(crIdx);
+
+        Assert.Contains("weapon: NOT wielded", crBlock);
+        Assert.Contains("nearest monster: (none in view)", crBlock);
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;
@@ -744,6 +931,46 @@ public class LlmGoalPolicyTests
             {
                 Guid = NpcGuid, Name = "Pathwarden Thorolf", Wcid = 30001u,
                 ItemType = 0x10u, Distance = 6f, IsCreature = true,
+            },
+        },
+    };
+
+    // Slice H — academy view with one wielded weapon, one peaceful
+    // NPC (Jonathan), and one Sparring Golem the bot can attack.
+    // Sparring Golem flags: IsAttackable=true, HasRadarBlipColor=false
+    // → IsMonster=true. Jonathan: IsAttackable=true, HasRadarBlipColor
+    // =true (every civilian gets a custom minimap color) → IsMonster
+    // =false. Mirrors what live ObjectCreate emits in the academy.
+    private const uint WeaponGuid = 0x80000040;
+
+    private static WorldStateProjection BuildAcademyCombatWorld() => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u, CellId = 0x86020001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = WeaponGuid, Name = "Training Spadone", Wcid = 5104u,
+                ItemType = 0x1u, WieldedAt = 0x1u,
+            },
+        },
+        Visible = new[]
+        {
+            new VisibleObjectProjection
+            {
+                Guid = NpcGuid, Name = "Jonathan", Wcid = 29324u, ItemType = 0x10u,
+                Distance = 3f, IsCreature = true, IsAttackable = true,
+                HasRadarBlipColor = true, IsMonster = false,
+            },
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Sparring Golem", Wcid = 12698u,
+                ItemType = 0x10u, Distance = 7f, IsCreature = true,
+                IsAttackable = true, HasRadarBlipColor = false, IsMonster = true,
             },
         },
     };

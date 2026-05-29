@@ -317,6 +317,70 @@ public class StrategyFoundationTests
         Assert.False(byGuid[MisnamedGuid].IsDoor); // name "Door" alone is NOT enough
     }
 
+    [Fact]
+    public void WorldStateProjection_FromWorldState_DerivesIsMonsterFromAttackableAndRadarBlipColor()
+    {
+        // Slice H — IsMonster is a server-derived composite. The friend/
+        // foe decision MUST come from the wire bits (Attackable +
+        // RadarBlipColor), never from hardcoded wcid lists or English
+        // name matching. Live observation: Sparring Golem wFlags
+        // =0x00800036 (no RadarBlipColor=0x100000) and ObjectDescriptionFlag
+        // .Attackable=true; civilian NPCs wFlags=0x00900036 (custom
+        // RadarBlipColor) and ObjectDescriptionFlag.Attackable=true.
+        const uint MonsterGuid       = 0x80000001;
+        const uint NpcCivilianGuid   = 0x80000002;
+        const uint VendorCreatureGuid = 0x80000003;
+        const uint HealerCreatureGuid = 0x80000004;
+        const uint NonCreatureGuid   = 0x80000005;
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+
+        // Generic monster: Attackable, no custom radar color.
+        SeedSnapshot(ws, MonsterGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable,
+            weenieFlags: 0x00800036u);
+        // Civilian NPC: Attackable AND has custom radar color → npc.
+        SeedSnapshot(ws, NpcCivilianGuid, "Jonathan", wcid: 29324u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable,
+            weenieFlags: 0x00900036u);
+        // Vendor creature: Attackable + no radar color but the Vendor
+        // bit MUST suppress monster classification (special-purpose NPC).
+        SeedSnapshot(ws, VendorCreatureGuid, "Shopkeeper Bob", wcid: 102u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable | (uint)ObjectDescriptionFlag.Vendor,
+            weenieFlags: 0x00800036u);
+        // Healer creature: same logic — Healer bit suppresses monster.
+        SeedSnapshot(ws, HealerCreatureGuid, "Town Healer", wcid: 104u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable | (uint)ObjectDescriptionFlag.Healer,
+            weenieFlags: 0x00800036u);
+        // Non-creature (no Creature bit in itemType) must never be monster.
+        SeedSnapshot(ws, NonCreatureGuid, "Pretty Rock", wcid: 999u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable,
+            weenieFlags: 0x00800036u);
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid[MonsterGuid].IsMonster);
+        Assert.True(byGuid[MonsterGuid].IsAttackable);
+        Assert.False(byGuid[MonsterGuid].HasRadarBlipColor);
+
+        Assert.False(byGuid[NpcCivilianGuid].IsMonster); // RadarBlipColor → npc
+        Assert.True(byGuid[NpcCivilianGuid].IsAttackable);
+        Assert.True(byGuid[NpcCivilianGuid].HasRadarBlipColor);
+
+        Assert.False(byGuid[VendorCreatureGuid].IsMonster); // Vendor bit suppresses
+        Assert.True(byGuid[VendorCreatureGuid].IsVendor);
+
+        Assert.False(byGuid[HealerCreatureGuid].IsMonster); // Healer bit suppresses
+        Assert.True(byGuid[HealerCreatureGuid].IsHealer);
+
+        Assert.False(byGuid[NonCreatureGuid].IsMonster); // not a creature
+        Assert.False(byGuid[NonCreatureGuid].IsCreature);
+    }
+
     // Helper: build a tiny WorldState with three objects whose attributes
     // exercise every Selector field. We use Apply via a synthetic ObjectCreate
     // when feasible; otherwise we stand up snapshots through the snapshot
@@ -343,7 +407,8 @@ public class StrategyFoundationTests
         uint itemType,
         uint cellId,
         uint? containerGuid = null,
-        uint? objectDescriptionFlags = null)
+        uint? objectDescriptionFlags = null,
+        uint? weenieFlags = null)
     {
         // WorldState lacks a public seed helper. The most direct path
         // without reflection is to mutate via internal setters on a
@@ -352,7 +417,7 @@ public class StrategyFoundationTests
         // mimic an ObjectCreate using the public API: a minimal
         // ObjectCreateMessage would require a fixture file. Instead,
         // we use the SnapshotSeeding test seam (defined below).
-        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags);
+        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags, weenieFlags);
     }
 
     private sealed class FakeWeenieRepo : IWeenieRepository
@@ -461,7 +526,8 @@ internal static class SnapshotSeeding
         uint itemType,
         uint cellId,
         uint? containerGuid,
-        uint? objectDescriptionFlags = null)
+        uint? objectDescriptionFlags = null,
+        uint? weenieFlags = null)
     {
         var snap = new WorldObjectSnapshot(guid)
         {
@@ -471,6 +537,7 @@ internal static class SnapshotSeeding
             CellId = cellId,
             ContainerGuid = containerGuid,
             ObjectDescriptionFlags = objectDescriptionFlags,
+            WeenieFlags = weenieFlags,
             Position = new Vector3(0, 0, 0),
         };
         // Reach the underlying dictionary via reflection. The field

@@ -80,6 +80,38 @@ internal sealed record VisibleObjectProjection
 
     /// <summary>True if observed-hostile (e.g. server-message indicated initial attack on us).</summary>
     [JsonPropertyName("observed_hostile")] public bool ObservedHostile { get; init; }
+
+    /// <summary>
+    /// True if ObjectDescriptionFlag has Attackable bit (0x10). Server-
+    /// asserted "this thing can be attacked by you". Set on training
+    /// dummies and most monsters; usually also set on PK-flagged civilians.
+    /// On its own NOT enough to classify a target as a monster — use
+    /// IsMonster (composite predicate) for the friend/foe decision.
+    /// </summary>
+    [JsonPropertyName("is_attackable")] public bool IsAttackable { get; init; }
+
+    /// <summary>
+    /// True if WeenieHeaderFlag has RadarBlipColor bit (0x100000).
+    /// Friendly NPCs (Greeter, Pathwarden, vendors, healers) get an
+    /// explicit minimap blip color and have this set. Generic monsters
+    /// rely on default minimap rendering and do NOT have this set.
+    /// Live observation: NPC wFlags=0x00900036 includes 0x100000;
+    /// Sparring Golem wFlags=0x00800036 does not.
+    /// </summary>
+    [JsonPropertyName("has_radar_blip_color")] public bool HasRadarBlipColor { get; init; }
+
+    /// <summary>
+    /// Composite friend/foe classification, derived per Slice H. True iff:
+    ///   - object is a creature (ItemType has Creature bit), AND
+    ///   - server flagged it Attackable, AND
+    ///   - it has NO custom radar blip color (NPCs do, generic monsters don't), AND
+    ///   - it is not a Vendor or Healer (those are special-purpose NPCs).
+    /// Both signals are server-provided; this is NOT hardcoded knowledge
+    /// about specific creatures. Surfaced as the `monster` tag in the
+    /// LLM prompt's Visible nearby section so the LLM can pick targets
+    /// for combat without misfiring on civilians.
+    /// </summary>
+    [JsonPropertyName("is_monster")] public bool IsMonster { get; init; }
 }
 
 internal sealed record SelfProjection
@@ -167,6 +199,13 @@ internal sealed record WorldStateProjection
                 var isVendor    = (descFlags & (uint)ObjectDescriptionFlag.Vendor)    != 0;
                 var isHealer    = (descFlags & (uint)ObjectDescriptionFlag.Healer)    != 0;
                 var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
+                var isAttackable = (descFlags & (uint)ObjectDescriptionFlag.Attackable) != 0;
+
+                // Slice H — server-derived friend/foe signals. Both bits are
+                // extracted from the wire, not from hardcoded weenie lists.
+                var weenieFlags = o.WeenieFlags ?? 0u;
+                var hasRadarBlipColor = (weenieFlags & (uint)WeenieHeaderFlag.RadarBlipColor) != 0;
+                var isMonster = isCreature && isAttackable && !hasRadarBlipColor && !isVendor && !isHealer;
 
                 return new VisibleObjectProjection
                 {
@@ -184,6 +223,9 @@ internal sealed record WorldStateProjection
                     IsVendor = isVendor,
                     IsHealer = isHealer,
                     IsOpenable = isOpenable,
+                    IsAttackable = isAttackable,
+                    HasRadarBlipColor = hasRadarBlipColor,
+                    IsMonster = isMonster,
                 };
             })
             .Where(v => v.Distance is null || v.Distance <= visibleRadius)
