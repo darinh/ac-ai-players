@@ -2537,93 +2537,41 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else if (candidate is null)
                     {
-                        // Schema-only fallback picker. Wcid-keyed prio
-                        // nudges (hostile creature, academy exit) are
-                        // now Strategy-layer decisions (see LLM pre-
-                        // emptor above). The picker only uses
-                        // ItemType bitmasks + visited-set memory +
-                        // pickup-count anti-respawn — all generic
-                        // schema, no game content.
+                        // Slice W.1 (#86) — schema-only picker. Replaces
+                        // the type-based priority ladder (NPC > corpse >
+                        // door > pickup > else) that the audit at
+                        // .github/skills/audit-hardcoded-knowledge/SKILL.md
+                        // flagged as hardcoded game knowledge. The picker
+                        // now selects the nearest mechanically-eligible
+                        // candidate; the LLM steers via the Slice V
+                        // "## Autonomous picker activity" prompt block.
                         //
-                        // Priorities (lower = better):
-                        //   prio 0: NPCs (Creature itemType 0x10).
-                        //   prio 2: unsatisfied-slot wearables, doors,
-                        //           portals, writables (signs).
-                        //   prio 3: non-wearable pickups (apples).
-                        //   prio 4: everything else (including
-                        //           creatures the bot has visited but
-                        //           that respawned).
-                        // Hostile-vs-friendly creature discrimination
-                        // is now done by the LLM via Strategy, NOT
-                        // here. Without an Attack goal from Strategy,
-                        // the picker treats a creature like any NPC —
-                        // the bot will walk up to it and try to USE
-                        // it, which is harmless (server returns "you
-                        // cannot use that").
-                        candidate = inRange
-                            .Select(s =>
-                            {
-                                WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
-                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
-                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
-                                // Slice P — corpses are time-sensitive
-                                // loot containers (they decay). Bump
-                                // them up the priority list so the bot
-                                // pivots to loot immediately after a
-                                // kill rather than chasing the next
-                                // NPC and forgetting about the corpse.
-                                // Wire-protocol bit, not English-name
-                                // matching (no hardcoded knowledge).
-                                var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
-                                // Slice U — Stuck flag distinguishes a
-                                // bolted-down sign (USE-to-read) from a
-                                // book on a table (Pickup-able). Openable
-                                // distinguishes a treasure chest /
-                                // bookshelf (Use-to-open-then-loot) from
-                                // a worn sack / NPC pack. Both are pure
-                                // wire-protocol bits.
-                                var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
-                                var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
-                                var isWritable  = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isContainer = s.ItemType is uint ct && (ct & 0x00000200u) != 0;
-                                var isInSelfBag = s.ContainerGuid is uint cg && cg == chosenCharacterGuid;
-                                var isBookPickup = isWritable && !isStuck && !isInSelfBag;
-                                var isSign       = isWritable && isStuck;
-                                var isLootChest  = isContainer && isOpenable && !isCorpse && !isInSelfBag;
-                                var isPickup = (s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isSign)
-                                    || isBookPickup;
-                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
-                                var isWearable = isPickup && s.ValidLocations is uint vl && vl != 0;
-                                var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
-                                    (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
-                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-                                var corpseVisited = isCorpse && visitedTargetGuids.Contains(s.Guid);
-                                // NOTE: Slice U previously bumped isLootChest
-                                // to prio=0 ("chest = loot-critical"). The
-                                // audit at .github/skills/audit-hardcoded-
-                                // knowledge/SKILL.md flagged this as game
-                                // knowledge and the bump is reverted. Chest
-                                // urgency belongs in the LLM RULES, not the
-                                // picker. Tracked in ac-ai-players#86.
-                                int prio;
-                                if (isCorpse && !corpseVisited) prio = 0;
-                                else if (isNpc) prio = 0;
-                                else if (isDoor || isPortal) prio = 2;
-                                else if (isWearable && !hasSatisfiedSlot) prio = 2;
-                                else if (isSign) prio = 2;
-                                else if (isPickup && !pickedBefore) prio = 3;
-                                else prio = 4;
-                                return (snap: s, d2, prio);
-                            })
-                            .OrderBy(t => t.prio)
-                            .ThenBy(t => t.d2)
-                            .Select(t => t.snap)
-                            .FirstOrDefault();
+                        // Upstream filters already applied in `inRange`:
+                        //   - within MotionSearchRadius
+                        //   - not self, non-empty Name
+                        //   - not visited (per-GUID)
+                        //   - not a player (0x5xxxxxxx GUID range)
+                        //   - not in satisfiedWeenieClasses
+                        //
+                        // Additional MECHANICAL filters in PickerSelection
+                        // (loop-prevention only, NOT priority):
+                        //   - drop ContainerGuid==self (item in our bag)
+                        //   - drop pickup-eligible items whose Name has
+                        //     already been picked once (anti-respawn)
+                        //
+                        // No type-based bumps. No corpse-loot bump. No
+                        // door preference. No wearable preference. Those
+                        // are strategic — owned by the LLM.
+                        candidate = PickerSelection.PickNearest(
+                            inRange,
+                            self,
+                            chosenCharacterGuid,
+                            pickupCountByName,
+                            PickupItemTypeMask);
                         if (candidate is not null)
                         {
                             pickerSourceForActivity = "in-range";
-                            pickerReasonForActivity = "schema-only picker (type+visited+distance scoring within search radius)";
+                            pickerReasonForActivity = "schema-only picker (nearest mechanically-eligible candidate)";
                         }
                     }
 
@@ -2647,6 +2595,17 @@ internal sealed class HandshakeDriver : IDisposable
                     // signs, NPCs, hostiles, or the academy exit
                     // portal). The wearable / "pickedBefore" filters
                     // still apply so we don't farm respawned apples.
+                    //
+                    // FIXME (ac-ai-players#86 — Slice W.2): this
+                    // ladder also encodes hardcoded game knowledge
+                    // (NPC > corpse > unvisited door > visited door >
+                    // pickup) plus a "backtrack via visited door"
+                    // strategy. It is intentionally LEFT IN PLACE
+                    // during Slice W.1 so the bot doesn't strand
+                    // itself the moment in-range goes empty. W.2
+                    // will replace the backtrack with an LLM-owned
+                    // Explore goal and reduce this fallback to a
+                    // motion-only nearest-known target.
                     if (candidate is null &&
                         string.IsNullOrWhiteSpace(motionTargetNameOverride) &&
                         combatTargetGuid is null)

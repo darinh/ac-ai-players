@@ -1404,6 +1404,127 @@ public class LlmGoalPolicyTests
             => currentGoal;
     }
 
+    // ---- Slice W.1 (#86) — picker activity bypasses coalesce ----
+
+    [Fact]
+    public void HasPickerActivityStartedSince_DetectsEvent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage,
+            Text = "some chatter",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0x800001D4u,
+            Name = "Samuel",
+            Text = "in-range: nearest mechanically-eligible candidate",
+        });
+        Assert.True(LlmGoalPolicy.HasPickerActivityStartedSince(events, floor));
+    }
+
+    [Fact]
+    public void HasPickerActivityStartedSince_ReturnsFalseWhenAbsent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted, ItemGuid = 1u, Name = "Old", Text = "in-range",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, Text = "later chatter",
+        });
+        // Floor is AFTER the picker event — nothing salient since.
+        Assert.False(LlmGoalPolicy.HasPickerActivityStartedSince(events, floor));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_PickerActivityStarted_BypassesCoalesce()
+    {
+        // Slice W.1 (#86): without this bypass the picker can pick a
+        // new target, walk to it, and dispatch an action all within
+        // one MinCallInterval window — the LLM never gets to steer.
+        // After this change a PickerActivityStarted event since the
+        // last LLM look forces a fresh call even inside the coalesce
+        // window. (currentGoal must be non-null so the coalesce gate
+        // is the one being exercised, not the no-goal short-circuit.)
+        var httpCallCount = 0;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        content = JsonSerializer.Serialize(new
+                        {
+                            goal_id = "11111111-2222-3333-4444-555555555555",
+                            kind = "Explore",
+                            target = new { name = "anywhere" },
+                            priority = 5,
+                            expires_in_seconds = 60,
+                        }),
+                    },
+                },
+            },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        // MinCallInterval LARGE so the only way a second call goes
+        // out within this test is via the picker-activity bypass.
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+        };
+
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        // First call kicks off + completes the first LLM HTTP.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Equal(1, httpCallCount);
+
+        // Within coalesce window WITHOUT picker activity: no new call.
+        // The same goal stays in play and the http counter is unchanged.
+        var stayed = policy.ProposeGoal(world, events, firstGoal);
+        Assert.Equal(1, httpCallCount);
+        Assert.Equal(firstGoal, stayed);
+
+        // Now publish a picker-activity-started event AFTER the last
+        // LLM look. Same coalesce window. New call MUST go out.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0x800001D4u,
+            Name = "Samuel",
+            Text = "in-range: nearest mechanically-eligible candidate",
+        });
+        var afterPicker = policy.ProposeGoal(world, events, firstGoal);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, httpCallCount);
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;

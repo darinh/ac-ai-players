@@ -217,9 +217,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var hasNewSalient = HasNewSalientEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
         var coalesce = nowUtc - _lastCalledAtUtc < MinCallInterval;
+        // Slice W.1 (#86) — picker activity bypasses coalesce. The
+        // picker is autonomous in the gap between LLM decisions and
+        // its choices need an LLM check before the bot commits to
+        // them (walks to + dispatches an action against the new
+        // target). Other salient events (rejections, dialog, etc.)
+        // still respect coalesce.
+        var pickerSteering = HasPickerActivityStartedSince(events, _lastEventConsideredSequence);
 
         if (currentGoal is not null && !hasNewSalient && !stuck) return currentGoal;
-        if (coalesce && currentGoal is not null)                 return currentGoal;
+        if (coalesce && currentGoal is not null && !pickerSteering) return currentGoal;
 
         _lastCalledAtUtc = nowUtc;
         var eventSeqAtCallStart = events.NextSequence;
@@ -504,6 +511,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
             .Any(e => e.Kind == EventKind.ActionRejected);
+    }
+
+    internal static bool HasPickerActivityStartedSince(EventStream events, long sequenceFloor)
+    {
+        // Slice W.1 (#86) — the picker switched autonomous activity
+        // since our last look. We treat this as a high-urgency
+        // signal that bypasses the normal MinCallInterval coalesce
+        // so the LLM can either confirm or override the picker's
+        // choice before the bot walks the entire path to the new
+        // target. Without this gate the picker can pick → walk →
+        // USE within one coalesce window and the LLM never gets
+        // a chance to steer.
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.PickerActivityStarted);
     }
 
     private bool HasNewSalientEvent(EventStream events)
