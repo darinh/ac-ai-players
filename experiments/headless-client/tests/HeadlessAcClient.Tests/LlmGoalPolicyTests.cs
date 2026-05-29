@@ -121,6 +121,91 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public async Task LlmGoalPolicy_429_TripsBackoff_NoFurtherHttpCallsWithinWindow()
+    {
+        // Slice T — once we see HTTP 429 the policy must NOT issue
+        // further LLM HTTP calls for the duration of the backoff
+        // window. The fallback should drive the bot in the meantime.
+        // Without this, a single rate-limit exhaustion burns all
+        // subsequent recovery attempts (28 consecutive 429s observed
+        // in spike13 on 2026-05-29).
+        var httpCallCount = 0;
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage((HttpStatusCode)429) { Content = new StringContent("Too Many Requests") };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            // Coalesce disabled so we'd otherwise issue back-to-back
+            // calls; backoff must do the actual gating.
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        // First ProposeGoal: kicks off the (eventually-429) call.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        // Consume the 429 result; backoff fires here. The fallback
+        // drives this tick so the bot keeps acting.
+        var afterFirst = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(afterFirst);
+        Assert.StartsWith("fallback:", afterFirst!.Source);
+        Assert.Equal(1, httpCallCount); // exactly one HTTP attempt
+
+        // Subsequent ProposeGoal calls within the backoff window must
+        // NOT trigger more HTTP calls. The fallback still drives the
+        // bot when currentGoal is null.
+        for (var i = 0; i < 5; i++)
+        {
+            var g = policy.ProposeGoal(world, events, null);
+            Assert.NotNull(g);
+            Assert.StartsWith("fallback:", g!.Source);
+        }
+        Assert.Equal(1, httpCallCount); // STILL 1 — no retries during backoff
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_429_PreservesCurrentGoalDuringBackoff()
+    {
+        // Slice T — when a currentGoal exists and we are in the 429
+        // backoff window, we return the currentGoal unchanged (the
+        // tactics layer keeps driving the existing plan). This is
+        // the path that prevents a quota exhaustion from blanking
+        // the bot's plan mid-action.
+        var httpCallCount = 0;
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage((HttpStatusCode)429) { Content = new StringContent("Too Many Requests") };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+        var keepAlive = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
+
+        // Trip the backoff.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        policy.ProposeGoal(world, events, null); // consume + backoff
+        Assert.Equal(1, httpCallCount);
+
+        // Now with a currentGoal in hand, the policy must hand it
+        // back unchanged — no HTTP, no fallback substitution.
+        var g = policy.ProposeGoal(world, events, keepAlive);
+        Assert.Same(keepAlive, g);
+        Assert.Equal(1, httpCallCount);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_UsesLlmResultWhenContentIsValidGoal()
     {
         var goalJson = """

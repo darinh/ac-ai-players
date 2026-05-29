@@ -60,6 +60,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private long _lastEventConsideredSequence = -1;
     private DateTimeOffset _lastCalledAtUtc = DateTimeOffset.MinValue;
 
+    // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
+    // current LLM provider) returns HTTP 429 once a small per-minute
+    // and per-day quota is exhausted. Without backoff the policy
+    // burns retries every few seconds the entire spike (54-decision
+    // run on 2026-05-29 saw 28 consecutive 429s — every LLM call
+    // failed). On a 429 we set _backoffUntilUtc and double
+    // _currentBackoff (cap 5 min). ProposeGoal gates on it before
+    // kicking off another call. Any successful (Ok=true) result
+    // resets the backoff to 30s. Other error kinds (transport, 5xx,
+    // parse) are NOT counted as backoff-triggering — they retry
+    // immediately as before.
+    private DateTimeOffset _backoffUntilUtc = DateTimeOffset.MinValue;
+    private TimeSpan       _currentBackoff = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan MaxBackoff     = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan InitialBackoff = TimeSpan.FromSeconds(30);
+
     /// <summary>
     /// In-flight LLM call. ProposeGoal is called from the receive
     /// loop and must NEVER block the loop on a 1s HTTP RTT, so we
@@ -158,6 +174,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         // 3) Decide whether to kick off a new call.
+        // Slice T — if we're inside a 429 backoff window, do NOT
+        // kick off another call. Returning currentGoal keeps the
+        // tactical layer driving on its existing plan; the fallback
+        // (NoQuestKnowledgePolicy) handles cases where currentGoal
+        // is null. This is intentionally separate from the coalesce
+        // gate below: coalesce is a 2s per-call rate limit; backoff
+        // is a multi-minute back-off after the LLM provider tells
+        // us we're over quota.
+        if (nowUtc < _backoffUntilUtc)
+        {
+            var remaining = _backoffUntilUtc - nowUtc;
+            if (currentGoal is null)
+            {
+                // No goal to keep driving on — fall through to
+                // fallback policy this tick so the bot keeps acting
+                // while we wait for the rate-limit window.
+                Console.WriteLine(
+                    $"[strategy] LlmGoalPolicy: 429 backoff active ({remaining.TotalSeconds:F0}s remaining); " +
+                    $"no current goal — deferring to fallback");
+                return _fallback.ProposeGoal(world, events, currentGoal);
+            }
+            return currentGoal;
+        }
+
         var hasNewSalient = HasNewSalientEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
         var coalesce = nowUtc - _lastCalledAtUtc < MinCallInterval;
@@ -237,7 +277,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         if (!result.Ok)
+        {
+            // Slice T — 429 / rate-limit backoff trigger. The error
+            // string from LlmGoalClient looks like "http 429: Too
+            // Many Requests" (see Strategy/LlmGoalClient.cs error
+            // formatting). Match the "429" token specifically so we
+            // don't trip the backoff on transient 5xx or transport
+            // errors — those should retry on the next salient event.
+            if (result.Error is not null && result.Error.Contains("429"))
+            {
+                _backoffUntilUtc = nowUtc + _currentBackoff;
+                Console.WriteLine(
+                    $"[strategy] LlmGoalPolicy: 429 detected — backoff until " +
+                    $"{_backoffUntilUtc:HH:mm:ss}Z (next interval {_currentBackoff.TotalSeconds:F0}s)");
+                var next = TimeSpan.FromSeconds(_currentBackoff.TotalSeconds * 2);
+                _currentBackoff = next > MaxBackoff ? MaxBackoff : next;
+            }
             return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
+        // Slice T — successful LLM call resets the backoff so a
+        // future 429 starts at the initial 30s interval again
+        // (we don't want a single recovered request to skip the
+        // doubling discipline for a NEW rate-limit event).
+        _currentBackoff = InitialBackoff;
 
         // Slice R wiring — strategic stack mutations are applied BEFORE
         // the goal is consumed so the rendered "## Intent stack" the
