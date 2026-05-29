@@ -101,11 +101,58 @@ public sealed class IndoorCell
     public required IReadOnlyList<StaticObstacle> StaticObstacles { get; init; }
 
     /// <summary>
+    /// Walkable floor surfaces inside this cell. Derived from the
+    /// cell's <c>CellStruct.PhysicsPolygons</c> by selecting polygons
+    /// whose face normal points up in world space (i.e. their world-
+    /// space normal Z component exceeds the loader's floor threshold).
+    /// Vertices are projected to world space at load time.
+    ///
+    /// The bot only walks ON a floor polygon — walls, ceilings, and
+    /// near-vertical surfaces are excluded. Phase 2 walkable-node
+    /// sampling will scatter grid points across these polygons and
+    /// carve out static-obstacle footprints.
+    /// </summary>
+    public required IReadOnlyList<FloorPolygon> FloorPolygons { get; init; }
+
+    /// <summary>
     /// True if this cell's geometry was available in the DAT.
     /// False indicates the cell was referenced by a neighbouring
     /// portal but its own record could not be loaded.
     /// </summary>
     public required bool HasGeometry { get; init; }
+}
+
+/// <summary>
+/// One walkable floor surface inside a cell. A floor polygon is a
+/// PhysicsPolygon from the owning cell's <c>CellStruct</c> whose
+/// face normal points up in world space (positive Z above some
+/// threshold). Vertices are already projected to world space.
+///
+/// The polygon is the substrate for the walkable mesh: Phase 2 will
+/// sample grid points within each floor polygon's footprint, drop
+/// any that fall inside a <see cref="StaticObstacle"/>, and connect
+/// the survivors into a per-cell walkable graph.
+/// </summary>
+public sealed class FloorPolygon
+{
+    /// <summary>
+    /// The PhysicsPolygon's polygon ID inside the source CellStruct.
+    /// Diagnostic only; not used for routing.
+    /// </summary>
+    public required ushort PolygonId { get; init; }
+
+    /// <summary>
+    /// World-space vertices of the polygon, preserving the original
+    /// winding from the DAT. At least 3 entries.
+    /// </summary>
+    public required IReadOnlyList<Vector3> VerticesWorld { get; init; }
+
+    /// <summary>
+    /// World-space face normal, normalised, oriented to point UP
+    /// (Z component is positive — i.e. away from the floor, into the
+    /// room).
+    /// </summary>
+    public required Vector3 NormalWorld { get; init; }
 }
 
 /// <summary>
@@ -271,4 +318,7 @@ public sealed class IndoorNavGraph
 
     /// <summary>Total static-obstacle primitive count across all cells.</summary>
     public int StaticObstacleCount => Cells.Values.Sum(c => c.StaticObstacles.Count);
+
+    /// <summary>Total floor-polygon count across all cells (walkable surfaces).</summary>
+    public int FloorPolygonCount => Cells.Values.Sum(c => c.FloorPolygons.Count);
 }

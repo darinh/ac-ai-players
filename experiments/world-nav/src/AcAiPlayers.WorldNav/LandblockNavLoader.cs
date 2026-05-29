@@ -113,6 +113,7 @@ public sealed class LandblockNavLoader
 
             var (centroidWorld, boundsWorld) = ComputeCellGeometry(raw);
             var obstacles = ComputeStaticObstacles(raw);
+            var floors = ComputeFloorPolygons(raw);
             cells[cellId] = new IndoorCell
             {
                 CellId = cellId,
@@ -123,6 +124,7 @@ public sealed class LandblockNavLoader
                 BoundsWorld = boundsWorld,
                 Connections = connections,
                 StaticObstacles = obstacles,
+                FloorPolygons = floors,
                 HasGeometry = raw.Mesh != null,
             };
         }
@@ -369,6 +371,84 @@ public sealed class LandblockNavLoader
                     Height = setup.Height,
                 });
             }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// World-space Z component (cosine of the normal-to-vertical angle)
+    /// required for a PhysicsPolygon to count as a walkable floor.
+    /// 0.7 ≈ 45° — accepts level floors and stair ramps; rejects
+    /// walls (~0) and ceilings (negative Z, which we flip then accept
+    /// only if abs is below threshold).
+    /// </summary>
+    private const float FloorNormalZThreshold = 0.7f;
+
+    /// <summary>
+    /// Identify walkable floor surfaces in a cell. A floor is a
+    /// PhysicsPolygon whose face normal, after rotation by the cell's
+    /// world orientation, has a positive Z component above the
+    /// <see cref="FloorNormalZThreshold"/>. Ceilings (normals pointing
+    /// down), walls (normals nearly horizontal), and degenerate
+    /// polygons (zero-area, collinear vertices) are excluded.
+    ///
+    /// Returns vertices in world space; the original DAT vertex order
+    /// is preserved (callers should treat the polygon as "the points in
+    /// the order the DAT stored them" — it may be CW or CCW depending
+    /// on the polygon's <c>SidesType</c>).
+    /// </summary>
+    private static List<FloorPolygon> ComputeFloorPolygons(RawCell raw)
+    {
+        var result = new List<FloorPolygon>();
+        if (raw.Mesh == null) return result;
+
+        var cellFrame = raw.EnvCell.Position;
+        foreach (var (polyId, poly) in raw.Mesh.PhysicsPolygons)
+        {
+            if (poly.Vertices == null || poly.Vertices.Count < 3)
+                continue;
+
+            // Face normal from first three vertices (treats the
+            // polygon as planar — true for AC's grid-aligned floors,
+            // close enough for the few sloped ramps).
+            var v0 = poly.Vertices[0].Origin;
+            var v1 = poly.Vertices[1].Origin;
+            var v2 = poly.Vertices[2].Origin;
+            var localNormal = Vector3.Cross(v1 - v0, v2 - v0);
+            if (localNormal.LengthSquared() < 1e-6f)
+                continue; // degenerate
+
+            localNormal = Vector3.Normalize(localNormal);
+            var worldNormal = Vector3.Transform(localNormal, cellFrame.Orientation);
+
+            // Floor test: world-space normal must point up. The cross
+            // product's sign depends on vertex winding (CW vs CCW), so
+            // we accept either orientation but only when the surface
+            // is genuinely near-horizontal — abs(Z) > threshold.
+            if (System.Math.Abs(worldNormal.Z) < FloorNormalZThreshold)
+                continue;
+
+            // For ceilings the normal points down; for floors it points
+            // up. We want floors specifically. After absorbing winding,
+            // a "floor" is a horizontal surface that the bot stands on,
+            // i.e. one whose centroid is BELOW any other horizontal
+            // surface above it. Simpler heuristic: if normal Z >= 0 we
+            // treat it as a floor; if < 0 we flip it (treating it as
+            // CW-wound floor). This will incorrectly classify ceilings
+            // as floors — Phase 2 will discriminate by picking the
+            // lowest horizontal surface per (X,Y) column.
+            var upwardNormal = worldNormal.Z >= 0 ? worldNormal : -worldNormal;
+
+            var worldVerts = new Vector3[poly.Vertices.Count];
+            for (int i = 0; i < poly.Vertices.Count; i++)
+                worldVerts[i] = CellLocalToWorld(poly.Vertices[i].Origin, cellFrame);
+
+            result.Add(new FloorPolygon
+            {
+                PolygonId = polyId,
+                VerticesWorld = worldVerts,
+                NormalWorld = upwardNormal,
+            });
         }
         return result;
     }

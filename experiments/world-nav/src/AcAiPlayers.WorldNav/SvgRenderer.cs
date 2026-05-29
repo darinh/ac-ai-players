@@ -14,14 +14,16 @@
 // (stairs, ramps, ladders, drops) get a colored "up"/"down" marker
 // at the source cell with the destination floor + cell-id label.
 //
-// CAVEAT: This view shows the CELL graph plus static-obstacle
-// footprints (signs, columns, lifestones, training dummies, etc.
-// drawn as red filled circles). It does NOT yet show the
-// fine-grained walkable surface inside each cell, and the
-// pathfinder still routes via cell centroids — a bot following
-// pure cell-centroid waypoints could clip the obstacles drawn
-// here. Dynamic obstacles (NPCs, mobs, players, items, closed
-// doors) are runtime-sensed and never appear here.
+// CAVEAT: This view shows the CELL graph plus the cell's WALKABLE
+// FLOOR POLYGONS (light green, the actual surface the bot can step
+// on) plus its STATIC-OBSTACLE FOOTPRINTS (red/orange circles for
+// signs, columns, lifestones, training dummies, etc.). The
+// pathfinder currently still routes via cell centroids — a bot
+// following pure cell-centroid waypoints could clip the obstacles
+// drawn here. Phase 2 will sample walkable nodes inside each floor
+// polygon, carve out obstacle footprints, and refactor the
+// pathfinder to use those. Dynamic obstacles (NPCs, mobs, players,
+// items, closed doors) are runtime-sensed and never appear here.
 //
 // This is diagnostic output, not a runtime artifact. Used to
 // eyeball-verify that the loader produced sensible geometry
@@ -137,6 +139,7 @@ public sealed class SvgRenderer
         sb.Append("  .obstacle-cyl{fill:#cc3333;fill-opacity:0.55;stroke:#660000;stroke-width:0.4}\n");
         sb.Append("  .obstacle-sphere{fill:#cc6633;fill-opacity:0.45;stroke:#663300;stroke-width:0.4}\n");
         sb.Append("  .obstacle-bound{fill:none;stroke:#660000;stroke-width:0.5;stroke-dasharray:2 2;opacity:0.7}\n");
+        sb.Append("  .floor-poly{fill:#88dd88;fill-opacity:0.35;stroke:#226622;stroke-width:0.15}\n");
         sb.Append("  .stair-up{fill:#ff8a1a;stroke:#7a3a00;stroke-width:0.6}\n");
         sb.Append("  .stair-dn{fill:#7a3aff;stroke:#2a0066;stroke-width:0.6}\n");
         sb.Append("  .stair-label{font:8px sans-serif;fill:#2a0033;text-anchor:middle;dominant-baseline:central}\n");
@@ -184,6 +187,27 @@ public sealed class SvgRenderer
             var h = cell.BoundsWorld.Height * scale;
             sb.Append(CultureInfo.InvariantCulture,
                 $"<rect class=\"{cls}\" x=\"{x:0.##}\" y=\"{y:0.##}\" width=\"{w:0.##}\" height=\"{h:0.##}\"/>\n");
+        }
+
+        // Walkable floor polygons (per-cell PhysicsPolygons with
+        // upward-facing normals, projected to world). Drawn over the
+        // cell bounding rect so the actual walkable shape -- usually
+        // smaller than the bounding box -- is visible. Drawn BEFORE
+        // obstacles so red obstacle circles sit on top of green floor.
+        foreach (var cell in floor.Cells)
+        {
+            foreach (var fp in cell.FloorPolygons)
+            {
+                var pts = new StringBuilder(fp.VerticesWorld.Count * 12);
+                for (int i = 0; i < fp.VerticesWorld.Count; i++)
+                {
+                    if (i > 0) pts.Append(' ');
+                    var vw = fp.VerticesWorld[i];
+                    pts.Append(CultureInfo.InvariantCulture, $"{Wx(vw.X):0.##},{Wy(vw.Y):0.##}");
+                }
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<polygon class=\"floor-poly\" points=\"{pts}\"/>\n");
+            }
         }
 
         // Static obstacles (signs, columns, lifestones, dummies, ...).
@@ -395,7 +419,7 @@ public sealed class SvgRenderer
         sb.Append(CssBlock());
         sb.Append("<rect x=\"0\" y=\"0\" width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n");
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {floors.Count} floors (highest at top)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"22\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys, {floors.Count} floors (highest at top)</text>\n");
 
         float y = 40f;
         var panelOriginYByFloor = new Dictionary<int, float>(stacked.Count);
@@ -456,6 +480,23 @@ public sealed class SvgRenderer
             var h = cell.BoundsWorld.Height * scale;
             sb.Append(CultureInfo.InvariantCulture,
                 $"<rect class=\"{cls}\" x=\"{x:0.##}\" y=\"{y:0.##}\" width=\"{w:0.##}\" height=\"{h:0.##}\"/>\n");
+        }
+
+        // Walkable floor polygons — drawn over cell rects, under obstacles.
+        foreach (var cell in graph.Cells.Values)
+        {
+            foreach (var fp in cell.FloorPolygons)
+            {
+                var pts = new StringBuilder(fp.VerticesWorld.Count * 12);
+                for (int i = 0; i < fp.VerticesWorld.Count; i++)
+                {
+                    if (i > 0) pts.Append(' ');
+                    var vw = fp.VerticesWorld[i];
+                    pts.Append(CultureInfo.InvariantCulture, $"{Wx(vw.X):0.##},{Wy(vw.Y):0.##}");
+                }
+                sb.Append(CultureInfo.InvariantCulture,
+                    $"<polygon class=\"floor-poly\" points=\"{pts}\"/>\n");
+            }
         }
 
         // Static obstacles — drawn before connection links/circles
@@ -528,7 +569,7 @@ public sealed class SvgRenderer
         }
 
         sb.Append(CultureInfo.InvariantCulture,
-            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles (combined view)</text>\n");
+            $"<text class=\"title\" x=\"{Margin}\" y=\"16\">Landblock {graph.LandblockId:X4} — {graph.CellCount} cells, {graph.ConnectionCount} connections, {graph.StaticObstacleCount} static obstacles, {graph.FloorPolygonCount} floor polys (combined view)</text>\n");
         sb.Append("</svg>\n");
         return sb.ToString();
     }

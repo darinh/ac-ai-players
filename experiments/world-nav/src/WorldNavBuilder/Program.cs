@@ -105,6 +105,7 @@ if (!quiet)
     Console.WriteLine($"  cells:        {graph.CellCount}");
     Console.WriteLine($"  connections:  {graph.ConnectionCount}");
     Console.WriteLine($"  obstacles:    {graph.StaticObstacleCount} static primitives");
+    Console.WriteLine($"  floor polys:  {graph.FloorPolygonCount} walkable surfaces");
     Console.WriteLine($"  bounds:  X[{graph.BoundsWorld.MinX:0.##}..{graph.BoundsWorld.MaxX:0.##}] Y[{graph.BoundsWorld.MinY:0.##}..{graph.BoundsWorld.MaxY:0.##}] Z[{graph.BoundsWorld.MinZ:0.##}..{graph.BoundsWorld.MaxZ:0.##}]");
 
     int withGeom = 0, withoutGeom = 0;
