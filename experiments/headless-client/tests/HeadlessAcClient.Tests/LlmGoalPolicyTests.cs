@@ -850,6 +850,106 @@ public class LlmGoalPolicyTests
         Assert.Contains("nearest monster: (none in view)", crBlock);
     }
 
+    [Fact]
+    public async Task LlmGoalPolicy_LocationRecency_LandblockDwellAndTalkCounts()
+    {
+        // Slice I — Location & recency section must surface (a) how
+        // long the bot has been in the current landblock since the
+        // most recent LandblockChanged event, and (b) per-NPC Talk
+        // emission counts in the last 10 GoalEmitted events. Both
+        // signals come from the EventStream — no hardcoded knowledge.
+        // The LOOP-BREAK rule below references these counts directly.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "item":   null,
+          "priority": 4,
+          "rationale": "stuck talking"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        // Seed: LandblockChanged 8 minutes ago.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(8),
+            Kind = EventKind.LandblockChanged,
+            LandblockFrom = 0x8602u,
+            LandblockTo = 0xA9B4u,
+        });
+        // Seed: 4 Talk goals to "Buckminster", 1 to "Alcott".
+        for (var i = 0; i < 4; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(7 - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = "Talk target=name=\"Buckminster\" item= source=llm:openai/gpt-4o-mini",
+            });
+        }
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(1),
+            Kind = EventKind.GoalEmitted,
+            GoalId = Guid.NewGuid(),
+            Text = "Talk target=name=\"Alcott\" item= source=llm:openai/gpt-4o-mini",
+        });
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        using var doc = JsonDocument.Parse(body);
+        var prompt = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+
+        // Section header present.
+        var lrIdx = prompt.IndexOf("## Location & recency", StringComparison.Ordinal);
+        Assert.True(lrIdx >= 0, "Location & recency section missing");
+        var afterLr = prompt.IndexOf("##", lrIdx + 1, StringComparison.Ordinal);
+        var lrBlock = afterLr > lrIdx ? prompt.Substring(lrIdx, afterLr - lrIdx) : prompt.Substring(lrIdx);
+
+        // Dwell minutes — ~8 minutes (allow 7.5 to 8.5 for clock skew).
+        Assert.Contains("minutes in current landblock:", lrBlock);
+        var dwellMatch = System.Text.RegularExpressions.Regex.Match(lrBlock, @"minutes in current landblock: (\d+\.\d)");
+        Assert.True(dwellMatch.Success, "dwell minutes line missing or malformed");
+        var dwell = double.Parse(dwellMatch.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.InRange(dwell, 7.5, 8.5);
+
+        // Per-NPC Talk counts.
+        Assert.Contains("recent Talk emissions", lrBlock);
+        Assert.Contains("Buckminster: x4", lrBlock);
+        Assert.Contains("Alcott: x1", lrBlock);
+
+        // LOOP-BREAK rule references the dwell signal and Explore as
+        // the escape hatch.
+        Assert.Contains("LOOP-BREAK", prompt);
+        Assert.Contains("Explore", prompt);
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;

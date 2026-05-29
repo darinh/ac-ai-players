@@ -316,6 +316,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- If a recent event is `ActionRejected`, the server refused that exact attempt. Do NOT immediately retry the same (kind, target, item) combination. Pick a different verb (e.g. Use instead of Give), a different item, or a different NPC. Read the rejection's `label` and `message` for the reason.");
         sb.AppendLine("- Read `## Server hints` closely. Phrases like \"Double click X\" or \"Use X to ...\" tell you EXACTLY what verb to use on what target. If an object is visible nearby AND the server has instructed you to use it, emit `Use{target: name=\"X\"}`. The server is your tutorial; do not ignore its instructions in favor of pure exploration.");
         sb.AppendLine("- Combat: creatures tagged `monster` are appropriate combat targets and grant XP and loot. Creatures tagged `npc` are civilians — talk to or trade with them, do NOT attack. If a `monster` is visible nearby AND a weapon is wielded (visible in inventory as `wielded@...`) AND no server hint or item short_desc gives a more specific quest action, emit `Attack{target: name=\"X\"}` on the nearest monster. Combat is the primary source of XP outside of NPC quests.");
+        sb.AppendLine("- LOOP-BREAK: If you have emitted `Talk{X}` 3 or more times in the last 10 goal emissions (see the Location & recency section below) AND no new inventory item has been added since AND no new unique server hint has appeared, STOP talking to X. Do exactly ONE of:");
+        sb.AppendLine("    (a) Talk to a different visible NPC (`Talk{name: \"Y\"}` where Y != X) — but only if Y has not also been talked-to-repeatedly.");
+        sb.AppendLine("    (b) Use or Give an inventory item whose `short_desc` names a target you have not yet acted on.");
+        sb.AppendLine("    (c) Emit `Explore{target: {name: \"anywhere\"}}` to wander outward. The schema picker will walk you through unvisited doors and portals to discover new NPCs, mobs, and items. This is the right choice when minutes-in-current-landblock exceeds 5 AND no monster is visible AND only `npc` creatures are nearby. Combat and contracts happen outdoors, not in town interiors.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -396,6 +400,60 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (observedHostile is not null)
         {
             sb.AppendLine($"- observed hostile: {observedHostile.Name} (it has attacked you — fight back or flee)");
+        }
+        sb.AppendLine();
+
+        // Slice I — Location & recency. Surfaces the two signals
+        // the LLM needs to break out of town-NPC loops: how long
+        // it has been in the current landblock, and how many
+        // Talk{X} goals it has emitted recently per NPC. Both
+        // come from the EventStream — no hardcoded knowledge of
+        // landblocks or NPC names. The LOOP-BREAK rule above
+        // references the recent-Talk counts directly.
+        sb.AppendLine("## Location & recency");
+        var hintPoolForRecency = events.Recent(EventStream.DefaultCapacity);
+        var lastLandblockChange = hintPoolForRecency
+            .FirstOrDefault(e => e.Kind == EventKind.LandblockChanged);
+        if (lastLandblockChange is not null)
+        {
+            var dwellMin = (DateTimeOffset.UtcNow - lastLandblockChange.Utc).TotalMinutes;
+            sb.AppendLine($"- minutes in current landblock: {dwellMin:F1}");
+        }
+        else
+        {
+            sb.AppendLine("- minutes in current landblock: (no LandblockChanged event in retained window)");
+        }
+        // Per-NPC recent Talk emissions (last 10 GoalEmitted events
+        // of kind Talk). Tactics formats GoalEmitted Text as
+        // `<Kind> target=<Selector> item=<Selector> source=<src>`
+        // so we look for lines starting with "Talk target=name=\"X\"".
+        var recentGoalEmits = hintPoolForRecency
+            .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+            .Take(10)
+            .ToList();
+        var talkCountByNpc = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Talk ", StringComparison.Ordinal)) continue;
+            var m = System.Text.RegularExpressions.Regex.Match(txt, "target=name=\"([^\"]+)\"");
+            if (m.Success)
+            {
+                var n = m.Groups[1].Value;
+                talkCountByNpc[n] = talkCountByNpc.TryGetValue(n, out var c) ? c + 1 : 1;
+            }
+        }
+        if (talkCountByNpc.Count > 0)
+        {
+            sb.AppendLine("- recent Talk emissions (last 10 goals):");
+            foreach (var kv in talkCountByNpc.OrderByDescending(p => p.Value))
+            {
+                sb.AppendLine($"    - {kv.Key}: x{kv.Value}");
+            }
+        }
+        else
+        {
+            sb.AppendLine("- recent Talk emissions: (none)");
         }
         sb.AppendLine();
 
