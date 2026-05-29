@@ -207,8 +207,9 @@ internal static class Program
             DatManager.Initialize(datDir, keepOpen: true, loadCell: true);
 
             var loader = new LandblockNavLoader(DatManager.CellDat, DatManager.PortalDat);
-            Console.WriteLine($"[indoor-nav] enabled (DAT dir: {datDir})");
-            return new IndoorNavService(loader);
+            var hops = ParseExpansionHops();
+            Console.WriteLine($"[indoor-nav] enabled (DAT dir: {datDir}, expansion-hops={hops})");
+            return new IndoorNavService(loader, expansionHops: hops);
         }
         catch (Exception ex)
         {
@@ -216,5 +217,19 @@ internal static class Program
             Console.WriteLine("[indoor-nav] continuing with indoor-nav disabled");
             return new IndoorNavService();
         }
+    }
+
+    /// <summary>
+    /// Parses AC_INDOOR_NAV_HOPS (default 4). Clamps to 0..16 so a
+    /// typo can't blow up the BFS frontier on a 568-cell landblock.
+    /// </summary>
+    private static int ParseExpansionHops()
+    {
+        var raw = Environment.GetEnvironmentVariable("AC_INDOOR_NAV_HOPS");
+        if (string.IsNullOrWhiteSpace(raw))
+            return 4;
+        if (!int.TryParse(raw, out var hops))
+            return 4;
+        return Math.Clamp(hops, 0, 16);
     }
 }

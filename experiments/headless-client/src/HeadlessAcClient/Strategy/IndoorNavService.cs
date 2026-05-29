@@ -145,6 +145,9 @@ internal sealed class IndoorNavTelemetry
     private long _disabled;
     private long _graphsLoaded;
     private long _graphsFailed;
+    private long _seedCellsTotal;
+    private long _expandedCellsTotal;
+    private long _expansionCalls;
 
     public long Success => Interlocked.Read(ref _success);
     public long NoPath => Interlocked.Read(ref _noPath);
@@ -154,6 +157,9 @@ internal sealed class IndoorNavTelemetry
     public long Disabled => Interlocked.Read(ref _disabled);
     public long GraphsLoaded => Interlocked.Read(ref _graphsLoaded);
     public long GraphsFailed => Interlocked.Read(ref _graphsFailed);
+    public long SeedCellsTotal => Interlocked.Read(ref _seedCellsTotal);
+    public long ExpandedCellsTotal => Interlocked.Read(ref _expandedCellsTotal);
+    public long ExpansionCalls => Interlocked.Read(ref _expansionCalls);
 
     internal void Record(IndoorPathStatus s)
     {
@@ -171,10 +177,24 @@ internal sealed class IndoorNavTelemetry
     internal void RecordGraphLoaded() => Interlocked.Increment(ref _graphsLoaded);
     internal void RecordGraphFailed() => Interlocked.Increment(ref _graphsFailed);
 
+    internal void RecordExpansion(int seedCount, int expandedCount)
+    {
+        Interlocked.Add(ref _seedCellsTotal, seedCount);
+        Interlocked.Add(ref _expandedCellsTotal, expandedCount);
+        Interlocked.Increment(ref _expansionCalls);
+    }
+
     public string Summary()
-        => $"indoor-nav: success={Success} no-path={NoPath} not-indoor={NotIndoor} "
-         + $"cross-lb={CrossLandblock} no-graph={NoGraph} disabled={Disabled} "
-         + $"graphs={GraphsLoaded} loaded ({GraphsFailed} failed)";
+    {
+        var calls = ExpansionCalls;
+        var avgSeed = calls == 0 ? 0.0 : (double)SeedCellsTotal / calls;
+        var avgExpanded = calls == 0 ? 0.0 : (double)ExpandedCellsTotal / calls;
+        return $"indoor-nav: success={Success} no-path={NoPath} not-indoor={NotIndoor} "
+             + $"cross-lb={CrossLandblock} no-graph={NoGraph} disabled={Disabled} "
+             + $"graphs={GraphsLoaded} loaded ({GraphsFailed} failed) "
+             + $"avg-seed={avgSeed:F1} avg-expanded={avgExpanded:F1} "
+             + $"expansion-calls={calls}";
+    }
 }
 
 internal sealed class IndoorNavService
@@ -193,6 +213,21 @@ internal sealed class IndoorNavService
     private readonly LandblockNavLoader? _loader;
     private readonly Pathfinder _pathfinder = new();
     private readonly Action<string> _log;
+    /// <summary>
+    /// Phase 3.1 — number of hops to expand the caller's seen-cells
+    /// set through the static cell-connection graph BEFORE running
+    /// A*. Models "look through doorway" awareness: a human player in
+    /// a room can see/plan into adjacent rooms without physically
+    /// entering them. Per-cell discovery of CONTENT (NPCs, mobs,
+    /// items) is unchanged — only PATH planning gets the look-ahead.
+    ///
+    /// K=0 disables expansion (planner restricted to exactly the
+    /// cells the caller marked seen).
+    /// K=4 (default) gives a comfortable "I can see down this
+    /// corridor + into the next two rooms" horizon while still
+    /// forcing the bot to explore to discover distant areas.
+    /// </summary>
+    private readonly int _expansionHops;
 
     public IndoorNavTelemetry Telemetry { get; } = new();
 
@@ -206,6 +241,7 @@ internal sealed class IndoorNavService
         _enabled = false;
         _loader = null;
         _log = log ?? Console.WriteLine;
+        _expansionHops = 0;
     }
 
     /// <summary>
@@ -216,11 +252,15 @@ internal sealed class IndoorNavService
     /// process-wide singleton with init costs we want at startup,
     /// not on first nav query.
     /// </summary>
-    public IndoorNavService(LandblockNavLoader loader, Action<string>? log = null)
+    public IndoorNavService(
+        LandblockNavLoader loader,
+        Action<string>? log = null,
+        int expansionHops = 4)
     {
         _enabled = true;
         _loader = loader;
         _log = log ?? Console.WriteLine;
+        _expansionHops = Math.Max(0, expansionHops);
     }
 
     public bool IsEnabled => _enabled;
@@ -313,6 +353,30 @@ internal sealed class IndoorNavService
                 IndoorPathStatus.NoGraph,
                 $"landblock 0x{fromLb:X4} has no indoor graph"));
 
+        // Phase 3.1 K-hop expansion: the caller's seenCells is the
+        // bot's directly-observed set ("I saw an object here, or
+        // I'm standing in this cell"). For planning purposes we
+        // expand it by K hops through the static cell-connection
+        // graph — modelling "I can see/plan into adjacent rooms
+        // through doorways" the same way a human player can. The
+        // bot's TRUE knowledge of WHERE CONTENT IS (NPCs, mobs,
+        // items) is unchanged; only the PATH planner gets the
+        // wider working set. Discovery still requires the bot to
+        // observe content via worldState.Objects from server-side
+        // visibility broadcasts.
+        var seedSet = (IReadOnlySet<uint>)new HashSet<uint>(seenCells);
+        // Always include the bot's current cell — it must be in
+        // the working set or A* can't even snap the start node.
+        if (IsIndoorCell(fromCellId) && GetLandblockId(fromCellId) == fromLb)
+        {
+            if (seedSet is HashSet<uint> hs1)
+                hs1.Add(fromCellId);
+        }
+        var working = _expansionHops > 0
+            ? ExpandViaConnections(graph, seedSet, _expansionHops)
+            : seedSet;
+        Telemetry.RecordExpansion(seedSet.Count, working.Count);
+
         // Pathfinder respects the walkableCells filter when snapping
         // BOTH endpoints; if the caller's seenCells is too small to
         // contain either endpoint, the snap fails and we get
@@ -321,7 +385,7 @@ internal sealed class IndoorNavService
         // semantics predictable; callers that want strict fog must
         // pre-validate.
         IReadOnlySet<uint>? walkableCells =
-            seenCells.Count == 0 ? null : seenCells;
+            working.Count == 0 ? null : working;
 
         var result = _pathfinder.FindWalkablePath(
             graph, fromXYZ, toXYZ, walkableCells);
@@ -336,5 +400,53 @@ internal sealed class IndoorNavService
 
         return Record(new IndoorPathResult(
             IndoorPathStatus.Success, result.Points, pathCells, null));
+    }
+
+    /// <summary>
+    /// BFS expansion of a seen-cells seed through the static
+    /// cell-connection graph. Returns a NEW set containing every
+    /// cell reachable from any seed within <paramref name="hops"/>
+    /// connection traversals.
+    ///
+    /// This is the planning-side "look through doorways" model:
+    /// cells that the bot hasn't physically observed but that lie
+    /// within K connection-hops of an observed cell can still be
+    /// USED for routing. The caller's true knowledge of WHAT is in
+    /// those cells remains discovery-only.
+    ///
+    /// Cells whose <see cref="CellConnection.OtherCellLoaded"/> is
+    /// false are dangling edges (cross-landblock / missing DAT
+    /// record) and are NOT followed.
+    /// </summary>
+    internal static IReadOnlySet<uint> ExpandViaConnections(
+        IndoorNavGraph graph,
+        IReadOnlySet<uint> seed,
+        int hops)
+    {
+        var visited = new HashSet<uint>(seed);
+        if (hops <= 0 || seed.Count == 0)
+            return visited;
+
+        var frontier = new List<uint>(seed);
+        var next = new List<uint>();
+        for (int h = 0; h < hops && frontier.Count > 0; h++)
+        {
+            next.Clear();
+            foreach (var cellId in frontier)
+            {
+                if (!graph.Cells.TryGetValue(cellId, out var cell))
+                    continue;
+                foreach (var conn in cell.Connections)
+                {
+                    if (!conn.OtherCellLoaded)
+                        continue;
+                    var other = conn.OtherCellId;
+                    if (visited.Add(other))
+                        next.Add(other);
+                }
+            }
+            (frontier, next) = (next, frontier);
+        }
+        return visited;
     }
 }
