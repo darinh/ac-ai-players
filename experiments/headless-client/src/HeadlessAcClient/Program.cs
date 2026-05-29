@@ -56,7 +56,18 @@ internal static class Program
 
         await PingApiAsync().ConfigureAwait(false);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(200));
+        // Outer cancellation budget. Must exceed
+        // HandshakeDriver.ObserveSeconds (currently 1800) plus
+        // the pre-observe handshake budget (~30s on a healthy
+        // localhost link, much higher if the server is slow to
+        // reply during ConnectResponse). 1900s gives 100s of
+        // handshake headroom while still bounding a single run.
+        // Previously hard-coded to 200s, which silently killed
+        // long-running observations mid-cycle and exited the
+        // outer loop BEFORE the picker could send its next walk
+        // — symptom: runs always terminated at ~3min 20s regardless
+        // of ObserveSeconds. See spec/12 future ops notes.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1900));
         using var driver = new HandshakeDriver(host, port, account, password, characterName);
         try
         {

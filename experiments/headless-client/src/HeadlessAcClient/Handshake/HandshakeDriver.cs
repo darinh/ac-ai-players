@@ -2072,8 +2072,30 @@ internal sealed class HandshakeDriver : IDisposable
                                 var sentLen = msg.Pack(sendBuf, myClientId,
                                                        sequence: packetSeq, iteration: 1,
                                                        encrypt: true, cryptoSend: cryptoSend);
-                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
-                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                // Walk-tick send: wrap so a socket-level
+                                // failure (server closed UDP "session",
+                                // ICMP port-unreachable, NIC blip) is
+                                // logged + handled gracefully instead of
+                                // escaping the outer try/catch and ending
+                                // the run silently. Cancellation should
+                                // still propagate so the deadline path
+                                // works as designed.
+                                try
+                                {
+                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
+                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    throw;
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine(
+                                        $"[motion] walk-tick: SendToAsync FAILED ({ex.GetType().Name}: {ex.Message}) — stopping motion");
+                                    motionDone = true;
+                                    break;
+                                }
                                 walkTickAps++;
                                 lastSentWaypointPos = newPos;
                                 Console.WriteLine(
