@@ -331,6 +331,18 @@ internal sealed record TellPayload(
     }
 }
 
+internal sealed record UpdateHealthPayload(uint ObjectId, float HealthFraction)
+{
+    public override string ToString() =>
+        $"UpdateHealth(objectId=0x{ObjectId:X8} healthFraction={HealthFraction:F3} ({(int)(HealthFraction * 100)}%))";
+}
+
+internal sealed record AttackDonePayload(uint ErrorCode)
+{
+    public override string ToString() =>
+        $"AttackDone(errCode=0x{ErrorCode:X4} {WeenieErrorLabels.Label(ErrorCode)})";
+}
+
 /// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
@@ -351,7 +363,9 @@ internal sealed record GameEventPayload(
     TellPayload?                         Tell,
     PopupStringPayload?                  PopupString,
     BookDataResponsePayload?             BookDataResponse,
-    BookPageDataResponsePayload?         BookPageDataResponse)
+    BookPageDataResponsePayload?         BookPageDataResponse,
+    UpdateHealthPayload?                 UpdateHealth,
+    AttackDonePayload?                   AttackDone)
 {
     public override string ToString() => EventType switch
     {
@@ -368,6 +382,8 @@ internal sealed record GameEventPayload(
         GameEventType.PopupString                  when PopupString                is { } x => x.ToString(),
         GameEventType.BookDataResponse             when BookDataResponse           is { } x => x.ToString(),
         GameEventType.BookPageDataResponse         when BookPageDataResponse       is { } x => x.ToString(),
+        GameEventType.UpdateHealth                 when UpdateHealth               is { } x => x.ToString(),
+        GameEventType.AttackDone                   when AttackDone                 is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -408,6 +424,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { BookDataResponse = DecodeBookDataResponse(body) },
                 GameEventType.BookPageDataResponse =>
                     Empty(eventType) with { BookPageDataResponse = DecodeBookPageDataResponse(body) },
+                GameEventType.UpdateHealth =>
+                    Empty(eventType) with { UpdateHealth = DecodeUpdateHealth(body) },
+                GameEventType.AttackDone =>
+                    Empty(eventType) with { AttackDone = DecodeAttackDone(body) },
                 _ => null,
             };
         }
@@ -433,7 +453,9 @@ internal static class GameEventPayloadDecoder
             Tell: null,
             PopupString: null,
             BookDataResponse: null,
-            BookPageDataResponse: null);
+            BookPageDataResponse: null,
+            UpdateHealth: null,
+            AttackDone: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -678,6 +700,27 @@ internal static class GameEventPayloadDecoder
         var v = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
         cursor += 4;
         return v;
+    }
+
+    private static UpdateHealthPayload DecodeUpdateHealth(ReadOnlySpan<byte> body)
+    {
+        // GameEventUpdateHealth (0x01C0):
+        //   u32 objectId
+        //   f32 healthFraction  ([0.0, 1.0])
+        if (body.Length < 8)
+            throw new InvalidOperationException("body too short for UpdateHealth");
+        var objectId = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4));
+        var health   = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(4, 4));
+        return new UpdateHealthPayload(objectId, health);
+    }
+
+    private static AttackDonePayload DecodeAttackDone(ReadOnlySpan<byte> body)
+    {
+        // GameEventAttackDone (0x01A7):
+        //   u32 errorCode  (WeenieError; 0 = success)
+        if (body.Length < 4)
+            throw new InvalidOperationException("body too short for AttackDone");
+        return new AttackDonePayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
     }
 
     /// <summary>

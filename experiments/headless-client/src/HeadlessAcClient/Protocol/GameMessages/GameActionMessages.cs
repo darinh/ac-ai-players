@@ -43,6 +43,7 @@ internal enum GameActionType : uint
     TargetedMeleeAttack = 0x0008,
     GetAndWieldItem     = 0x001A,
     ChangeCombatMode    = 0x0053,
+    QueryHealth         = 0x01BF,
 }
 
 /// <summary>
@@ -360,6 +361,48 @@ internal static class GameActionGetAndWieldItemMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.GetAndWieldItem, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid);       cursor += 4;
         BinaryPrimitives.WriteInt32LittleEndian (dest.Slice(cursor), equipLocation);  cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// QueryHealth (0x01BF). Sent by a real client when the player
+/// selects (left-clicks) a creature in the world — registers that
+/// creature as the player's "appraisal / health-query target" so
+/// the server emits ongoing UpdateHealth broadcasts as that
+/// target's health changes.
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionQueryHealth.cs</c>
+///   reads u32 objectGuid and calls
+///   <c>session.Player.HandleActionQueryHealth(objectGuid)</c>.
+///   That method sets <c>selectedTarget</c> + <c>HealthQueryTarget</c>
+///   on the Player AND immediately invokes
+///   <c>creature.QueryHealth(session)</c> which emits one UpdateHealth
+///   right away. Subsequent UpdateHealth broadcasts come from
+///   <c>Player_Vitals.HandleTargetVitals()</c> (called every
+///   Player_Tick) — those only fire while <c>selectedTarget != null</c>.
+///
+/// Payload after the 12B GameAction header:
+///   u32 objectGuid
+/// = 16 bytes total.
+///
+/// Sending QueryHealth before/with TargetedMeleeAttack is what makes
+/// damage visible to a headless client. Without it the swings still
+/// land (server-side) but the client sees zero UpdateHealth events
+/// and can't tell when the target died.
+/// </summary>
+internal static class GameActionQueryHealthMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint objectGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.QueryHealth, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), objectGuid); cursor += 4;
         return cursor;
     }
 }

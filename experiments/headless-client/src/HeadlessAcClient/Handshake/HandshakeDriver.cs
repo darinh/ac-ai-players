@@ -336,6 +336,50 @@ internal sealed class HandshakeDriver : IDisposable
         // so we can promote the class to satisfiedWeenieClasses when the
         // wield ack arrives.
         var                  pendingEquipWcid = new Dictionary<uint, uint>();
+        // Phase 7f — combat state. Locked when bot dispatches a melee
+        // attack. While locked, the picker keeps targeting the same
+        // golem (so we don't walk away mid-fight) and a retry timer
+        // re-sends TargetedMeleeAttack every CombatRetryIntervalSec
+        // until we observe the target dying (UpdateHealth==0) or
+        // disappearing, or the wall-clock CombatTimeoutSec elapses.
+        // Hardcoded for now: only wcid 12698 (Sparring Golem) triggers
+        // combat. Bot is unarmed (no weapon equipped) — server uses
+        // bare-handed melee, falling back to UnarmedCombat skill.
+        //
+        // Phase 7f.1 — progress-based abandon. The 30s wall-clock
+        // timeout fires too early when the bot is making progress
+        // (3% damage per hit at unarmed L1). Switched to "no damage
+        // for AbandonOnNoDamageSec" — abandon a golem ONLY if we've
+        // failed to land ANY damage in this window. lastDamageAt is
+        // bumped whenever UpdateHealth shows healthFraction dropped.
+        //
+        // Phase 7f.2 — server-driven swing loop. AC1 melee is a
+        // CONTINUOUS server-side loop: one TargetedMeleeAttack
+        // packet starts a loop that auto-repeats Attack() until the
+        // target dies, AutoRepeatAttacks character option is off,
+        // bot moves out of range, or OnMoveComplete fires with a
+        // non-None status (Player_Move.cs:228 calls
+        // HandleActionCancelAttack). The slow motion cycle we run
+        // BREAKS the swing loop because each AP/MS packet causes
+        // OnMoveComplete to fire. To fix:
+        //   1) After first ATTACK on a target, suppress AP +
+        //      walk-tick + MS-START + MS-STOP packets (the server
+        //      auto-positions us via melee sticky distance).
+        //   2) Re-engage attack only via a periodic re-attack timer
+        //      (CombatRetryIntervalSec, set high enough to not
+        //      conflict with the server's animation cooldown).
+        //   3) Fast-fire packet bundles ONLY TargetedMeleeAttack
+        //      (NOT ChangeCombatMode — re-sending CombatMode while
+        //      already in Melee triggers ActionCancelled via the
+        //      NextUseTime gate in Player_Combat.cs:744).
+        const uint           HostileCreatureWcidSparringGolem = 12698u;
+        const double         CombatRetryIntervalSec = 5.0;
+        const double         AbandonOnNoDamageSec   = 60.0;
+        uint?                combatTargetGuid = null;
+        DateTime?            combatStartedAt = null;
+        DateTime?            lastCombatAttackAt = null;
+        DateTime?            lastDamageAt = null;
+        float?               lastObservedTargetHealthFraction = null;
         var ownPlayerSeen = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
@@ -670,6 +714,64 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
                                     $"wcids=[{string.Join(",", satisfiedWeenieClasses.Select(c => c.ToString()))}]");
                             }
+                            // Phase 7f — UpdateHealth tracking. If
+                            // the server reports our combat target's
+                            // health <= 0, the golem is dead (corpse
+                            // will spawn). Clear combat lock and
+                            // mark the wcid satisfied so the picker
+                            // moves on (we'll loot the corpse in a
+                            // later phase via a new picker branch).
+                            if (ge.Payload?.UpdateHealth is { } updHealth)
+                            {
+                                if (combatTargetGuid is uint ctgHealth && updHealth.ObjectId == ctgHealth)
+                                {
+                                    // Track damage progress. If
+                                    // health dropped vs last seen
+                                    // value, bump lastDamageAt so
+                                    // the no-progress timeout
+                                    // doesn't fire while we're
+                                    // actively dpsing.
+                                    if (lastObservedTargetHealthFraction is float prevHF &&
+                                        updHealth.HealthFraction < prevHF - 0.0001f)
+                                    {
+                                        lastDamageAt = DateTime.UtcNow;
+                                    }
+                                    lastObservedTargetHealthFraction = updHealth.HealthFraction;
+                                    if (updHealth.HealthFraction <= 0.0001f)
+                                    {
+                                        Console.WriteLine(
+                                            $"[combat] target 0x{ctgHealth:X8} DEAD (health={updHealth.HealthFraction:F3}); " +
+                                            $"clearing combat lock.");
+                                        visitedTargetGuids.Add(ctgHealth);
+                                        satisfiedWeenieClasses.Add(HostileCreatureWcidSparringGolem);
+                                        combatTargetGuid = null;
+                                        combatStartedAt = null;
+                                        lastCombatAttackAt = null;
+                                        lastDamageAt = null;
+                                        lastObservedTargetHealthFraction = null;
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine(
+                                            $"[combat] target 0x{ctgHealth:X8} health={updHealth.HealthFraction:F3} ({(int)(updHealth.HealthFraction*100)}%)");
+                                    }
+                                }
+                            }
+                            // Phase 7f — AttackDone visibility. A
+                            // non-zero errCode means the server
+                            // refused the swing. Common reasons:
+                            // OutOfRange, NotMeleeWeapon (we have
+                            // none — unarmed should still work),
+                            // YouCanNotAttackThisCreature, SkillTooLow.
+                            if (ge.Payload?.AttackDone is { } atkDone)
+                            {
+                                if (atkDone.ErrorCode != 0)
+                                {
+                                    Console.WriteLine(
+                                        $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
+                                        $"({WeenieErrorLabels.Label(atkDone.ErrorCode)})");
+                                }
+                            }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
                             Console.WriteLine(
@@ -936,6 +1038,106 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
 
+                // Phase 7f — combat watchdog. Switched from absolute
+                // 30s wall-clock to "no damage progress for N sec".
+                // The bot may take 30+ seconds to land its first hit
+                // (unarmed L1 + golem armor); abandoning early
+                // wastes the engagement. We only give up if we've
+                // landed ZERO damage in AbandonOnNoDamageSec.
+                if (combatTargetGuid is uint ctgWatch && combatStartedAt is DateTime cstart)
+                {
+                    var sinceLastDamage = lastDamageAt is DateTime ld
+                        ? (DateTime.UtcNow - ld).TotalSeconds
+                        : (DateTime.UtcNow - cstart).TotalSeconds;
+                    if (sinceLastDamage >= AbandonOnNoDamageSec)
+                    {
+                        Console.WriteLine(
+                            $"[combat] NO-PROGRESS abandon after {sinceLastDamage:F0}s with no damage on 0x{ctgWatch:X8} " +
+                            $"lastHealth={lastObservedTargetHealthFraction?.ToString("F3") ?? "<none>"}; " +
+                            $"adding to visited+satisfied so picker moves on.");
+                        visitedTargetGuids.Add(ctgWatch);
+                        satisfiedWeenieClasses.Add(HostileCreatureWcidSparringGolem);
+                        combatTargetGuid = null;
+                        combatStartedAt = null;
+                        lastCombatAttackAt = null;
+                        lastDamageAt = null;
+                        lastObservedTargetHealthFraction = null;
+                    }
+                }
+
+                // Phase 7f.2 — RE-ENGAGE attack. AC1's melee is a
+                // server-side loop: one TargetedMeleeAttack starts
+                // the swing loop, server auto-repeats Attack() until
+                // target dies, AutoRepeatAttacks character option
+                // turns off, we leave range, or the loop is
+                // cancelled by our motion. We send a fresh
+                // TargetedMeleeAttack every CombatRetryIntervalSec
+                // (NOT ChangeCombatMode — re-sending CombatMode
+                // triggers ActionCancelled via NextUseTime gate).
+                // If the swing loop is still running server-side,
+                // this attack is silently no-op'd by the
+                // `if (Attacking || MeleeTarget != null && MeleeTarget.IsAlive) return;`
+                // guard in Player_Melee.cs:99 — harmless. If the
+                // loop has stopped, this re-engages it.
+                if (combatTargetGuid is uint ffCtg &&
+                    lastCombatAttackAt is DateTime ffLast &&
+                    (DateTime.UtcNow - ffLast).TotalSeconds >= CombatRetryIntervalSec &&
+                    worldState.Self is WorldObjectSnapshot ffSelf &&
+                    worldState.TryGet(ffCtg) is WorldObjectSnapshot ffTarget &&
+                    WorldDistance.TrySquaredDistance(ffSelf, ffTarget, out var ffD2) &&
+                    ffD2 <= 16.0f /* StickyDistance^2 = 16 */)
+                {
+                    var ffPacketSeq = nextOutboundPacketSequence++;
+                    var ffFragSeq   = nextOutboundFragmentSequence++;
+
+                    var ffBuf = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
+                    var ffLen = GameActionTargetedMeleeAttackMessage.Pack(
+                        ffBuf,
+                        targetGuid: ffCtg,
+                        attackHeight: 2u /* Medium */,
+                        powerLevel: 1.0f);
+
+                    var ffMsg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        ffMsg.AddAckSequence(lastReceivedSeq);
+                    ffMsg.AddBlobFragment(
+                        fragSequence: ffFragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: ffBuf.AsSpan(0, ffLen));
+
+                    var ffSent = ffMsg.Pack(sendBuf, myClientId,
+                                            sequence: ffPacketSeq, iteration: 1,
+                                            encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ffSent),
+                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    lastCombatAttackAt = DateTime.UtcNow;
+                    Console.WriteLine(
+                        $"[observe]   -> PHASE7F.2 RE-ATTACK: target=0x{ffCtg:X8} dist={Math.Sqrt(ffD2):F2}u " +
+                        $"pktSeq={ffPacketSeq} fragSeq={ffFragSeq} totalBytes={ffSent} " +
+                        $"(loop-keeper; server no-ops if Attacking==true)");
+                }
+
+                // Phase 7f — combat retry. While combat lock is
+                // active and the post-action cooldown has elapsed,
+                // the natural picker→AP→MoveToState→Attack cycle
+                // already re-dispatches an attack every iteration
+                // (since the picker re-locks to combatTargetGuid).
+                // We just have to make sure CombatRetryIntervalSec
+                // actually paces the swings; if 2s cooldown is too
+                // tight, the server may queue-saturate. We track
+                // lastCombatAttackAt and skip the reset block until
+                // the retry interval elapses.
+                if (combatTargetGuid is not null && lastCombatAttackAt is DateTime lca &&
+                    (DateTime.UtcNow - lca).TotalSeconds < CombatRetryIntervalSec)
+                {
+                    // Hold off resetting use gates until the retry
+                    // window opens. Otherwise the picker would
+                    // re-fire ATTACK as soon as motion completes
+                    // (likely <2s away from last attack).
+                    // No-op: just delay the reset block below.
+                }
+
                 // Phase 6g — post-action loop reset. After USE/PICKUP
                 // completes and the post-action cooldown elapses, clear
                 // all per-action gates so the picker block (below) can
@@ -944,8 +1146,31 @@ internal sealed class HandshakeDriver : IDisposable
                 if (useSent && useSentAt is DateTime usat &&
                     (DateTime.UtcNow - usat).TotalSeconds >= PostActionCooldownSec)
                 {
+                    // While in combat lock: do NOT reset motion
+                    // state. Each AP/MS packet OnMoveComplete would
+                    // call HandleActionCancelAttack and break the
+                    // server-side swing loop. Keep useSent=true and
+                    // motionTarget locked so the picker doesn't
+                    // re-fire AP, and rely on the Phase 7f.2
+                    // RE-ATTACK block (above) to keep the swing
+                    // loop alive. The combat watchdog (NO-PROGRESS
+                    // abandon) clears the combat lock when the
+                    // target dies or stalls, at which point the
+                    // reset block can fire normally.
+                    var inCombat = combatTargetGuid is not null;
+                    if (inCombat)
+                    {
+                        // Combat lock active — suppress reset so AP
+                        // doesn't re-fire and cancel the swing loop.
+                    }
+                    else
+                    {
                     actionsCompleted++;
-                    if (motionTarget is not null)
+                    // Only flag visited for non-combat targets. The
+                    // combat-state machine owns the visited add for
+                    // golems (on death or timeout) so we re-target
+                    // the same guid until it dies.
+                    if (motionTarget is not null && motionTarget.Guid != combatTargetGuid)
                         visitedTargetGuids.Add(motionTarget.Guid);
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}'); " +
@@ -971,6 +1196,7 @@ internal sealed class HandshakeDriver : IDisposable
                     {
                         Console.WriteLine(
                             $"[motion] max actions per session ({MaxActionsPerSession}) reached; staying idle until observation window closes");
+                    }
                     }
                 }
 
@@ -998,6 +1224,7 @@ internal sealed class HandshakeDriver : IDisposable
                 // proving the server's broadcast path fired. See
                 // rubber-duck critique in checkpoint 033.
                 if (!autonomousPositionSent &&
+                    combatTargetGuid is null &&
                     actionsCompleted < MaxActionsPerSession &&
                     loginCompleteSent &&
                     loginCompletePacketIndex >= 0 &&
@@ -1043,25 +1270,42 @@ internal sealed class HandshakeDriver : IDisposable
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
-                    if (!string.IsNullOrWhiteSpace(motionTargetNameOverride))
+                    // Phase 7f — combat lock. While we have an active
+                    // melee target, refuse to pick anything else. If
+                    // the target is still visible, target it again
+                    // (so the picker keeps driving combat-tick re-
+                    // sends). If not, the lock will be cleared by the
+                    // disappearance check below before the next AP
+                    // tick.
+                    if (combatTargetGuid is uint ctg)
+                    {
+                        candidate = inRange.FirstOrDefault(s => s.Guid == ctg);
+                        if (candidate is not null)
+                        {
+                            Console.WriteLine(
+                                $"[motion] COMBAT LOCK -> existing target guid=0x{ctg:X8}");
+                        }
+                    }
+                    if (candidate is null && !string.IsNullOrWhiteSpace(motionTargetNameOverride))
                     {
                         candidate = inRange.FirstOrDefault(s =>
                             string.Equals(s.Name, motionTargetNameOverride, StringComparison.Ordinal));
                     }
-                    else
+                    else if (candidate is null)
                     {
-                        // Phase 7c picker. Priorities:
-                        // - prio 0: unsatisfied-slot wearables, doors,
-                        //   portals, AND writables (signs/books). Signs
-                        //   in the academy carry quest instructions
-                        //   (Token retrieval) that NPCs explicitly tell
-                        //   the player to read.
-                        // - prio 1: NPCs (Creature, itemType bit 0x10).
-                        //   Quest-givers, trainers, vendors.
-                        // - prio 2: non-wearable pickups (apples, etc.),
-                        //   already-counted-once pickups.
-                        // - prio 3: anything else (e.g. already-USEd
-                        //   wcid creatures pushed down to lowest).
+                        // Phase 7c/7f picker. Priorities:
+                        // - prio 0: hostile creatures we haven't
+                        //   killed yet (wcid 12698 Sparring Golem in
+                        //   spike). Combat is gating on Academy
+                        //   Token, which only drops from golem corpses.
+                        //   Without prio 0, the picker exhausts
+                        //   doors/signs/NPCs first and the bot never
+                        //   engages combat.
+                        // - prio 1: unsatisfied-slot wearables,
+                        //   doors, portals, AND writables (signs).
+                        // - prio 2: NPCs (Creature, itemType bit 0x10).
+                        // - prio 3: non-wearable pickups (apples).
+                        // - prio 4: everything else.
                         candidate = inRange
                             .Select(s =>
                             {
@@ -1075,13 +1319,15 @@ internal sealed class HandshakeDriver : IDisposable
                                 var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
+                                var isHostile = s.WeenieClassId == HostileCreatureWcidSparringGolem;
                                 int prio;
-                                if (isDoor || isPortal) prio = 0;
-                                else if (isWearable && !hasSatisfiedSlot) prio = 0;
-                                else if (isWritable) prio = 0;
-                                else if (isNpc) prio = 1;
-                                else if (isPickup && !pickedBefore) prio = 2;
-                                else prio = 3;
+                                if (isHostile) prio = 0;
+                                else if (isDoor || isPortal) prio = 1;
+                                else if (isWearable && !hasSatisfiedSlot) prio = 1;
+                                else if (isWritable) prio = 1;
+                                else if (isNpc) prio = 2;
+                                else if (isPickup && !pickedBefore) prio = 3;
+                                else prio = 4;
                                 return (snap: s, d2, prio);
                             })
                             .OrderBy(t => t.prio)
@@ -1363,13 +1609,73 @@ internal sealed class HandshakeDriver : IDisposable
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
                     var isPickup = (itemType & PickupItemTypeMask) != 0;
+                    // Phase 7f — hostile-creature detection. For the
+                    // spike we hardcode wcid 12698 (Sparring Golem)
+                    // since the academy quest gate is "kill golem,
+                    // loot Academy Token". Once combat is working we
+                    // can generalize via Tolerance / PlayerKiller /
+                    // hostile-faction flags.
+                    var isHostile = motionTarget.WeenieClassId == HostileCreatureWcidSparringGolem;
                     var packetSeq = nextOutboundPacketSequence++;
-                    var fragSeq   = nextOutboundFragmentSequence++;
 
                     int payloadLen;
                     string actionName;
                     byte[] actionBuf;
-                    if (isPickup)
+                    uint fragSeq;
+                    // For combat we emit TWO fragments in one packet:
+                    // (A) ChangeCombatMode(Melee) and (B) Targeted-
+                    // MeleeAttack(guid, MediumHeight, 1.0f). Rubber-
+                    // duck flagged that splitting them risks the
+                    // NextUseTime race in Player_Combat.cs:737 — a
+                    // bundled send avoids that because the server
+                    // dispatches both messages in the same tick.
+                    //
+                    // Phase 7f.1 — on the FIRST swing of a NEW target
+                    // we additionally bundle (C) QueryHealth(guid).
+                    // QueryHealth sets selectedTarget server-side so
+                    // Player_Vitals.HandleTargetVitals() starts emitting
+                    // UpdateHealth on each tick — without it the bot
+                    // is blind to damage progress (Player_Vitals.cs:166
+                    // early-returns if selectedTarget == null). One
+                    // QueryHealth is sufficient: selectedTarget persists
+                    // until the player picks a different target.
+                    uint fragSeqB = 0;
+                    int combatPayloadLenB = 0;
+                    byte[]? combatBufB = null;
+                    uint fragSeqC = 0;
+                    int combatPayloadLenC = 0;
+                    byte[]? combatBufC = null;
+                    var sendQueryHealth = false;
+                    if (isHostile)
+                    {
+                        actionName = "ATTACK";
+                        actionBuf  = new byte[GameActionChangeCombatModeMessage.PackedSize];
+                        payloadLen = GameActionChangeCombatModeMessage.Pack(
+                            actionBuf,
+                            newCombatMode: 2u /* Melee */);
+                        fragSeq    = nextOutboundFragmentSequence++;
+                        combatBufB = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
+                        combatPayloadLenB = GameActionTargetedMeleeAttackMessage.Pack(
+                            combatBufB,
+                            targetGuid: motionTarget.Guid,
+                            attackHeight: 2u /* Medium */,
+                            powerLevel: 1.0f);
+                        fragSeqB   = nextOutboundFragmentSequence++;
+                        // First swing on this target → also send
+                        // QueryHealth so the server registers it as
+                        // our selectedTarget and starts emitting
+                        // UpdateHealth heartbeats.
+                        sendQueryHealth = (combatTargetGuid != motionTarget.Guid);
+                        if (sendQueryHealth)
+                        {
+                            combatBufC = new byte[GameActionQueryHealthMessage.PackedSize];
+                            combatPayloadLenC = GameActionQueryHealthMessage.Pack(
+                                combatBufC,
+                                objectGuid: motionTarget.Guid);
+                            fragSeqC = nextOutboundFragmentSequence++;
+                        }
+                    }
+                    else if (isPickup)
                     {
                         actionName = "PUTITEMINCONTAINER";
                         actionBuf  = new byte[GameActionPutItemInContainerMessage.PackedSize];
@@ -1378,12 +1684,14 @@ internal sealed class HandshakeDriver : IDisposable
                             itemGuid: motionTarget.Guid,
                             containerGuid: chosenCharacterGuid,
                             placement: 0);
+                        fragSeq    = nextOutboundFragmentSequence++;
                     }
                     else
                     {
                         actionName = "USE";
                         actionBuf  = new byte[GameActionUseMessage.PackedSize];
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
+                        fragSeq    = nextOutboundFragmentSequence++;
                     }
 
                     var msg = new OutboundPacket();
@@ -1394,6 +1702,22 @@ internal sealed class HandshakeDriver : IDisposable
                         fragId: OutboundFragmentId,
                         queue: (ushort)GameMessageGroup.UIQueue,
                         gameMessagePayload: actionBuf.AsSpan(0, payloadLen));
+                    if (isHostile && combatBufB is not null)
+                    {
+                        msg.AddBlobFragment(
+                            fragSequence: fragSeqB,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: combatBufB.AsSpan(0, combatPayloadLenB));
+                    }
+                    if (isHostile && combatBufC is not null)
+                    {
+                        msg.AddBlobFragment(
+                            fragSequence: fragSeqC,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: combatBufC.AsSpan(0, combatPayloadLenC));
+                    }
 
                     // Phase 6l (revised) — equip-after-pickup HANDOFF.
                     // We DON'T bundle GetAndWieldItem in the same packet
@@ -1424,19 +1748,14 @@ internal sealed class HandshakeDriver : IDisposable
                     }
 
                     // Phase 7c — USE-side wcid satisfaction. After we
-                    // USE a Creature (NPC, training golem) or Writable
-                    // (sign, book), mark its wcid as satisfied so the
-                    // picker won't repeatedly walk to the next instance
-                    // of the same wcid. Without this, the 8 academy
-                    // Sparring Golems each get USE'd in turn — the bot
-                    // wastes the entire observe window swinging at
-                    // training dummies instead of progressing past them.
-                    // Quest-relevant NPCs (Samuel, Training Master) are
-                    // unique-wcid so this doesn't block returning to a
-                    // quest-giver. If we later need re-USE (e.g. accept
-                    // multiple quests from same NPC) we'll switch to a
-                    // per-guid "talked to" cooldown.
-                    if (!isPickup && motionTarget.WeenieClassId is uint useWcid)
+                    // USE a Creature (NPC) or Writable (sign, book),
+                    // mark its wcid as satisfied so the picker won't
+                    // repeatedly walk to the next instance of the
+                    // same wcid. Hostile creatures (golems) are
+                    // handled separately by combatTargetGuid + the
+                    // post-combat clear logic — they should NOT be
+                    // marked satisfied here.
+                    if (!isPickup && !isHostile && motionTarget.WeenieClassId is uint useWcid)
                     {
                         var useType = motionTarget.ItemType ?? 0u;
                         var isCreature = (useType & 0x00000010u) != 0;
@@ -1447,6 +1766,22 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
 
+                    // Phase 7f — engage combat lock.
+                    if (isHostile)
+                    {
+                        // Only set combatStartedAt on the FIRST swing of
+                        // a target. Retry swings reuse the existing
+                        // timeout window (otherwise we'd never time out).
+                        if (combatTargetGuid != motionTarget.Guid)
+                        {
+                            combatTargetGuid = motionTarget.Guid;
+                            combatStartedAt  = DateTime.UtcNow;
+                            lastDamageAt     = DateTime.UtcNow;
+                            lastObservedTargetHealthFraction = null;
+                        }
+                        lastCombatAttackAt = DateTime.UtcNow;
+                    }
+
                     var sentLen = msg.Pack(sendBuf, myClientId,
                                            sequence: packetSeq, iteration: 1,
                                            encrypt: true, cryptoSend: cryptoSend);
@@ -1455,10 +1790,21 @@ internal sealed class HandshakeDriver : IDisposable
                     var equipNote = equipLoc is uint el
                         ? $" (queued EQUIP loc=0x{el:X} for after pickup-ack)"
                         : (isPickup ? " (not wearable; ValidLocations=null/0)" : "");
-                    Console.WriteLine(
-                        $"[observe]   -> PHASE6E/6F {actionName}{equipNote}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
-                        $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
-                        $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    if (isHostile)
+                    {
+                        var qhNote = sendQueryHealth ? "+QueryHealth" : "";
+                        Console.WriteLine(
+                            $"[observe]   -> PHASE7F ATTACK: cmd=Melee+TargetedMeleeAttack{qhNote} target=0x{motionTarget.Guid:X8} " +
+                            $"name='{motionTarget.Name}' wcid={motionTarget.WeenieClassId} height=Medium power=1.0 " +
+                            $"pktSeq={packetSeq} fragSeqA={fragSeq} fragSeqB={fragSeqB}{(sendQueryHealth ? $" fragSeqC={fragSeqC}" : "")} totalBytes={sentLen}");
+                    }
+                    else
+                    {
+                        Console.WriteLine(
+                            $"[observe]   -> PHASE6E/6F {actionName}{equipNote}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                            $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
+                            $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+                    }
                 }
 
                 // Periodic world-state heartbeat — once every 100
