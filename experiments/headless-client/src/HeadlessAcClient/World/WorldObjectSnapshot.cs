@@ -45,6 +45,13 @@ internal sealed class WorldObjectSnapshot
     public uint? ItemType { get; internal set; }
     public uint? WeenieFlags { get; internal set; }
     public uint? WeenieFlags2 { get; internal set; }
+    // ObjectDescriptionFlag bits (Door=0x1000, Portal=0x40000, Corpse=0x2000,
+    // LifeStone=0x4000, Vendor=0x200, Healer=0x10000, Openable=0x1, ...).
+    // Surfaced as a raw uint so consumers can test bits without taking a
+    // protocol-enum dependency. See Protocol/GameMessages/ObjectCreateFlags.cs.
+    // This replaces the prior English-string heuristic `Name == "Door"` that
+    // wouldn't survive a localized server or a custom door named "Iron Gate".
+    public uint? ObjectDescriptionFlags { get; internal set; }
     public uint? ValidLocations { get; internal set; }
     public uint? CurrentWieldedLocation { get; internal set; }
 

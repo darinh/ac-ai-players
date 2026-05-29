@@ -204,6 +204,7 @@ internal sealed class WorldState
         snap.ItemType = oc.Weenie.ItemType;
         snap.WeenieFlags = (uint)oc.Weenie.Flags;
         snap.WeenieFlags2 = (uint)oc.Weenie.Flags2;
+        snap.ObjectDescriptionFlags = (uint)oc.Weenie.DescriptionFlags;
         snap.ValidLocations = oc.Weenie.ValidLocations;
         snap.CurrentWieldedLocation = oc.Weenie.CurrentlyWieldedLocation;
         // ContainerGuid/WielderGuid: populate when the header carries

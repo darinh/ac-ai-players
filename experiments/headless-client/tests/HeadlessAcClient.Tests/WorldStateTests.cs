@@ -59,6 +59,48 @@ public class WorldStateTests
     }
 
     [Fact]
+    public void ObjectCreate_PlumbsObjectDescriptionFlags_FromWeenieHeader()
+    {
+        // Validates the de-hardcoding plumbing: door/portal/vendor/etc.
+        // classification must come from ObjectDescriptionFlag bits, not
+        // English-string Name matching. Without this plumbing the
+        // schema picker and LLM projection would silently classify
+        // every world object as "not a door, not a portal, ..." and
+        // the bot would have to fall back to nearest-distance picks.
+        var ws = new WorldState();
+        var flags = ObjectDescriptionFlag.Door
+                  | ObjectDescriptionFlag.Openable
+                  | ObjectDescriptionFlag.Stuck;
+        var msg = BuildObjectCreate(
+            guid: TestGuid,
+            name: "Iron Gate",  // deliberately NOT "Door"
+            descriptionFlags: flags);
+
+        Assert.True(ws.Apply(msg));
+
+        var snap = ws.TryGet(TestGuid);
+        Assert.NotNull(snap);
+        Assert.Equal((uint)flags, snap!.ObjectDescriptionFlags);
+        // Spot-check individual bits the picker / projection rely on.
+        Assert.True(((snap.ObjectDescriptionFlags ?? 0u) & (uint)ObjectDescriptionFlag.Door) != 0);
+        Assert.True(((snap.ObjectDescriptionFlags ?? 0u) & (uint)ObjectDescriptionFlag.Openable) != 0);
+        Assert.False(((snap.ObjectDescriptionFlags ?? 0u) & (uint)ObjectDescriptionFlag.Portal) != 0);
+    }
+
+    [Fact]
+    public void ObjectCreate_ZeroDescriptionFlags_LeavesSnapshotZero()
+    {
+        // Default path: nothing special. Field is stored as 0u, not null,
+        // so consumers can write `(snap.ObjectDescriptionFlags ?? 0u) & bit`
+        // without an extra null-handling branch.
+        var ws = new WorldState();
+        Assert.True(ws.Apply(BuildObjectCreate(TestGuid, name: "Apple")));
+
+        var snap = ws.TryGet(TestGuid)!;
+        Assert.Equal(0u, snap.ObjectDescriptionFlags);
+    }
+
+    [Fact]
     public void ObjectCreate_ForExistingGuid_PreservesFirstSeenAndPropertyInts()
     {
         var ws = new WorldState();
@@ -403,7 +445,8 @@ public class WorldStateTests
         uint wcid = 1,
         ushort seqInstance = 0,
         ushort seqPosition = 0,
-        ObjectPosition? position = null)
+        ObjectPosition? position = null,
+        ObjectDescriptionFlag descriptionFlags = 0)
     {
         var model = new ObjectModelData(
             PaletteId: null,
@@ -427,7 +470,7 @@ public class WorldStateTests
 
         var weenie = new ObjectWeenieHeader(
             Flags: 0, Flags2: 0,
-            Name: name, WeenieClassId: wcid, IconId: 0, ItemType: 0, DescriptionFlags: 0,
+            Name: name, WeenieClassId: wcid, IconId: 0, ItemType: 0, DescriptionFlags: descriptionFlags,
             PluralName: null, ItemsCapacity: null, ContainersCapacity: null, AmmoType: null,
             Value: null, Usable: null, UseRadius: null, TargetType: null, UiEffects: null,
             CombatUse: null, Structure: null, MaxStructure: null, StackSize: null, MaxStackSize: null,

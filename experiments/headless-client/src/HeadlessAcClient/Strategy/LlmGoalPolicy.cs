@@ -290,6 +290,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (v.IsCreature) sb.Append(" creature");
             if (v.IsPortal)   sb.Append(" portal");
             if (v.IsDoor)     sb.Append(" door");
+            if (v.IsCorpse)   sb.Append(" corpse");
+            if (v.IsLifestone) sb.Append(" lifestone");
+            if (v.IsVendor)   sb.Append(" vendor");
+            if (v.IsHealer)   sb.Append(" healer");
+            if (v.IsOpenable) sb.Append(" openable");
             if (v.ObservedHostile) sb.Append(" HOSTILE");
             if (v.Distance is float d) sb.Append($" d={d:F1}");
             sb.AppendLine(")");

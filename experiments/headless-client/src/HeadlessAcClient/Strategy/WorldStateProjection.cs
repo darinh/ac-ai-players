@@ -20,6 +20,7 @@ using System.Linq;
 using System.Numerics;
 using System.Text.Json.Serialization;
 
+using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.World;
 
 namespace HeadlessAcClient.Strategy;
@@ -56,11 +57,26 @@ internal sealed record VisibleObjectProjection
     /// <summary>True if ItemType has Creature bit AND object is not us.</summary>
     [JsonPropertyName("is_creature")] public bool IsCreature { get; init; }
 
-    /// <summary>True if ItemType has Portal bit.</summary>
+    /// <summary>True if ObjectDescriptionFlag has Portal bit (0x40000).</summary>
     [JsonPropertyName("is_portal")] public bool IsPortal { get; init; }
 
-    /// <summary>True if Name == "Door" (case-insensitive). Doors carry Misc itemtype.</summary>
+    /// <summary>True if ObjectDescriptionFlag has Door bit (0x1000).</summary>
     [JsonPropertyName("is_door")] public bool IsDoor { get; init; }
+
+    /// <summary>True if ObjectDescriptionFlag has Corpse bit (0x2000).</summary>
+    [JsonPropertyName("is_corpse")] public bool IsCorpse { get; init; }
+
+    /// <summary>True if ObjectDescriptionFlag has LifeStone bit (0x4000).</summary>
+    [JsonPropertyName("is_lifestone")] public bool IsLifestone { get; init; }
+
+    /// <summary>True if ObjectDescriptionFlag has Vendor bit (0x200).</summary>
+    [JsonPropertyName("is_vendor")] public bool IsVendor { get; init; }
+
+    /// <summary>True if ObjectDescriptionFlag has Healer bit (0x10000).</summary>
+    [JsonPropertyName("is_healer")] public bool IsHealer { get; init; }
+
+    /// <summary>True if ObjectDescriptionFlag has Openable bit (0x1). Doors, chests, etc.</summary>
+    [JsonPropertyName("is_openable")] public bool IsOpenable { get; init; }
 
     /// <summary>True if observed-hostile (e.g. server-message indicated initial attack on us).</summary>
     [JsonPropertyName("observed_hostile")] public bool ObservedHostile { get; init; }
@@ -139,8 +155,18 @@ internal sealed record WorldStateProjection
 
                 var itemType = o.ItemType ?? 0u;
                 var isCreature = (itemType & ItemTypeMasks.Creature) != 0;
-                var isPortal   = (itemType & ItemTypeMasks.Portal)   != 0;
-                var isDoor     = string.Equals(o.Name, "Door", StringComparison.OrdinalIgnoreCase);
+
+                // Protocol-level schema classification, NOT English-string
+                // matching. Holds for localized servers and custom-named
+                // doors / chests / vendors / lifestones.
+                var descFlags = o.ObjectDescriptionFlags ?? 0u;
+                var isDoor      = (descFlags & (uint)ObjectDescriptionFlag.Door)      != 0;
+                var isPortal    = (descFlags & (uint)ObjectDescriptionFlag.Portal)    != 0;
+                var isCorpse    = (descFlags & (uint)ObjectDescriptionFlag.Corpse)    != 0;
+                var isLifestone = (descFlags & (uint)ObjectDescriptionFlag.LifeStone) != 0;
+                var isVendor    = (descFlags & (uint)ObjectDescriptionFlag.Vendor)    != 0;
+                var isHealer    = (descFlags & (uint)ObjectDescriptionFlag.Healer)    != 0;
+                var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
 
                 return new VisibleObjectProjection
                 {
@@ -153,6 +179,11 @@ internal sealed record WorldStateProjection
                     IsCreature = isCreature,
                     IsPortal = isPortal,
                     IsDoor = isDoor,
+                    IsCorpse = isCorpse,
+                    IsLifestone = isLifestone,
+                    IsVendor = isVendor,
+                    IsHealer = isHealer,
+                    IsOpenable = isOpenable,
                 };
             })
             .Where(v => v.Distance is null || v.Distance <= visibleRadius)

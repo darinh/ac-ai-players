@@ -1865,12 +1865,11 @@ internal sealed class HandshakeDriver : IDisposable
                     //          0x5xxxxxxx — see ObjectGuid.Player range). USE'ing
                     //          another player accomplishes nothing useful and
                     //          can deadlock the loop on a stationary peer bot.
-                    //          Also: weight the sort so any object named "Door"
-                    //          ranks ahead of equal-distance non-doors. Doors
-                    //          are the chief mechanism for progressing between
-                    //          tutorial rooms; otherwise a dense room of NPCs
-                    //          can starve us of door interactions until they
-                    //          all join the visited set.
+                    // De-hardcoding pass: door/portal classification is now
+                    //          done from ObjectDescriptionFlag bits, not from
+                    //          `Name == "Door"`. This must work on localized
+                    //          servers and custom door names — the picker
+                    //          must NEVER hold game-content English strings.
                     var apRot = self.Rotation;
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
@@ -1938,8 +1937,9 @@ internal sealed class HandshakeDriver : IDisposable
                             .Select(s =>
                             {
                                 WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
-                                var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
+                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
+                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
+                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
@@ -1993,8 +1993,9 @@ internal sealed class HandshakeDriver : IDisposable
                             .Select(s =>
                             {
                                 var hasDist = WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var isDoor = string.Equals(s.Name, "Door", StringComparison.OrdinalIgnoreCase);
-                                var isPortal = s.ItemType is uint pt && (pt & 0x00010000u) != 0;
+                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
+                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
+                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
                                 var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
                                 var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;

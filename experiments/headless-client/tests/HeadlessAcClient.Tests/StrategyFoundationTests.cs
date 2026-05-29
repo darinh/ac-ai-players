@@ -5,6 +5,7 @@ using System;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
+using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.Tactics;
 using HeadlessAcClient.World;
@@ -194,6 +195,61 @@ public class StrategyFoundationTests
         Assert.Equal(ItemGuid, withRepo[0].Guid);
     }
 
+    [Fact]
+    public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
+    {
+        // De-hardcoding contract: the projection sees IsDoor / IsPortal /
+        // IsCorpse / IsLifestone / IsVendor / IsHealer / IsOpenable purely
+        // from ObjectDescriptionFlag bits, not from English name strings.
+        // A door named "Iron Gate" must still project as IsDoor=true. A
+        // creature named "Door" (yes, AC has had such weenies historically)
+        // must NOT project as IsDoor=true unless the server says so.
+        const uint DoorGuid     = 0x70000001;
+        const uint PortalGuid   = 0x70000002;
+        const uint VendorGuid   = 0x70000003;
+        const uint LifestoneGuid = 0x70000004;
+        const uint HealerGuid   = 0x70000005;
+        const uint CorpseGuid   = 0x70000006;
+        const uint MisnamedGuid = 0x70000007;
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        // Self must exist as a snapshot too (FromWorldState reads world.Self).
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, DoorGuid, "Iron Gate",       wcid: 100u, itemType: 0x0u,    cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Door | (uint)ObjectDescriptionFlag.Openable);
+        SeedSnapshot(ws, PortalGuid, "Glowing Vortex", wcid: 101u, itemType: 0x0u,    cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Portal);
+        SeedSnapshot(ws, VendorGuid, "Shopkeeper Bob", wcid: 102u, itemType: 0x10u,   cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Vendor);
+        SeedSnapshot(ws, LifestoneGuid, "A Lifestone", wcid: 103u, itemType: 0x0u,    cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.LifeStone);
+        SeedSnapshot(ws, HealerGuid, "Town Healer",    wcid: 104u, itemType: 0x10u,   cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Healer);
+        SeedSnapshot(ws, CorpseGuid, "Corpse of Foo",  wcid: 105u, itemType: 0x0u,    cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Corpse);
+        // Sanity: an object literally NAMED "Door" but with NO Door bit
+        // must NOT be projected as IsDoor. This is the entire point of
+        // the bit-based classification.
+        SeedSnapshot(ws, MisnamedGuid, "Door", wcid: 106u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: 0u);
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid[DoorGuid].IsDoor);
+        Assert.True(byGuid[DoorGuid].IsOpenable);
+        Assert.False(byGuid[DoorGuid].IsPortal);
+        Assert.True(byGuid[PortalGuid].IsPortal);
+        Assert.False(byGuid[PortalGuid].IsDoor);
+        Assert.True(byGuid[VendorGuid].IsVendor);
+        Assert.True(byGuid[LifestoneGuid].IsLifestone);
+        Assert.True(byGuid[HealerGuid].IsHealer);
+        Assert.True(byGuid[CorpseGuid].IsCorpse);
+        Assert.False(byGuid[MisnamedGuid].IsDoor); // name "Door" alone is NOT enough
+    }
+
     // Helper: build a tiny WorldState with three objects whose attributes
     // exercise every Selector field. We use Apply via a synthetic ObjectCreate
     // when feasible; otherwise we stand up snapshots through the snapshot
@@ -219,7 +275,8 @@ public class StrategyFoundationTests
         uint wcid,
         uint itemType,
         uint cellId,
-        uint? containerGuid = null)
+        uint? containerGuid = null,
+        uint? objectDescriptionFlags = null)
     {
         // WorldState lacks a public seed helper. The most direct path
         // without reflection is to mutate via internal setters on a
@@ -228,7 +285,7 @@ public class StrategyFoundationTests
         // mimic an ObjectCreate using the public API: a minimal
         // ObjectCreateMessage would require a fixture file. Instead,
         // we use the SnapshotSeeding test seam (defined below).
-        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid);
+        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags);
     }
 
     private sealed class FakeWeenieRepo : IWeenieRepository
@@ -336,7 +393,8 @@ internal static class SnapshotSeeding
         uint wcid,
         uint itemType,
         uint cellId,
-        uint? containerGuid)
+        uint? containerGuid,
+        uint? objectDescriptionFlags = null)
     {
         var snap = new WorldObjectSnapshot(guid)
         {
@@ -345,6 +403,7 @@ internal static class SnapshotSeeding
             ItemType = itemType,
             CellId = cellId,
             ContainerGuid = containerGuid,
+            ObjectDescriptionFlags = objectDescriptionFlags,
             Position = new Vector3(0, 0, 0),
         };
         // Reach the underlying dictionary via reflection. The field
