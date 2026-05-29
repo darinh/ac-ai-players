@@ -43,6 +43,12 @@ internal enum EventKind
     GoalExpired           = 9,
     NpcDialog             = 10,
     HealthChanged         = 11,
+    // The server returned a WeenieError (or WeenieErrorWithString)
+    // in response to an action we dispatched. The bot's Strategy
+    // layer reads this from EventStream + WorldStateProjection
+    // (recent_rejections section) so the LLM knows not to re-propose
+    // the same (kind, target, item) combination.
+    GoalRejected          = 12,
 }
 
 /// <summary>
@@ -91,6 +97,30 @@ internal sealed record StreamEvent
     [JsonPropertyName("health_fraction")]
     public float? HealthFraction { get; init; }
 
+    /// <summary>
+    /// WeenieError code as reported by the server. Only populated
+    /// for <see cref="EventKind.GoalRejected"/>.
+    /// </summary>
+    [JsonPropertyName("error_code")]
+    public uint? ErrorCode { get; init; }
+
+    /// <summary>
+    /// Stringified <see cref="GoalKind"/> of the goal whose dispatch
+    /// produced the rejection. Carried denormalized on the event so
+    /// the projection / prompt rendering doesn't need to chase the
+    /// goal by id after the original Goal record may be gone.
+    /// </summary>
+    [JsonPropertyName("rejected_goal_kind")]
+    public string? RejectedGoalKind { get; init; }
+
+    /// <summary>
+    /// Name of the item involved in a Give-style rejection (sourced
+    /// from the dispatch-time snapshot). Distinct from <see cref="Name"/>,
+    /// which is reserved for the target NPC's name.
+    /// </summary>
+    [JsonPropertyName("item_name")]
+    public string? ItemName { get; init; }
+
     public override string ToString() => Kind switch
     {
         EventKind.PopupString          => $"#{Sequence} PopupString \"{Truncate(Text, 120)}\"",
@@ -104,6 +134,12 @@ internal sealed record StreamEvent
         EventKind.GoalExpired          => $"#{Sequence} GoalExpired   id={GoalId:N}",
         EventKind.NpcDialog            => $"#{Sequence} NpcDialog from=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.HealthChanged        => $"#{Sequence} Health frac={HealthFraction:F2}",
+        EventKind.GoalRejected         =>
+            $"#{Sequence} GoalRejected  kind={RejectedGoalKind ?? "?"} " +
+            $"target=\"{Name}\"" +
+            (string.IsNullOrEmpty(ItemName) ? "" : $" item=\"{ItemName}\"") +
+            $" error=0x{ErrorCode ?? 0:X4}" +
+            (string.IsNullOrEmpty(Text) ? "" : $" \"{Truncate(Text, 100)}\""),
         _                              => $"#{Sequence} {Kind}",
     };
 
