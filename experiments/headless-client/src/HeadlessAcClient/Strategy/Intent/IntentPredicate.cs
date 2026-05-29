@@ -73,7 +73,16 @@ internal sealed record IntentEvalContext(
     WorldStateProjection World,
     EventStream Events,
     IntentBaseline Baseline,
-    DateTime UtcNow);
+    DateTime UtcNow)
+{
+    /// <summary>
+    /// Lifetime stat counters. Optional for legacy callers / tests
+    /// that don't need stats-based predicates. Stats-based predicates
+    /// (KillCountTotalAtLeast, KillCountSincePushAtLeast) evaluate
+    /// false if Stats is null.
+    /// </summary>
+    public BotStatistics? Stats { get; init; }
+}
 
 /// <summary>
 /// Base type. Sealed records below are the only valid implementations
@@ -97,6 +106,13 @@ internal sealed record IntentEvalContext(
 [JsonDerivedType(typeof(LevelAtLeastPredicate),         "level_at_least")]
 [JsonDerivedType(typeof(LevelGainSincePushAtLeastPredicate), "level_gain_since_push_at_least")]
 [JsonDerivedType(typeof(KillCountSincePushAtLeastPredicate), "kill_count_since_push_at_least")]
+[JsonDerivedType(typeof(KillCountTotalAtLeastPredicate),     "kill_count_total_at_least")]
+[JsonDerivedType(typeof(LevelsGainedTotalAtLeastPredicate),  "levels_gained_total_at_least")]
+[JsonDerivedType(typeof(NumDeathsAtLeastPredicate),          "num_deaths_at_least")]
+[JsonDerivedType(typeof(NumDeathsSincePushAtMostPredicate),  "num_deaths_since_push_at_most")]
+[JsonDerivedType(typeof(CoinValueAtLeastPredicate),          "coin_value_at_least")]
+[JsonDerivedType(typeof(CoinGainSincePushAtLeastPredicate),  "coin_gain_since_push_at_least")]
+[JsonDerivedType(typeof(UnitsTraveledSincePushAtLeastPredicate), "units_traveled_since_push_at_least")]
 [JsonDerivedType(typeof(HealthFractionAtLeastPredicate),"health_fraction_at_least")]
 [JsonDerivedType(typeof(HealthFractionAtMostPredicate), "health_fraction_at_most")]
 [JsonDerivedType(typeof(VisibleTagPredicate),           "visible_tag")]
@@ -386,12 +402,15 @@ internal sealed record LevelGainSincePushAtLeastPredicate(
 }
 
 /// <summary>
-/// At least Count GoalCompleted events of kind Attack since push,
-/// optionally filtered by target name (case-insensitive substring on
-/// the goal's Text — the GoalCompleted event carries the rendered
-/// goal description). Used for "kill 10 Sparring Golems" style
-/// intents. Counts a KILL only when an Attack goal completed
-/// successfully — interrupted or expired Attack goals do not count.
+/// Lifetime kill counter has increased by at least Count since this
+/// intent was pushed. Uses <see cref="BotStatistics.Kills"/> which is
+/// monotonic and unbounded — so this works correctly even if the
+/// 256-event EventStream window has fully turned over since push.
+/// NameContains is an OPTIONAL filter on the most-recent N kills, but
+/// because BotStatistics doesn't currently track per-target kill
+/// names, NameContains is ignored when Stats is present and only
+/// honored as a fallback by scanning EventStream when Stats is null
+/// (legacy code path). LLM is told this in the prompt.
 /// </summary>
 internal sealed record KillCountSincePushAtLeastPredicate(
     [property: JsonPropertyName("count")] int Count,
@@ -400,12 +419,21 @@ internal sealed record KillCountSincePushAtLeastPredicate(
     public override bool IsSatisfied(IntentEvalContext ctx)
     {
         if (Count <= 0) return false;
+
+        if (ctx.Stats is { } stats)
+        {
+            // Authoritative path: pure subtraction.
+            return (stats.Kills - ctx.Baseline.StatsAtPush.Kills) >= Count;
+        }
+
+        // Legacy path (no Stats wired): fall back to the original
+        // bounded EventStream scan. Honors NameContains. Will silently
+        // under-count if > 256 events between push and check.
         var seen = 0;
         foreach (var e in ctx.Events.Recent())
         {
             if (e.Sequence <= ctx.Baseline.LastEventSequence) break;
             if (e.Kind != EventKind.GoalCompleted) continue;
-            // GoalCompleted Text is the goal description ("Attack{name=Sparring Golem}").
             if (e.Text is null || e.Text.IndexOf("Attack", StringComparison.OrdinalIgnoreCase) < 0)
                 continue;
             if (NameContains is { Length: > 0 } nc &&
@@ -419,8 +447,128 @@ internal sealed record KillCountSincePushAtLeastPredicate(
     public override string Summary()
     {
         var q = NameContains is { Length: > 0 } ? $" \"{NameContains}\"" : "";
-        return $"kills{q}>={Count}";
+        return $"kills_since_push{q}>={Count}";
     }
+}
+
+/// <summary>
+/// Lifetime kill counter has reached the given absolute total. Useful
+/// for "grind until session total is N" or for intents that should
+/// pre-complete because we already met the threshold before push.
+/// Requires Stats wired in IntentEvalContext; evaluates false without.
+/// </summary>
+internal sealed record KillCountTotalAtLeastPredicate(
+    [property: JsonPropertyName("count")] long Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx) =>
+        Count > 0 && ctx.Stats is { } stats && stats.Kills >= Count;
+
+    public override string Summary() => $"kills_total>={Count}";
+}
+
+/// <summary>
+/// Net Self.Level increase observed this session has reached the
+/// given total. Cheap absolute counter; useful for "grind to level 10
+/// from wherever we are" style intents.
+/// </summary>
+internal sealed record LevelsGainedTotalAtLeastPredicate(
+    [property: JsonPropertyName("count")] int Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx) =>
+        Count > 0 && ctx.Stats is { } stats && stats.LevelsGained >= Count;
+
+    public override string Summary() => $"levels_gained_total>={Count}";
+}
+
+/// <summary>
+/// Self.NumDeaths (PropertyInt 43) at least Count. Server-
+/// authoritative — survives bot restarts. Useful for "I have died at
+/// least once" gating or for capping "I won't push this dangerous
+/// intent until I've taken at least one death" experiments.
+/// </summary>
+internal sealed record NumDeathsAtLeastPredicate(
+    [property: JsonPropertyName("count")] int Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx) =>
+        Count >= 0 && ctx.World.Self.NumDeaths is int nd && nd >= Count;
+
+    public override string Summary() => $"num_deaths>={Count}";
+}
+
+/// <summary>
+/// "I will only continue if I have died at most N times since this
+/// intent was pushed." Inverse-orientation predicate: satisfies the
+/// intent (and pops it) when the death-count delta from push EXCEEDS
+/// the threshold — i.e. we should bail. Used to safely cap risky
+/// intents like "grind without dying more than twice".
+/// </summary>
+internal sealed record NumDeathsSincePushAtMostPredicate(
+    [property: JsonPropertyName("count")] int Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx)
+    {
+        if (Count < 0) return false;
+        var baseline = ctx.Baseline.NumDeaths ?? ctx.World.Self.NumDeaths ?? 0;
+        var current  = ctx.World.Self.NumDeaths ?? baseline;
+        // Predicate SATISFIES when delta > Count (we've exceeded the
+        // budget, time to pop). LLM reads this as "stop when I've
+        // already died more than Count times since this intent began".
+        return (current - baseline) > Count;
+    }
+
+    public override string Summary() => $"deaths_since_push>{Count}";
+}
+
+/// <summary>
+/// Self.CoinValue (PropertyInt 20, pyreals) at least Count. Server-
+/// authoritative. Useful for "earn 100 pyreals" intents.
+/// </summary>
+internal sealed record CoinValueAtLeastPredicate(
+    [property: JsonPropertyName("count")] int Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx) =>
+        Count > 0 && ctx.World.Self.CoinValue is int cv && cv >= Count;
+
+    public override string Summary() => $"coin>={Count}";
+}
+
+/// <summary>
+/// Self.CoinValue has increased by at least Count since push. Server-
+/// authoritative delta; useful for "grind until you've earned N
+/// pyreals from this point" without caring about the starting balance.
+/// </summary>
+internal sealed record CoinGainSincePushAtLeastPredicate(
+    [property: JsonPropertyName("count")] int Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx)
+    {
+        if (Count <= 0) return false;
+        var baseline = ctx.Baseline.CoinValue ?? 0;
+        var current  = ctx.World.Self.CoinValue ?? baseline;
+        return (current - baseline) >= Count;
+    }
+
+    public override string Summary() => $"coin_gain>={Count}";
+}
+
+/// <summary>
+/// Client-side <see cref="BotStatistics.UnitsTraveled"/> has advanced
+/// by at least Count units since push. Useful for "explore at least
+/// 500 units before giving up" style intents. Resets per landblock
+/// transition (teleports don't count). Evaluates false if Stats is
+/// not wired.
+/// </summary>
+internal sealed record UnitsTraveledSincePushAtLeastPredicate(
+    [property: JsonPropertyName("count")] double Count) : IntentPredicate
+{
+    public override bool IsSatisfied(IntentEvalContext ctx)
+    {
+        if (Count <= 0) return false;
+        if (ctx.Stats is not { } stats) return false;
+        return (stats.UnitsTraveled - ctx.Baseline.StatsAtPush.UnitsTraveled) >= Count;
+    }
+
+    public override string Summary() => $"units_traveled_since_push>={Count:F0}";
 }
 
 /// <summary>Self.HealthFraction &gt;= fraction. Useful for "rest until healed".</summary>

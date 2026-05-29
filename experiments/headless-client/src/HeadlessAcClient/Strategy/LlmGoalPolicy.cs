@@ -28,6 +28,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
+using HeadlessAcClient.Strategy.Intent;
+
 namespace HeadlessAcClient.Strategy;
 
 internal sealed class LlmGoalPolicy : IGoalPolicy
@@ -36,6 +38,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private readonly IGoalPolicy _fallback;
     private readonly IWeenieRepository _weenies;
     private readonly ITrainingDataSink? _training;
+    private readonly IntentStack? _stack;
+    private readonly IntentIdAllocator? _idAllocator;
 
     /// <summary>
     /// Minimum interval between LLM calls. Even when an event would
@@ -82,12 +86,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
     }
 
-    public LlmGoalPolicy(LlmGoalClient client, IGoalPolicy fallback, IWeenieRepository weenies, ITrainingDataSink? training = null)
+    public LlmGoalPolicy(
+        LlmGoalClient client,
+        IGoalPolicy fallback,
+        IWeenieRepository weenies,
+        ITrainingDataSink? training = null,
+        IntentStack? stack = null,
+        IntentIdAllocator? idAllocator = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _fallback = fallback ?? throw new ArgumentNullException(nameof(fallback));
         _weenies = weenies ?? throw new ArgumentNullException(nameof(weenies));
         _training = training;
+        _stack = stack;
+        // If a stack is supplied an allocator must be too (we need to
+        // assign ids when the LLM omits them). Easier to default than
+        // to require the caller to thread one through.
+        _idAllocator = idAllocator ?? (stack is null ? null : new IntentIdAllocator());
     }
 
     public string Source => $"llm:{_client.Model}";

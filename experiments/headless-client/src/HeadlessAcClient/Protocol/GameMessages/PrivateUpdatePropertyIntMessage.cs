@@ -86,6 +86,7 @@ internal sealed record PrivateUpdatePropertyIntMessage(
         { 29,   "AttackHeight" },
         { 33,   "PhysicalScore" },
         { 41,   "Allegiance_CPCached" },
+        { 43,   "NumDeaths" },
 
         // Ticker properties (visible every server heartbeat)
         { 125,  "Age" },

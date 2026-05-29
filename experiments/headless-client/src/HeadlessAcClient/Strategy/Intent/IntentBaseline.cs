@@ -51,13 +51,36 @@ internal sealed record IntentBaseline
     [JsonPropertyName("level")]
     public int? Level { get; init; }
 
+    /// <summary>PropertyInt.NumDeaths at push (server-authoritative).</summary>
+    [JsonPropertyName("num_deaths")]
+    public int? NumDeaths { get; init; }
+
+    /// <summary>PropertyInt.CoinValue at push (server-authoritative pyreal count).</summary>
+    [JsonPropertyName("coin_value")]
+    public int? CoinValue { get; init; }
+
     [JsonPropertyName("visible_at_push")]
     public required ImmutableHashSet<uint> VisibleAtPush { get; init; }
 
     [JsonPropertyName("inventory_counts_at_push")]
     public required ImmutableDictionary<uint, int> InventoryCountsAtPush { get; init; }
 
+    /// <summary>
+    /// Frozen lifetime-counter values at push time. Lets predicates
+    /// compute "since-push" deltas authoritatively without scanning
+    /// the bounded EventStream.
+    /// </summary>
+    [JsonPropertyName("stats_at_push")]
+    public required StatsSnapshot StatsAtPush { get; init; }
+
     public static IntentBaseline Capture(WorldStateProjection world, EventStream events, DateTime utcNow)
+        => Capture(world, events, utcNow, stats: null);
+
+    public static IntentBaseline Capture(
+        WorldStateProjection world,
+        EventStream events,
+        DateTime utcNow,
+        BotStatistics? stats)
     {
         var visible = world.Visible.Select(v => v.Guid).ToImmutableHashSet();
 
@@ -82,8 +105,11 @@ internal sealed record IntentBaseline
             Landblock = world.Self.Landblock,
             Position = pos,
             Level = world.Self.Level,
+            NumDeaths = world.Self.NumDeaths,
+            CoinValue = world.Self.CoinValue,
             VisibleAtPush = visible,
             InventoryCountsAtPush = inv,
+            StatsAtPush = stats?.Snapshot() ?? default,
         };
     }
 }

@@ -110,6 +110,15 @@ internal sealed record Intent
     [JsonPropertyName("last_failure")]
     public string? LastFailure { get; init; }
 
+    /// <summary>
+    /// Free-form LLM note describing a completion condition that no
+    /// existing predicate expresses cleanly. Surfaced in training
+    /// data and in the rendered intent stack so the next deliberation
+    /// reminds the LLM what it asked for. Never consumed at runtime.
+    /// </summary>
+    [JsonPropertyName("predicate_request")]
+    public string? PredicateRequest { get; init; }
+
     public override string ToString()
     {
         var sb = new System.Text.StringBuilder(96);

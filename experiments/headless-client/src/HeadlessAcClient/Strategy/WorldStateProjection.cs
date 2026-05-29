@@ -125,6 +125,14 @@ internal sealed record SelfProjection
     [JsonPropertyName("position_z")] public float PositionZ { get; init; }
     [JsonPropertyName("level")]   public int? Level { get; init; }
     [JsonPropertyName("health_fraction")] public float? HealthFraction { get; init; }
+
+    // Server-authoritative counters (read directly from PropertyInts;
+    // ACE pushes these on character-load + on every change).
+    /// <summary>PropertyInt.NumDeaths (43). Total deaths this character has ever suffered. Persists across sessions.</summary>
+    [JsonPropertyName("num_deaths")] public int? NumDeaths { get; init; }
+
+    /// <summary>PropertyInt.CoinValue (20). Pyreals in inventory (server-totaled).</summary>
+    [JsonPropertyName("coin_value")] public int? CoinValue { get; init; }
 }
 
 internal sealed record WorldStateProjection
@@ -236,11 +244,16 @@ internal sealed record WorldStateProjection
         var landblock = self.CellId is uint cell ? cell >> 16 : (uint?)null;
 
         int? level = null;
+        int? numDeaths = null;
+        int? coinValue = null;
         float? hfrac = null;
         if (self.PropertyInts is { } props)
         {
-            // PropertyInt.Level = 25, MaxHealth = 16, CurrentHealth not Int — but coarse level is fine
+            // PropertyInt ids: see ACE-bots Source/ACE.Entity/Enum/Properties/PropertyInt.cs
+            //   25 = Level, 43 = NumDeaths, 20 = CoinValue
             if (props.TryGetValue(25u, out var lv)) level = lv;
+            if (props.TryGetValue(43u, out var nd)) numDeaths = nd;
+            if (props.TryGetValue(20u, out var cv)) coinValue = cv;
         }
 
         return new WorldStateProjection
@@ -256,6 +269,8 @@ internal sealed record WorldStateProjection
                 PositionZ = self.Position.Z,
                 Level = level,
                 HealthFraction = hfrac,
+                NumDeaths = numDeaths,
+                CoinValue = coinValue,
             },
             Inventory = inv,
             Visible = visible,
