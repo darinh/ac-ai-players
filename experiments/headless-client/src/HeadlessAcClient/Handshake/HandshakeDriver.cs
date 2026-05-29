@@ -59,16 +59,18 @@ internal sealed class HandshakeDriver : IDisposable
     private readonly string _account;
     private readonly string _password;
     private readonly string _characterName;
+    private readonly Strategy.IndoorNavService _indoorNav;
 
     private Socket? _socket;
 
-    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null)
+    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null, Strategy.IndoorNavService? indoorNav = null)
     {
         _serverPort0 = new IPEndPoint(host, port);
         _serverPort1 = new IPEndPoint(host, port + 1);
         _account = account;
         _password = password;
         _characterName = string.IsNullOrWhiteSpace(characterName) ? "Headless01" : characterName;
+        _indoorNav = indoorNav ?? new Strategy.IndoorNavService();
     }
 
     public async Task<HandshakeResult> RunAsync(CancellationToken ct)
