@@ -314,6 +314,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- If an inventory item's short_desc tells you what to do with it, follow it.");
         sb.AppendLine("- 'Give' requires both target (the NPC) and item (the thing being given).");
         sb.AppendLine("- If a recent event is `ActionRejected`, the server refused that exact attempt. Do NOT immediately retry the same (kind, target, item) combination. Pick a different verb (e.g. Use instead of Give), a different item, or a different NPC. Read the rejection's `label` and `message` for the reason.");
+        sb.AppendLine("- Read `## Server hints` closely. Phrases like \"Double click X\" or \"Use X to ...\" tell you EXACTLY what verb to use on what target. If an object is visible nearby AND the server has instructed you to use it, emit `Use{target: name=\"X\"}`. The server is your tutorial; do not ignore its instructions in favor of pure exploration.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -358,8 +359,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         sb.AppendLine();
 
+        // Pull ServerMessage + NpcDialog from the full retained
+        // window (capacity 256). These are high-signal cues
+        // ("Double click the lifestone", "I need a token") that get
+        // pushed out of the generic Recent events tail fast. Without
+        // this section ambient NPC chatter can fully evict a one-
+        // time tutorial hint within ~25 events.
+        //
+        // Budgets are split per-kind so server tutorials survive
+        // bursts of NPC small-talk in a busy town:
+        //   - up to 8 ServerMessages (rare, high-value)
+        //   - up to 6 NpcDialog lines (denser, more chatty)
+        // Dedup exact repeats so the same banner doesn't waste tokens.
+        var hintPool = events.Recent(EventStream.DefaultCapacity);
+        var serverHints = hintPool
+            .Where(e => e.Kind == EventKind.ServerMessage)
+            .GroupBy(e => (e.ChatType, e.Text))
+            .Select(g => g.First())  // newest-first ordering preserved
+            .OrderByDescending(e => e.Sequence)
+            .Take(8)
+            .ToList();
+        var npcHints = hintPool
+            .Where(e => e.Kind == EventKind.NpcDialog)
+            .GroupBy(e => (e.Name, e.Text))
+            .Select(g => g.First())
+            .OrderByDescending(e => e.Sequence)
+            .Take(6)
+            .ToList();
+        if (serverHints.Count > 0 || npcHints.Count > 0)
+        {
+            sb.AppendLine("## Server hints (recent — text the server sent you, dedupe'd)");
+            foreach (var h in serverHints)
+                sb.AppendLine($"- ServerMessage[chat=0x{h.ChatType ?? 0:X}]: \"{Truncate(h.Text, 320)}\"");
+            foreach (var h in npcHints)
+                sb.AppendLine($"- NpcDialog from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Recent events (newest first)");
-        var recent = events.Recent(15);
+        var recent = events.Recent(25);
         if (recent.Count == 0) sb.AppendLine("- (none)");
         else foreach (var e in recent) sb.AppendLine($"- {e}");
         sb.AppendLine();
@@ -388,6 +426,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         return sb.ToString();
     }
+
+    private static string Truncate(string? s, int n) =>
+        string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s[..n] + "...");
 
     internal static bool TryParseGoal(string json, out Goal? goal, out string? error)
     {
@@ -428,7 +469,8 @@ called again when a new event arrives or the goal completes.
 
 Architectural constraints you MUST respect:
 - Use ONLY information from the prompt (inventory, visible objects,
-  recent events). Do not assume world knowledge from outside.
+  server hints, recent events). Do not assume world knowledge from
+  outside.
 - Refer to NPCs and items by NAME, not by wcid (wcids are session-
   scoped runtime ids; the name is the stable identifier).
 - If an inventory item's short_desc tells you what to do with it

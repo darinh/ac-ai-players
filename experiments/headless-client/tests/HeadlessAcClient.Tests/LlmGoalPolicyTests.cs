@@ -475,6 +475,194 @@ public class LlmGoalPolicyTests
         Assert.Contains("Society Greeter", s);
     }
 
+    // ---- Slice G — server-hints prompt section regression ----
+    //
+    // In rejfix-run-01 the bot teleported to Holtburg, saw the Life
+    // Stone, received ServerMessage "Double click the lifestone to
+    // use it", and never emitted Use(Life Stone). Hypothesis: the
+    // hint rolled off the Recent(15) window before the LLM was
+    // re-triggered while the lifestone was still close. Slice G
+    // bumps Recent → 25 AND adds a dedicated "## Server hints"
+    // section pulling from the full event capacity.
+
+    [Fact]
+    public async Task LlmGoalPolicy_ServerHints_PersistAcrossEventWindow()
+    {
+        // Scenario:
+        //   1) Append a salient ServerMessage with tutorial text.
+        //   2) Append 30 more events of varied kinds (more than
+        //      Recent(25) cap). This evicts the hint from the
+        //      generic Recent tail.
+        //   3) Trigger a fresh LLM call. The captured request body
+        //      must:
+        //        - contain "## Server hints" section
+        //        - include the tutorial text inside that section
+        //        - NOT contain the tutorial text inside the
+        //          "## Recent events" section (too old)
+        //        - dedupe exact-duplicate ServerMessages
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Use",
+          "target": { "name": "Life Stone" },
+          "item":   null,
+          "priority": 7,
+          "rationale": "Server told me to double-click the lifestone."
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildHoltburgLifestoneWorld();
+        var events = new EventStream();
+
+        // Tutorial hint arrives first.
+        const string lifestoneHint = "Double click the lifestone to use it.";
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, ChatType = 0,
+            Text = lifestoneHint,
+        });
+        // An exact-duplicate banner that should dedupe inside hints.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, ChatType = 0,
+            Text = lifestoneHint,
+        });
+
+        // Push 30 unrelated events to evict the hint from Recent(25)
+        // but stay well under the 256-event ring capacity.
+        for (int i = 0; i < 30; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.NpcDialog, Name = $"Bystander{i}",
+                Text = $"Idle chatter line {i} that should NOT eclipse the tutorial hint.",
+            });
+        }
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(goal);
+        Assert.Single(requestBodies);
+
+        var body = requestBodies[0];
+
+        // The dedicated Server hints section must be present.
+        // Match the exact section header — the RULES block also
+        // mentions "## Server hints" so we have to disambiguate.
+        const string hintsHeader  = "## Server hints (recent";
+        const string recentHeader = "## Recent events (";
+        Assert.Contains(hintsHeader, body);
+
+        var hintsIdx  = body.IndexOf(hintsHeader, StringComparison.Ordinal);
+        var recentIdx = body.IndexOf(recentHeader, StringComparison.Ordinal);
+        Assert.True(hintsIdx >= 0);
+        Assert.True(recentIdx > hintsIdx, "## Server hints must come before ## Recent events");
+
+        var hintsBlock = body.Substring(hintsIdx, recentIdx - hintsIdx);
+        var recentBlock = body.Substring(recentIdx);
+
+        // Tutorial hint must be in the Server hints block.
+        Assert.Contains(lifestoneHint, hintsBlock);
+
+        // And the duplicate must have been deduped (appears once
+        // inside the hints block).
+        var hintsHits = System.Text.RegularExpressions.Regex.Matches(
+            hintsBlock, System.Text.RegularExpressions.Regex.Escape(lifestoneHint)).Count;
+        Assert.Equal(1, hintsHits);
+
+        // It must NOT be in the Recent events block (was evicted).
+        Assert.DoesNotContain(lifestoneHint, recentBlock);
+
+        // Life Stone visible-nearby line still carries the lifestone tag.
+        Assert.Contains("Life Stone", body);
+        Assert.Contains("lifestone", body);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_ServerHints_OrderingNewestFirst()
+    {
+        // The hints section is newest-first. Append two distinct
+        // hints in order then assert the second one appears earlier
+        // (smaller offset) than the first within the section.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Use",
+          "target": { "name": "Life Stone" },
+          "item":   null,
+          "priority": 7,
+          "rationale": "tutorial"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildHoltburgLifestoneWorld();
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, ChatType = 0,
+            Text = "FIRST-HINT older message",
+        });
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, ChatType = 0,
+            Text = "SECOND-HINT newer message",
+        });
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        var hintsIdx = body.IndexOf("## Server hints (recent", StringComparison.Ordinal);
+        var endIdx = body.IndexOf("## Recent events (", StringComparison.Ordinal);
+        Assert.True(hintsIdx >= 0 && endIdx > hintsIdx);
+        var block = body.Substring(hintsIdx, endIdx - hintsIdx);
+
+        var firstHintAt = block.IndexOf("FIRST-HINT", StringComparison.Ordinal);
+        var secondHintAt = block.IndexOf("SECOND-HINT", StringComparison.Ordinal);
+        Assert.True(firstHintAt > 0 && secondHintAt > 0);
+        Assert.True(secondHintAt < firstHintAt, "newer hint should appear earlier (newest-first)");
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;
@@ -530,6 +718,32 @@ public class LlmGoalPolicyTests
             {
                 Guid = NpcGuid, Name = "Jonathan", Wcid = 29324u, ItemType = 0x10u,
                 Distance = 3f, IsCreature = true, ObservedHostile = false,
+            },
+        },
+    };
+
+    private const uint LifestoneGuid = 0x7A9B404Fu;
+
+    private static WorldStateProjection BuildHoltburgLifestoneWorld() => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u, CellId = 0xA9B40019u,
+            PositionX = 84f, PositionY = 7.1f, PositionZ = 94f, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = new[]
+        {
+            new VisibleObjectProjection
+            {
+                Guid = LifestoneGuid, Name = "Life Stone", Wcid = 509u,
+                ItemType = 0x10000000u, Distance = 2.42f,
+                IsLifestone = true,
+            },
+            new VisibleObjectProjection
+            {
+                Guid = NpcGuid, Name = "Pathwarden Thorolf", Wcid = 30001u,
+                ItemType = 0x10u, Distance = 6f, IsCreature = true,
             },
         },
     };
