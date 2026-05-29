@@ -951,13 +951,22 @@ internal sealed class HandshakeDriver : IDisposable
                                 // without this update, `weapon: NOT wielded`
                                 // is reported even right after we wield the
                                 // starter Spadone, blocking any Attack.
+                                //
+                                // IMPORTANT: do NOT null ContainerGuid here.
+                                // The WorldStateProjection inventory filter
+                                // is `ContainerGuid == selfGuid`. A wielded
+                                // item is still carried by the character, so
+                                // it must remain in the inventory projection
+                                // with WieldedAt populated. Nulling
+                                // ContainerGuid drops the item from inventory
+                                // entirely and `weapon: wielded` never fires
+                                // (run-02 regression).
                                 var equippedSnap = worldState.TryGet(wieldAck.ItemGuid);
                                 if (equippedSnap is not null)
                                 {
                                     equippedSnap.CurrentWieldedLocation = wieldAck.NewLocation;
                                     if (worldState.SelfGuid is uint sg)
                                         equippedSnap.WielderGuid = sg;
-                                    equippedSnap.ContainerGuid = null;
                                 }
                                 Console.WriteLine(
                                     $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
