@@ -95,6 +95,24 @@ internal sealed record SelfProjection
     [JsonPropertyName("health_fraction")] public float? HealthFraction { get; init; }
 }
 
+/// <summary>
+/// Compact view of a server-reported rejection of one of our recent
+/// actions. Sourced from EventStream events with kind=GoalRejected.
+/// Surfaced in the LLM prompt under "recent_rejections" so the model
+/// can avoid re-proposing the same dispatch.
+/// </summary>
+internal sealed record RejectionProjection
+{
+    [JsonPropertyName("kind")]        public required string Kind { get; init; }
+    [JsonPropertyName("target_name")] public string? TargetName { get; init; }
+    [JsonPropertyName("target_guid")] public uint? TargetGuid { get; init; }
+    [JsonPropertyName("item_name")]   public string? ItemName { get; init; }
+    [JsonPropertyName("item_guid")]   public uint? ItemGuid { get; init; }
+    [JsonPropertyName("error_code")]  public uint? ErrorCode { get; init; }
+    [JsonPropertyName("error_text")]  public string? ErrorText { get; init; }
+    [JsonPropertyName("event_seq")]   public long Sequence { get; init; }
+}
+
 internal sealed record WorldStateProjection
 {
     [JsonPropertyName("self")]
@@ -106,11 +124,21 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("visible")]
     public required IReadOnlyList<VisibleObjectProjection> Visible { get; init; }
 
+    /// <summary>
+    /// Recent rejections sourced from the EventStream. May be empty.
+    /// Capped at <c>maxRejections</c> (default 8) most-recent entries
+    /// to keep the LLM prompt small.
+    /// </summary>
+    [JsonPropertyName("recent_rejections")]
+    public IReadOnlyList<RejectionProjection> RecentRejections { get; init; } = Array.Empty<RejectionProjection>();
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
         float visibleRadius = 60f,
-        int maxVisible = 32)
+        int maxVisible = 32,
+        EventStream? events = null,
+        int maxRejections = 8)
     {
         if (world.Self is not WorldObjectSnapshot self) return null;
         var selfGuid = self.Guid;
@@ -201,6 +229,35 @@ internal sealed record WorldStateProjection
             if (props.TryGetValue(25u, out var lv)) level = lv;
         }
 
+        // Pull the last `maxRejections` GoalRejected events. EventStream's
+        // RecentOfKind returns newest-first already, so iterate forward
+        // to preserve that order in the projection. The LLM should read
+        // the most recent rejection first.
+        IReadOnlyList<RejectionProjection> recentRejections = Array.Empty<RejectionProjection>();
+        if (events is not null)
+        {
+            var rejs = events.RecentOfKind(EventKind.GoalRejected, maxRejections);
+            if (rejs.Count > 0)
+            {
+                var list = new List<RejectionProjection>(rejs.Count);
+                foreach (var ev in rejs)
+                {
+                    list.Add(new RejectionProjection
+                    {
+                        Kind = ev.RejectedGoalKind ?? "?",
+                        TargetName = ev.Name,
+                        TargetGuid = null, // not currently captured on the StreamEvent
+                        ItemName = ev.ItemName,
+                        ItemGuid = ev.ItemGuid,
+                        ErrorCode = ev.ErrorCode,
+                        ErrorText = ev.Text,
+                        Sequence = ev.Sequence,
+                    });
+                }
+                recentRejections = list;
+            }
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -217,6 +274,7 @@ internal sealed record WorldStateProjection
             },
             Inventory = inv,
             Visible = visible,
+            RecentRejections = recentRejections,
         };
     }
 }

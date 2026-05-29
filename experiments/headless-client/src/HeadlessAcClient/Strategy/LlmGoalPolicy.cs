@@ -196,6 +196,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // Defensive guard — even with the system-prompt rule and the
+        // "Recent rejections" prompt section, an LLM may re-propose
+        // a freshly-rejected action. Catch it here and route to the
+        // fallback so the bot tries something different instead of
+        // hammering the same dispatch in an infinite loop.
+        if (MatchesRecentRejection(parsed!, world.RecentRejections))
+        {
+            _training?.RecordParseError(decisionId, $"rejected-repeat: {parsed!.Kind} {SelectorName(parsed.Target)} item={SelectorName(parsed.Item)}");
+            // Force the next ProposeGoal to re-call immediately with
+            // fresh observations rather than reusing the rejected goal.
+            _lastCalledAtUtc = DateTimeOffset.MinValue;
+            _lastEventConsideredSequence = -1;
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         var goal = parsed! with
         {
             Source = Source,
@@ -216,6 +231,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.InventoryItemRemoved
                               or EventKind.LandblockChanged
                               or EventKind.NpcDialog
+                              or EventKind.GoalRejected
                               or EventKind.ServerMessage);
     }
 
@@ -230,8 +246,48 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.GoalCompleted
                               or EventKind.GoalFailed
                               or EventKind.GoalExpired
+                              or EventKind.GoalRejected
                               or EventKind.NpcDialog
                               or EventKind.ServerMessage);
+    }
+
+    private static string? SelectorName(Selector? sel) =>
+        sel is null ? null : (sel.Name ?? sel.NameContains);
+
+    /// <summary>
+    /// Returns true if the parsed Goal matches any rejection in the
+    /// projection's recent-rejections list. Matching is by:
+    /// (1) goal kind matches RejectedGoalKind (case-insensitive), and
+    /// (2) target name matches (case-insensitive), and
+    /// (3) for Give: item name also matches (case-insensitive).
+    ///
+    /// We deliberately match on NAME, not guid — quest items often
+    /// re-spawn with new guids after rejection.
+    /// </summary>
+    internal static bool MatchesRecentRejection(Goal goal, IReadOnlyList<RejectionProjection> rejections)
+    {
+        if (rejections.Count == 0) return false;
+        var goalKindStr = goal.Kind.ToString();
+        var goalTarget = SelectorName(goal.Target);
+        var goalItem = SelectorName(goal.Item);
+        if (string.IsNullOrEmpty(goalTarget)) return false;
+
+        foreach (var r in rejections)
+        {
+            if (!string.Equals(r.Kind, goalKindStr, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!string.Equals(r.TargetName, goalTarget, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (goal.Kind == GoalKind.Give)
+            {
+                if (string.IsNullOrEmpty(goalItem) || string.IsNullOrEmpty(r.ItemName))
+                    continue;
+                if (!string.Equals(r.ItemName, goalItem, StringComparison.OrdinalIgnoreCase))
+                    continue;
+            }
+            return true;
+        }
+        return false;
     }
 
     private static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
@@ -257,6 +313,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Prefer NAME selectors over wcid (wcids change between sessions).");
         sb.AppendLine("- If an inventory item's short_desc tells you what to do with it, follow it.");
         sb.AppendLine("- 'Give' requires both target (the NPC) and item (the thing being given).");
+        sb.AppendLine("- 'Use' can target an INVENTORY item (e.g., a token, scroll, or recall stone). To do this, emit kind=\"Use\" with target.name set to the inventory item's name. The bot will activate the item from your inventory without walking anywhere.");
+        sb.AppendLine("- If the most recent action was REJECTED by the server (see 'Recent rejections' below), do NOT propose the same (kind + target + item) again. Try a different approach (different item, different NPC, or Explore to find more options).");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -305,6 +363,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var recent = events.Recent(15);
         if (recent.Count == 0) sb.AppendLine("- (none)");
         else foreach (var e in recent) sb.AppendLine($"- {e}");
+        sb.AppendLine();
+
+        sb.AppendLine("## Recent rejections (DO NOT REPEAT THESE)");
+        if (world.RecentRejections.Count == 0)
+        {
+            sb.AppendLine("- (none)");
+        }
+        else
+        {
+            foreach (var r in world.RecentRejections)
+            {
+                sb.Append($"- {r.Kind}");
+                if (!string.IsNullOrEmpty(r.TargetName)) sb.Append($" target=\"{r.TargetName}\"");
+                if (!string.IsNullOrEmpty(r.ItemName))   sb.Append($" item=\"{r.ItemName}\"");
+                if (r.ErrorCode is uint ec) sb.Append($" error=0x{ec:X4}");
+                if (!string.IsNullOrEmpty(r.ErrorText)) sb.Append($" \"{r.ErrorText}\"");
+                sb.AppendLine();
+            }
+            sb.AppendLine("If the rejected action is the only one that makes sense, do NOT retry it. Pick a DIFFERENT action — try another item, another NPC, or emit Explore.");
+        }
         sb.AppendLine();
 
         if (currentGoal is not null)
@@ -357,11 +435,22 @@ called again when a new event arrives or the goal completes.
 
 Architectural constraints you MUST respect:
 - Use ONLY information from the prompt (inventory, visible objects,
-  recent events). Do not assume world knowledge from outside.
+  recent events, recent rejections). Do not assume world knowledge
+  from outside.
 - Refer to NPCs and items by NAME, not by wcid (wcids are session-
   scoped runtime ids; the name is the stable identifier).
 - If an inventory item's short_desc tells you what to do with it
-  (e.g., "Give this to X"), that is the canonical clue. Follow it.
+  (e.g., "Give this to X", "Use to teleport"), that is the canonical
+  clue. Follow it.
+- 'Use' can target an INVENTORY item. To activate an item you are
+  carrying (e.g., a recall token, a scroll, a tuning fork), emit
+  kind="Use" with target.name set to the item's name. The bot
+  will activate it in place without walking anywhere.
+- If the bot just had an action REJECTED by the server (see the
+  "Recent rejections" section), you MUST NOT re-propose the same
+  (kind + target + item) combination. Pick something different:
+  a different item, a different NPC, or an Explore goal to surface
+  new options. Re-proposing a rejected action is a hard failure.
 - If you are uncertain, output a low-priority 'Talk' or 'Explore'
   goal so the bot keeps moving and surfaces more observations.
 
