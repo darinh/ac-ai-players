@@ -318,6 +318,88 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void WorldStateProjection_Slice_U_DistinguishesChestBookSignFromContainerAndWritable()
+    {
+        // Slice U — three new composite predicates derived from the
+        // existing ObjectDescriptionFlag + ItemType wire bits:
+        //   IsChest = Container itemType + Openable descFlag, !Corpse, !Door
+        //   IsBook  = Writable itemType, !Stuck descFlag
+        //   IsSign  = Writable itemType,  Stuck descFlag
+        // Composition rules — chest and door BOTH have Openable, but a
+        // door already has IsDoor=true and must NOT also be IsChest.
+        // Sack (own bag) is filtered earlier by ContainerGuid; here we
+        // only verify the in-world derivation logic.
+        const uint ChestGuid       = 0x71000001;
+        const uint BookshelfGuid   = 0x71000002;
+        const uint BookGuid        = 0x71000003;
+        const uint SignGuid        = 0x71000004;
+        const uint DoorGuid        = 0x71000005;
+        const uint CorpseGuid      = 0x71000006;
+        const uint PlainBookcaseGuid = 0x71000007;
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+
+        // Chest: Container itemType + Openable description flag.
+        SeedSnapshot(ws, ChestGuid, "Wooden Chest", wcid: 200u,
+            itemType: ItemTypeMasks.Container, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Openable);
+        // Bookshelf: same wire shape as chest; should also be IsChest.
+        SeedSnapshot(ws, BookshelfGuid, "Academy Bookshelf", wcid: 201u,
+            itemType: ItemTypeMasks.Container, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Openable);
+        // Book on a table: Writable itemType, NOT Stuck.
+        SeedSnapshot(ws, BookGuid, "Magic Tips", wcid: 202u,
+            itemType: ItemTypeMasks.Writable, cellId: 0x86020001u,
+            objectDescriptionFlags: 0u);
+        // Sign bolted to a wall: Writable itemType, IS Stuck.
+        SeedSnapshot(ws, SignGuid, "VIEW CONTROLS", wcid: 203u,
+            itemType: ItemTypeMasks.Writable, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Stuck);
+        // Door: Door + Openable. Must NOT also be IsChest.
+        SeedSnapshot(ws, DoorGuid, "Iron Gate", wcid: 204u,
+            itemType: 0u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Door | (uint)ObjectDescriptionFlag.Openable);
+        // Corpse: Corpse description flag. Must NOT also be IsChest
+        // even if it carries Container itemType (corpses do).
+        SeedSnapshot(ws, CorpseGuid, "Corpse of Foo", wcid: 205u,
+            itemType: ItemTypeMasks.Container, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Corpse);
+        // Plain Container with no Openable bit (decorative bookcase the
+        // player can never open). Must NOT be IsChest — the LLM should
+        // ignore it, not waste a Use cycle.
+        SeedSnapshot(ws, PlainBookcaseGuid, "Decorative Bookcase", wcid: 206u,
+            itemType: ItemTypeMasks.Container, cellId: 0x86020001u,
+            objectDescriptionFlags: 0u);
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True (byGuid[ChestGuid].IsChest,        "chest with Openable bit must be IsChest");
+        Assert.False(byGuid[ChestGuid].IsBook);
+        Assert.False(byGuid[ChestGuid].IsSign);
+        Assert.True (byGuid[BookshelfGuid].IsChest,    "openable bookshelf must be IsChest");
+
+        Assert.True (byGuid[BookGuid].IsBook,          "Writable + !Stuck must be IsBook");
+        Assert.False(byGuid[BookGuid].IsSign);
+        Assert.False(byGuid[BookGuid].IsChest);
+
+        Assert.True (byGuid[SignGuid].IsSign,          "Writable + Stuck must be IsSign");
+        Assert.False(byGuid[SignGuid].IsBook);
+        Assert.False(byGuid[SignGuid].IsChest);
+
+        Assert.True (byGuid[DoorGuid].IsDoor);
+        Assert.False(byGuid[DoorGuid].IsChest,         "door must not also be classified as chest");
+
+        Assert.True (byGuid[CorpseGuid].IsCorpse);
+        Assert.False(byGuid[CorpseGuid].IsChest,       "corpse must not also be classified as chest");
+
+        Assert.False(byGuid[PlainBookcaseGuid].IsChest, "container without Openable bit is not a chest");
+    }
+
+    [Fact]
     public void WorldStateProjection_FromWorldState_DerivesIsMonsterFromAttackableAndRadarBlipColor()
     {
         // Slice H — IsMonster is a server-derived composite. The friend/

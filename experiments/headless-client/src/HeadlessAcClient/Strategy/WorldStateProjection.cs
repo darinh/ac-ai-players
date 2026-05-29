@@ -78,6 +78,31 @@ internal sealed record VisibleObjectProjection
     /// <summary>True if ObjectDescriptionFlag has Openable bit (0x1). Doors, chests, etc.</summary>
     [JsonPropertyName("is_openable")] public bool IsOpenable { get; init; }
 
+    /// <summary>
+    /// Slice U — true if this is a non-corpse, non-door openable Container
+    /// (treasure chest, bookshelf, coffer, lockbox). Composite of
+    /// ItemType.Container (0x200) AND ObjectDescriptionFlag.Openable (0x1)
+    /// AND NOT corpse / door. Surfaced so the LLM can prioritise loot
+    /// without learning the difference between an itemType bit and a
+    /// description-flag bit. Pure wire-protocol — no English-name matching.
+    /// </summary>
+    [JsonPropertyName("is_chest")] public bool IsChest { get; init; }
+
+    /// <summary>
+    /// Slice U — true if this is a pickup-able Writable (a book on a
+    /// table, a scroll on the floor). ItemType.Writable (0x2000) AND NOT
+    /// ObjectDescriptionFlag.Stuck (0x4). Surfaced so the LLM knows to
+    /// emit Pickup instead of Use.
+    /// </summary>
+    [JsonPropertyName("is_book")] public bool IsBook { get; init; }
+
+    /// <summary>
+    /// Slice U — true if this is a fixed Writable (a wall sign, a
+    /// bolted-down plaque). ItemType.Writable (0x2000) AND
+    /// ObjectDescriptionFlag.Stuck (0x4). Use-only; cannot be picked up.
+    /// </summary>
+    [JsonPropertyName("is_sign")] public bool IsSign { get; init; }
+
     /// <summary>True if observed-hostile (e.g. server-message indicated initial attack on us).</summary>
     [JsonPropertyName("observed_hostile")] public bool ObservedHostile { get; init; }
 
@@ -207,7 +232,19 @@ internal sealed record WorldStateProjection
                 var isVendor    = (descFlags & (uint)ObjectDescriptionFlag.Vendor)    != 0;
                 var isHealer    = (descFlags & (uint)ObjectDescriptionFlag.Healer)    != 0;
                 var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
+                var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
                 var isAttackable = (descFlags & (uint)ObjectDescriptionFlag.Attackable) != 0;
+
+                // Slice U — composite predicates the LLM can read directly
+                // out of the visible-nearby projection. Building them here
+                // keeps the prompt rendering simple (just check the bool)
+                // and means tests can pin the derivation logic without
+                // reaching into HandshakeDriver's inline lambdas.
+                var isContainer = (itemType & ItemTypeMasks.Container) != 0;
+                var isWritable  = (itemType & ItemTypeMasks.Writable)  != 0;
+                var isChest     = isContainer && isOpenable && !isCorpse && !isDoor;
+                var isBook      = isWritable && !isStuck;
+                var isSign      = isWritable &&  isStuck;
 
                 // Slice H — server-derived friend/foe signals. Both bits are
                 // extracted from the wire, not from hardcoded weenie lists.
@@ -231,6 +268,9 @@ internal sealed record WorldStateProjection
                     IsVendor = isVendor,
                     IsHealer = isHealer,
                     IsOpenable = isOpenable,
+                    IsChest = isChest,
+                    IsBook = isBook,
+                    IsSign = isSign,
                     IsAttackable = isAttackable,
                     HasRadarBlipColor = hasRadarBlipColor,
                     IsMonster = isMonster,

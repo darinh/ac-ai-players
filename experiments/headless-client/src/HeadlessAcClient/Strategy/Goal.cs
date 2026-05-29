@@ -182,6 +182,7 @@ internal static class ItemTypeMasks
     public const uint Creature = 0x00000010u; // NPCs + mobs
     public const uint Portal   = 0x00010000u;
     public const uint Writable = 0x00002000u; // signs, books
+    public const uint Container = 0x00000200u; // sacks, corpses, chests, bookshelves
 
     /// <summary>
     /// Mirror of HandshakeDriver.PickupItemTypeMask (0xD96F).

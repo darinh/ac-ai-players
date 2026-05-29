@@ -2551,20 +2551,37 @@ internal sealed class HandshakeDriver : IDisposable
                                 // Wire-protocol bit, not English-name
                                 // matching (no hardcoded knowledge).
                                 var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
-                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
+                                // Slice U — Stuck flag distinguishes a
+                                // bolted-down sign (USE-to-read) from a
+                                // book on a table (Pickup-able). Openable
+                                // distinguishes a treasure chest /
+                                // bookshelf (Use-to-open-then-loot) from
+                                // a worn sack / NPC pack. Both are pure
+                                // wire-protocol bits.
+                                var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
+                                var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
+                                var isWritable  = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
+                                var isContainer = s.ItemType is uint ct && (ct & 0x00000200u) != 0;
+                                var isInSelfBag = s.ContainerGuid is uint cg && cg == chosenCharacterGuid;
+                                var isBookPickup = isWritable && !isStuck && !isInSelfBag;
+                                var isSign       = isWritable && isStuck;
+                                var isLootChest  = isContainer && isOpenable && !isCorpse && !isInSelfBag;
+                                var isPickup = (s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isSign)
+                                    || isBookPickup;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
                                 var isWearable = isPickup && s.ValidLocations is uint vl && vl != 0;
                                 var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 var corpseVisited = isCorpse && visitedTargetGuids.Contains(s.Guid);
+                                var lootChestVisited = isLootChest && visitedTargetGuids.Contains(s.Guid);
                                 int prio;
                                 if (isCorpse && !corpseVisited) prio = 0;
+                                else if (isLootChest && !lootChestVisited) prio = 0; // Slice U: chest = loot-critical
                                 else if (isNpc) prio = 0;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 2;
-                                else if (isWritable) prio = 2;
+                                else if (isSign) prio = 2;
                                 else if (isPickup && !pickedBefore) prio = 3;
                                 else prio = 4;
                                 return (snap: s, d2, prio);
@@ -2614,23 +2631,38 @@ internal sealed class HandshakeDriver : IDisposable
                                 // corpses ahead of pickups in the
                                 // exploration fallback too.
                                 var isCorpse = (descFlags & (uint)ObjectDescriptionFlag.Corpse) != 0;
-                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
+                                // Slice U — see inRange picker above for
+                                // the rationale on Stuck/Openable bits.
+                                var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
+                                var isOpenable  = (descFlags & (uint)ObjectDescriptionFlag.Openable)  != 0;
+                                var isWritable  = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
+                                var isContainer = s.ItemType is uint ct && (ct & 0x00000200u) != 0;
+                                var isInSelfBag = s.ContainerGuid is uint cg && cg == chosenCharacterGuid;
+                                var isBookPickup = isWritable && !isStuck && !isInSelfBag;
+                                var isSign       = isWritable && isStuck;
+                                var isLootChest  = isContainer && isOpenable && !isCorpse && !isInSelfBag;
+                                var isPickup = (s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isSign)
+                                    || isBookPickup;
                                 var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
                                 var isVisited = visitedTargetGuids.Contains(s.Guid);
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 // Exploration priorities (lower = better):
                                 //   0: unvisited NPC (quest giver / shopkeeper)
                                 //      OR unvisited corpse (fresh loot — Slice P)
+                                //      OR unvisited openable chest/bookshelf
+                                //      (Slice U — same loot urgency as a corpse).
                                 //   1: unvisited door/portal (cross to new room)
                                 //   2: visited door/portal (BACKTRACK through
                                 //      to re-stimulate cells on the other side)
                                 //   3: unvisited pickup we haven't farmed
+                                //      (Slice U: now includes pickup-eligible
+                                //      books — Writable AND NOT Stuck).
                                 //   4: unvisited creature (LLM will decide if
                                 //      it's hostile via Strategy layer)
                                 //   5: everything else (filtered out below)
                                 int prio;
                                 if (!isVisited && isCorpse) prio = 0;
+                                else if (!isVisited && isLootChest) prio = 0; // Slice U
                                 else if (!isVisited && isNpc) prio = 0;
                                 else if (!isVisited && (isDoor || isPortal)) prio = 1;
                                 else if (isDoor || isPortal) prio = 2;
@@ -2947,7 +2979,15 @@ internal sealed class HandshakeDriver : IDisposable
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
-                    var isPickup = (itemType & PickupItemTypeMask) != 0;
+                    // Slice U — Writable items that are NOT Stuck (books
+                    // on a table, scrolls on the floor) take the
+                    // PUTITEMINCONTAINER path; signs (Writable + Stuck)
+                    // and openable chests/bookshelves stay on the USE
+                    // path below. Wire-protocol bits only.
+                    var dispatchDescFlags = motionTarget.ObjectDescriptionFlags ?? 0u;
+                    var dispatchIsStuck   = (dispatchDescFlags & (uint)ObjectDescriptionFlag.Stuck) != 0;
+                    var dispatchIsBookPickup = (itemType & 0x00002000u) != 0 && !dispatchIsStuck;
+                    var isPickup = ((itemType & PickupItemTypeMask) != 0) || dispatchIsBookPickup;
                     // M1.6 redo — combat dispatch keys on the goal
                     // kind locked at motion-lock time (NOT on the
                     // live tactics.CurrentGoal, which may have
@@ -3054,24 +3094,36 @@ internal sealed class HandshakeDriver : IDisposable
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
 
-                        // Slice Q — track USE on a corpse so the loot
-                        // pre-emptor can dispatch PUTITEMINCONTAINER
-                        // for items the server spawns inside it.
-                        // Wire-protocol bit only (Corpse=0x2000); no
-                        // English-name matching.
-                        var useDescFlags = motionTarget.ObjectDescriptionFlags ?? 0u;
-                        if ((useDescFlags & (uint)ObjectDescriptionFlag.Corpse) != 0 &&
+                        // Slice Q + Slice U — track USE on any openable
+                        // loot container (corpse, treasure chest,
+                        // bookshelf, coffer) so the loot pre-emptor can
+                        // dispatch PUTITEMINCONTAINER for items the
+                        // server spawns inside. Pure wire-protocol bits
+                        // (Corpse=0x2000, Openable=0x1, Container itemType
+                        // 0x200) — no English-name matching. Slice Q
+                        // bumps the kill-stat; Slice U non-corpse
+                        // containers don't (no analog stat yet).
+                        var useDescFlags  = motionTarget.ObjectDescriptionFlags ?? 0u;
+                        var useIsCorpse   = (useDescFlags & (uint)ObjectDescriptionFlag.Corpse)   != 0;
+                        var useIsOpenable = (useDescFlags & (uint)ObjectDescriptionFlag.Openable) != 0;
+                        var useIsContainer = motionTarget.ItemType is uint uit && (uit & 0x00000200u) != 0;
+                        var useIsSelfBag  = motionTarget.ContainerGuid is uint ucg && ucg == chosenCharacterGuid;
+                        var trackAsLootContainer = !useIsSelfBag &&
+                            (useIsCorpse || (useIsContainer && useIsOpenable));
+                        if (trackAsLootContainer &&
                             worldState.Self is WorldObjectSnapshot useCorpseSelf)
                         {
                             recentlyOpenedContainers[motionTarget.Guid] =
                                 (DateTime.UtcNow, useCorpseSelf.Position);
-                            botStats.IncrementCorpsesOpened();
+                            if (useIsCorpse) botStats.IncrementCorpsesOpened();
+                            var sliceTag = useIsCorpse ? "Q" : "U";
+                            var kindTag  = useIsCorpse ? "corpse" : "container";
                             Console.WriteLine(
-                                $"[loot] Slice Q tracking opened corpse guid=0x{motionTarget.Guid:X8} " +
+                                $"[loot] Slice {sliceTag} tracking opened {kindTag} guid=0x{motionTarget.Guid:X8} " +
                                 $"name='{motionTarget.Name}' at selfPos=" +
                                 $"({useCorpseSelf.Position.X:F2},{useCorpseSelf.Position.Y:F2}) " +
-                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8} " +
-                                $"stats.corpses_opened={botStats.CorpsesOpened}");
+                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8}" +
+                                (useIsCorpse ? $" stats.corpses_opened={botStats.CorpsesOpened}" : ""));
                         }
                     }
 
