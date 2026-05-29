@@ -2574,10 +2574,15 @@ internal sealed class HandshakeDriver : IDisposable
                                     (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 var corpseVisited = isCorpse && visitedTargetGuids.Contains(s.Guid);
-                                var lootChestVisited = isLootChest && visitedTargetGuids.Contains(s.Guid);
+                                // NOTE: Slice U previously bumped isLootChest
+                                // to prio=0 ("chest = loot-critical"). The
+                                // audit at .github/skills/audit-hardcoded-
+                                // knowledge/SKILL.md flagged this as game
+                                // knowledge and the bump is reverted. Chest
+                                // urgency belongs in the LLM RULES, not the
+                                // picker. Tracked in ac-ai-players#86.
                                 int prio;
                                 if (isCorpse && !corpseVisited) prio = 0;
-                                else if (isLootChest && !lootChestVisited) prio = 0; // Slice U: chest = loot-critical
                                 else if (isNpc) prio = 0;
                                 else if (isDoor || isPortal) prio = 2;
                                 else if (isWearable && !hasSatisfiedSlot) prio = 2;
@@ -2648,9 +2653,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
                                 // Exploration priorities (lower = better):
                                 //   0: unvisited NPC (quest giver / shopkeeper)
-                                //      OR unvisited corpse (fresh loot — Slice P)
-                                //      OR unvisited openable chest/bookshelf
-                                //      (Slice U — same loot urgency as a corpse).
+                                //      OR unvisited corpse (fresh loot — Slice P).
                                 //   1: unvisited door/portal (cross to new room)
                                 //   2: visited door/portal (BACKTRACK through
                                 //      to re-stimulate cells on the other side)
@@ -2660,9 +2663,16 @@ internal sealed class HandshakeDriver : IDisposable
                                 //   4: unvisited creature (LLM will decide if
                                 //      it's hostile via Strategy layer)
                                 //   5: everything else (filtered out below)
+                                //
+                                // NOTE: Slice U previously bumped isLootChest
+                                // to prio=0 ("same loot urgency as a corpse").
+                                // The audit at .github/skills/audit-hardcoded-
+                                // knowledge/SKILL.md flagged that as game
+                                // knowledge and the bump is reverted. The
+                                // LLM RULES bullet for chests handles urgency
+                                // judgements. Tracked in ac-ai-players#86.
                                 int prio;
                                 if (!isVisited && isCorpse) prio = 0;
-                                else if (!isVisited && isLootChest) prio = 0; // Slice U
                                 else if (!isVisited && isNpc) prio = 0;
                                 else if (!isVisited && (isDoor || isPortal)) prio = 1;
                                 else if (isDoor || isPortal) prio = 2;
