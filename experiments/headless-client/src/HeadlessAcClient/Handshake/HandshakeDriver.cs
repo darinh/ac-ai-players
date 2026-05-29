@@ -28,6 +28,7 @@ using System.Threading.Tasks;
 using HeadlessAcClient.Crypto;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
 using HeadlessAcClient.Tactics;
 using HeadlessAcClient.World;
 
@@ -440,6 +441,17 @@ internal sealed class HandshakeDriver : IDisposable
         // files). The graph is global across sessions, characters
         // and accounts; the LLM/planner can query it for routes.
         var navGraph = new NavGraph();
+        // Slice R wiring — the strategic intent stack persists across
+        // LLM deliberations. The LLM authors push/pop/replace ops in
+        // its response; the bot's per-tick code (below) checks the
+        // TOP for completion via predicate evaluation and pops it
+        // automatically when satisfied. BotStatistics is the lifetime
+        // monotonic counter feeding the stats-based predicates
+        // (kill_count_total_at_least, levels_gained_total_at_least,
+        // units_traveled_since_push_at_least, etc.).
+        var intentStack = new IntentStack();
+        var intentIds   = new IntentIdAllocator();
+        var botStats    = new BotStatistics();
         IGoalPolicy goalPolicy;
         if (llmDisabled)
         {
@@ -451,8 +463,8 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink);
-                Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint})");
+                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink, intentStack, intentIds);
+                Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
             }
             catch (Exception ex)
             {
@@ -2055,6 +2067,33 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     var projection = WorldStateProjection.FromWorldState(
                         worldState, weenies, visibleRadius: 60f, maxVisible: 32);
+                    // Slice R wiring — pump lifetime stat counters and
+                    // check the top of the intent stack for completion
+                    // BEFORE the policy deliberates. If the predicate
+                    // pops the top this tick, the next prompt will
+                    // render the new top and the LLM picks up. Also
+                    // synthesize a GoalCompleted event so HasNewSalient
+                    // fires on the next ProposeGoal poll.
+                    if (projection is not null)
+                    {
+                        botStats.Pump(eventStream, projection);
+                        var poppedTop = intentStack.CheckTopForCompletion(
+                            projection, eventStream, DateTime.UtcNow, botStats);
+                        if (poppedTop is not null)
+                        {
+                            Console.WriteLine(
+                                $"[intent-stack] auto-popped id={poppedTop.Id} kind={poppedTop.Kind} " +
+                                $"status={poppedTop.Status} revision_now={intentStack.Revision} " +
+                                $"depth_now={intentStack.Depth}");
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0, // overwritten by Append
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.GoalCompleted,
+                                Text = $"IntentCompleted id={poppedTop.Id} kind={poppedTop.Kind} status={poppedTop.Status}",
+                            });
+                        }
+                    }
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
                     // Allowlist:
                     //   - Give: walk to NPC, deliver item from bag.
@@ -2996,11 +3035,13 @@ internal sealed class HandshakeDriver : IDisposable
                         {
                             recentlyOpenedContainers[motionTarget.Guid] =
                                 (DateTime.UtcNow, useCorpseSelf.Position);
+                            botStats.IncrementCorpsesOpened();
                             Console.WriteLine(
                                 $"[loot] Slice Q tracking opened corpse guid=0x{motionTarget.Guid:X8} " +
                                 $"name='{motionTarget.Name}' at selfPos=" +
                                 $"({useCorpseSelf.Position.X:F2},{useCorpseSelf.Position.Y:F2}) " +
-                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8}");
+                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8} " +
+                                $"stats.corpses_opened={botStats.CorpsesOpened}");
                         }
                     }
 

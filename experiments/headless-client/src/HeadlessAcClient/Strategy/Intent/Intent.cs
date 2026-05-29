@@ -264,6 +264,16 @@ internal sealed class IntentStack
     /// null. This is the per-tick "is the bot done yet?" hook.
     /// </summary>
     public Intent? CheckTopForCompletion(WorldStateProjection world, EventStream events, DateTime utcNow)
+        => CheckTopForCompletion(world, events, utcNow, stats: null);
+
+    /// <summary>
+    /// Stats-aware overload. The HandshakeDriver tick passes its
+    /// BotStatistics instance so kill-count, levels-gained, units-
+    /// traveled, etc. predicates can resolve. Legacy callers (tests,
+    /// pure-predicate evaluations) pass null and stats-based predicates
+    /// evaluate false.
+    /// </summary>
+    public Intent? CheckTopForCompletion(WorldStateProjection world, EventStream events, DateTime utcNow, BotStatistics? stats)
     {
         if (_frames.Count == 0) return null;
 
@@ -293,7 +303,7 @@ internal sealed class IntentStack
             return _history[0];
         }
 
-        var ctx = new IntentEvalContext(world, events, top.Baseline, utcNow);
+        var ctx = new IntentEvalContext(world, events, top.Baseline, utcNow) { Stats = stats };
         if (top.Completion.IsSatisfied(ctx))
         {
             if (_frames.Count == 1)

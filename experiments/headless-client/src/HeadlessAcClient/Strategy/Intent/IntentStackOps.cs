@@ -53,10 +53,10 @@ namespace HeadlessAcClient.Strategy.Intent;
 
 internal enum IntentStackOpKind
 {
-    Push           = 0,
-    PopTop         = 1,
-    ReplaceTop     = 2,
-    MarkTopBlocked = 3,
+    [JsonStringEnumMemberName("push")]              Push           = 0,
+    [JsonStringEnumMemberName("pop_top")]           PopTop         = 1,
+    [JsonStringEnumMemberName("replace_top")]       ReplaceTop     = 2,
+    [JsonStringEnumMemberName("mark_top_blocked")]  MarkTopBlocked = 3,
 }
 
 internal sealed record IntentSpec

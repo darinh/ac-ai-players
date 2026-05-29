@@ -169,7 +169,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
 
-        var userPrompt = BuildUserPrompt(world, events, currentGoal);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -238,6 +238,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (!result.Ok)
             return _fallback.ProposeGoal(world, events, currentGoal);
+
+        // Slice R wiring — strategic stack mutations are applied BEFORE
+        // the goal is consumed so the rendered "## Intent stack" the
+        // next prompt sees reflects everything the LLM just emitted.
+        // Rejected batches are logged into training data. A goal-only
+        // response is fine (empty stack_ops or no stack_ops field).
+        if (_stack is not null && _idAllocator is not null)
+        {
+            if (TryParseStackOps(result.Content, out var stackRevision, out var stackOps, out var opsErr))
+            {
+                if (stackOps is not null && stackOps.Count > 0)
+                {
+                    var outcome = IntentStackOpsApplier.TryApply(
+                        _stack, _idAllocator, stackOps, stackRevision, world, events, nowUtc.UtcDateTime);
+                    Console.WriteLine(
+                        $"[intent-stack] result={outcome.Result} ops={stackOps.Count} " +
+                        $"applied={outcome.AppliedLog.Count} " +
+                        $"revision_after={_stack.Revision} depth_after={_stack.Depth}");
+                    if (outcome.Result != BatchApplyResult.Ok)
+                    {
+                        _training?.RecordParseError(decisionId,
+                            $"stack-ops rejected: {outcome.Result} reason={outcome.RejectReason}");
+                    }
+                }
+            }
+            else
+            {
+                _training?.RecordParseError(decisionId,
+                    $"stack-ops parse failed: {opsErr ?? "unknown"}");
+            }
+        }
 
         if (!TryParseGoal(result.Content, out var parsed, out var parseError))
         {
@@ -414,12 +445,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
+        => BuildUserPrompt(world, events, currentGoal, stack: null);
+
+    internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
         sb.AppendLine();
         sb.AppendLine("Output JSON exactly matching this schema (no extra fields):");
-        sb.AppendLine("""
+        if (stack is null)
+        {
+            sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
   "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore",
@@ -430,6 +466,69 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   "expires_in_seconds": number | null
 }
 """);
+        }
+        else
+        {
+            sb.AppendLine("""
+{
+  // -- per-cycle tactical goal (REQUIRED — the tactics layer
+  //    executes this in the next few ticks) --
+  "goal_id": "<new uuid>",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore",
+  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
+  "item":   { ...same as target... } | null,
+  "rationale": string,
+  "priority": 1..10,
+  "expires_in_seconds": number | null,
+
+  // -- strategic intent stack (OPTIONAL — include only when you want
+  //    to push/pop/replace top/mark-blocked; omit entirely if the
+  //    stack should stay as-is). See `## Intent stack` below. --
+  "stack_revision": <number — echo the current revision shown in
+                     `## Intent stack`; mismatch rejects the batch>,
+  "stack_ops": [
+    {
+      "op": "push",
+      "intent": {
+        "id":          "<new id, e.g. i-005>",
+        "kind":        "<freeform tag, e.g. quest:collect-apples>",
+        "target_name": "<NPC or 'self' or null>",
+        "target_guid":  <optional number>,
+        "rationale":   "<why this intent now>",
+        "deadline_seconds": <optional number; null = no deadline>,
+        "completion": {
+          // Pick exactly ONE typed completion predicate. Common ones:
+          //   {"$type":"inventory_contains_at_least","wcid":<n>,"count":<n>}
+          //   {"$type":"inventory_contains_at_least","name_contains":"<s>","count":<n>}
+          //   {"$type":"landblock_equals","value": 0x<hex>}
+          //   {"$type":"kill_count_since_push_at_least","count":<n>}
+          //   {"$type":"kill_count_total_at_least","count":<n>}
+          //   {"$type":"levels_gained_total_at_least","count":<n>}
+          //   {"$type":"num_deaths_at_least","count":<n>}
+          //   {"$type":"num_deaths_since_push_at_most","budget":<n>}
+          //   {"$type":"coin_value_at_least","count":<n>}
+          //   {"$type":"coin_gain_since_push_at_least","count":<n>}
+          //   {"$type":"units_traveled_since_push_at_least","units":<n>}
+          //   {"$type":"and","predicates":[ ...nested... ]}
+          //   {"$type":"or","predicates":[ ...nested... ]}
+          //   {"$type":"never"}  -- e.g. for safety-cap-only intents
+        },
+        // ESCAPE HATCH: if NO existing completion type fits, set
+        // completion to {"$type":"never"} and populate this field with
+        // a prose description of the predicate we need. We will add
+        // the type in the next dev iteration; meanwhile the intent
+        // can only be popped by deadline or by an explicit pop_top.
+        "predicate_request": "<null or string>"
+      },
+      "reason": "<short note>"
+    }
+    // OR: {"op":"pop_top",          "reason":"..."}
+    // OR: {"op":"replace_top","intent":{...},"reason":"..."}
+    // OR: {"op":"mark_top_blocked", "reason":"..."}
+  ]
+}
+""");
+        }
         sb.AppendLine();
         sb.AppendLine("RULES:");
         sb.AppendLine("- Reason ONLY from the observed world below. Do NOT invent NPCs, items, or wcids that aren't listed.");
@@ -443,6 +542,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Looting: when a monster dies it becomes a `corpse` object that appears in the visible-nearby list tagged `corpse`. Corpses are time-sensitive containers — they decay. Emit `Use{target: name=\"<corpse name>\"}` to open one; after that, items inside the corpse appear as new visible objects and you should `Pickup{target: name=\"<item>\"}` them. Loot (pyreals, components, gear) is your main income outside of quest rewards. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- LOOP-BREAK (Talk loop): If you have emitted `Talk{X}` 3 or more times in the last 10 goal emissions (see the Location & recency section below) AND no new inventory item has been added since AND no new unique server hint has appeared, STOP talking to X. Talk to a different visible NPC, or Use/Give an inventory item to a different target, or emit `Explore`.");
         sb.AppendLine("- LOOP-BREAK (town-stuck): If `minutes in current landblock` is greater than 5 AND `Combat readiness` shows `nearest monster: (none in view)` AND every visible creature is tagged `npc` (no `monster` tag anywhere in Visible nearby), you are STUCK INDOORS in a town. Stop cycling through NPCs — they have no more quests for you here. Emit `Explore{target: {name: \"anywhere\"}}` immediately. The schema picker will walk you through visible Doors and portals to discover new NPCs, monsters, and items. Combat XP, loot, and contracts happen OUTDOORS, not in town interiors. This rule OVERRIDES `Talk` and `Give` even when a new NPC is visible — talk-to-every-NPC is not progress when there are no monsters in view.");
+        if (stack is not null)
+        {
+            sb.AppendLine("- STRATEGIC STACK: `## Intent stack` shows the bot's current strategic plan. The TOP intent is the active sub-goal; ancestors are paused waiting for it. Per-cycle goals should advance the TOP. PUSH a new intent when you discover a sub-task. POP_TOP when the sub-task is done and no completion predicate caught it (rare — predicates auto-pop). REPLACE_TOP when the intent was right-track-wrong-target. MARK_TOP_BLOCKED when you cannot make progress and want to record why (the next call you can pop or replace). Always echo `stack_revision` to detect races.");
+            sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate that matches your termination criterion. Prefer server-authoritative ones (num_deaths, coin_value) when applicable — they survive crashes and are exact. Use *_total_* for absolute thresholds (\"reach level 5\"), *_since_push_* for deltas (\"kill 3 more\"). If none fits, use {\"$type\":\"never\"} + `predicate_request` (escape hatch).");
+        }
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -452,7 +556,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine($"- pos: ({world.Self.PositionX:F1}, {world.Self.PositionY:F1}, {world.Self.PositionZ:F1})");
         if (world.Self.Level is int lv) sb.AppendLine($"- level: {lv}");
         if (world.Self.HealthFraction is float hf) sb.AppendLine($"- health: {hf:P0}");
+        if (world.Self.NumDeaths is int nd) sb.AppendLine($"- deaths (server-tracked): {nd}");
+        if (world.Self.CoinValue is int cv) sb.AppendLine($"- coin (server-tracked): {cv} pyreals");
         sb.AppendLine();
+
+        if (stack is not null)
+        {
+            sb.AppendLine(IntentStackOpsApplier.RenderStackForPrompt(stack));
+            sb.AppendLine();
+        }
 
         sb.AppendLine("## Inventory");
         if (world.Inventory.Count == 0) sb.AppendLine("- (empty)");
@@ -724,24 +836,95 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
     }
 
+    /// <summary>
+    /// Extract optional `stack_revision` (long) and `stack_ops` (array)
+    /// from the LLM JSON response. Returns true on syntactic success
+    /// (including the case where neither field is present — both out
+    /// params are null). Returns false only when JSON itself can't be
+    /// parsed or the stack_ops array can't be deserialized to the
+    /// strongly-typed shape.
+    /// </summary>
+    internal static bool TryParseStackOps(
+        string json,
+        out long? stackRevision,
+        out IReadOnlyList<IntentStackOp>? stackOps,
+        out string? error)
+    {
+        stackRevision = null;
+        stackOps = null;
+        error = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return true; // no stack info — fine
+
+            if (root.TryGetProperty("stack_revision", out var rev) &&
+                rev.ValueKind == JsonValueKind.Number)
+            {
+                stackRevision = rev.GetInt64();
+            }
+
+            if (root.TryGetProperty("stack_ops", out var opsEl) &&
+                opsEl.ValueKind == JsonValueKind.Array)
+            {
+                var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+                stackOps = JsonSerializer.Deserialize<List<IntentStackOp>>(opsEl.GetRawText(), opts);
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
     public const string DefaultSystemPrompt = """
 You are the strategy layer for an Asheron's Call bot. Your job is to
-decide the bot's NEXT GOAL based on what it currently perceives.
+decide the bot's NEXT GOAL based on what it currently perceives, and
+to manage a small FILO STACK of strategic INTENTS that persist across
+your deliberations.
 
-You are NOT a controller. You output one Goal as a JSON object. The
-bot's tactics layer executes the goal step by step. You will be
-called again when a new event arrives or the goal completes.
+You are NOT a controller. You output one tactical Goal (executed by
+the tactics layer in the next few ticks) plus, optionally, a batch of
+mutations to the strategic intent stack. You will be called again
+when a new event arrives, the goal completes, or an intent's
+completion predicate pops the top.
 
 Architectural constraints you MUST respect:
 - Use ONLY information from the prompt (inventory, visible objects,
-  server hints, recent events). Do not assume world knowledge from
-  outside.
+  server hints, recent events, intent stack). Do not assume world
+  knowledge from outside.
 - Refer to NPCs and items by NAME, not by wcid (wcids are session-
   scoped runtime ids; the name is the stable identifier).
 - If an inventory item's short_desc tells you what to do with it
   (e.g., "Give this to X"), that is the canonical clue. Follow it.
 - If you are uncertain, output a low-priority 'Talk' or 'Explore'
   goal so the bot keeps moving and surfaces more observations.
+
+Intent stack — when `## Intent stack` is present in the prompt:
+- The TOP intent is the active strategic sub-goal. Ancestors are
+  PAUSED waiting for top. Your per-cycle Goal should advance TOP.
+- The stack persists across deliberations — don't redundantly re-push
+  the same intent you can see on the stack.
+- PUSH a new intent when you discover a sub-task (e.g. you accepted
+  a quest that requires collecting items: push a "collect" intent on
+  top of the existing "do quest" root). Always include a typed
+  COMPLETION predicate so the stack auto-pops when satisfied.
+- POP_TOP only when the predicate didn't fire but the intent is
+  truly done (rare).
+- REPLACE_TOP when the same strategic frame applies but the specific
+  target / parameters were wrong.
+- MARK_TOP_BLOCKED when you cannot advance and want to record why,
+  so a later deliberation can pop or replace it.
+- Always echo `stack_revision` from the prompt so we detect races.
+- COMPLETION PREDICATES: prefer server-authoritative types
+  (num_deaths, coin_value) when applicable. Use *_total_* for
+  absolute thresholds, *_since_push_* for deltas. If none fits,
+  use `{"$type":"never"}` + populate `predicate_request` with the
+  predicate type we should add.
 
 Output JSON only. No prose outside the JSON object.
 """;
