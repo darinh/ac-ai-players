@@ -329,7 +329,14 @@ internal sealed class HandshakeDriver : IDisposable
         // target the same item, and we cap total actions so we don't
         // loop forever in a dense room.
         DateTime?            useSentAt = null;
-        const int            PostActionCooldownSec = 2;
+        // Per-target post-action cooldown is owned by
+        // Strategy/MotorPostActionCooldown.For(motionTarget). Most
+        // targets return the 2-second default; Portal targets
+        // return 6 seconds so the server-driven windup
+        // (MoveToPosition pin → animation → Teleport packet) can
+        // complete before the picker dispatches a competing AP/MS.
+        // See files/portal03-spike.log:20224..20266 for the
+        // smoking-gun trace of the 2-second-default regression.
         // Phase 7f.5 — bumped from 30 → 100. With the exploration
         // fallback the bot can keep finding new things to do well
         // past 30 actions (whole academy has ~50+ named objects:
@@ -1892,8 +1899,14 @@ internal sealed class HandshakeDriver : IDisposable
                 // all per-action gates so the picker block (below) can
                 // fire again with a fresh target. Cap total actions per
                 // session so the bot doesn't loop forever.
+                //
+                // The cooldown is per-target (Portal=6s, default=2s) so
+                // server-side portal windups can complete without the
+                // picker dispatching a competing AP. See
+                // Strategy/MotorPostActionCooldown.cs for the rationale.
+                var postActionCooldown = HeadlessAcClient.Strategy.MotorPostActionCooldown.For(motionTarget);
                 if (useSent && useSentAt is DateTime usat &&
-                    (DateTime.UtcNow - usat).TotalSeconds >= PostActionCooldownSec)
+                    (DateTime.UtcNow - usat) >= postActionCooldown)
                 {
                     // While in combat lock: do NOT reset motion
                     // state. Each AP/MS packet OnMoveComplete would
@@ -1930,7 +1943,8 @@ internal sealed class HandshakeDriver : IDisposable
                         tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
 
                     Console.WriteLine(
-                        $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}'); " +
+                        $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}') " +
+                        $"after {postActionCooldown.TotalSeconds:F1}s cooldown; " +
                         $"resetting motion state to pick next target");
 
                     // Reset every per-action gate.
@@ -1990,9 +2004,9 @@ internal sealed class HandshakeDriver : IDisposable
                 // corpse and have not moved since). After dispatch
                 // we synthesize motion state so the post-action
                 // reset cascade (HandshakeDriver.cs ~L1759) fires
-                // after PostActionCooldownSec, marking the loot
-                // item visited and clearing motionTarget so the
-                // next pre-emptor iteration picks the NEXT item.
+                // after MotorPostActionCooldown.For(target), marking
+                // the loot item visited and clearing motionTarget so
+                // the next pre-emptor iteration picks the NEXT item.
                 if (!autonomousPositionSent &&
                     !useSent &&
                     motionTarget is null &&
@@ -2098,7 +2112,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 // action reset cascade owns the
                                 // visitedTargetGuids.Add and gate
                                 // clear — set useSent=true so it
-                                // fires after PostActionCooldownSec.
+                                // fires after
+                                // MotorPostActionCooldown.For(target).
                                 // Set autonomousPositionSent /
                                 // moveToStateStart / moveToStateStop
                                 // / motionDone so the AP-send, MS-
