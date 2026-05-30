@@ -156,6 +156,41 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                     rationale: $"inspect newly-acquired {matchingInv.Name} (no quest knowledge)");
         }
 
+        // 5b) Visible openable: any visible object the world says you can
+        //     OPEN. Wire-derived from ObjectDescriptionFlag.Openable.
+        //     Excludes doors (Door bit gets its own dispatch path via
+        //     the walk-tick door-USE handler) and items already in our
+        //     bag (visible-list filter at WorldStateProjection drops
+        //     them anyway).
+        //
+        //     Action verb is Use — opening a container exposes its
+        //     contents (server-driven). This fallback fires the same
+        //     way regardless of the container's role in the game
+        //     (corpse, chest, bookshelf, lockbox, coffer). It does NOT
+        //     bump openables above other steps — it sits at the same
+        //     priority bucket as inv-Use (step 5) and runs AFTER it so
+        //     freshly-acquired inventory still gets its inspect-pass
+        //     before any persistent visible openable competes for the
+        //     tick.
+        //
+        //     Schema-only framing: mirrors step 4 (Pickup) in shape —
+        //     observation drives behavior, no game-knowledge value
+        //     judgment about whether openable things are worth opening.
+        var openable = world.Visible
+            .Where(v => v.IsOpenable && !v.IsDoor)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+            .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        if (openable is not null)
+        {
+            RememberProposed(openable.Guid);
+            return MakeGoal(GoalKind.Use,
+                new Selector { Guid = openable.Guid, Name = openable.Name },
+                null, priority: 4,
+                rationale: $"openable visible {openable.Name} at d={openable.Distance:F1}");
+        }
+
         // 6) Talk to nearest NPC creature (non-hostile creature with name) —
         //    talking emits PopupString, feeding the LLM next round.
         var npc = world.Visible

@@ -689,6 +689,351 @@ public class StrategyFoundationTests
         Assert.NotEqual(firstGuid, secondGuid);
     }
 
+    // ---- Step 5b: fallback Use{openable} for visible openable objects ----
+    //
+    // Schema-only behavior: any visible object with the
+    // ObjectDescriptionFlag.Openable bit (and not a Door, which has its
+    // own dispatch path) becomes a fallback Use target. Mirrors the
+    // existing step 4 (Pickup) and step 6 (Talk) shape — observation
+    // drives behavior, no game-knowledge value judgment about whether
+    // openable things are valuable to open. Adds a path for corpse
+    // looting that does NOT require either the priority-bump (audited
+    // out per Slice U revert) or the LLM (often quota-suppressed).
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PicksUse_ForVisibleOpenableCorpse()
+    {
+        const uint CorpseGuid = 0x5F000100;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Sparring Golem",
+                    Wcid = 21u, ItemType = 0x200u, Distance = 1.6f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(CorpseGuid, goal.Target.Guid);
+        Assert.Equal("fallback:no-quest-knowledge", goal.Source);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PicksUse_ForGenericOpenableChest_NotCorpse()
+    {
+        // Generic openable (e.g. a treasure chest in a dungeon) MUST
+        // be eligible too — the schema-only filter cannot single out
+        // corpses. Wire-bit `Openable` is the affordance, regardless
+        // of game-role.
+        const uint ChestGuid = 0x70000200;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = ChestGuid, Name = "Treasure Chest",
+                    Wcid = 13007u, ItemType = 0x200u, Distance = 3.0f,
+                    IsOpenable = true, IsChest = true, IsCorpse = false,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(ChestGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_DoesNotPickDoor_AsOpenable()
+    {
+        // Doors carry the Openable bit too, but they have their own
+        // walk-tick door-USE dispatch path. Step 5b must skip them so
+        // the door-handling pipeline is not duplicated/short-circuited
+        // by a Use goal here.
+        const uint DoorGuid = 0x78602000;
+        const uint NpcGuid  = 0x800001AA;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DoorGuid, Name = "Door", Wcid = 31064u,
+                    ItemType = 0x80u, Distance = 2.0f,
+                    IsOpenable = true, IsDoor = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Jonathan", Wcid = 29324u,
+                    ItemType = 0x10u, Distance = 8.0f,
+                    IsCreature = true, ObservedHostile = false,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        // The door is closer (d=2) and openable, but Step 5b skips
+        // doors → Step 6 picks Jonathan instead.
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal(NpcGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsOpenable_WhenRecentlyRejected()
+    {
+        // Same dedup pattern as Step 4 (Pickup) — an ActionRejected
+        // for the openable guid (e.g. server denied open because we
+        // already opened and emptied it, or geometry blocked) must
+        // suppress the candidate.
+        const uint CorpseGuid = 0x5F000300;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Drudge",
+                    Wcid = 22u, ItemType = 0x200u, Distance = 1.0f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Text = "Unreachable: 'Corpse of Drudge'",
+            ItemGuid = CorpseGuid,
+            Name = "Corpse of Drudge",
+            ErrorCode = 0xFFFE,
+            ErrorLabel = "Unreachable",
+        });
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Use, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_DoesNotProposeSameOpenableTwiceInARow()
+    {
+        // The shared _recentProposedGuids queue (size 8) prevents tight
+        // re-Use loops on a single openable that doesn't despawn after
+        // open. With only one openable visible and no other actionable
+        // candidates, the second tick falls through to Explore (or the
+        // recycle path).
+        const uint CorpseGuid = 0x5F000400;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Drudge Sklavos",
+                    Wcid = 31u, ItemType = 0x200u, Distance = 0.8f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Use, first!.Kind);
+        Assert.Equal(CorpseGuid, first.Target.Guid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        // Second tick: same corpse is in _recentProposedGuids → must
+        // NOT propose another Use against it.
+        if (second!.Kind == GoalKind.Use)
+            Assert.NotEqual(CorpseGuid, second.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersPickup_OverOpenable_BothVisible()
+    {
+        // Step 4 (Pickup) runs BEFORE Step 5b (Openable). A pickup-mask
+        // item should win even if a closer openable container is in
+        // sight, because Pickups are immediate and Step 4 returns
+        // first. Documents the policy's step-order intent.
+        const uint AppleGuid  = 0x80004001;
+        const uint CorpseGuid = 0x5F000500;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Drudge",
+                    Wcid = 22u, ItemType = 0x200u, Distance = 1.0f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = AppleGuid, Name = "Bruised Apple", Wcid = 5090u,
+                    ItemType = 0x20u, Distance = 5.0f,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Pickup, goal!.Kind);
+        Assert.Equal(AppleGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersInvUse_OverOpenable_WhenNewInvAdded()
+    {
+        // Step 5 (Use newly-acquired-inventory) runs BEFORE Step 5b
+        // (Openable). When the bot just picked up an item, that
+        // item's Use should fire first so the resulting popup feeds
+        // the LLM next deliberation. The openable can wait one tick.
+        const uint NewInvGuid = 0x80004002;
+        const uint CorpseGuid = 0x5F000600;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = NewInvGuid, Name = "Letter From Home",
+                    Wcid = 12222u, ItemType = 0x2000u, ValidLocations = 0,
+                    ShortDesc = "Double-click to read.",
+                },
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Drudge",
+                    Wcid = 22u, ItemType = 0x200u, Distance = 1.0f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.InventoryItemAdded,
+            ItemGuid = NewInvGuid,
+            Name = "Letter From Home",
+        });
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        // Target must be the newly-acquired inventory item, NOT the corpse.
+        Assert.Equal(NewInvGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PicksNearestOpenable_WhenMultipleVisible()
+    {
+        // Within the openable set, pure distance wins (no
+        // corpse-vs-chest value judgment).
+        const uint NearCorpse = 0x5F000700;
+        const uint FarChest   = 0x70000800;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = FarChest, Name = "Treasure Chest", Wcid = 13007u,
+                    ItemType = 0x200u, Distance = 8.0f,
+                    IsOpenable = true, IsChest = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NearCorpse, Name = "Corpse of Drudge", Wcid = 22u,
+                    ItemType = 0x200u, Distance = 2.0f,
+                    IsOpenable = true, IsCorpse = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(NearCorpse, goal.Target.Guid);
+    }
+
     // ---- ItemTypeMasks.MeleeWeapon constant ----
 
     [Fact]
