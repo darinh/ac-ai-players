@@ -2141,11 +2141,18 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsInventoryUseRecentlyDispatched_OldUse_OutsideWindow_DoesNotMatch()
+    public void IsInventoryUseRecentlyDispatched_OldUse_SurvivesMixedKindNoise()
     {
-        // Push 30 unrelated events after the Use event so it falls
-        // out of the 30-event lookback (Recent(30) takes the 30
-        // newest, so the InvUsed at the head is no longer in scope).
+        // Regression for spike bot_invdedup01 (2026-05-30): the old
+        // implementation used Recent(30) (mixed-kind), so 30+
+        // intervening ServerMessage / LandblockChanged / NpcDialog
+        // events between two Use{Letter From Home} attempts evicted
+        // the InvUsed marker from the lookback window and the
+        // second Use went through. Live spike captured two
+        // successful Use{Letter From Home} dispatches with seven
+        // LLM kickoffs (~25 strategy events) between them. The fix
+        // uses RecentOfKind(InventoryItemUsed, 16) which is immune
+        // to noise from high-volume kinds.
         var es = new EventStream();
         es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
         for (int i = 0; i < 35; i++)
@@ -2155,6 +2162,30 @@ public class LlmGoalPolicyTests
                 Sequence = -1, Utc = DateTimeOffset.UtcNow,
                 Kind = EventKind.ServerMessage, Text = $"filler {i}",
             });
+        }
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Letter From Home" },
+        };
+        Assert.True(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_EvictedByLaterUseEvents_DoesNotMatch()
+    {
+        // The per-kind window IS bounded: 16 distinct InventoryItemUsed
+        // events after the original push it out. This is the
+        // intended behavior for consumables (potions, scrolls) —
+        // after 16 USE dispatches against other items, the bot may
+        // re-USE a consumable. Non-consumables (notes, letters) are
+        // typically USE'd once total per character so this never
+        // matters for them.
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+        for (int i = 0; i < 20; i++)
+        {
+            es.Append(InvUsed($"Other Item {i}", 9000u + (uint)i, 0x80001000u + (uint)i));
         }
         var goal = new Goal
         {

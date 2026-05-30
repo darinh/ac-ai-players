@@ -599,18 +599,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// re-USE block on those would be wrong.
     /// </summary>
     /// <remarks>
-    /// Window matches <see cref="IsGoalRecentlyRejected"/> (30 events
-    /// ≈ 10 LLM decisions). For non-consumable inventory (notes,
-    /// letters, tutorial items) this prevents the runaway loop.
-    /// For consumables (potions, scrolls) the bot can re-USE after
-    /// the 30-event window scrolls past, which is fine for the
-    /// current academy/M3 scope; M4+ may want a wall-clock window
-    /// or an "item still in inventory unchanged" predicate.
+    /// Uses <see cref="EventStream.RecentOfKind"/> with N=16 — pulls
+    /// only InventoryItemUsed events regardless of how many other
+    /// (high-volume) events have arrived since the dispatch.
+    ///
+    /// Original implementation used <c>Recent(30)</c> (mixed-kind)
+    /// to match <see cref="IsGoalRecentlyRejected"/>, but spike
+    /// bot_invdedup01 (2026-05-30) showed two <c>Use{Letter From
+    /// Home}</c> dispatches with seven LLM kickoffs between them;
+    /// the <c>InventoryItemUsed</c> marker from the first dispatch
+    /// had been evicted from the 30-event window by intervening
+    /// LandblockChanged / InventoryItemAdded / NpcDialog /
+    /// ServerMessage / GoalCompleted events. RecentOfKind is the
+    /// semantically correct primitive — "have I used this item in
+    /// the last 16 USE dispatches?" — and isolates the dedup from
+    /// noise in the event stream. The IsGoalRecentlyRejected mixed-
+    /// kind window stays at 30 because ActionRejected events are
+    /// frequent enough that a per-kind window would over-dedup.
+    ///
+    /// For non-consumable inventory (notes, letters, tutorial
+    /// items) this prevents the runaway loop. For consumables
+    /// (potions, scrolls) the bot can re-USE after 16 distinct USE
+    /// dispatches, which is fine for the current academy/M3 scope;
+    /// M4+ may want a wall-clock window or an "item still in
+    /// inventory unchanged" predicate.
     /// </remarks>
     internal static bool IsInventoryUseRecentlyDispatched(Goal goal, EventStream events)
     {
         if (goal.Kind != GoalKind.Use) return false;
-        const int LookbackEvents = 30;
+        const int LookbackUseEvents = 16;
 
         var targetName = goal.Target?.Name;
         var targetWcid = goal.Target?.Wcid;
@@ -624,10 +641,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return false;
         }
 
-        foreach (var ev in events.Recent(LookbackEvents))
+        foreach (var ev in events.RecentOfKind(EventKind.InventoryItemUsed, LookbackUseEvents))
         {
-            if (ev.Kind != EventKind.InventoryItemUsed) continue;
-
             if (itemWcid is uint iw && ev.Wcid == iw) return true;
             if (targetWcid is uint tw && ev.Wcid == tw) return true;
 
