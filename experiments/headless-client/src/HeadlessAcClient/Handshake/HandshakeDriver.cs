@@ -339,6 +339,10 @@ internal sealed class HandshakeDriver : IDisposable
         const int            MaxActionsPerSession = 100;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
+        // Diagnostic: throttle silent goal-kind fall-through logs to
+        // once per (kind, source) pair per session. See dispatcher
+        // fall-through branch later in this method.
+        var                  loggedFallthroughKinds = new HashSet<string>();
         // Slice V (#86) — autonomous picker activity surface. The
         // picker code paths below select + dispatch targets without
         // pushing IntentStack frames (that's the architectural smell
@@ -2603,6 +2607,34 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                     $"sent AP yaw={yaw:F3}rad pktSeq={apPacketSeq} fragSeq={apFragSeq} bytes={apSent}");
                             }
+                        }
+                    }
+                    else if (goal is not null)
+                    {
+                        // Diagnostic: goal kinds not covered by either
+                        // dispatch branch above (Explore at L2303,
+                        // Give/Use/Talk/Attack/Pickup at L2444) fall
+                        // through silently. The portal02 spike traced
+                        // a fallback step-3 Wield-loop bug to this
+                        // gap — without this log it took grep
+                        // archeology to identify which kind was being
+                        // swallowed. Throttled to once per (kind,
+                        // source) pair per session to avoid log spam
+                        // when the fallback genuinely cannot make
+                        // progress (e.g. step 3 repeat-firing on
+                        // dedup-window-aged unwielded gear).
+                        var fallthroughKey = $"{goal.Kind}|{goal.Source}";
+                        if (loggedFallthroughKinds.Add(fallthroughKey))
+                        {
+                            var tgtDesc = goal.Target is null
+                                ? "-"
+                                : ($"guid={(goal.Target.Guid is uint g ? $"0x{g:X8}" : "-")} " +
+                                   $"name={(goal.Target.Name ?? "-")}");
+                            Console.WriteLine(
+                                $"[strategy] goal kind={goal.Kind} unhandled " +
+                                $"(no dispatch path - target {tgtDesc}); " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\" " +
+                                $"(further occurrences this session suppressed)");
                         }
                     }
                 }

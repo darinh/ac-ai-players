@@ -127,17 +127,36 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"observed-hostile {hostile.Name} at d={hostile.Distance:F1}");
 
         // 3) Wield: any inventory item with ValidLocations set and not yet wielded.
+        //
+        // Symmetric dedup with steps 4/5b/5c/5d/6/6b: filter out guids
+        // already proposed in the recent window, and remember each new
+        // proposal. Without this, a Wield that the driver silently
+        // no-ops (Wield is NOT in the action-dispatch allowlist; the
+        // pickup→equip pipeline owns the only working wield path) AND
+        // that the server failed to actuate (e.g. PHASE6L
+        // GetAndWieldItem race losing to the slot-filled check) gets
+        // re-proposed every tick forever — starving steps 4/5b/5c/5d/6
+        // of CPU and blocking all downstream behaviour. portal02 spike
+        // smoking gun: Leather Cap 0x80000483 picked up at L2892,
+        // PHASE6L sent L2942, InventoryServerSaveFailed err=0 at L2950,
+        // NO WieldObject ever. From L3023 onward fallback re-proposed
+        // Wield{Cap} on every one of 24+ ticks; step 5d (Use Portal)
+        // never executed despite portal visible at d=12.6u.
         var unwielded = world.Inventory
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
+            .Where(i => !_recentProposedGuids.Contains(i.Guid))
             .OrderByDescending(i => i.ValidLocations) // weapons/armor first roughly
             .FirstOrDefault();
         if (unwielded is not null)
+        {
+            RememberProposed(unwielded.Guid);
             return MakeGoal(GoalKind.Wield,
                 new Selector { Name = "self" }, // wield target is the bot
                 new Selector { Guid = unwielded.Guid, Name = unwielded.Name, Wcid = unwielded.Wcid },
                 priority: 6,
                 rationale: $"unwielded gear in inventory: {unwielded.Name}");
+        }
 
         // 4) Pickup: nearest pickup-eligible (by ItemType mask) on the ground.
         var pickup = world.Visible

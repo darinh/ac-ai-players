@@ -901,6 +901,65 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void NoQuestKnowledgePolicy_DoesNotProposeSameUnwieldedGearTwiceInARow()
+    {
+        // Regression for the portal02-spike bug: a wearable that the
+        // server fails to actuate (PHASE6L GetAndWieldItem raced the
+        // PUTITEMINCONTAINER ack and was rejected; WieldedAt stays
+        // null) leaves step 3 (Wield) firing every tick forever.
+        // Because the HandshakeDriver dispatcher has no Wield branch
+        // in its action allowlist, the goal is silently no-op'd and
+        // the picker takes over — meaning later steps (4 Pickup, 5b
+        // openable, 5c lifestone, 5d portal, 6 Talk) never run.
+        //
+        // Symmetric dedup with step 4 Pickup must apply: emit Wield
+        // once for the item, remember it, then fall through on
+        // subsequent ticks so downstream steps can fire.
+        const uint UnwieldedCapGuid = 0x80000483;
+        const uint VisibleNpcGuid   = 0x80000700;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = UnwieldedCapGuid, Name = "Leather Cap", Wcid = 13239u,
+                    ItemType = 0x2u, ValidLocations = 0x1u, WieldedAt = null,
+                },
+            },
+            Visible = new[]
+            {
+                // Provide a non-Wield candidate so the second-tick
+                // proposal is unambiguous (would be Talk via step 6).
+                new VisibleObjectProjection
+                {
+                    Guid = VisibleNpcGuid, Name = "Society Greeter",
+                    Wcid = 700u, ItemType = 0x10u, Distance = 4.0f,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Wield, first!.Kind);
+        Assert.Equal(UnwieldedCapGuid, first.Item!.Guid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        // Second tick: cap is in _recentProposedGuids → step 3 must
+        // skip it, allowing step 6 (Talk) to fire on the NPC.
+        Assert.NotEqual(GoalKind.Wield, second!.Kind);
+    }
+
+    [Fact]
     public void NoQuestKnowledgePolicy_PrefersPickup_OverOpenable_BothVisible()
     {
         // Step 4 (Pickup) runs BEFORE Step 5b (Openable). A pickup-mask
