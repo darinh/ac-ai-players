@@ -20,6 +20,17 @@ internal interface IGoalPolicy
     string Source { get; }
 
     /// <summary>
+    /// True iff the policy currently has an asynchronous decision
+    /// pending (e.g. LlmGoalPolicy waiting on an HTTP response).
+    /// Callers in the Motor layer use this to defer their own
+    /// fallback decisions while Strategy is deliberating, so an
+    /// in-flight LLM call isn't bypassed by the schema-only picker.
+    /// Default-impl returns false for synchronous policies like
+    /// NoQuestKnowledgePolicy.
+    /// </summary>
+    bool HasInflight => false;
+
+    /// <summary>
     /// Propose the next goal given the current world state and
     /// event-stream observations. May return null to mean "no
     /// goal change; keep doing what you're doing". May return the

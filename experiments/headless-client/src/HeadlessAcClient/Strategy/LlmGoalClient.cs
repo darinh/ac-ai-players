@@ -22,6 +22,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -35,7 +36,14 @@ namespace HeadlessAcClient.Strategy;
 internal sealed class LlmGoalClient
 {
     private const string DefaultEndpoint = "https://models.github.ai/inference/chat/completions";
-    private const string DefaultModel    = "openai/gpt-4o-mini";
+
+    // meta/llama-3.3-70b-instruct verified working on GitHub Models
+    // (flexguid01-run-01 spike: 12/20 LLM kickoffs succeeded). The
+    // previous default `openai/gpt-4o-mini` is chronically 429-rate-
+    // limited on the same endpoint — every spike using it burned the
+    // Slice T backoff window within the first call. Override via
+    // AC_BOTS_LLM_MODEL env var if you need a specific model.
+    private const string DefaultModel    = "meta/llama-3.3-70b-instruct";
 
     private readonly HttpClient _http;
     private readonly string _endpoint;
@@ -108,7 +116,30 @@ internal sealed class LlmGoalClient
         sw.Stop();
 
         if (!resp.IsSuccessStatusCode)
-            return new LlmResult(false, "", raw, (int)sw.ElapsedMilliseconds, $"http {(int)resp.StatusCode}: {resp.ReasonPhrase}");
+        {
+            // Capture HTTP status + (for 429) the server's Retry-After
+            // hint. The Retry-After header on a 429 may be either a
+            // delta-seconds integer (`Retry-After: 8`) or an HTTP-date.
+            // resp.Headers.RetryAfter exposes both via RetryConditionHeaderValue
+            // (Delta vs Date). We translate to a TimeSpan if present and
+            // non-negative; LlmGoalPolicy decides how to weight it.
+            TimeSpan? retryAfter = null;
+            var ra = resp.Headers.RetryAfter;
+            if (ra is not null)
+            {
+                if (ra.Delta is { } delta && delta > TimeSpan.Zero)
+                    retryAfter = delta;
+                else if (ra.Date is { } when)
+                {
+                    var diff = when - DateTimeOffset.UtcNow;
+                    if (diff > TimeSpan.Zero) retryAfter = diff;
+                }
+            }
+            return new LlmResult(false, "", raw, (int)sw.ElapsedMilliseconds,
+                $"http {(int)resp.StatusCode}: {resp.ReasonPhrase}",
+                StatusCode: resp.StatusCode,
+                RetryAfter: retryAfter);
+        }
 
         try
         {
@@ -169,4 +200,11 @@ internal sealed class LlmGoalClient
     }
 }
 
-internal sealed record LlmResult(bool Ok, string Content, string RawResponse, int LatencyMs, string? Error);
+internal sealed record LlmResult(
+    bool Ok,
+    string Content,
+    string RawResponse,
+    int LatencyMs,
+    string? Error,
+    HttpStatusCode? StatusCode = null,
+    TimeSpan? RetryAfter = null);

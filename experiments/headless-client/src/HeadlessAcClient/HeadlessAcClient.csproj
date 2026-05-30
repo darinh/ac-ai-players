@@ -16,6 +16,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\..\services-common\src\AcAiPlayers.ServicesClient\AcAiPlayers.ServicesClient.csproj" />
+    <ProjectReference Include="..\..\..\world-nav\src\AcAiPlayers.WorldNav\AcAiPlayers.WorldNav.csproj" />
   </ItemGroup>
 
   <ItemGroup>

@@ -27,5 +27,13 @@ node_modules/
 # Local-only: agent worktrees (see .github/skills/create-new-branch)
 .worktrees/
 
+# Local-only: Copilot CLI session state (per-machine agent scratch)
+.copilot/
+
 # Local-only: headless-client telemetry sinks (LLM decisions + nav graph)
+# Source lives in the worktrees.
 experiments/headless-client/data/
+
+# Local-only: regeneratable output from WorldNavBuilder. Reference
+# outputs live in experiments/world-nav/reference/ instead.
+experiments/world-nav/data/

@@ -28,6 +28,9 @@ using System.Threading.Tasks;
 using HeadlessAcClient.Crypto;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
+
+using AcAiPlayers.WorldNav;
 using HeadlessAcClient.Tactics;
 using HeadlessAcClient.World;
 
@@ -58,16 +61,27 @@ internal sealed class HandshakeDriver : IDisposable
     private readonly string _account;
     private readonly string _password;
     private readonly string _characterName;
+    private readonly Strategy.IndoorNavService _indoorNav;
+    /// <summary>
+    /// Phase 3.1 — per-session fog-of-war: indoor cells the bot has
+    /// directly perceived (its own cell, or any cell containing an
+    /// observed object). The indoor pathfinder uses this set to
+    /// restrict A* expansion so the bot never plans through cells
+    /// it hasn't seen, matching the project rule "static GEOMETRY
+    /// may be pre-loaded but dynamic content stays discovery-only".
+    /// </summary>
+    private readonly HashSet<uint> _seenIndoorCells = new();
 
     private Socket? _socket;
 
-    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null)
+    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null, Strategy.IndoorNavService? indoorNav = null)
     {
         _serverPort0 = new IPEndPoint(host, port);
         _serverPort1 = new IPEndPoint(host, port + 1);
         _account = account;
         _password = password;
         _characterName = string.IsNullOrWhiteSpace(characterName) ? "Headless01" : characterName;
+        _indoorNav = indoorNav ?? new Strategy.IndoorNavService();
     }
 
     public async Task<HandshakeResult> RunAsync(CancellationToken ct)
@@ -325,6 +339,16 @@ internal sealed class HandshakeDriver : IDisposable
         const int            MaxActionsPerSession = 100;
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
+        // Slice V (#86) — autonomous picker activity surface. The
+        // picker code paths below select + dispatch targets without
+        // pushing IntentStack frames (that's the architectural smell
+        // ac-ai-players#86 will eventually fix). Until then, we
+        // publish a single nullable PickerActivity record to the
+        // LLM's prompt so the LLM can SEE what the picker is auto-
+        // driving and decide whether to take strategic control by
+        // emitting an explicit per-cycle goal. Set on candidate
+        // selection, cleared when the picker picks nothing.
+        PickerActivity? pickerActivityCurrent = null;
         // Phase 6l — pickup→equip handoff. When PutItemInContainer is
         // sent for a wearable item, we stash (itemGuid → equipLocation
         // bitmask) here. On InventoryPutObjInContainer arrival for the
@@ -440,10 +464,54 @@ internal sealed class HandshakeDriver : IDisposable
         // files). The graph is global across sessions, characters
         // and accounts; the LLM/planner can query it for routes.
         var navGraph = new NavGraph();
+        // Slice R wiring — the strategic intent stack persists across
+        // LLM deliberations. The LLM authors push/pop/replace ops in
+        // its response; the bot's per-tick code (below) checks the
+        // TOP for completion via predicate evaluation and pops it
+        // automatically when satisfied. BotStatistics is the lifetime
+        // monotonic counter feeding the stats-based predicates
+        // (kill_count_total_at_least, levels_gained_total_at_least,
+        // units_traveled_since_push_at_least, etc.).
+        var intentStack = new IntentStack();
+        var intentIds   = new IntentIdAllocator();
+        var botStats    = new BotStatistics();
+
+        // Slice 0 (Hunt) — operator-pushed initial intent. Read at
+        // startup; pushed on the first tick where a real projection
+        // is available so the IntentBaseline captures real data
+        // (push-with-empty-projection would leave the baseline
+        // counters at zero and corrupt since-push predicates).
+        //
+        // Supported values (case-insensitive): "Hunt". Anything
+        // else logs a warning and is ignored. Env var, not CLI flag,
+        // to match the AC_BOTS_* convention (AC_BOTS_LLM_DISABLE,
+        // AC_BOTS_API_TOKEN, AC_BOTS_LLM_ENDPOINT, AC_BOTS_LLM_MODEL).
+        var initialIntentRaw = Environment.GetEnvironmentVariable("AC_BOTS_INITIAL_INTENT");
+        var pendingInitialIntentKind = string.IsNullOrWhiteSpace(initialIntentRaw)
+            ? null
+            : initialIntentRaw.Trim();
+        bool initialIntentPushed = false;
+        if (pendingInitialIntentKind is not null &&
+            !string.Equals(pendingInitialIntentKind, "Hunt", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[intent-stack] warning: AC_BOTS_INITIAL_INTENT='{initialIntentRaw}' is not a recognised intent kind (supported: Hunt) — ignored");
+            pendingInitialIntentKind = null;
+        }
+        else if (pendingInitialIntentKind is not null)
+        {
+            Console.WriteLine($"[intent-stack] AC_BOTS_INITIAL_INTENT={pendingInitialIntentKind} queued for first-tick push (operator-authorised)");
+        }
+
         IGoalPolicy goalPolicy;
+        // Slice V (#86): if the active policy is LlmGoalPolicy, hold
+        // an extra typed reference so the picker can publish its
+        // autonomous activity into the LLM prompt. NoQuestKnowledgePolicy
+        // is unaffected (the schema-only fallback doesn't render an
+        // LLM prompt).
+        LlmGoalPolicy? llmPolicyForPickerSurface = null;
         if (llmDisabled)
         {
-            goalPolicy = new NoQuestKnowledgePolicy();
+            goalPolicy = new NoQuestKnowledgePolicy(intentStack);
             Console.WriteLine("[strategy] AC_BOTS_LLM_DISABLE=1 -> LLM disabled, using NoQuestKnowledgePolicy fallback only");
         }
         else
@@ -451,13 +519,15 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                goalPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink);
-                Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint})");
+                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack), weenies, trainingSink, intentStack, intentIds);
+                goalPolicy = llmPolicy;
+                llmPolicyForPickerSurface = llmPolicy;
+                Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[strategy] LlmGoalClient unavailable ({ex.GetType().Name}: {ex.Message}); using NoQuestKnowledgePolicy fallback only");
-                goalPolicy = new NoQuestKnowledgePolicy();
+                goalPolicy = new NoQuestKnowledgePolicy(intentStack);
             }
         }
         var eventStream = new EventStream();
@@ -481,6 +551,16 @@ internal sealed class HandshakeDriver : IDisposable
         // cleared during the move. Cleared by the cooldown-reset
         // block alongside motionTarget / useSent / etc.
         GoalKind? lockedGoalKind = null;
+
+        // M1.6+ — schema-vs-LLM race fix. When LlmGoalPolicy has a
+        // call in flight, the schema-only picker at the bottom of
+        // the AP block must defer so the LLM result isn't bypassed
+        // by a hasty nearest-named lock. Safety timeout
+        // (MaxLlmDeferralSec) caps the wait so a stuck network
+        // call can't park the bot forever — past the cap, the
+        // schema-only picker fires as a fallback.
+        DateTime?            llmInflightSince = null;
+        const int            MaxLlmDeferralSec = 4;
 
         // Phase 6 — first goal-directed motion. Locked at the AP send
         // boundary if a named-snapshot is in range. The chosen target
@@ -510,9 +590,30 @@ internal sealed class HandshakeDriver : IDisposable
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         int                  walkTickAps = 0;
+        // Slice S — blocked-motion detection state. Tracked across
+        // walk ticks within a single motion lock; reset whenever the
+        // lock is released (see ResetMotion block).
+        Vector3?             prevSelfBeforeAp = null;
+        float                prevExpectedStepLen = 0f;
+        int                  consecutiveBlockedTicks = 0;
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
+        // Phase 3.1 — indoor-nav path-following state. Once per motion
+        // lock we attempt to plan a collision-aware path through the
+        // static indoor mesh; if that succeeds, the walk-tick steps
+        // through Waypoints rather than aiming straight at the target.
+        // motionIndoorPathAttempted is the "tried once" gate (we don't
+        // re-plan every tick — Phase 3.2 may add replan triggers).
+        IReadOnlyList<IndoorWaypoint>? motionIndoorPath = null;
+        int                     motionIndoorPathIndex = 0;
+        IReadOnlySet<uint>?     motionIndoorPathCells = null;
+        bool                    motionIndoorPathAttempted = false;
+        // Door-USE dispatch tracking: per-door cooldown so we don't
+        // spam USE on the same door every walk-tick while waiting for
+        // it to open. Keyed by door object guid; value is the wall-
+        // clock tick we last dispatched USE.
+        var doorUseDispatchedAt = new Dictionary<uint, DateTime>();
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -550,9 +651,43 @@ internal sealed class HandshakeDriver : IDisposable
         // must advance at the same rate or motion-done detection drifts.
         const float          WalkSpeedUnitsPerSec = 5.0f;
         const int            MotionWallClockTimeoutSec = 30;
+        // Slice S — blocked-motion detection. Server-authoritative
+        // walkSelf.Position is updated by UpdatePosition packets from
+        // the server. After we send an AP(intent), if the server's
+        // next reported position has barely advanced from where we
+        // were before sending — well under the step we requested —
+        // server physics is clamping us against something (wall,
+        // closed door, mob, NPC, geometry). Stop after a short run
+        // of blocked ticks and surface ActionRejected so strategy
+        // re-deliberates instead of (a) continuing to send APs the
+        // server keeps clamping and (b) eventually drifting through
+        // the obstacle via accumulated AP creep. No hardcoded
+        // geometry: the detector only consumes server-reported self
+        // position, which is the same signal a real player's local
+        // physics engine consumes.
+        const float          BlockedMoveRatioThreshold = 0.25f;
+        const int            BlockedConsecutiveTicks   = 3;
+        const float          BlockedMinExpectedStep    = 0.30f;
+        // Slice Q — corpse loot extraction. After the bot opens a
+        // corpse via USE, the server emits ObjectCreate for each
+        // contained item with ContainerGuid=corpse.Guid and NO world
+        // Position. WithinRadius can't see them; we dispatch
+        // PUTITEMINCONTAINER directly. Tracker is proximity-gated:
+        // we store the player's XY position at open time and only
+        // loot when the bot has not wandered >LootContainerProximityRadius
+        // away. TTL bounds memory + handles the case where a corpse
+        // decays server-side without us hearing about it.
+        const int            LootContainerTtlSec = 90;
+        const float          LootContainerProximityRadius = 5.0f;
+        // PickupItemTypeMask (0xD96F) plus Misc (0x80) for trophy
+        // items (claws, teeth, etc.) which standard pickup excludes
+        // because Misc collides with Door — but inside a corpse the
+        // door false-positive risk vanishes.
+        const uint           LootItemTypeMask = 0xD9EF;
         CharacterEnterWorldServerReadyMessage? enterWorldServerReady = null;
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
+        var  recentlyOpenedContainers = new Dictionary<uint, (DateTime OpenedAt, Vector3 OpenedAtPos)>();
 
         // Multi-fragment messages (ObjectCreate for players with active
         // motion, LoginCompletion GameEvent, etc.) split across multiple
@@ -909,6 +1044,48 @@ internal sealed class HandshakeDriver : IDisposable
                                     Name = sourceSnap?.Name ?? tell.SenderName,
                                 });
                             }
+                            // Slice M — quest book / scroll / parchment
+                            // contents. The server returns this when the
+                            // bot Uses a Book itemType. Surface the full
+                            // page text (concatenated) so the LLM can
+                            // read quest directions, coordinates, item
+                            // lists the same way a player would. We
+                            // capture every BookDataResponse — the
+                            // LlmGoalPolicy section dedupes by BookId
+                            // newest-first so repeats don't bloat the
+                            // prompt.
+                            if (ge.Payload?.BookDataResponse is { } book)
+                            {
+                                var sb = new System.Text.StringBuilder();
+                                if (!string.IsNullOrEmpty(book.Inscription))
+                                    sb.AppendLine($"[Inscription] {book.Inscription}");
+                                for (int pi = 0; pi < book.Pages.Count; pi++)
+                                {
+                                    var pg = book.Pages[pi];
+                                    if (!pg.TextIncluded || pg.PageText is null) continue;
+                                    if (book.Pages.Count > 1)
+                                        sb.Append($"[Page {pi + 1}/{book.Pages.Count}] ");
+                                    sb.AppendLine(pg.PageText.Replace("\r", ""));
+                                }
+                                var bookText = sb.ToString().Trim();
+                                if (bookText.Length > 0)
+                                {
+                                    // Try to recover a human-readable
+                                    // book name from the WorldState (the
+                                    // ObjectCreate that delivered the
+                                    // book should have populated it).
+                                    var bookSnap = worldState.TryGet(book.BookId);
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.BookText,
+                                        ItemGuid = book.BookId,
+                                        Name = bookSnap?.Name ?? book.AuthorName ?? $"book-0x{book.BookId:X8}",
+                                        Text = bookText,
+                                    });
+                                }
+                            }
                             // Phase 6n — wield ack: mark the slot mask
                             // and the wcid as satisfied so the picker
                             // stops chasing duplicate copies of the
@@ -927,6 +1104,36 @@ internal sealed class HandshakeDriver : IDisposable
                                     var wieldedSnap = worldState.TryGet(wieldAck.ItemGuid);
                                     if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
                                         satisfiedWeenieClasses.Add(wc2);
+                                }
+                                // Slice H follow-up: WieldObject is the only
+                                // notification the server sends when an item
+                                // transitions from inventory to equipped. The
+                                // server does NOT re-broadcast an ObjectCreate
+                                // for the item, so WorldObjectSnapshot's
+                                // CurrentWieldedLocation / WielderGuid stay at
+                                // their last-ObjectCreate values (typically
+                                // null/null for an inventory item) forever.
+                                // The LLM Combat readiness section reads
+                                // WieldedAt to decide if the bot is armed -
+                                // without this update, `weapon: NOT wielded`
+                                // is reported even right after we wield the
+                                // starter Spadone, blocking any Attack.
+                                //
+                                // IMPORTANT: do NOT null ContainerGuid here.
+                                // The WorldStateProjection inventory filter
+                                // is `ContainerGuid == selfGuid`. A wielded
+                                // item is still carried by the character, so
+                                // it must remain in the inventory projection
+                                // with WieldedAt populated. Nulling
+                                // ContainerGuid drops the item from inventory
+                                // entirely and `weapon: wielded` never fires
+                                // (run-02 regression).
+                                var equippedSnap = worldState.TryGet(wieldAck.ItemGuid);
+                                if (equippedSnap is not null)
+                                {
+                                    equippedSnap.CurrentWieldedLocation = wieldAck.NewLocation;
+                                    if (worldState.SelfGuid is uint sg)
+                                        equippedSnap.WielderGuid = sg;
                                 }
                                 Console.WriteLine(
                                     $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
@@ -991,14 +1198,92 @@ internal sealed class HandshakeDriver : IDisposable
                             // OutOfRange, NotMeleeWeapon (we have
                             // none — unarmed should still work),
                             // YouCanNotAttackThisCreature, SkillTooLow.
+                            //
+                            // Slice H — surface non-zero AttackDone as an
+                            // ActionRejected event so the LLM can pivot
+                            // (e.g. wrong target classification → switch
+                            // verb / target). Without this the bot can
+                            // sit in the 60s no-damage stall after a bad
+                            // Attack goal with no learning signal.
                             if (ge.Payload?.AttackDone is { } atkDone)
                             {
                                 if (atkDone.ErrorCode != 0)
                                 {
+                                    var attackLabel = WeenieErrorLabels.Label(atkDone.ErrorCode);
                                     Console.WriteLine(
                                         $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
-                                        $"({WeenieErrorLabels.Label(atkDone.ErrorCode)})");
+                                        $"({attackLabel})");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"Attack rejected: {attackLabel}",
+                                        ErrorCode = atkDone.ErrorCode,
+                                        ErrorLabel = attackLabel,
+                                    });
                                 }
+                            }
+                            // M1.5 — surface WeenieErrorWithString
+                            // to the EventStream as an ActionRejected
+                            // event so the LLM can see the rejection
+                            // and pivot. Otherwise the LLM keeps
+                            // re-emitting the same Give/Use goal
+                            // forever (Society Greeter refusing the
+                            // Calling Stone with TradeAiDoesntWant
+                            // observed in stalefix-run-01). The
+                            // rubber-duck pass said skip the
+                            // deterministic anti-repeat gate for
+                            // now; the prompt + currentGoal drop in
+                            // LlmGoalPolicy is the minimal mechanical
+                            // repair.
+                            if (ge.Payload?.WeenieErrorWithString is { } wewe &&
+                                wewe.ErrorCode != 0)
+                            {
+                                var label = WeenieErrorLabels.Label(wewe.ErrorCode);
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.ActionRejected,
+                                    Text = wewe.Message,
+                                    ErrorCode = wewe.ErrorCode,
+                                    ErrorLabel = label,
+                                });
+                            }
+                            // Slice J — InventoryServerSaveFailed
+                            // surfaces as ActionRejected so the LLM
+                            // and fallback policy can both avoid the
+                            // failing item (e.g. pickup of an apple
+                            // the bot can't physically reach). The
+                            // ItemGuid identifies the target item so
+                            // the policy can dedupe by guid, not by
+                            // verb/name.
+                            if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
+                                isf.ErrorType != 0)
+                            {
+                                var invLabel = WeenieErrorLabels.Label(isf.ErrorType);
+                                // Look up the item's name from the
+                                // visible-world snapshot so the LLM
+                                // sees a human-readable rejection.
+                                string? isfName = null;
+                                if (worldState.Self is WorldObjectSnapshot isfSelf)
+                                {
+                                    isfName = worldState.WithinRadius(isfSelf, 999f)
+                                        .FirstOrDefault(s => s.Guid == isf.ItemGuid)?.Name;
+                                }
+                                isfName ??= "(unknown)";
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.ActionRejected,
+                                    Text = $"Inventory action failed on '{isfName}': {invLabel}",
+                                    ItemGuid = isf.ItemGuid,
+                                    Name = isfName,
+                                    ErrorCode = isf.ErrorType,
+                                    ErrorLabel = invLabel,
+                                });
                             }
                             break;
                         case PrivateUpdatePropertyIntMessage pup:
@@ -1652,6 +1937,20 @@ internal sealed class HandshakeDriver : IDisposable
                     useSentAt = null;
                     lastSentWaypointPos = null;
                     walkTickAps = 0;
+                    // Slice S — clear blocked-motion bookkeeping so
+                    // a fresh lock starts with a clean slate (the
+                    // previous lock may have ended in a "stuck on
+                    // wall" state we don't want to inherit).
+                    prevSelfBeforeAp = null;
+                    prevExpectedStepLen = 0f;
+                    consecutiveBlockedTicks = 0;
+                    // Phase 3.1 — wipe the indoor-path cache so the
+                    // next motion lock plans a fresh path from the
+                    // bot's new position.
+                    motionIndoorPath = null;
+                    motionIndoorPathIndex = 0;
+                    motionIndoorPathCells = null;
+                    motionIndoorPathAttempted = false;
                     pendingGiveItemGuid = null;
                     lockedGoalKind = null;
 
@@ -1660,6 +1959,175 @@ internal sealed class HandshakeDriver : IDisposable
                         Console.WriteLine(
                             $"[motion] max actions per session ({MaxActionsPerSession}) reached; staying idle until observation window closes");
                     }
+                    }
+                }
+
+                // Slice Q — Container loot extraction pre-emptor.
+                // Runs BEFORE the LLM pre-emptor and the schema
+                // picker so that loot inside a freshly-opened corpse
+                // always wins over the next walking target. Slice P
+                // ensures the bot walks to the corpse and USEs it;
+                // the server then spawns ObjectCreate messages for
+                // each contained item with ContainerGuid=corpse.Guid
+                // and NO world Position. WithinRadius is position-
+                // based and excludes these items — they are
+                // invisible to the standard picker. This block
+                // scans for items inside any recently-opened corpse
+                // that the bot is still adjacent to (proximity-
+                // gated to ~5u) and dispatches PUTITEMINCONTAINER
+                // immediately, with NO walk (we just walked to the
+                // corpse and have not moved since). After dispatch
+                // we synthesize motion state so the post-action
+                // reset cascade (HandshakeDriver.cs ~L1759) fires
+                // after PostActionCooldownSec, marking the loot
+                // item visited and clearing motionTarget so the
+                // next pre-emptor iteration picks the NEXT item.
+                if (!autonomousPositionSent &&
+                    !useSent &&
+                    motionTarget is null &&
+                    combatTargetGuid is null &&
+                    actionsCompleted < MaxActionsPerSession &&
+                    loginCompleteSent &&
+                    !loginCompleteResendNeeded &&
+                    loginCompletePacketIndex >= 0 &&
+                    (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
+                    worldState.Self is WorldObjectSnapshot lootSelf &&
+                    lootSelf.CellId is uint lootSelfCell &&
+                    lootSelfCell != 0)
+                {
+                    // Evict TTL-stale tracked corpses.
+                    var lootCutoff = DateTime.UtcNow.AddSeconds(-LootContainerTtlSec);
+                    var lootToEvict = new List<uint>();
+                    foreach (var lkv in recentlyOpenedContainers)
+                    {
+                        if (lkv.Value.OpenedAt < lootCutoff)
+                            lootToEvict.Add(lkv.Key);
+                    }
+                    foreach (var lk in lootToEvict)
+                        recentlyOpenedContainers.Remove(lk);
+
+                    if (recentlyOpenedContainers.Count > 0)
+                    {
+                        // Build the set of corpse guids the bot is
+                        // still standing next to. A bot that has
+                        // wandered away from a corpse cannot be
+                        // sending PUT against items inside it (server
+                        // would reject; worse, in retail AC the
+                        // container auto-closes on player movement).
+                        var nearbyContainers = new HashSet<uint>();
+                        foreach (var lkv in recentlyOpenedContainers)
+                        {
+                            var dxL = lkv.Value.OpenedAtPos.X - lootSelf.Position.X;
+                            var dyL = lkv.Value.OpenedAtPos.Y - lootSelf.Position.Y;
+                            var distLootXY = MathF.Sqrt(dxL * dxL + dyL * dyL);
+                            if (distLootXY <= LootContainerProximityRadius)
+                                nearbyContainers.Add(lkv.Key);
+                        }
+
+                        if (nearbyContainers.Count > 0)
+                        {
+                            // First unlooted, loot-eligible item
+                            // inside any nearby container. Order by
+                            // guid for deterministic per-cycle
+                            // selection across multi-item loots.
+                            var lootItem = worldState.Objects.Values
+                                .Where(s => s.Guid != lootSelf.Guid)
+                                .Where(s => s.ContainerGuid is uint c && nearbyContainers.Contains(c))
+                                .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                                .Where(s => s.ItemType is uint t && (t & LootItemTypeMask) != 0)
+                                .OrderBy(s => s.Guid)
+                                .FirstOrDefault();
+
+                            if (lootItem is not null)
+                            {
+                                var lootPktSeq  = nextOutboundPacketSequence++;
+                                var lootFragSeq = nextOutboundFragmentSequence++;
+                                var lootBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                                var lootLen = GameActionPutItemInContainerMessage.Pack(
+                                    lootBuf,
+                                    itemGuid:      lootItem.Guid,
+                                    containerGuid: chosenCharacterGuid,
+                                    placement:     0);
+                                var lootMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    lootMsg.AddAckSequence(lastReceivedSeq);
+                                lootMsg.AddBlobFragment(
+                                    fragSequence: lootFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: lootBuf.AsSpan(0, lootLen));
+                                var lootSent = lootMsg.Pack(sendBuf, myClientId,
+                                                            sequence: lootPktSeq, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, lootSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                                // Hook the existing wearable equip
+                                // pipeline. If the loot is wearable
+                                // (ValidLocations != 0), the inventory
+                                // ack path will dispatch GetAndWieldItem
+                                // and the bot auto-equips upgraded gear.
+                                if (lootItem.ValidLocations is uint lvl && lvl != 0)
+                                {
+                                    var lEquipLoc = lvl & (~lvl + 1);
+                                    pendingEquip[lootItem.Guid] = lEquipLoc;
+                                    if (lootItem.WeenieClassId is uint lwc)
+                                        pendingEquipWcid[lootItem.Guid] = lwc;
+                                }
+
+                                Console.WriteLine(
+                                    $"[loot] Slice Q PUTITEMINCONTAINER (no walk): " +
+                                    $"item=0x{lootItem.Guid:X8} name='{lootItem.Name}' " +
+                                    $"itemType=0x{lootItem.ItemType ?? 0:X} " +
+                                    $"sourceContainer=0x{lootItem.ContainerGuid ?? 0:X8} " +
+                                    $"destContainer=0x{chosenCharacterGuid:X8} " +
+                                    $"payload={lootLen}B pktSeq={lootPktSeq} fragSeq={lootFragSeq} totalBytes={lootSent}");
+
+                                // Synthesize motion state. The post-
+                                // action reset cascade owns the
+                                // visitedTargetGuids.Add and gate
+                                // clear — set useSent=true so it
+                                // fires after PostActionCooldownSec.
+                                // Set autonomousPositionSent /
+                                // moveToStateStart / moveToStateStop
+                                // / motionDone so the AP-send, MS-
+                                // start, walk-tick, MS-stop and
+                                // dispatch blocks all skip on this
+                                // tick.
+                                motionTarget = lootItem;
+                                autonomousPositionSent = true;
+                                moveToStateStartSent = true;
+                                moveToStateStopSent = true;
+                                motionDone = true;
+                                motionStartedAt = DateTime.UtcNow;
+                                motionStoppedAt = DateTime.UtcNow;
+                                motionLockedCellId = lootSelfCell;
+                                useSent = true;
+                                useSentAt = DateTime.UtcNow;
+                            }
+                            else
+                            {
+                                // Pre-empt couldn't loot anything
+                                // in the nearby containers. Either
+                                // they're empty or all items have
+                                // been visited. Untrack now to keep
+                                // the dict small and avoid repeated
+                                // proximity scans of an empty corpse
+                                // for the rest of TTL.
+                                foreach (var nearbyCorpse in nearbyContainers)
+                                {
+                                    var anyLeftInside = worldState.Objects.Values.Any(s =>
+                                        s.ContainerGuid is uint c && c == nearbyCorpse &&
+                                        !visitedTargetGuids.Contains(s.Guid));
+                                    if (!anyLeftInside)
+                                    {
+                                        recentlyOpenedContainers.Remove(nearbyCorpse);
+                                        Console.WriteLine(
+                                            $"[loot] corpse 0x{nearbyCorpse:X8} fully looted / empty — untracking");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1709,6 +2177,82 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     var projection = WorldStateProjection.FromWorldState(
                         worldState, weenies, visibleRadius: 60f, maxVisible: 32);
+                    // Slice R wiring — pump lifetime stat counters and
+                    // check the top of the intent stack for completion
+                    // BEFORE the policy deliberates. If the predicate
+                    // pops the top this tick, the next prompt will
+                    // render the new top and the LLM picks up. Also
+                    // synthesize a GoalCompleted event so HasNewSalient
+                    // fires on the next ProposeGoal poll.
+                    if (projection is not null)
+                    {
+                        botStats.Pump(eventStream, projection);
+
+                        // Slice 0 (Hunt) — push operator-authorised
+                        // initial intent on the first tick where a
+                        // projection is available. Baseline.Capture
+                        // needs real world+events data so since-push
+                        // predicates (units_traveled_since_push etc.)
+                        // start counting from a meaningful zero.
+                        //
+                        // Pushed once and only once: the flag is
+                        // never reset. If the operator wants to
+                        // re-arm, they restart the spike. If the
+                        // LLM pops the intent, that's a deliberate
+                        // strategic decision — code does NOT
+                        // re-push behind the LLM's back.
+                        if (!initialIntentPushed &&
+                            pendingInitialIntentKind is not null &&
+                            intentStack.IsEmpty)
+                        {
+                            var baseline = IntentBaseline.Capture(
+                                projection, eventStream, DateTime.UtcNow, botStats);
+                            var initial = new Strategy.Intent.Intent
+                            {
+                                Id = intentIds.Allocate(),
+                                Kind = pendingInitialIntentKind,
+                                Rationale = $"operator-supplied initial intent (AC_BOTS_INITIAL_INTENT={pendingInitialIntentKind})",
+                                Completion = new AlwaysFalsePredicate(),
+                                Baseline = baseline,
+                                Status = IntentLifecycle.Active,
+                            };
+                            var pushResult = intentStack.TryPush(initial);
+                            if (pushResult == StackOpResult.Ok)
+                            {
+                                initialIntentPushed = true;
+                                Console.WriteLine(
+                                    $"[intent-stack] operator push: id={initial.Id} kind={initial.Kind} " +
+                                    $"revision_now={intentStack.Revision} depth_now={intentStack.Depth}");
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[intent-stack] operator push REJECTED: kind={initial.Kind} " +
+                                    $"result={pushResult}");
+                                // Never retry — if the first push failed
+                                // there's something structurally wrong;
+                                // re-trying every tick would spam logs.
+                                initialIntentPushed = true;
+                            }
+                        }
+
+                        var poppedTop = intentStack.CheckTopForCompletion(
+                            projection, eventStream, DateTime.UtcNow, botStats);
+                        if (poppedTop is not null)
+                        {
+                            Console.WriteLine(
+                                $"[intent-stack] auto-popped id={poppedTop.Id} kind={poppedTop.Kind} " +
+                                $"status={poppedTop.Status} revision_now={intentStack.Revision} " +
+                                $"depth_now={intentStack.Depth}");
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0, // overwritten by Append
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.GoalCompleted,
+                                Text = $"IntentCompleted id={poppedTop.Id} kind={poppedTop.Kind} status={poppedTop.Status}",
+                            });
+                        }
+                    }
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
                     // Allowlist:
                     //   - Give: walk to NPC, deliver item from bag.
@@ -1738,7 +2282,159 @@ internal sealed class HandshakeDriver : IDisposable
                     //     (e.g. Talk{name="Jonathan"}) actually drive
                     //     motion instead of falling through to the
                     //     nearest-named picker.
-                    if (goal is not null &&
+                    //   - Explore: PRE-EMPTED. We synthesize a target
+                    //     by picking the farthest visible non-self
+                    //     object the bot hasn't recently visited, then
+                    //     walk to it with no action-send on arrival.
+                    //     This unblocks the bot when the LLM emits
+                    //     `Explore{anywhere}` (a goal kind it picks
+                    //     when stuck in town with no new NPCs in view).
+                    //     Without this branch the goal would lock,
+                    //     ResolveTarget would miss (no name match),
+                    //     and the bot would sit motionless until the
+                    //     LLM picked a different goal.
+                    if (goal is not null && goal.Kind == GoalKind.Explore)
+                    {
+                        // Slice W.2 (#87) — if the LLM emitted
+                        // `Explore{target}`, honor it: walk to that
+                        // specific candidate (typically chosen from
+                        // the "## Exploration candidates" prompt
+                        // block). Fall back to "farthest unvisited
+                        // in 200u" only when the goal has no target
+                        // or the target can't be resolved.
+                        WorldObjectSnapshot? exploreTarget = null;
+                        float bestDist = 0f;
+
+                        if (goal.Target is not null)
+                        {
+                            // Prefer GUID-addressed Explore (most
+                            // reliable — names duplicate). Pull from
+                            // the full known-object set so the LLM
+                            // can name an off-screen candidate.
+                            if (goal.Target.Guid is uint tg
+                                && worldState.Objects.TryGetValue(tg, out var byGuid)
+                                && byGuid.Guid != tacticsSelf.Guid
+                                && byGuid.CellId is uint bgc && bgc != 0u)
+                            {
+                                exploreTarget = byGuid;
+                                if (WorldDistance.TrySquaredDistance(tacticsSelf, byGuid, out var d2g))
+                                    bestDist = (float)Math.Sqrt(d2g);
+                            }
+                            else
+                            {
+                                // Other selector kinds (Name,
+                                // NameContains, Wcid, ItemTypeMask,
+                                // ShortDescContains) — delegate to
+                                // the canonical resolver so the
+                                // landblock-clip + own-guid filters
+                                // are consistent with the rest of
+                                // the Tactics layer.
+                                var resolved = SelectorResolver.ResolveSingleNearest(goal.Target, worldState, referencePoint: tacticsSelf);
+                                if (resolved is not null
+                                    && resolved.Guid != tacticsSelf.Guid
+                                    && resolved.CellId is uint rc && rc != 0u)
+                                {
+                                    exploreTarget = resolved;
+                                    if (WorldDistance.TrySquaredDistance(tacticsSelf, resolved, out var d2r))
+                                        bestDist = (float)Math.Sqrt(d2r);
+                                }
+                            }
+
+                            if (exploreTarget is null)
+                            {
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Explore{{target}} unresolved " +
+                                    $"(guid={(goal.Target.Guid is uint gt ? $"0x{gt:X8}" : "-")} " +
+                                    $"name={(goal.Target.Name ?? "-")} " +
+                                    $"wcid={(goal.Target.Wcid?.ToString() ?? "-")}); " +
+                                    $"falling back to farthest-unvisited in 200u");
+                            }
+                        }
+
+                        if (exploreTarget is null)
+                        {
+                            // Original Explore{anywhere} behaviour:
+                            // farthest unvisited within 200u. The
+                            // LLM picks Explore without a target
+                            // when it has no specific landmark in
+                            // mind; "go see something new and far
+                            // away" beats wandering randomly.
+                            foreach (var snap in worldState.WithinRadius(tacticsSelf, 200f))
+                            {
+                                if (snap.Guid == tacticsSelf.Guid) continue;
+                                if (snap.CellId is not uint sc || sc == 0u) continue;
+                                if (visitedTargetGuids.Contains(snap.Guid)) continue;
+                                if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
+                                var d = (float)Math.Sqrt(dsq);
+                                if (d > bestDist)
+                                {
+                                    bestDist = d;
+                                    exploreTarget = snap;
+                                }
+                            }
+                        }
+
+                        if (exploreTarget is null)
+                        {
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Explore: no fresh target in 200u; " +
+                                $"clearing so picker can deliberate again");
+                            tactics.Fail("explore: no fresh target", eventStream);
+                        }
+                        else
+                        {
+                            float yawX = 0f;
+                            Quaternion rotX;
+                            if (WorldHeading.TryYawToTarget(tacticsSelf, exploreTarget, out yawX))
+                                rotX = WorldHeading.RotationFromYaw(yawX);
+                            else
+                                rotX = tacticsSelf.Rotation;
+
+                            motionTarget   = exploreTarget;
+                            motionRotation = rotX;
+                            lockedGoalKind = GoalKind.Explore;
+                            motionInitialDistance = bestDist;
+
+                            autonomousPositionSent = true;
+                            autonomousPositionPacketIndex = count;
+
+                            var apPacketSeqX = nextOutboundPacketSequence++;
+                            var apFragSeqX   = nextOutboundFragmentSequence++;
+                            var apBufX = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                            var apLenX = GameActionAutonomousPositionMessage.Pack(
+                                apBufX,
+                                cellId: tacticsSelfCell,
+                                pos:    tacticsSelf.Position,
+                                rot:    rotX,
+                                instanceSequence:      tacticsSelf.SeqInstance      ?? 0,
+                                serverControlSequence: tacticsSelf.SeqServerControl ?? 0,
+                                teleportSequence:      tacticsSelf.SeqTeleport      ?? 0,
+                                forcePositionSequence: tacticsSelf.SeqForcePosition ?? 0,
+                                contact: true);
+                            var apMsgX = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                apMsgX.AddAckSequence(lastReceivedSeq);
+                            apMsgX.AddBlobFragment(
+                                fragSequence: apFragSeqX,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: apBufX.AsSpan(0, apLenX));
+                            var apSentX = apMsgX.Pack(sendBuf, myClientId,
+                                                      sequence: apPacketSeqX, iteration: 1,
+                                                      encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSentX),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL LOCK kind=Explore " +
+                                $"target='{exploreTarget.Name}' guid=0x{exploreTarget.Guid:X8} " +
+                                $"cell=0x{(exploreTarget.CellId ?? 0):X8} " +
+                                $"dist={bestDist:F2}u " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"sent AP yaw={yawX:F3}rad pktSeq={apPacketSeqX} fragSeq={apFragSeqX} bytes={apSentX}");
+                        }
+                    }
+                    else if (goal is not null &&
                         (goal.Kind == GoalKind.Give ||
                          goal.Kind == GoalKind.Use ||
                          goal.Kind == GoalKind.Talk ||
@@ -1796,6 +2492,23 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"item='{targetSnap.Name}' guid=0x{targetSnap.Guid:X8} " +
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={invUsePktSeq} fragSeq={invUseFragSeq} bytes={invUseSent}");
+                            // Inventory-USE dedup (2026-05-30): record the
+                            // dispatch so LlmGoalPolicy.IsInventoryUseRecentlyDispatched
+                            // can drop repeat goals against the same item.
+                            // Non-consumable tutorial letters in spike
+                            // bot_stalenarrow01 caused 5 Use{Letter From
+                            // Home} goals in 3 min and crowded out Attack
+                            // emission. NOT salient, NOT plan-invalidating
+                            // — purely a self-emitted echo for dedup.
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.InventoryItemUsed,
+                                ItemGuid = targetSnap.Guid,
+                                Wcid     = targetSnap.WeenieClassId,
+                                Name     = targetSnap.Name,
+                            });
                             tactics.Clear("inventory-use dispatched", eventStream);
                         }
                         else
@@ -1887,6 +2600,18 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
+                // M1.6+ — schema-vs-LLM deferral bookkeeping.
+                // Update llmInflightSince every tick: capture the
+                // first tick we see HasInflight true, clear it when
+                // the policy goes idle. The schema-only picker
+                // below consults this + MaxLlmDeferralSec to decide
+                // whether to defer or to take over as fallback.
+                var llmBusyNow = tactics.PolicyHasInflight;
+                if (llmBusyNow && llmInflightSince is null)
+                    llmInflightSince = DateTime.UtcNow;
+                else if (!llmBusyNow)
+                    llmInflightSince = null;
+
                 // Phase 5a: send one GameActionAutonomousPosition
                 // (0xF753) echoing our current server-asserted
                 // position back at the server. First outbound
@@ -1918,7 +2643,18 @@ internal sealed class HandshakeDriver : IDisposable
                     (count - loginCompletePacketIndex) >= PostLoginCompleteGracePackets &&
                     worldState.Self is WorldObjectSnapshot self &&
                     self.CellId is uint selfCell &&
-                    selfCell != 0)
+                    selfCell != 0 &&
+                    // M1.6+ — defer to the LLM when it is mid-call.
+                    // Without this gate the schema-only picker
+                    // grabs the nearest-named NPC at packet rate
+                    // (~50ms) and locks motionTarget before the
+                    // LLM's ~1s response can land, so the LLM
+                    // result is never actuated (the LLM block's
+                    // gate requires motionTarget==null). Bound by
+                    // MaxLlmDeferralSec so a stuck network call
+                    // doesn't park the bot indefinitely.
+                    (llmInflightSince is not DateTime inflightSince ||
+                     (DateTime.UtcNow - inflightSince).TotalSeconds > MaxLlmDeferralSec))
                 {
                     autonomousPositionSent = true;
                     autonomousPositionPacketIndex = count;
@@ -1956,6 +2692,13 @@ internal sealed class HandshakeDriver : IDisposable
                         .ToList();
 
                     WorldObjectSnapshot? candidate = null;
+                    // Slice V (#86): track which picker chose, so we
+                    // can publish the autonomous activity to the LLM
+                    // prompt. Stays null if the LLM-driven paths
+                    // (combat lock, name override) take this tick —
+                    // those aren't autonomous picker activity.
+                    string? pickerSourceForActivity = null;
+                    string? pickerReasonForActivity = null;
                     // Phase 7f — combat lock. While we have an active
                     // melee target, refuse to pick anything else. If
                     // the target is still visible, target it again
@@ -1979,133 +2722,201 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else if (candidate is null)
                     {
-                        // Schema-only fallback picker. Wcid-keyed prio
-                        // nudges (hostile creature, academy exit) are
-                        // now Strategy-layer decisions (see LLM pre-
-                        // emptor above). The picker only uses
-                        // ItemType bitmasks + visited-set memory +
-                        // pickup-count anti-respawn — all generic
-                        // schema, no game content.
+                        // Slice W.1 (#86) — schema-only picker. Replaces
+                        // the type-based priority ladder (NPC > corpse >
+                        // door > pickup > else) that the audit at
+                        // .github/skills/audit-hardcoded-knowledge/SKILL.md
+                        // flagged as hardcoded game knowledge. The picker
+                        // now selects the nearest mechanically-eligible
+                        // candidate; the LLM steers via the Slice V
+                        // "## Autonomous picker activity" prompt block.
                         //
-                        // Priorities (lower = better):
-                        //   prio 0: NPCs (Creature itemType 0x10).
-                        //   prio 2: unsatisfied-slot wearables, doors,
-                        //           portals, writables (signs).
-                        //   prio 3: non-wearable pickups (apples).
-                        //   prio 4: everything else (including
-                        //           creatures the bot has visited but
-                        //           that respawned).
-                        // Hostile-vs-friendly creature discrimination
-                        // is now done by the LLM via Strategy, NOT
-                        // here. Without an Attack goal from Strategy,
-                        // the picker treats a creature like any NPC —
-                        // the bot will walk up to it and try to USE
-                        // it, which is harmless (server returns "you
-                        // cannot use that").
-                        candidate = inRange
-                            .Select(s =>
-                            {
-                                WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
-                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
-                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
-                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
-                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
-                                var isWearable = isPickup && s.ValidLocations is uint vl && vl != 0;
-                                var hasSatisfiedSlot = isWearable && s.ValidLocations is uint vl2 &&
-                                    (vl2 & SatisfiedSlotMask(satisfiedEquipSlots)) != 0;
-                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-                                int prio;
-                                if (isNpc) prio = 0;
-                                else if (isDoor || isPortal) prio = 2;
-                                else if (isWearable && !hasSatisfiedSlot) prio = 2;
-                                else if (isWritable) prio = 2;
-                                else if (isPickup && !pickedBefore) prio = 3;
-                                else prio = 4;
-                                return (snap: s, d2, prio);
-                            })
-                            .OrderBy(t => t.prio)
-                            .ThenBy(t => t.d2)
-                            .Select(t => t.snap)
-                            .FirstOrDefault();
+                        // Upstream filters already applied in `inRange`:
+                        //   - within MotionSearchRadius
+                        //   - not self, non-empty Name
+                        //   - not visited (per-GUID)
+                        //   - not a player (0x5xxxxxxx GUID range)
+                        //   - not in satisfiedWeenieClasses
+                        //
+                        // Additional MECHANICAL filters in PickerSelection
+                        // (loop-prevention only, NOT priority):
+                        //   - drop ContainerGuid==self (item in our bag)
+                        //   - drop pickup-eligible items whose Name has
+                        //     already been picked once (anti-respawn)
+                        //
+                        // No type-based bumps. No corpse-loot bump. No
+                        // door preference. No wearable preference. Those
+                        // are strategic — owned by the LLM.
+                        candidate = PickerSelection.PickNearest(
+                            inRange,
+                            self,
+                            chosenCharacterGuid,
+                            pickupCountByName,
+                            PickupItemTypeMask);
+                        if (candidate is not null)
+                        {
+                            pickerSourceForActivity = "in-range";
+                            pickerReasonForActivity = "schema-only picker (nearest mechanically-eligible candidate)";
+                        }
                     }
 
-                    // Phase 7f.5 — EXPLORATION FALLBACK. When the
-                    // normal picker (within MotionSearchRadius) finds
-                    // nothing, the bot would otherwise sit idle until
-                    // the observation window closes. That happened in
-                    // phase7f4-headless20-fullrun.log: bot killed one
-                    // golem, visited the corpse + 4 signs, then
-                    // reported inRange=0 from then on (every other
-                    // golem was filtered by the now-removed wcid
-                    // satisfaction; even with that fix, the bot can
-                    // still exhaust everything within 60u in a small
-                    // room). The fallback widens the search to ALL
-                    // known objects (no radius limit) and ALSO admits
-                    // visited doors/portals as re-traversal targets —
-                    // walking back through a door we used earlier
-                    // crosses cells and re-stimulates server-side
-                    // visibility on whatever's on the other side
-                    // (which may include the next set of unvisited
-                    // signs, NPCs, hostiles, or the academy exit
-                    // portal). The wearable / "pickedBefore" filters
-                    // still apply so we don't farm respawned apples.
+                    // Slice W.2 (ac-ai-players#87) — EXPLORATION
+                    // FALLBACK. When the in-range queue is empty,
+                    // pick the nearest mechanically-eligible known
+                    // object in the bot's CURRENT LANDBLOCK
+                    // (addressable in one motion). Pure-distance —
+                    // no NPC>corpse>door>pickup ladder, no visited-
+                    // door backtrack preference. The OLD fallback
+                    // encoded those as game knowledge; the audit
+                    // at .github/skills/audit-hardcoded-knowledge/
+                    // SKILL.md flagged the entire ladder + the
+                    // "backtrack via visited door" strategy as
+                    // FORBIDDEN. They're now the LLM's call,
+                    // surfaced via the "## Exploration candidates"
+                    // prompt block.
+                    //
+                    // Mechanical filters (in PickerSelection.
+                    // PickNearestFallback):
+                    //   - drop self / empty-name / player guids
+                    //   - drop visited GUIDs (LLM can request
+                    //     backtrack via Explore{target=visited})
+                    //   - drop satisfied weenie classes
+                    //   - drop ContainerGuid==self / WielderGuid==self
+                    //   - drop pickup respawns whose Name has been
+                    //     picked once (anti-respawn)
+                    //   - drop objects with no CellId
+                    //   - drop objects in a different landblock
+                    //     (addressability — the bot can't walk
+                    //     directly into another landblock without
+                    //     a cell hand-off; chasing a 300u
+                    //     remembered object across a building
+                    //     wall just wedges against geometry).
+                    //
+                    // The LLM sees the same candidate set via the
+                    // "## Exploration candidates" prompt block
+                    // (top N, sorted nearest-first) and can
+                    // override the picker's nearest pick by
+                    // emitting Explore{target=<guid|name>}.
+                    IReadOnlyList<ExplorationCandidate>? explorationCandidatesForLlm = null;
                     if (candidate is null &&
                         string.IsNullOrWhiteSpace(motionTargetNameOverride) &&
                         combatTargetGuid is null)
                     {
-                        var allKnown = worldState.Objects.Values
-                            .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
+                        var selfLandblock = (self.CellId ?? 0u) & 0xFFFF0000u;
+
+                        // Pre-filter for the picker (mirrors the
+                        // inRange pre-filters that aren't already
+                        // inside PickerSelection): visited / wcid-
+                        // satisfied / player guids. Keeps the
+                        // PickerSelection method generic.
+                        var fallbackPool = worldState.Objects.Values
                             .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
+                            .Where(s => !visitedTargetGuids.Contains(s.Guid))
                             .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
-                            .Select(s =>
-                            {
-                                var hasDist = WorldDistance.TrySquaredDistance(self, s, out var d2);
-                                var descFlags = s.ObjectDescriptionFlags ?? 0u;
-                                var isDoor   = (descFlags & (uint)ObjectDescriptionFlag.Door)   != 0;
-                                var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
-                                var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-                                var isPickup = s.ItemType is uint it && (it & PickupItemTypeMask) != 0 && !isPortal && !isWritable;
-                                var isNpc = s.ItemType is uint nt && (nt & 0x00000010u) != 0 && !isPickup;
-                                var isVisited = visitedTargetGuids.Contains(s.Guid);
-                                var pickedBefore = pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-                                // Exploration priorities (lower = better):
-                                //   0: unvisited NPC (quest giver / shopkeeper)
-                                //   1: unvisited door/portal (cross to new room)
-                                //   2: visited door/portal (BACKTRACK through
-                                //      to re-stimulate cells on the other side)
-                                //   3: unvisited pickup we haven't farmed
-                                //   4: unvisited creature (LLM will decide if
-                                //      it's hostile via Strategy layer)
-                                //   5: everything else (filtered out below)
-                                int prio;
-                                if (!isVisited && isNpc) prio = 0;
-                                else if (!isVisited && (isDoor || isPortal)) prio = 1;
-                                else if (isDoor || isPortal) prio = 2;
-                                else if (!isVisited && isPickup && !pickedBefore) prio = 3;
-                                else prio = 5;
-                                return (snap: s, d2, prio, hasDist);
-                            })
-                            // Drop the "everything else" bucket entirely to
-                            // avoid re-walking to visited signs / corpses /
-                            // farmed pickups in the fallback (they were the
-                            // exact things that filled visitedTargetGuids).
-                            .Where(t => t.prio < 5 && t.hasDist)
-                            .OrderBy(t => t.prio)
-                            .ThenBy(t => t.d2)
                             .ToList();
-                        if (allKnown.Count > 0)
+
+                        var ranked = PickerSelection.EnumerateFallbackCandidates(
+                            fallbackPool,
+                            self,
+                            chosenCharacterGuid,
+                            selfLandblock,
+                            pickupCountByName,
+                            PickupItemTypeMask).ToList();
+
+                        if (ranked.Count > 0)
                         {
-                            var picked = allKnown[0];
-                            candidate = picked.snap;
-                            var dist = (float)Math.Sqrt(picked.d2);
-                            var visTag = visitedTargetGuids.Contains(candidate.Guid) ? " [BACKTRACK]" : "";
+                            candidate = ranked[0].snap;
+                            pickerSourceForActivity = "fallback";
+                            pickerReasonForActivity = "no candidates in radius; mechanical nearest known object in current landblock";
                             Console.WriteLine(
                                 $"[motion] EXPLORATION FALLBACK — no candidates in {MotionSearchRadius}u; " +
-                                $"picked from {allKnown.Count} known objects: " +
-                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' prio={picked.prio} dist={dist:F2}u{visTag}");
+                                $"mechanical nearest in landblock 0x{selfLandblock:X8}: " +
+                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' dist={ranked[0].distance:F2}u " +
+                                $"(of {ranked.Count} candidates)");
                         }
+
+                        // Surface candidate set to the LLM (top
+                        // 10, including the picked one). Empty
+                        // list = the LLM block won't render. We
+                        // also surface candidates when the picker
+                        // found one because the LLM may want to
+                        // pick a DIFFERENT one (the picker's pick
+                        // is by mechanical distance only).
+                        if (ranked.Count > 0)
+                        {
+                            const int MaxCandidatesForLlm = 10;
+                            var top = ranked.Take(MaxCandidatesForLlm).Select(t => new ExplorationCandidate
+                            {
+                                Guid     = t.snap.Guid,
+                                Name     = t.snap.Name ?? string.Empty,
+                                Distance = t.distance,
+                                CellId   = t.snap.CellId ?? 0u,
+                                Visited  = visitedTargetGuids.Contains(t.snap.Guid),
+                            }).ToList();
+                            explorationCandidatesForLlm = top;
+                        }
+                    }
+                    // Publish (or clear) the candidate surface every
+                    // tick — stale lists are worse than empty ones
+                    // because the LLM may emit Explore{target} for
+                    // a candidate that no longer applies.
+                    llmPolicyForPickerSurface?.SetCurrentExplorationCandidates(explorationCandidatesForLlm);
+
+                    // Slice V (#86) — publish autonomous picker
+                    // activity to the LLM prompt. The picker still
+                    // dispatches the action mechanically; this just
+                    // surfaces what it's doing so the LLM can see
+                    // and override. See PickerActivity.cs for why
+                    // we use a parallel surface instead of pushing
+                    // synthetic Intents.
+                    if (candidate is not null && pickerSourceForActivity is not null)
+                    {
+                        var prev = pickerActivityCurrent;
+                        if (prev is null || prev.TargetGuid != candidate.Guid)
+                        {
+                            if (prev is not null)
+                            {
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc      = DateTimeOffset.UtcNow,
+                                    Kind     = EventKind.PickerActivityCompleted,
+                                    ItemGuid = prev.TargetGuid,
+                                    Name     = prev.TargetName,
+                                });
+                            }
+                            pickerActivityCurrent = new PickerActivity
+                            {
+                                TargetGuid   = candidate.Guid,
+                                TargetName   = candidate.Name ?? string.Empty,
+                                Source       = pickerSourceForActivity,
+                                Reason       = pickerReasonForActivity ?? "",
+                                StartedAtUtc = DateTimeOffset.UtcNow,
+                            };
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.PickerActivityStarted,
+                                ItemGuid = candidate.Guid,
+                                Name     = candidate.Name,
+                                Text     = $"{pickerSourceForActivity}: {pickerReasonForActivity}",
+                            });
+                            llmPolicyForPickerSurface?.SetCurrentPickerActivity(pickerActivityCurrent);
+                        }
+                    }
+                    else if (candidate is null && pickerActivityCurrent is not null)
+                    {
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.PickerActivityCompleted,
+                            ItemGuid = pickerActivityCurrent.TargetGuid,
+                            Name     = pickerActivityCurrent.TargetName,
+                        });
+                        pickerActivityCurrent = null;
+                        llmPolicyForPickerSurface?.SetCurrentPickerActivity(null);
                     }
 
                     // Log all candidates at AP time for visibility (capped to 8 so
@@ -2377,17 +3188,97 @@ internal sealed class HandshakeDriver : IDisposable
                     motionDone &&
                     motionTarget is not null)
                 {
+                    // Slice L — Explore short-circuit. For Explore goals
+                    // there is no action to perform on arrival; we just
+                    // need to clear the motion lock so the next goal can
+                    // be picked. Mark useSent so the cooldown/reset
+                    // cascade fires below.
+                    if (lockedGoalKind == GoalKind.Explore)
+                    {
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        Console.WriteLine(
+                            $"[strategy] LLM-GOAL Explore arrived: " +
+                            $"target='{motionTarget.Name}' guid=0x{motionTarget.Guid:X8} " +
+                            $"(no action send; reset cascade will pick next goal)");
+                        // Fall through to skip the rest of the block.
+                        goto _slice_l_explore_done;
+                    }
+
+                    // Slice W.3 (ac-ai-players#88) — action dispatch
+                    // is now GOAL-GATED. The picker is responsible
+                    // for WHERE to walk; the LLM (via a typed Goal
+                    // with a verb Kind) is responsible for WHAT to
+                    // do on arrival. Wire-type bits no longer choose
+                    // verbs. The verb table:
+                    //   lockedGoalKind == Attack  -> ATTACK bundle
+                    //   lockedGoalKind == Give    -> GIVE
+                    //                                (pendingGiveItemGuid
+                    //                                 set by Give-goal
+                    //                                 pre-emptor)
+                    //   lockedGoalKind == Pickup  -> PUTITEMINCONTAINER
+                    //   lockedGoalKind == Use     -> USE
+                    //   lockedGoalKind == Talk    -> USE (NPC talk
+                    //                                opens dialog by
+                    //                                Use on the NPC)
+                    //   lockedGoalKind == null    -> arrival-no-op
+                    //   (picker auto-lock without
+                    //   an LLM goal — emit
+                    //   PickerArrivedNoAction)
+                    // The arrival-no-op branch keeps the bot parked
+                    // for the post-action cooldown (~2s) while the
+                    // salient event wakes the LLM. If the LLM emits
+                    // a verb goal naming the same target before the
+                    // cooldown elapses, the next motion-lock cycle
+                    // walks distance ~0u and dispatches the verb.
+                    if (lockedGoalKind is null)
+                    {
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        var arrivedActivity = pickerActivityCurrent;
+                        var arrivedSource   = arrivedActivity?.Source ?? "unknown";
+                        var arrivedReason   = arrivedActivity?.Reason ?? "picker auto-lock without LLM verb goal";
+                        Console.WriteLine(
+                            $"[strategy] PICKER ARRIVED no-action: " +
+                            $"target='{motionTarget.Name}' guid=0x{motionTarget.Guid:X8} " +
+                            $"source={arrivedSource} " +
+                            $"(no opcode sent; awaiting LLM verb goal)");
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.PickerArrivedNoAction,
+                            ItemGuid = motionTarget.Guid,
+                            Name     = motionTarget.Name,
+                            Text     = $"{arrivedSource}: {arrivedReason}",
+                        });
+                        if (arrivedActivity is not null &&
+                            arrivedActivity.TargetGuid == motionTarget.Guid)
+                        {
+                            // Flag the live activity surface so the
+                            // LLM prompt's "## Autonomous picker
+                            // activity" block renders ARRIVED state
+                            // directly (not just inferred from the
+                            // event ring). Cleared automatically on
+                            // the next picker selection cycle when
+                            // a new PickerActivity replaces this one.
+                            pickerActivityCurrent = arrivedActivity with { Arrived = true };
+                            llmPolicyForPickerSurface?.SetCurrentPickerActivity(pickerActivityCurrent);
+                        }
+                        goto _slice_l_explore_done;
+                    }
+
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
                     var itemType = motionTarget.ItemType ?? 0u;
-                    var isPickup = (itemType & PickupItemTypeMask) != 0;
-                    // M1.6 redo — combat dispatch keys on the goal
-                    // kind locked at motion-lock time (NOT on the
-                    // live tactics.CurrentGoal, which may have
-                    // cleared mid-motion if the LLM re-deliberated).
-                    // wcid literals in source are forbidden by the
-                    // anti-hardcoding rule.
+                    // Slice W.3 — wire-type bits no longer choose the
+                    // verb. itemType is still computed because the
+                    // observe-log line below references it. isPickup
+                    // is now derived from the LOCKED GOAL KIND, not
+                    // from the item's wire type — verb ownership
+                    // moved to the LLM.
                     var isHostile = lockedGoalKind == GoalKind.Attack;
+                    var isPickup  = lockedGoalKind == GoalKind.Pickup;
                     var packetSeq = nextOutboundPacketSequence++;
 
                     int payloadLen;
@@ -2480,12 +3371,59 @@ internal sealed class HandshakeDriver : IDisposable
                             placement: 0);
                         fragSeq    = nextOutboundFragmentSequence++;
                     }
-                    else
+                    else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
                     {
                         actionName = "USE";
                         actionBuf  = new byte[GameActionUseMessage.PackedSize];
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
+
+                        // Slice Q + Slice U — track USE on any openable
+                        // loot container (corpse, treasure chest,
+                        // bookshelf, coffer) so the loot pre-emptor can
+                        // dispatch PUTITEMINCONTAINER for items the
+                        // server spawns inside. Pure wire-protocol bits
+                        // (Corpse=0x2000, Openable=0x1, Container itemType
+                        // 0x200) — no English-name matching. Slice Q
+                        // bumps the kill-stat; Slice U non-corpse
+                        // containers don't (no analog stat yet).
+                        var useDescFlags  = motionTarget.ObjectDescriptionFlags ?? 0u;
+                        var useIsCorpse   = (useDescFlags & (uint)ObjectDescriptionFlag.Corpse)   != 0;
+                        var useIsOpenable = (useDescFlags & (uint)ObjectDescriptionFlag.Openable) != 0;
+                        var useIsContainer = motionTarget.ItemType is uint uit && (uit & 0x00000200u) != 0;
+                        var useIsSelfBag  = motionTarget.ContainerGuid is uint ucg && ucg == chosenCharacterGuid;
+                        var trackAsLootContainer = !useIsSelfBag &&
+                            (useIsCorpse || (useIsContainer && useIsOpenable));
+                        if (trackAsLootContainer &&
+                            worldState.Self is WorldObjectSnapshot useCorpseSelf)
+                        {
+                            recentlyOpenedContainers[motionTarget.Guid] =
+                                (DateTime.UtcNow, useCorpseSelf.Position);
+                            if (useIsCorpse) botStats.IncrementCorpsesOpened();
+                            var sliceTag = useIsCorpse ? "Q" : "U";
+                            var kindTag  = useIsCorpse ? "corpse" : "container";
+                            Console.WriteLine(
+                                $"[loot] Slice {sliceTag} tracking opened {kindTag} guid=0x{motionTarget.Guid:X8} " +
+                                $"name='{motionTarget.Name}' at selfPos=" +
+                                $"({useCorpseSelf.Position.X:F2},{useCorpseSelf.Position.Y:F2}) " +
+                                $"cell=0x{useCorpseSelf.CellId ?? 0:X8}" +
+                                (useIsCorpse ? $" stats.corpses_opened={botStats.CorpsesOpened}" : ""));
+                        }
+                    }
+                    else
+                    {
+                        // Slice W.3 defensive fallthrough — should be
+                        // unreachable. Explore + null are handled by
+                        // the short-circuits above; Attack/Give/Pickup
+                        // are explicit branches above; Use/Talk match
+                        // this if-chain. If a future GoalKind is added
+                        // without a dispatch branch, log and treat as
+                        // arrival-no-op rather than silently sending USE.
+                        Console.WriteLine(
+                            $"[strategy] PICKER ARRIVED unknown verb: " +
+                            $"lockedGoalKind={lockedGoalKind} target='{motionTarget.Name}' " +
+                            $"guid=0x{motionTarget.Guid:X8} (no opcode sent)");
+                        goto _slice_l_explore_done;
                     }
 
                     var msg = new OutboundPacket();
@@ -2599,6 +3537,7 @@ internal sealed class HandshakeDriver : IDisposable
                             $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
                             $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     }
+                    _slice_l_explore_done: ;
                 }
 
                 // Periodic world-state heartbeat — once every 100
@@ -2645,6 +3584,27 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     motionDone = true;
                     Console.WriteLine($"[motion] walk-tick: wall-clock timeout {MotionWallClockTimeoutSec}s elapsed — stopping");
+                    // Slice J — surface unreachable target as
+                    // ActionRejected so the LLM and the fallback
+                    // policy can both avoid retargeting the same
+                    // guid (otherwise we loop on geometry-blocked
+                    // pickups like the academy Bruised Apple at
+                    // d=4.9u behind a wall). Carries ItemGuid +
+                    // Name so policies can dedupe by guid.
+                    if (motionTarget is not null)
+                    {
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc = DateTimeOffset.UtcNow,
+                            Kind = EventKind.ActionRejected,
+                            Text = $"Unreachable: '{motionTarget.Name}' (walk timeout {MotionWallClockTimeoutSec}s)",
+                            ItemGuid = motionTarget.Guid,
+                            Name = motionTarget.Name,
+                            ErrorCode = 0xFFFE,
+                            ErrorLabel = "Unreachable",
+                        });
+                    }
                 }
 
                 if (!motionDone &&
@@ -2654,42 +3614,365 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.Self is WorldObjectSnapshot walkSelf &&
                     walkSelf.CellId is uint walkCell)
                 {
+                    // Phase 3.1 — refresh fog-of-war. Add every indoor
+                    // cell containing an observed object (including
+                    // our own) to the seen-cell set. We pay this
+                    // small O(N) cost per walk-tick (~30 objects in
+                    // the academy) rather than per-packet so it
+                    // doesn't dominate the receive loop.
+                    if (_indoorNav.IsEnabled)
+                    {
+                        foreach (var snap in worldState.Objects.Values)
+                        {
+                            if (snap.CellId is uint cid &&
+                                Strategy.IndoorNavService.IsIndoorCell(cid))
+                                _seenIndoorCells.Add(cid);
+                        }
+                    }
+
                     if (walkCell != motionLockedCellId)
                     {
-                        // Cell crossings out of scope for Phase 6b
-                        // (target apple is in same cell as bot).
-                        motionDone = true;
-                        Console.WriteLine($"[motion] walk-tick: self cell changed (was 0x{motionLockedCellId:X8} now 0x{walkCell:X8}) — stopping (cell crossings are Phase 6c work)");
+                        // Phase 3.1 — if we're following a multi-cell
+                        // indoor path AND the new cell is one the
+                        // planner expected to traverse, slide the
+                        // motion-lock forward instead of stopping.
+                        // The bot is exactly where we wanted it; the
+                        // remaining waypoints + the final approach
+                        // logic stay valid.
+                        if (motionIndoorPathCells is not null &&
+                            motionIndoorPathCells.Contains(walkCell))
+                        {
+                            Console.WriteLine(
+                                $"[motion] walk-tick: indoor-path cell crossing " +
+                                $"0x{motionLockedCellId:X8} -> 0x{walkCell:X8} (expected by planner; continuing)");
+                            motionLockedCellId = walkCell;
+                        }
+                        else
+                        {
+                            // Cell crossings out of scope for Phase 6b
+                            // (target apple is in same cell as bot).
+                            motionDone = true;
+                            Console.WriteLine($"[motion] walk-tick: self cell changed (was 0x{motionLockedCellId:X8} now 0x{walkCell:X8}) — stopping (cell crossings are Phase 6c work)");
+                        }
                     }
-                    else
+
+                    if (!motionDone && walkCell == motionLockedCellId)
                     {
-                        var liveTarget = worldState.WithinRadius(walkSelf, 999f)
-                            .FirstOrDefault(s => s.Guid == motionTarget.Guid);
-                        if (liveTarget is null)
+                        // Slice S — blocked-motion detection. Before
+                        // we compute and send another AP, check what
+                        // happened to the LAST AP we sent. We snapshot
+                        // walkSelf.Position INTO prevSelfBeforeAp just
+                        // before sending each AP. If the server-reported
+                        // position on this tick has barely moved from
+                        // that snapshot — well under the step length
+                        // we requested — server physics is holding us
+                        // against geometry (wall, closed door, mob,
+                        // obstacle). We tolerate a short run of these
+                        // because the FIRST tick after lock-on can be
+                        // a no-op (server hasn't started the motion
+                        // yet) and a single network blip can hide one
+                        // tick's worth of movement.
+                        if (prevSelfBeforeAp is Vector3 prevSelf &&
+                            prevExpectedStepLen >= BlockedMinExpectedStep)
+                        {
+                            var moveDx = walkSelf.Position.X - prevSelf.X;
+                            var moveDy = walkSelf.Position.Y - prevSelf.Y;
+                            var actualMove = MathF.Sqrt(moveDx * moveDx + moveDy * moveDy);
+                            if (actualMove < prevExpectedStepLen * BlockedMoveRatioThreshold)
+                            {
+                                consecutiveBlockedTicks++;
+                                Console.WriteLine(
+                                    $"[motion] walk-tick: BLOCKED (tick {consecutiveBlockedTicks}/{BlockedConsecutiveTicks}) " +
+                                    $"actualMoveXY={actualMove:F3}u expectedStep={prevExpectedStepLen:F2}u " +
+                                    $"ratio={(actualMove / prevExpectedStepLen):P0} " +
+                                    $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2}) " +
+                                    $"prevSelf=({prevSelf.X:F2},{prevSelf.Y:F2})");
+                                if (consecutiveBlockedTicks >= BlockedConsecutiveTicks)
+                                {
+                                    // Bot is clipping into an obstacle. Stop
+                                    // sending APs (the server WILL keep
+                                    // clamping and we MUST NOT trust any
+                                    // future accepted-far-away AP — that's
+                                    // the "teleports past obstacle" bug).
+                                    // Surface ActionRejected "Blocked" with
+                                    // the target's guid+name so dedup
+                                    // (LlmGoalPolicy + NoQuestKnowledgePolicy)
+                                    // can avoid retargeting the same guid.
+                                    motionDone = true;
+                                    Console.WriteLine(
+                                        $"[motion] walk-tick: BLOCKED for {consecutiveBlockedTicks} consecutive ticks — " +
+                                        $"target 0x{motionTarget.Guid:X8} '{motionTarget.Name}' is unreachable from current position; stopping motion");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"Blocked: '{motionTarget.Name}' — server physics held bot in place ({consecutiveBlockedTicks} ticks, actualMove<{BlockedMoveRatioThreshold:P0} of expected)",
+                                        ItemGuid = motionTarget.Guid,
+                                        Name = motionTarget.Name,
+                                        ErrorCode = 0xFFFD,
+                                        ErrorLabel = "Blocked",
+                                    });
+                                }
+                            }
+                            else
+                            {
+                                // Healthy progress — reset the counter.
+                                consecutiveBlockedTicks = 0;
+                            }
+                        }
+
+                        var liveTarget = motionDone
+                            ? null
+                            : worldState.WithinRadius(walkSelf, 999f)
+                                .FirstOrDefault(s => s.Guid == motionTarget.Guid);
+                        if (!motionDone && liveTarget is null)
                         {
                             motionDone = true;
                             Console.WriteLine($"[motion] walk-tick: target 0x{motionTarget.Guid:X8} disappeared from world snapshot — stopping");
                         }
-                        else
+                        else if (!motionDone && liveTarget is not null)
                         {
+                            // Phase 3.1 — plan an indoor path once per
+                            // motion lock. If the planner returns a
+                            // collision-aware sequence of waypoints,
+                            // the step computation below aims at the
+                            // current waypoint instead of the target
+                            // itself; this is what lets the bot walk
+                            // AROUND furniture/walls and use doorways
+                            // instead of clipping through geometry.
+                            if (_indoorNav.IsEnabled &&
+                                !motionIndoorPathAttempted &&
+                                liveTarget.CellId is uint liveTargetCellId)
+                            {
+                                motionIndoorPathAttempted = true;
+                                var pathResult = _indoorNav.TryFindPath(
+                                    walkCell, walkSelf.Position,
+                                    liveTargetCellId, liveTarget.Position,
+                                    _seenIndoorCells);
+                                Console.WriteLine(
+                                    $"[motion] indoor-nav: {pathResult.Status} " +
+                                    $"waypoints={pathResult.Waypoints.Count} " +
+                                    $"cells={pathResult.PathCells.Count} " +
+                                    $"seen-cells={_seenIndoorCells.Count} " +
+                                    $"from=0x{walkCell:X8}@({walkSelf.Position.X:F1},{walkSelf.Position.Y:F1}) " +
+                                    $"to=0x{liveTargetCellId:X8}@({liveTarget.Position.X:F1},{liveTarget.Position.Y:F1}) " +
+                                    $"reason={pathResult.Reason ?? "(none)"}");
+                                if (pathResult.Status == Strategy.IndoorPathStatus.Success)
+                                {
+                                    motionIndoorPath = pathResult.Waypoints;
+                                    motionIndoorPathIndex = 0;
+                                    motionIndoorPathCells = pathResult.PathCells;
+                                }
+                                else if (pathResult.Status == Strategy.IndoorPathStatus.NoPath)
+                                {
+                                    // Per Phase 3 rubber-duck: do NOT
+                                    // silently straight-line on a real
+                                    // pathfinder failure — that's the
+                                    // wall-walking bug we're here to
+                                    // fix. Stop motion and emit an
+                                    // ActionRejected so dedup (LLM +
+                                    // NoQuestKnowledgePolicy) avoids
+                                    // retargeting the same unreachable
+                                    // guid.
+                                    motionDone = true;
+                                    Console.WriteLine(
+                                        $"[motion] indoor-nav: NO INDOOR PATH to 0x{motionTarget.Guid:X8} '{motionTarget.Name}' — stopping motion");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = $"NoIndoorPath: '{motionTarget.Name}' — indoor pathfinder found no walkable route ({pathResult.Reason ?? "unknown"})",
+                                        ItemGuid = motionTarget.Guid,
+                                        Name = motionTarget.Name,
+                                        ErrorCode = 0xFFFC,
+                                        ErrorLabel = "NoIndoorPath",
+                                    });
+                                }
+                                // Other statuses (Disabled, NotIndoor,
+                                // CrossLandblock, NoGraph) fall through
+                                // to straight-line motion below — those
+                                // are legitimate "indoor-nav doesn't
+                                // apply here" cases.
+                            }
+
+                            // Decide whether to aim at an intermediate
+                            // waypoint or the actual target. The path's
+                            // last waypoint is a snap-to-graph
+                            // approximation of the target, so once we
+                            // arrive at it, switch to aiming at the
+                            // real target position for the final
+                            // close-in (the existing stop-radius /
+                            // asymptote rules then govern arrival).
+                            Vector3 stepTargetPos = liveTarget.Position;
+                            bool aimingAtWaypoint = false;
+                            if (!motionDone &&
+                                motionIndoorPath is not null &&
+                                motionIndoorPathIndex < motionIndoorPath.Count - 1)
+                            {
+                                stepTargetPos = motionIndoorPath[motionIndoorPathIndex].Position;
+                                aimingAtWaypoint = true;
+                            }
+
+                            // Door-USE motor pre-emptor — part of the "walk"
+                            // mechanical action, NOT a strategic interaction.
+                            //
+                            // Architecture justification (audit override):
+                            // The hardcoded-knowledge audit on this commit
+                            // flagged this block as FORBIDDEN ("Motor
+                            // autonomously deciding to USE a target the
+                            // LLM did not request"). We push it anyway with
+                            // documented rationale per the audit skill's
+                            // documented escape-hatch:
+                            //
+                            //   1. Doors are nav INFRASTRUCTURE, not game
+                            //      content. They physically gate cell
+                            //      connections. The pathfinder explicitly
+                            //      routes through them.
+                            //   2. The LLM already pushed an Intent to walk
+                            //      to a target. Walking through a doorway
+                            //      requires opening the door first. USE-on-
+                            //      doorway is the mechanical "how" of
+                            //      executing the LLM's "what" — same role
+                            //      as steering, animation, or accepting
+                            //      portal teleport.
+                            //   3. The user explicitly directed this:
+                            //      "all doors should be their own node so
+                            //       there will be implicit instructions to
+                            //       open the door node" (verbatim quote
+                            //       in the original task message).
+                            //   4. The alternatives (multi-second LLM
+                            //      round-trip per door, or letting the bot
+                            //      bounce off doors) fail the litmus tests
+                            //      (academy traversal requires multiple
+                            //      door openings within seconds).
+                            //
+                            // The two constants below are MECHANICAL:
+                            //   - DoorMatchRadiusUnits = 3.0u: tolerance
+                            //     for matching a Doorway navigation node
+                            //     (placed at the cell-connection centroid)
+                            //     to the live Door entity (placed at the
+                            //     door's physics centroid). Sometimes the
+                            //     pathfinder centroid and the door
+                            //     entity's authoritative position differ
+                            //     by a meter or two depending on cell
+                            //     mesh resolution. 3u is the empirical
+                            //     match tolerance.
+                            //   - DoorUseCooldownSeconds = 30.0: a USE on
+                            //     an already-open door toggles it CLOSED
+                            //     (Door.cs:97-98). Without a cooldown,
+                            //     repeated walk-tick attempts in the same
+                            //     waypoint would close-then-reopen-then-
+                            //     close in a tight loop. The cooldown is
+                            //     a per-door "send USE at most once per
+                            //     30s" mechanical rate-limit, not a
+                            //     statement about door behavior.
+                            //
+                            // If we add other "nav infrastructure that
+                            // requires interaction to traverse" (lever-
+                            // gates, pressure plates, traversal portals)
+                            // they belong in the same motor-extension
+                            // pattern, NOT in autonomous picker logic.
+                            const float DoorMatchRadiusUnits = 3.0f;
+                            const double DoorUseCooldownSeconds = 30.0;
+                            if (aimingAtWaypoint &&
+                                motionIndoorPath is not null &&
+                                motionIndoorPathIndex < motionIndoorPath.Count &&
+                                motionIndoorPath[motionIndoorPathIndex].Kind == WalkableNodeKind.Doorway)
+                            {
+                                var doorWp = motionIndoorPath[motionIndoorPathIndex];
+                                WorldObjectSnapshot? nearDoor = null;
+                                float nearDoorDistSq = DoorMatchRadiusUnits * DoorMatchRadiusUnits;
+                                foreach (var snap in worldState.Objects.Values)
+                                {
+                                    var dflags = snap.ObjectDescriptionFlags ?? 0u;
+                                    if ((dflags & (uint)ObjectDescriptionFlag.Door) == 0) continue;
+                                    var ddx = snap.Position.X - doorWp.Position.X;
+                                    var ddy = snap.Position.Y - doorWp.Position.Y;
+                                    var ddSq = ddx * ddx + ddy * ddy;
+                                    if (ddSq <= nearDoorDistSq)
+                                    {
+                                        nearDoorDistSq = ddSq;
+                                        nearDoor = snap;
+                                    }
+                                }
+                                if (nearDoor is not null)
+                                {
+                                    bool onCooldown = doorUseDispatchedAt.TryGetValue(nearDoor.Guid, out var lastT)
+                                        && (DateTime.UtcNow - lastT).TotalSeconds < DoorUseCooldownSeconds;
+                                    if (!onCooldown)
+                                    {
+                                        doorUseDispatchedAt[nearDoor.Guid] = DateTime.UtcNow;
+                                        var doorPktSeq  = nextOutboundPacketSequence++;
+                                        var doorFragSeq = nextOutboundFragmentSequence++;
+                                        var doorBuf = new byte[GameActionUseMessage.PackedSize];
+                                        var doorLen = GameActionUseMessage.Pack(doorBuf, nearDoor.Guid);
+                                        var doorMsg = new OutboundPacket();
+                                        if (lastReceivedSeq != 0)
+                                            doorMsg.AddAckSequence(lastReceivedSeq);
+                                        doorMsg.AddBlobFragment(
+                                            fragSequence: doorFragSeq,
+                                            fragId: OutboundFragmentId,
+                                            queue: (ushort)GameMessageGroup.UIQueue,
+                                            gameMessagePayload: doorBuf.AsSpan(0, doorLen));
+                                        var doorSent = doorMsg.Pack(sendBuf, myClientId,
+                                                                    sequence: doorPktSeq, iteration: 1,
+                                                                    encrypt: true, cryptoSend: cryptoSend);
+                                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, doorSent),
+                                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                        var doorDist = MathF.Sqrt(nearDoorDistSq);
+                                        Console.WriteLine(
+                                            $"[motion] door-USE: opening door '{nearDoor.Name}' guid=0x{nearDoor.Guid:X8} " +
+                                            $"at ({nearDoor.Position.X:F1},{nearDoor.Position.Y:F1}) " +
+                                            $"distFromDoorway={doorDist:F2}u " +
+                                            $"waypoint={motionIndoorPathIndex + 1}/{motionIndoorPath.Count} " +
+                                            $"pktSeq={doorPktSeq} bytes={doorSent}");
+                                    }
+                                }
+                            }
+
                             // Step in XY only; preserve self Z so we don't
                             // get flagged by Player_Tick's z-jump hacking
                             // check, and don't try to chase the apple's
                             // floor Z (~0.9) when we're at 0.0.
-                            var dx = liveTarget.Position.X - walkSelf.Position.X;
-                            var dy = liveTarget.Position.Y - walkSelf.Position.Y;
+                            var dx = stepTargetPos.X - walkSelf.Position.X;
+                            var dy = stepTargetPos.Y - walkSelf.Position.Y;
                             var lenXY = MathF.Sqrt(dx * dx + dy * dy);
-                            if (lenXY <= MotionStopRadius)
+
+                            // Phase 3.1 — intermediate-waypoint advance.
+                            // When chasing a waypoint (not the final
+                            // target), use a looser 1.5u XY threshold;
+                            // we don't need to be on top of it, just
+                            // close enough that the next waypoint is a
+                            // reasonable continuation. The terminal
+                            // stop radius (1.0u) only applies to the
+                            // real target.
+                            if (!motionDone && aimingAtWaypoint && lenXY <= 1.5f)
+                            {
+                                Console.WriteLine(
+                                    $"[motion] walk-tick: indoor-path waypoint {motionIndoorPathIndex + 1}/{motionIndoorPath!.Count} reached (distXY={lenXY:F2}u <= 1.50u) — advancing");
+                                motionIndoorPathIndex++;
+                                // Fall through to next walk-tick rather
+                                // than re-evaluate now; keeps the
+                                // existing once-per-tick pacing.
+                            }
+                            else if (motionDone)
+                            {
+                                // NoIndoorPath case already handled
+                                // above; skip the rest.
+                            }
+                            else if (!aimingAtWaypoint && lenXY <= MotionStopRadius)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {MotionStopRadius:F2}u) — stopping");
                             }
-                            else if (lenXY < 1e-4f)
+                            else if (!aimingAtWaypoint && lenXY < 1e-4f)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
                             }
-                            else if (lenXY - MotionStopRadius < 0.1f)
+                            else if (!aimingAtWaypoint && lenXY - MotionStopRadius < 0.1f)
                             {
                                 // Phase 6n — asymptote failsafe: when
                                 // the remaining gap is < 0.1u, server
@@ -2706,7 +3989,15 @@ internal sealed class HandshakeDriver : IDisposable
                             else
                             {
                                 var dt = WalkTickIntervalMs / 1000f;
-                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, lenXY - MotionStopRadius);
+                                // When aiming at an intermediate
+                                // waypoint, we don't reserve the
+                                // MotionStopRadius — the waypoint
+                                // itself is a valid floor sample to
+                                // stand on.
+                                var maxStep = aimingAtWaypoint
+                                    ? lenXY
+                                    : lenXY - MotionStopRadius;
+                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, maxStep);
                                 var stepX = dx / lenXY * stepLen;
                                 var stepY = dy / lenXY * stepLen;
                                 var newPos = new Vector3(
@@ -2767,6 +4058,13 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
                                 walkTickAps++;
                                 lastSentWaypointPos = newPos;
+                                // Slice S — remember what we were BEFORE
+                                // this AP, and how big a step we asked
+                                // for. Next tick's blocked-detector
+                                // compares (current walkSelf - prevSelf)
+                                // against prevExpectedStepLen.
+                                prevSelfBeforeAp    = walkSelf.Position;
+                                prevExpectedStepLen = stepLen;
                                 Console.WriteLine(
                                     $"[motion] walk-tick #{walkTickAps}: AP " +
                                     $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2},{walkSelf.Position.Z:F2}) " +

@@ -43,6 +43,62 @@ internal enum EventKind
     GoalExpired           = 9,
     NpcDialog             = 10,
     HealthChanged         = 11,
+    // Mechanical: the server told us our last action failed.
+    // Carries the raw WeenieError code + label + message string.
+    // Surfaced so the LLM can pivot off a stuck retry loop and so
+    // LlmGoalPolicy can drop the stale currentGoal anchor.
+    ActionRejected        = 12,
+    // Slice M: full text of a quest book / scroll / parchment the
+    // bot has Used. The server returns BookDataResponse with up to
+    // 1000 chars per page; we concatenate the pages so the LLM can
+    // read directions, item lists, and coordinates the way a human
+    // player would. ItemGuid = book guid (dedup key), Name = book
+    // display name (e.g. "A List of Items"), Text = body content.
+    BookText              = 13,
+    // Slice V (ac-ai-players#86): the schema-only picker began or
+    // changed an autonomous activity. ItemGuid = target guid, Name
+    // = target name, Text = "<source>: <reason>" (e.g.
+    // "in-range: nearest unvisited NPC"). Made salient so the LLM
+    // wakes up on the picker's choice rather than discovering it
+    // only when the bot has already finished investigating.
+    PickerActivityStarted = 14,
+    // Slice V: the picker either reached its target (and dispatched
+    // the action) or moved on to a different target. ItemGuid =
+    // the target guid that was being investigated. NOT salient on
+    // its own; the next PickerActivityStarted (if any) will wake
+    // the LLM if anything material happened.
+    PickerActivityCompleted = 15,
+    // Slice W.3 (ac-ai-players#88): the picker walked to its auto-
+    // locked target but no LLM goal named a verb to dispatch on
+    // arrival, so the motor sent nothing. ItemGuid = the target
+    // guid the bot is now standing next to, Name = its display
+    // name, Text = "<source>: <reason>" copied from the prior
+    // PickerActivityStarted. Salient — wakes the LLM so it can
+    // emit a verb goal (Use/Talk/Pickup/Attack) before the next
+    // picker pick moves the bot on. Without this event the LLM
+    // would only learn about the arrival by diffing successive
+    // Visible-nearby projections, which is too slow.
+    PickerArrivedNoAction   = 16,
+    // 2026-05-30 (inventory-USE dedup): the bot just dispatched a
+    // GameActionUse against an inventory item it carries (the
+    // "inventory-Use direct" path in HandshakeDriver — items in
+    // bag have no spatial position so they bypass the motor).
+    // Carries ItemGuid (the item's guid), Wcid, and Name.
+    //
+    // Used by LlmGoalPolicy.IsInventoryUseRecentlyDispatched to
+    // drop LLM goals that repeat Use{inventory item} against an
+    // item the bot has already USE'd in the recent event window —
+    // motivating case is non-consumable tutorial letters whose
+    // short_desc keeps instructing "double-click to read", causing
+    // the LLM to re-emit the same goal every deliberation and
+    // crowd out other actions (e.g. Attack against a visible
+    // monster).
+    //
+    // Deliberately NOT plan-invalidating (we just dispatched it
+    // ourselves) and NOT salient (does not wake the LLM). It's a
+    // self-emitted echo that exists solely for dedup + prompt
+    // rendering.
+    InventoryItemUsed       = 17,
 }
 
 /// <summary>
@@ -91,6 +147,16 @@ internal sealed record StreamEvent
     [JsonPropertyName("health_fraction")]
     public float? HealthFraction { get; init; }
 
+    // For ActionRejected: raw WeenieError code (e.g. 0x046A) plus
+    // a human-readable label resolved from WeenieErrorLabels. The
+    // server's accompanying string is in Text. Optional so other
+    // event kinds aren't forced to carry it.
+    [JsonPropertyName("error_code")]
+    public uint? ErrorCode { get; init; }
+
+    [JsonPropertyName("error_label")]
+    public string? ErrorLabel { get; init; }
+
     public override string ToString() => Kind switch
     {
         EventKind.PopupString          => $"#{Sequence} PopupString \"{Truncate(Text, 120)}\"",
@@ -104,6 +170,10 @@ internal sealed record StreamEvent
         EventKind.GoalExpired          => $"#{Sequence} GoalExpired   id={GoalId:N}",
         EventKind.NpcDialog            => $"#{Sequence} NpcDialog from=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.HealthChanged        => $"#{Sequence} Health frac={HealthFraction:F2}",
+        EventKind.ActionRejected       => $"#{Sequence} ActionRejected code=0x{ErrorCode ?? 0:X4} label=\"{ErrorLabel ?? "?"}\" message=\"{Truncate(Text, 120)}\"",
+        EventKind.BookText             => $"#{Sequence} BookText name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8} \"{Truncate(Text, 120)}\"",
+        EventKind.PickerArrivedNoAction => $"#{Sequence} PickerArrivedNoAction guid=0x{ItemGuid ?? 0:X8} name=\"{Name}\" \"{Truncate(Text, 80)}\"",
+        EventKind.InventoryItemUsed    => $"#{Sequence} InventoryUsed wcid={Wcid} name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8}",
         _                              => $"#{Sequence} {Kind}",
     };
 

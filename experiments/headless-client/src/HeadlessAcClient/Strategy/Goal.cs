@@ -110,6 +110,7 @@ internal sealed record Selector
 internal sealed record Goal
 {
     [JsonPropertyName("goal_id")]
+    [JsonConverter(typeof(FlexibleGuidConverter))]
     public Guid Id { get; init; } = Guid.Empty;
 
     [JsonPropertyName("kind")]
@@ -182,6 +183,18 @@ internal static class ItemTypeMasks
     public const uint Creature = 0x00000010u; // NPCs + mobs
     public const uint Portal   = 0x00010000u;
     public const uint Writable = 0x00002000u; // signs, books
+    public const uint Container = 0x00000200u; // sacks, corpses, chests, bookshelves
+
+    /// <summary>
+    /// ACE.Entity.Enum.ItemType.MeleeWeapon bit (0x1). Inventory item
+    /// whose ItemType has this bit and is wielded (WieldedAt != 0)
+    /// satisfies the wire-schema precondition for the
+    /// GameActionTargetedMeleeAttack message — the only attack path
+    /// the driver currently issues (see HandshakeDriver attack-loop
+    /// notes). Used by NoQuestKnowledgePolicy to gate Attack goals on
+    /// "do I actually have a weapon equipped".
+    /// </summary>
+    public const uint MeleeWeapon = 0x00000001u;
 
     /// <summary>
     /// Mirror of HandshakeDriver.PickupItemTypeMask (0xD96F).

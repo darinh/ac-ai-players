@@ -31,6 +31,14 @@ internal sealed class TacticsExecutor
 
     public Goal? CurrentGoal { get; private set; }
 
+    /// <summary>
+    /// Pass-through to the underlying policy. True iff the policy
+    /// has an asynchronous decision pending (LLM in flight). The
+    /// Motor layer uses this to defer its schema-only fallback so
+    /// it doesn't race ahead of an in-flight LLM call.
+    /// </summary>
+    public bool PolicyHasInflight => _policy.HasInflight;
+
     public TacticsExecutor(IGoalPolicy policy, IWeenieRepository weenies, ITrainingDataSink? training = null)
     {
         _policy = policy ?? throw new ArgumentNullException(nameof(policy));

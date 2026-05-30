@@ -15,13 +15,18 @@
 
 using System;
 using System.Net;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
+using ACE.DatLoader;
+
 using AcAiPlayers.Services;
+using AcAiPlayers.WorldNav;
 
 using HeadlessAcClient.Protocol;
 using HeadlessAcClient.Protocol.GameMessages;
+using HeadlessAcClient.Strategy;
 
 namespace HeadlessAcClient;
 
@@ -56,6 +61,8 @@ internal static class Program
 
         await PingApiAsync().ConfigureAwait(false);
 
+        var indoorNav = TryInitIndoorNav();
+
         // Outer cancellation budget. Must exceed
         // HandshakeDriver.ObserveSeconds (currently 3600) plus
         // the pre-observe handshake budget (~30s on a healthy
@@ -70,7 +77,7 @@ internal static class Program
         // — symptom: runs always terminated at ~3min 20s regardless
         // of ObserveSeconds. See spec/12 future ops notes.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3700));
-        using var driver = new HandshakeDriver(host, port, account, password, characterName);
+        using var driver = new HandshakeDriver(host, port, account, password, characterName, indoorNav);
         try
         {
             var result = await driver.RunAsync(cts.Token).ConfigureAwait(false);
@@ -155,5 +162,74 @@ internal static class Program
             Console.Error.WriteLine($"[api] WARNING: API host unreachable: {ex.GetType().Name}: {ex.Message}");
             Console.Error.WriteLine("[api] continuing without API; Phase 1 spike doesn't require it");
         }
+    }
+
+    /// <summary>
+    /// Initialise the indoor-nav service (Phase 3 integration of
+    /// AcAiPlayers.WorldNav). Gated on the AC_INDOOR_NAV env var
+    /// (default "1" — opt-OUT, not opt-in, so the spike loop
+    /// exercises the new code path by default). DAT directory
+    /// comes from AC_DAT_DIR (default "C:\ACE\Dats").
+    ///
+    /// Returns a disabled service if anything goes wrong (env var
+    /// off, DAT dir missing, DatManager init throws). The
+    /// headless client keeps its existing straight-line walk
+    /// behaviour when indoor-nav is disabled.
+    /// </summary>
+    private static IndoorNavService TryInitIndoorNav()
+    {
+        var flag = Environment.GetEnvironmentVariable("AC_INDOOR_NAV");
+        if (flag == "0" || string.Equals(flag, "false", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine("[indoor-nav] disabled (AC_INDOOR_NAV=0)");
+            return new IndoorNavService();
+        }
+
+        var datDir = Environment.GetEnvironmentVariable("AC_DAT_DIR");
+        if (string.IsNullOrWhiteSpace(datDir))
+            datDir = @"C:\ACE\Dats";
+
+        if (!System.IO.Directory.Exists(datDir))
+        {
+            Console.WriteLine($"[indoor-nav] disabled (DAT directory not found: {datDir})");
+            return new IndoorNavService();
+        }
+
+        try
+        {
+            // ACE.DatLoader reads Windows-1252 strings via
+            // Encoding.GetEncoding(1252); .NET Core only ships UTF
+            // + a couple of ASCII variants in the base runtime.
+            // System.Text.Encoding.CodePages adds the rest; we have
+            // to register its provider before any DAT file with
+            // embedded text is read.
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            DatManager.Initialize(datDir, keepOpen: true, loadCell: true);
+
+            var loader = new LandblockNavLoader(DatManager.CellDat, DatManager.PortalDat);
+            var hops = ParseExpansionHops();
+            Console.WriteLine($"[indoor-nav] enabled (DAT dir: {datDir}, expansion-hops={hops})");
+            return new IndoorNavService(loader, expansionHops: hops);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[indoor-nav] FAILED to initialise: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine("[indoor-nav] continuing with indoor-nav disabled");
+            return new IndoorNavService();
+        }
+    }
+
+    /// <summary>
+    /// Parses AC_INDOOR_NAV_HOPS (default 4). Clamps to 0..16 so a
+    /// typo can't blow up the BFS frontier on a 568-cell landblock.
+    /// </summary>
+    private static int ParseExpansionHops()
+    {
+        var raw = Environment.GetEnvironmentVariable("AC_INDOOR_NAV_HOPS");
+        if (string.IsNullOrWhiteSpace(raw))
+            return 4;
+        if (!int.TryParse(raw, out var hops))
+            return 4;
+        return Math.Clamp(hops, 0, 16);
     }
 }
