@@ -625,7 +625,14 @@ internal sealed class HandshakeDriver : IDisposable
         // (XY-only with bounding-cylinder radii); ending at 1.0u of
         // center keeps us comfortably inside the pickup threshold
         // without overshooting through the item collision.
-        const float          MotionStopRadius = 1.0f;
+        //
+        // 2026-05-30: the terminal stop radius is now target-aware
+        // (Portals need 4u because their stab obstacle blocks the
+        // default 1u envelope). The walk-tick calls
+        // <c>MotorStopRadius.For(motionTarget)</c> per tick; the
+        // <c>DefaultUnits=1.0f</c> in that helper preserves the
+        // original behaviour for items/NPCs/signs. See
+        // <c>Strategy/MotorStopRadius.cs</c> for the audit framing.
         // Phase 7f.5 — bumped from 30 → 60. Academy rooms are
         // sometimes 40-50u across; a 30u radius left the bot blind
         // to half a room from a corner position. With 60u we pull in
@@ -3093,8 +3100,11 @@ internal sealed class HandshakeDriver : IDisposable
                 //       cell-crossing detected, target lost, wall-
                 //       clock timeout).
                 //   (b) observed distance to target dropped below
-                //       MotionStopRadius (race condition: walk-tick
-                //       hasn't picked this up yet).
+                //       the target-aware stop radius (race
+                //       condition: walk-tick hasn't picked this up
+                //       yet). MotorStopRadius.For bumps the radius
+                //       for IsPortal targets — see that file's
+                //       header for the audit framing.
                 //   (c) wall-clock since motion started > timeout
                 //       (defensive; walk-tick will normally beat us
                 //       here but doesn't fire if no packets arrive).
@@ -3108,11 +3118,14 @@ internal sealed class HandshakeDriver : IDisposable
                 float stopByDistanceCurr = float.NaN;
                 if (motionTarget is not null &&
                     worldState.Self is WorldObjectSnapshot stopProbe &&
-                    WorldDistance.TrySquaredDistance(stopProbe, motionTarget, out var d2curr) &&
-                    d2curr <= MotionStopRadius * MotionStopRadius)
+                    WorldDistance.TrySquaredDistance(stopProbe, motionTarget, out var d2curr))
                 {
-                    stopByDistance = true;
-                    stopByDistanceCurr = (float)Math.Sqrt(d2curr);
+                    var stopRadius = MotorStopRadius.For(motionTarget);
+                    if (d2curr <= stopRadius * stopRadius)
+                    {
+                        stopByDistance = true;
+                        stopByDistanceCurr = (float)Math.Sqrt(d2curr);
+                    }
                 }
                 var stopByTimeout = motionStartedAt is DateTime stopStartTs &&
                                     (DateTime.UtcNow - stopStartTs).TotalSeconds > MotionWallClockTimeoutSec;
@@ -3940,13 +3953,21 @@ internal sealed class HandshakeDriver : IDisposable
                             var dy = stepTargetPos.Y - walkSelf.Position.Y;
                             var lenXY = MathF.Sqrt(dx * dx + dy * dy);
 
+                            // Target-aware terminal stop radius.
+                            // Default 1.0u for items/NPCs/signs;
+                            // 4.0u for Portals (whose stab obstacle
+                            // makes the default unreachable — see
+                            // MotorStopRadius for the audit framing).
+                            var terminalStopRadius = MotorStopRadius.For(motionTarget);
+
                             // Phase 3.1 — intermediate-waypoint advance.
                             // When chasing a waypoint (not the final
                             // target), use a looser 1.5u XY threshold;
                             // we don't need to be on top of it, just
                             // close enough that the next waypoint is a
                             // reasonable continuation. The terminal
-                            // stop radius (1.0u) only applies to the
+                            // stop radius (target-aware via
+                            // MotorStopRadius) only applies to the
                             // real target.
                             if (!motionDone && aimingAtWaypoint && lenXY <= 1.5f)
                             {
@@ -3962,41 +3983,44 @@ internal sealed class HandshakeDriver : IDisposable
                                 // NoIndoorPath case already handled
                                 // above; skip the rest.
                             }
-                            else if (!aimingAtWaypoint && lenXY <= MotionStopRadius)
+                            else if (!aimingAtWaypoint && lenXY <= terminalStopRadius)
                             {
                                 motionDone = true;
-                                Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {MotionStopRadius:F2}u) — stopping");
+                                Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {terminalStopRadius:F2}u) — stopping");
                             }
                             else if (!aimingAtWaypoint && lenXY < 1e-4f)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
                             }
-                            else if (!aimingAtWaypoint && lenXY - MotionStopRadius < 0.1f)
+                            else if (!aimingAtWaypoint && lenXY - terminalStopRadius < 0.1f)
                             {
                                 // Phase 6n — asymptote failsafe: when
                                 // the remaining gap is < 0.1u, server
                                 // physics clamps our step so the bot
                                 // sits forever sending 0-step APs. Just
                                 // call it good and let the USE/PUT fire.
-                                // Server's actual UseRadius (0.6u) plus
-                                // the target's physics radius is the
-                                // real arrival bound; 1.1u is well
-                                // inside that for any NPC/door.
+                                // Server's actual UseRadius plus the
+                                // target's physics radius is the real
+                                // arrival bound; the terminal stop
+                                // radius (target-aware via
+                                // MotorStopRadius) provides sufficient
+                                // margin for the server-side
+                                // IsWithinUseRadiusOf cylinder check.
                                 motionDone = true;
-                                Console.WriteLine($"[motion] walk-tick: asymptote reached (distXY={lenXY:F3}u, gap={lenXY - MotionStopRadius:F3}u) — stopping");
+                                Console.WriteLine($"[motion] walk-tick: asymptote reached (distXY={lenXY:F3}u, gap={lenXY - terminalStopRadius:F3}u) — stopping");
                             }
                             else
                             {
                                 var dt = WalkTickIntervalMs / 1000f;
                                 // When aiming at an intermediate
                                 // waypoint, we don't reserve the
-                                // MotionStopRadius — the waypoint
-                                // itself is a valid floor sample to
-                                // stand on.
+                                // terminal stop radius — the
+                                // waypoint itself is a valid floor
+                                // sample to stand on.
                                 var maxStep = aimingAtWaypoint
                                     ? lenXY
-                                    : lenXY - MotionStopRadius;
+                                    : lenXY - terminalStopRadius;
                                 var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, maxStep);
                                 var stepX = dx / lenXY * stepLen;
                                 var stepY = dy / lenXY * stepLen;

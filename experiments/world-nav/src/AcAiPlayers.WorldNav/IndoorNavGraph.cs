@@ -195,7 +195,7 @@ public sealed class FloorPolygon
 public enum WalkableNodeKind
 {
     /// <summary>Grid-sampled floor sample on a <see cref="FloorPolygon"/>.</summary>
-    Floor,
+    Floor = 0,
 
     /// <summary>
     /// Structural transit node anchored at a doorway centroid. There
@@ -207,7 +207,24 @@ public enum WalkableNodeKind
     /// Doorway nodes for the same connection are linked across cells
     /// by exactly one <see cref="WalkableBridge"/>.
     /// </summary>
-    Doorway,
+    Doorway = 1,
+
+    /// <summary>
+    /// Structural USE-target anchored at an in-cell entity that
+    /// requires a server-side USE dispatch to transit (most commonly
+    /// a Portal — wire bit
+    /// <c>ObjectDescriptionFlag.Portal=0x40000</c> — but the same
+    /// kind covers any future use-to-transit fixture). Reserved for
+    /// the runtime nav-graph augmentation slice: portals live in the
+    /// ACE world DB rather than the client DAT files, so
+    /// <see cref="LandblockNavLoader"/> never emits Portal nodes
+    /// during static load. Carries the same "act first, then transit"
+    /// semantic as <see cref="Doorway"/>: the path consumer is
+    /// expected to dispatch USE on the matching entity guid and
+    /// resolve the resulting teleport rather than continuing to walk
+    /// along the path.
+    /// </summary>
+    Portal = 2,
 }
 
 /// <summary>
