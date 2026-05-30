@@ -191,6 +191,34 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"openable visible {openable.Name} at d={openable.Distance:F1}");
         }
 
+        // 5c) Visible lifestone: any visible object with the
+        //     ObjectDescriptionFlag.LifeStone bit. Lifestones do NOT
+        //     have the Openable bit (see ACE Lifestone.cs:33 — only
+        //     LifeStone is set), so step 5b does not cover them, but
+        //     they ARE Use-targets via the same WorldObject.ActOnUse
+        //     dispatch path.
+        //
+        //     Same shape as step 5b — pure wire-bit predicate,
+        //     priority 4 (no bump), generic action verb (Use),
+        //     generic rationale string. Sits AFTER step 5b so an
+        //     openable in the same view still wins one tick first;
+        //     the lifestone gets its turn on the next tick because
+        //     the openable will be in `_recentProposedGuids` by then.
+        var lifestone = world.Visible
+            .Where(v => v.IsLifestone)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+            .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        if (lifestone is not null)
+        {
+            RememberProposed(lifestone.Guid);
+            return MakeGoal(GoalKind.Use,
+                new Selector { Guid = lifestone.Guid, Name = lifestone.Name },
+                null, priority: 4,
+                rationale: $"lifestone visible {lifestone.Name} at d={lifestone.Distance:F1}");
+        }
+
         // 6) Talk to nearest NPC creature (non-hostile creature with name) —
         //    talking emits PopupString, feeding the LLM next round.
         var npc = world.Visible

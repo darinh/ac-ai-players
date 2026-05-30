@@ -1034,6 +1034,225 @@ public class StrategyFoundationTests
         Assert.Equal(NearCorpse, goal.Target.Guid);
     }
 
+    // ---- Step 5c: fallback Use{lifestone} for visible lifestones ----
+    //
+    // Lifestones have their own wire bit (ObjectDescriptionFlag.LifeStone)
+    // distinct from Openable — ACE Lifestone.cs only sets LifeStone in
+    // SetEphemeralValues. So step 5b's openable predicate does NOT cover
+    // them. Step 5c is the symmetric step for lifestones; same priority
+    // (4, no bump), same dedup/rejection filters, same generic action
+    // verb (Use). Attuning is a precondition for safe outdoor play (death
+    // sends to last attuned lifestone); the bot must be able to attune
+    // autonomously without LLM input.
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PicksUse_ForVisibleLifestone()
+    {
+        const uint LifestoneGuid = 0x80000900;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsLifestone = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(LifestoneGuid, goal.Target.Guid);
+        Assert.Equal("fallback:no-quest-knowledge", goal.Source);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsLifestone_WhenRecentlyRejected()
+    {
+        // Same dedup pattern as steps 4/5b/6 — an ActionRejected for
+        // the lifestone guid (e.g. server denied because we moved too
+        // far during the attune animation) must suppress the candidate.
+        const uint LifestoneGuid = 0x80000901;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsLifestone = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Text = "YouHaveMovedTooFar: 'Lifestone'",
+            ItemGuid = LifestoneGuid,
+            Name = "Lifestone",
+            ErrorCode = 0x06,
+            ErrorLabel = "YouHaveMovedTooFar",
+        });
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Use, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_DoesNotProposeSameLifestoneTwiceInARow()
+    {
+        // Tight-loop protection via the shared _recentProposedGuids
+        // queue. After attune the lifestone stays visible, so without
+        // this the bot would spam Use{lifestone} every tick.
+        const uint LifestoneGuid = 0x80000902;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsLifestone = true,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Use, first!.Kind);
+        Assert.Equal(LifestoneGuid, first.Target.Guid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        if (second!.Kind == GoalKind.Use)
+            Assert.NotEqual(LifestoneGuid, second.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersOpenable_OverLifestone_BothVisible()
+    {
+        // Step 5b (openable) runs BEFORE step 5c (lifestone). Document
+        // the step-order intent: when both are visible the openable
+        // wins for one tick; the lifestone gets its turn after the
+        // openable enters _recentProposedGuids.
+        const uint ChestGuid = 0x70000A00;
+        const uint LifestoneGuid = 0x80000A01;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 1.0f,
+                    IsLifestone = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = ChestGuid, Name = "Treasure Chest", Wcid = 13007u,
+                    ItemType = 0x200u, Distance = 10.0f,
+                    IsOpenable = true, IsChest = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        // Chest wins step 5b even at d=10 vs lifestone at d=1 because
+        // step 5b runs first in the early-return chain.
+        Assert.Equal(ChestGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersTalk_OnlyAfterLifestoneIsDeduped()
+    {
+        // After a lifestone has been Use'd (now in _recentProposedGuids),
+        // the next tick should fall through step 5c and pick the NPC
+        // via step 6. Validates step 5c does not block downstream
+        // steps once its candidate is deduped.
+        const uint LifestoneGuid = 0x80000B00;
+        const uint NpcGuid = 0x80000B01;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsLifestone = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Alcott", Wcid = 5091u,
+                    ItemType = 0x10u, Distance = 6.0f,
+                    IsCreature = true, ObservedHostile = false,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Use, first!.Kind);
+        Assert.Equal(LifestoneGuid, first.Target.Guid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        Assert.Equal(GoalKind.Talk, second!.Kind);
+        Assert.Equal(NpcGuid, second.Target.Guid);
+    }
+
     // ---- ItemTypeMasks.MeleeWeapon constant ----
 
     [Fact]
