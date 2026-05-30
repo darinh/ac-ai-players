@@ -238,6 +238,47 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"lifestone visible {lifestone.Name} at d={lifestone.Distance:F1}");
         }
 
+        // 5d) Visible portal: any visible object with the
+        //     ObjectDescriptionFlag.Portal bit. Portals do NOT carry
+        //     the Openable bit in ACE wire data (the Openable bit is
+        //     reserved for chests/doors), so step 5b does not cover
+        //     them, but they ARE Use-targets via the same
+        //     WorldObject.ActOnUse dispatch path (PortalUseHandler
+        //     server-side). Without this step a fallback-only bot
+        //     stays trapped inside whichever indoor area it spawned
+        //     in — the academy exit portal, dungeon-return portals,
+        //     and town gateway portals all go unused.
+        //
+        //     Same shape as step 5b/5c — pure wire-bit predicate
+        //     (no name/wcid hardcoded), priority 4 (no bump),
+        //     generic action verb (Use), generic rationale string.
+        //     Sits AFTER step 5b and 5c so chests + lifestones in
+        //     the same view still win a tick first; the portal gets
+        //     its turn on the next tick because both will be in
+        //     `_recentProposedGuids` by then.
+        //
+        //     Risk acknowledged: portals can lead anywhere, including
+        //     dangerous zones. This is symmetric to "humans walk
+        //     through portals they discover". A future slice MAY
+        //     gate this behind an authorised Intent (e.g.
+        //     `Explore{outdoor}` or `ReturnTo{lifestone}`), but the
+        //     fallback baseline matches step 5b's posture: observe,
+        //     act, learn from the result.
+        var portal = world.Visible
+            .Where(v => v.IsPortal)
+            .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+            .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        if (portal is not null)
+        {
+            RememberProposed(portal.Guid);
+            return MakeGoal(GoalKind.Use,
+                new Selector { Guid = portal.Guid, Name = portal.Name },
+                null, priority: 4,
+                rationale: $"portal visible {portal.Name} at d={portal.Distance:F1}");
+        }
+
         // 6) Talk to nearest NPC creature (non-hostile, non-monster
         //    creature with name) — talking emits PopupString,
         //    feeding the LLM next round. The !IsMonster filter is

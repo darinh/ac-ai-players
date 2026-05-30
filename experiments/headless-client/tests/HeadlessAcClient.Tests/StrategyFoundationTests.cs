@@ -1253,6 +1253,181 @@ public class StrategyFoundationTests
         Assert.Equal(NpcGuid, second.Target.Guid);
     }
 
+    // ---- Step 5d: Use any visible Portal (M2 outdoor enabler) ----
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PortalVisible_PicksUseGoal()
+    {
+        // Mirror of step 5c (lifestone). Wire-bit-only gate: any
+        // visible object with IsPortal should drive a Use goal so
+        // a fallback-only bot is not trapped inside whichever
+        // building it spawned in.
+        const uint PortalGuid = 0x80000C00;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = PortalGuid, Name = "Portal", Wcid = 5500u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsPortal = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(PortalGuid, goal.Target.Guid);
+        Assert.Equal("fallback:no-quest-knowledge", goal.Source);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsPortal_WhenRecentlyRejected()
+    {
+        // Same dedup pattern as steps 4/5b/5c — an ActionRejected for
+        // the portal guid (e.g. "You must have the proper rank to use
+        // this portal") must suppress the candidate.
+        const uint PortalGuid = 0x80000C01;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = PortalGuid, Name = "Portal", Wcid = 5500u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsPortal = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Text = "YouHaveMovedTooFar: 'Portal'",
+            ItemGuid = PortalGuid,
+            Name = "Portal",
+            ErrorCode = 0x06,
+            ErrorLabel = "YouHaveMovedTooFar",
+        });
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Use, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersLifestone_OverPortal_BothVisible()
+    {
+        // Step 5c (lifestone) runs BEFORE step 5d (portal). Document
+        // the step-order intent: when both are visible the lifestone
+        // wins for one tick; the portal gets its turn after the
+        // lifestone enters _recentProposedGuids. Symmetric to the
+        // openable-over-lifestone test for step 5b vs 5c.
+        const uint LifestoneGuid = 0x80000C10;
+        const uint PortalGuid = 0x80000C11;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = PortalGuid, Name = "Portal", Wcid = 5500u,
+                    ItemType = 0x40000u, Distance = 1.0f,
+                    IsPortal = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = LifestoneGuid, Name = "Lifestone", Wcid = 8329u,
+                    ItemType = 0x40000u, Distance = 10.0f,
+                    IsLifestone = true,
+                },
+            },
+        };
+        var events = new EventStream();
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        // Lifestone wins step 5c even at d=10 vs portal at d=1
+        // because step 5c runs first in the early-return chain.
+        Assert.Equal(LifestoneGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersTalk_OnlyAfterPortalIsDeduped()
+    {
+        // After a portal has been Use'd (now in _recentProposedGuids),
+        // the next tick should fall through step 5d and pick the NPC
+        // via step 6. Validates step 5d does not block downstream
+        // steps once its candidate is deduped.
+        const uint PortalGuid = 0x80000C20;
+        const uint NpcGuid = 0x80000C21;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x860201ADu, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = PortalGuid, Name = "Portal", Wcid = 5500u,
+                    ItemType = 0x40000u, Distance = 4.5f,
+                    IsPortal = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Alcott", Wcid = 5091u,
+                    ItemType = 0x10u, Distance = 6.0f,
+                    IsCreature = true, ObservedHostile = false,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var first = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(first);
+        Assert.Equal(GoalKind.Use, first!.Kind);
+        Assert.Equal(PortalGuid, first.Target.Guid);
+
+        var second = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(second);
+        Assert.Equal(GoalKind.Talk, second!.Kind);
+        Assert.Equal(NpcGuid, second.Target.Guid);
+    }
+
     // ---- ItemTypeMasks.MeleeWeapon constant ----
 
     [Fact]
