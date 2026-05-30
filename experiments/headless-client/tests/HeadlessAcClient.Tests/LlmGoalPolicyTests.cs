@@ -5,6 +5,7 @@ using System;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -265,6 +266,99 @@ public class LlmGoalPolicyTests
         Assert.Equal(1, httpCallCount);
     }
 
+    [Fact]
+    public async Task LlmGoalClient_429WithRetryAfterDelta_PopulatesLlmResult()
+    {
+        // The OpenAI-compatible providers (GitHub Models, OpenAI) emit
+        // a Retry-After header on 429 responses indicating when the
+        // client may retry. Delta form: an integer number of seconds.
+        // LlmGoalClient must surface this as a TimeSpan? on LlmResult
+        // so LlmGoalPolicy can honour the server's hint instead of
+        // blindly applying its own 30s -> 5min exponential window.
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            var resp = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent("Too Many Requests"),
+            };
+            resp.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(7));
+            return resp;
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var result = await llm.CompleteAsync("sys", "user");
+        Assert.False(result.Ok);
+        Assert.Equal((HttpStatusCode)429, result.StatusCode);
+        Assert.NotNull(result.RetryAfter);
+        Assert.Equal(TimeSpan.FromSeconds(7), result.RetryAfter);
+    }
+
+    [Fact]
+    public async Task LlmGoalClient_429WithoutRetryAfter_LeavesRetryAfterNull()
+    {
+        // Not every provider sends Retry-After. If absent, RetryAfter
+        // must stay null so the policy falls back to its exponential
+        // window rather than honouring a phantom value.
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage((HttpStatusCode)429) { Content = new StringContent("Too Many Requests") }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var result = await llm.CompleteAsync("sys", "user");
+        Assert.False(result.Ok);
+        Assert.Equal((HttpStatusCode)429, result.StatusCode);
+        Assert.Null(result.RetryAfter);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_429WithRetryAfter_HonorsShorterServerHint()
+    {
+        // When the server returns Retry-After: 2 (much smaller than
+        // the default 30s initial backoff), the policy must honour
+        // the hint -- a follow-up ProposeGoal a few seconds later
+        // must be allowed to issue a fresh LLM call. Without this,
+        // even one rate-limit blip burns a 30s gap on a server that
+        // was telling us we only needed to wait a couple seconds.
+        var httpCallCount = 0;
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            var resp = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent("Too Many Requests"),
+            };
+            resp.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(2));
+            return resp;
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        // First kickoff -> 429 with Retry-After: 2.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var afterFirst = policy.ProposeGoal(world, events, null); // consume + arm backoff
+        Assert.StartsWith("fallback:", afterFirst!.Source);
+        Assert.Equal(1, httpCallCount);
+
+        // Immediately after -- backoff window is still open (~2s).
+        // Must NOT issue another HTTP call.
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+        Assert.Equal(1, httpCallCount);
+
+        // Wait past the 2s server hint but well short of the 30s
+        // default exponential window.
+        await Task.Delay(TimeSpan.FromMilliseconds(2500));
+
+        // Now the backoff must be expired -- a fresh ProposeGoal
+        // must kick off another LLM call. Without honouring
+        // Retry-After this would still be gated for ~27 more seconds.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        _ = policy.ProposeGoal(world, events, null); // drain
+        Assert.Equal(2, httpCallCount);
+    }
     [Fact]
     public async Task LlmGoalPolicy_UsesLlmResultWhenContentIsValidGoal()
     {

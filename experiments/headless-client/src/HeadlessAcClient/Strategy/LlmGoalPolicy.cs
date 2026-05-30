@@ -119,6 +119,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private TimeSpan       _currentBackoff = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan MaxBackoff     = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan InitialBackoff = TimeSpan.FromSeconds(30);
+    // Floor for Retry-After honoring. If the server says "retry in 0s"
+    // (or in <1s) we still wait 1s so the LLM is not hammered in a
+    // tight retry loop -- the 2s MinCallInterval already coalesces
+    // back-to-back calls, but this is a separate floor specifically
+    // for the rate-limit-window logic.
+    private static readonly TimeSpan MinRetryAfter  = TimeSpan.FromSeconds(1);
 
     /// <summary>
     /// In-flight LLM call. ProposeGoal is called from the receive
@@ -373,18 +379,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Console.WriteLine(
                 $"[llm-call] FAILED id={decisionId} latency={result.LatencyMs}ms " +
                 $"error={result.Error ?? "(null)"}");
-            // Slice T — 429 / rate-limit backoff trigger. The error
-            // string from LlmGoalClient looks like "http 429: Too
-            // Many Requests" (see Strategy/LlmGoalClient.cs error
-            // formatting). Match the "429" token specifically so we
-            // don't trip the backoff on transient 5xx or transport
-            // errors — those should retry on the next salient event.
-            if (result.Error is not null && result.Error.Contains("429"))
+            // Slice T (extended) — 429 / rate-limit backoff trigger.
+            // Prefer the structured HttpStatusCode field over substring
+            // matching on Error (the old check was brittle to message
+            // format changes and could false-positive on unrelated
+            // errors containing "429"). Honour the server's Retry-After
+            // header when present; otherwise fall back to the
+            // exponential window. Always ratchet _currentBackoff so
+            // persistent failures still escalate pressure even if the
+            // server keeps returning small Retry-After hints.
+            var is429 =
+                result.StatusCode == (System.Net.HttpStatusCode)429 ||
+                (result.Error is not null && result.Error.Contains("429"));
+            if (is429)
             {
-                _backoffUntilUtc = nowUtc + _currentBackoff;
+                TimeSpan window;
+                bool honored = false;
+                if (result.RetryAfter is { } ra && ra > TimeSpan.Zero)
+                {
+                    if (ra < MinRetryAfter) window = MinRetryAfter;
+                    else if (ra > MaxBackoff) window = MaxBackoff;
+                    else window = ra;
+                    honored = true;
+                }
+                else
+                {
+                    window = _currentBackoff;
+                }
+                _backoffUntilUtc = nowUtc + window;
                 Console.WriteLine(
-                    $"[strategy] LlmGoalPolicy: 429 detected — backoff until " +
-                    $"{_backoffUntilUtc:HH:mm:ss}Z (next interval {_currentBackoff.TotalSeconds:F0}s)");
+                    $"[strategy] LlmGoalPolicy: 429 detected — " +
+                    (honored
+                        ? $"retry-after={result.RetryAfter!.Value.TotalSeconds:F1}s honored (window={window.TotalSeconds:F0}s); "
+                        : $"window={window.TotalSeconds:F0}s; ") +
+                    $"backoff until {_backoffUntilUtc:HH:mm:ss}Z " +
+                    $"(next exponential interval {(_currentBackoff.TotalSeconds * 2):F0}s)");
                 var next = TimeSpan.FromSeconds(_currentBackoff.TotalSeconds * 2);
                 _currentBackoff = next > MaxBackoff ? MaxBackoff : next;
             }
