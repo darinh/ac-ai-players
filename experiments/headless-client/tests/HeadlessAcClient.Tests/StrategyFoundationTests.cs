@@ -1266,6 +1266,369 @@ public class StrategyFoundationTests
         // driver currently ships.
         Assert.Equal(0x00000001u, ItemTypeMasks.MeleeWeapon);
     }
+
+    // ---- Slice 0: Hunt-intent decomposer ----
+
+    [Fact]
+    public void WorldStateProjection_IsMonster_ExcludesCorpse()
+    {
+        // Slice 0 — corpses inherit Creature + Attackable from their
+        // pre-death object record in some captures; IsMonster MUST
+        // exclude them or the Hunt decomposer would loop on dead
+        // bodies that are already handled by Step 5b (openable Use).
+        const uint LivingGuid = 0x80000001;
+        const uint CorpseGuid = 0x80000002;
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+
+        // Living monster: Creature + Attackable, no Corpse bit.
+        SeedSnapshot(ws, LivingGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable,
+            weenieFlags: 0x00800036u);
+        // Corpse of dead Golem: Creature + Attackable bits still present,
+        // PLUS Corpse bit. Must NOT be classified as monster.
+        SeedSnapshot(ws, CorpseGuid, "Corpse of Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable | (uint)ObjectDescriptionFlag.Corpse,
+            weenieFlags: 0x00800036u);
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid[LivingGuid].IsMonster, "living creature with Attackable bit is a monster");
+        Assert.False(byGuid[CorpseGuid].IsMonster, "corpse must NEVER be classified as monster (handled by Step 5b openable)");
+        Assert.True(byGuid[CorpseGuid].IsCorpse, "corpse projection sanity check");
+    }
+
+    private static WorldStateProjection MakeHuntProjection(
+        InventoryItemProjection[] inventory,
+        VisibleObjectProjection[] visible) =>
+        new()
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = inventory,
+            Visible = visible,
+        };
+
+    private static HeadlessAcClient.Strategy.Intent.IntentStack MakeStackWithHunt()
+    {
+        var stack = new HeadlessAcClient.Strategy.Intent.IntentStack();
+        var events = new EventStream();
+        var proj = MakeHuntProjection(
+            Array.Empty<InventoryItemProjection>(),
+            Array.Empty<VisibleObjectProjection>());
+        var baseline = HeadlessAcClient.Strategy.Intent.IntentBaseline.Capture(
+            proj, events, DateTime.UtcNow, stats: null);
+        var hunt = new HeadlessAcClient.Strategy.Intent.Intent
+        {
+            Id = "test-hunt-1",
+            Kind = "Hunt",
+            Rationale = "test operator push",
+            Completion = new HeadlessAcClient.Strategy.Intent.AlwaysFalsePredicate(),
+            Baseline = baseline,
+            Status = HeadlessAcClient.Strategy.Intent.IntentLifecycle.Active,
+        };
+        var result = stack.TryPush(hunt);
+        Assert.Equal(HeadlessAcClient.Strategy.Intent.StackOpResult.Ok, result);
+        return stack;
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_NoStack_DoesNotAttackPassiveMonster()
+    {
+        // Sanity: without an authorised Hunt intent in scope, the
+        // fallback MUST NOT initiate combat on a passive monster
+        // even with a melee weapon wielded. This is the audit-
+        // critical invariant — code never originates strategy.
+        const uint GolemGuid = 0x80000010;
+        const uint WeaponGuid = 0x80000011;
+        var policy = new NoQuestKnowledgePolicy(); // no stack
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = GolemGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 5f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                    ObservedHostile = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        if (goal is not null)
+            Assert.NotEqual(GoalKind.Attack, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_PicksAttack_WhenMeleeWielded()
+    {
+        // With operator-authorised Hunt on the stack + melee weapon
+        // wielded + visible monster, the decomposer materialises
+        // Attack against the nearest monster.
+        const uint GolemNearGuid = 0x80000020;
+        const uint GolemFarGuid  = 0x80000021;
+        const uint WeaponGuid    = 0x80000022;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = GolemFarGuid, Name = "Far Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 12f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = GolemNearGuid, Name = "Near Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 4f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(GolemNearGuid, goal.Target.Guid);
+        Assert.Contains("Hunt", goal.Rationale, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_NoAttack_WhenNoMeleeWielded()
+    {
+        // Hunt intent on stack + monster visible but no melee
+        // weapon wielded → decomposer must NOT propose Attack
+        // (would fail at the wire — GameActionTargetedMeleeAttack
+        // requires a wielded weapon). Falls through to other
+        // steps (likely Explore if nothing else applies).
+        const uint GolemGuid = 0x80000030;
+        const uint WeaponGuid = 0x80000031;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                // Weapon in inventory but UNWIELDED (WieldedAt is null).
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0x18,
+                    WieldedAt = null,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = GolemGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 4f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        // Either no goal, OR a non-Attack goal (e.g. Wield, Explore).
+        // The bot's other steps may fire — we just verify Hunt-decomposer
+        // did not jump straight to Attack with a sheathed weapon.
+        if (goal is not null)
+            Assert.NotEqual(GoalKind.Attack, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_NoAttack_WhenNoMonsterVisible()
+    {
+        // Hunt intent on stack + melee wielded but no IsMonster
+        // visible (only NPCs / corpses) → no Attack proposed.
+        const uint NpcGuid = 0x80000040;
+        const uint WeaponGuid = 0x80000041;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Jonathan", Wcid = 29324u,
+                    ItemType = 0x10u, Distance = 4f,
+                    IsCreature = true, IsAttackable = false, IsMonster = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        if (goal is not null)
+            Assert.NotEqual(GoalKind.Attack, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_NoAttack_OnCorpse()
+    {
+        // Defense-in-depth — even if a Corpse somehow slipped into
+        // the projection with IsMonster=true (projection bug), the
+        // decomposer's IsCorpse exclusion must catch it. We deliberately
+        // construct a contradictory projection (IsMonster=true AND
+        // IsCorpse=true) to verify the decomposer's belt-and-braces
+        // guard. In live data the projection fix ensures IsMonster=false
+        // for any corpse; this test guards the second layer.
+        const uint CorpseGuid = 0x80000050;
+        const uint WeaponGuid = 0x80000051;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 2f,
+                    IsCreature = true, IsAttackable = true,
+                    IsMonster = true, IsCorpse = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        if (goal is not null)
+            Assert.NotEqual(GoalKind.Attack, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_ObservedHostile_BeatsHuntIntent()
+    {
+        // A monster that has ALREADY attacked the bot (ObservedHostile)
+        // must remain the highest tactical priority. The Hunt decomposer
+        // sits below the existing observed-hostile path so a fight-back
+        // response isn't deferred for picking the nearest Hunt target.
+        // Here both objects exist; the test asserts the observed-hostile
+        // one wins regardless of distance to the Hunt candidate.
+        const uint HostileGuid = 0x80000060;
+        const uint PassiveGuid = 0x80000061;
+        const uint WeaponGuid  = 0x80000062;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                // Passive Hunt-eligible monster (closer).
+                new VisibleObjectProjection
+                {
+                    Guid = PassiveGuid, Name = "Passive Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 2f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                    ObservedHostile = false,
+                },
+                // Hostile monster (farther — but priority matters more).
+                new VisibleObjectProjection
+                {
+                    Guid = HostileGuid, Name = "Angry Drudge", Wcid = 22u,
+                    ItemType = 0x10u, Distance = 8f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                    ObservedHostile = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(HostileGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_PickupBeatsHunt_WhenBothEligible()
+    {
+        // Audit-driven invariant (slice 0 v2): the Hunt-intent
+        // decomposer sits at the BOTTOM of the opportunity ladder
+        // (priority 2, immediately before bare Explore). When a
+        // pickup-eligible item AND a Hunt-eligible monster are both
+        // visible on the same tick, Pickup MUST win. This codifies
+        // the audit fix that flagged the v1 ordering ("combat during
+        // Hunt outranks loot") as hardcoded urgency policy. The
+        // policy now encodes only the minimal "decompose intent as
+        // a last opportunity" semantics, not any value judgment
+        // about combat vs loot.
+        const uint LootGuid    = 0x80000070;
+        const uint MonsterGuid = 0x80000071;
+        const uint WeaponGuid  = 0x80000072;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                // Pickup-eligible item on the ground (ItemTypeMasks.Pickup bit).
+                new VisibleObjectProjection
+                {
+                    Guid = LootGuid, Name = "Mana Potion", Wcid = 1u,
+                    ItemType = ItemTypeMasks.Pickup, Distance = 6f,
+                },
+                // Hunt-eligible monster, closer.
+                new VisibleObjectProjection
+                {
+                    Guid = MonsterGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                    ObservedHostile = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Pickup, goal!.Kind);
+        Assert.Equal(LootGuid, goal.Target.Guid);
+    }
 }
 
 /// <summary>

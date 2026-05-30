@@ -250,7 +250,12 @@ internal sealed record WorldStateProjection
                 // extracted from the wire, not from hardcoded weenie lists.
                 var weenieFlags = o.WeenieFlags ?? 0u;
                 var hasRadarBlipColor = (weenieFlags & (uint)WeenieHeaderFlag.RadarBlipColor) != 0;
-                var isMonster = isCreature && isAttackable && !hasRadarBlipColor && !isVendor && !isHealer;
+                // Slice 0 (Hunt) — exclude corpses from IsMonster. Corpses
+                // can carry Creature+Attackable bits in some captures (the
+                // server doesn't strip them on death); without this guard
+                // a Hunt-intent decomposer would target a dead body
+                // already covered by the Step 5b openable-Use path.
+                var isMonster = isCreature && isAttackable && !hasRadarBlipColor && !isVendor && !isHealer && !isCorpse;
 
                 return new VisibleObjectProjection
                 {

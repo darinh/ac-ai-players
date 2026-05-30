@@ -37,6 +37,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using HeadlessAcClient.Strategy.Intent;
+
 namespace HeadlessAcClient.Strategy;
 
 internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
@@ -60,6 +62,23 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     // a state change, but never twice in a row.
     private const int RecentProposedWindow = 8;
     private readonly Queue<uint> _recentProposedGuids = new();
+
+    // Slice 0 (Hunt) — shared reference to the IntentStack so this
+    // fallback can read (NEVER mutate) the strategic context an
+    // operator (or eventually the LLM) has authorised.
+    //
+    // Constructor injection rather than ProposeGoal-arg avoids
+    // rippling IGoalPolicy. Both production policies (this one and
+    // LlmGoalPolicy) receive the SAME instance from HandshakeDriver,
+    // so observations stay consistent across fallover.
+    private readonly IntentStack? _intentStack;
+
+    public NoQuestKnowledgePolicy() : this(null) { }
+
+    public NoQuestKnowledgePolicy(IntentStack? intentStack)
+    {
+        _intentStack = intentStack;
+    }
 
     private void RememberProposed(uint guid)
     {
@@ -219,10 +238,18 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"lifestone visible {lifestone.Name} at d={lifestone.Distance:F1}");
         }
 
-        // 6) Talk to nearest NPC creature (non-hostile creature with name) —
-        //    talking emits PopupString, feeding the LLM next round.
+        // 6) Talk to nearest NPC creature (non-hostile, non-monster
+        //    creature with name) — talking emits PopupString,
+        //    feeding the LLM next round. The !IsMonster filter is
+        //    mechanical, not game-knowledge: monsters do not have
+        //    NPC dialog trees, so a Talk dispatched against one
+        //    will produce no PopupString. Filtering them out here
+        //    keeps the Talk step on its actual surface (vendors,
+        //    greeters, quest-givers) and avoids competing with the
+        //    Hunt-intent decomposer (step 6c) for the same wire
+        //    objects.
         var npc = world.Visible
-            .Where(v => v.IsCreature && !v.ObservedHostile)
+            .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
@@ -240,12 +267,13 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     proposed-set (rare; happens in a sparse landblock where
         //     we've already cycled through everyone), forget the
         //     window and try again. Without this we'd starve the
-        //     fallback in a small room.
+        //     fallback in a small room. Same !IsMonster filter as
+        //     step 6.
         if (_recentProposedGuids.Count > 0)
         {
             _recentProposedGuids.Clear();
             var npcRetry = world.Visible
-                .Where(v => v.IsCreature && !v.ObservedHostile)
+                .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
                 .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
                 .OrderBy(v => v.Distance ?? float.MaxValue)
                 .FirstOrDefault();
@@ -256,6 +284,68 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                     new Selector { Guid = npcRetry.Guid, Name = npcRetry.Name },
                     null, priority: 3,
                     rationale: $"explore via dialog (recycle): {npcRetry.Name}");
+            }
+        }
+
+        // 6c) Hunt-intent decomposer — only fires when an authorised
+        //     `Hunt` Intent is currently on top of the stack. The
+        //     intent itself is pushed by either:
+        //       - the operator via the AC_BOTS_INITIAL_INTENT=Hunt
+        //         env var (HandshakeDriver pushes once at startup),
+        //       - the LLM via a stack_ops push in its JSON response.
+        //
+        //     Code does NOT originate the strategic commitment to
+        //     hunt. It only materialises an existing, externally-
+        //     authorised commitment into a concrete tactical Attack
+        //     goal during downtime — and only when every more
+        //     concrete observable opportunity is already exhausted
+        //     (Wield, Pickup, inspect-newest-inv, openable Use,
+        //     lifestone Use, NPC dialog, dialog recycle). Per the
+        //     audit narrative for ac-ai-players#92 (slice 0), this
+        //     is the difference between "proactive combat
+        //     initiation" (FORBIDDEN — what the prior naive
+        //     Attack-on-IsMonster step did) and "reactive
+        //     decomposition of an authorised intent" (ALLOWED).
+        //
+        //     Placement is deliberately LAST in the opportunity
+        //     ladder, immediately before bare Explore. This is the
+        //     audit-driven fix for the v1 of this slice, which
+        //     placed Hunt-Attack at priority 6 ahead of Pickup and
+        //     was flagged as encoding the rule "combat during Hunt
+        //     outranks loot". The shape now is purely "if the
+        //     operator asked us to hunt and nothing else observable
+        //     is worth doing, attack a monster instead of wandering
+        //     aimlessly". The observed-hostile path (step 2,
+        //     priority 7) still beats us if a monster becomes
+        //     aggressive mid-tick — that's a fight-back response,
+        //     not a Hunt commitment.
+        //
+        //     Wire-bit gating only:
+        //       - stack.Top.Kind == "Hunt" (strategic authorisation)
+        //       - any inventory item with WieldedAt != 0 AND the
+        //         ItemTypeMasks.MeleeWeapon bit set (mechanical
+        //         precondition for GameActionTargetedMeleeAttack)
+        //       - any visible IsMonster (Slice H composite of
+        //         Creature+Attackable+!RadarBlipColor+!Vendor+!Healer
+        //         +!Corpse — corpse exclusion shipped this slice)
+        if (_intentStack?.Top is Intent.Intent topIntent &&
+            string.Equals(topIntent.Kind, "Hunt", StringComparison.Ordinal))
+        {
+            var hasMeleeWielded = world.Inventory.Any(i =>
+                i.WieldedAt is uint w && w != 0 &&
+                i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0);
+            if (hasMeleeWielded)
+            {
+                var huntTarget = world.Visible
+                    .Where(v => v.IsMonster && !v.IsCorpse)
+                    .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+                    .OrderBy(v => v.Distance ?? float.MaxValue)
+                    .FirstOrDefault();
+                if (huntTarget is not null)
+                    return MakeGoal(GoalKind.Attack,
+                        new Selector { Guid = huntTarget.Guid, Name = huntTarget.Name },
+                        null, priority: 2,
+                        rationale: $"decompose Hunt intent [{topIntent.Id}]: monster {huntTarget.Name} at d={huntTarget.Distance:F1}");
             }
         }
 

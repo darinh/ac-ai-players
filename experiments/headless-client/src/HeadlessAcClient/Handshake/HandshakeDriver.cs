@@ -475,6 +475,33 @@ internal sealed class HandshakeDriver : IDisposable
         var intentStack = new IntentStack();
         var intentIds   = new IntentIdAllocator();
         var botStats    = new BotStatistics();
+
+        // Slice 0 (Hunt) — operator-pushed initial intent. Read at
+        // startup; pushed on the first tick where a real projection
+        // is available so the IntentBaseline captures real data
+        // (push-with-empty-projection would leave the baseline
+        // counters at zero and corrupt since-push predicates).
+        //
+        // Supported values (case-insensitive): "Hunt". Anything
+        // else logs a warning and is ignored. Env var, not CLI flag,
+        // to match the AC_BOTS_* convention (AC_BOTS_LLM_DISABLE,
+        // AC_BOTS_API_TOKEN, AC_BOTS_LLM_ENDPOINT, AC_BOTS_LLM_MODEL).
+        var initialIntentRaw = Environment.GetEnvironmentVariable("AC_BOTS_INITIAL_INTENT");
+        var pendingInitialIntentKind = string.IsNullOrWhiteSpace(initialIntentRaw)
+            ? null
+            : initialIntentRaw.Trim();
+        bool initialIntentPushed = false;
+        if (pendingInitialIntentKind is not null &&
+            !string.Equals(pendingInitialIntentKind, "Hunt", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[intent-stack] warning: AC_BOTS_INITIAL_INTENT='{initialIntentRaw}' is not a recognised intent kind (supported: Hunt) — ignored");
+            pendingInitialIntentKind = null;
+        }
+        else if (pendingInitialIntentKind is not null)
+        {
+            Console.WriteLine($"[intent-stack] AC_BOTS_INITIAL_INTENT={pendingInitialIntentKind} queued for first-tick push (operator-authorised)");
+        }
+
         IGoalPolicy goalPolicy;
         // Slice V (#86): if the active policy is LlmGoalPolicy, hold
         // an extra typed reference so the picker can publish its
@@ -484,7 +511,7 @@ internal sealed class HandshakeDriver : IDisposable
         LlmGoalPolicy? llmPolicyForPickerSurface = null;
         if (llmDisabled)
         {
-            goalPolicy = new NoQuestKnowledgePolicy();
+            goalPolicy = new NoQuestKnowledgePolicy(intentStack);
             Console.WriteLine("[strategy] AC_BOTS_LLM_DISABLE=1 -> LLM disabled, using NoQuestKnowledgePolicy fallback only");
         }
         else
@@ -492,7 +519,7 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(), weenies, trainingSink, intentStack, intentIds);
+                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack), weenies, trainingSink, intentStack, intentIds);
                 goalPolicy = llmPolicy;
                 llmPolicyForPickerSurface = llmPolicy;
                 Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
@@ -500,7 +527,7 @@ internal sealed class HandshakeDriver : IDisposable
             catch (Exception ex)
             {
                 Console.WriteLine($"[strategy] LlmGoalClient unavailable ({ex.GetType().Name}: {ex.Message}); using NoQuestKnowledgePolicy fallback only");
-                goalPolicy = new NoQuestKnowledgePolicy();
+                goalPolicy = new NoQuestKnowledgePolicy(intentStack);
             }
         }
         var eventStream = new EventStream();
@@ -2160,6 +2187,55 @@ internal sealed class HandshakeDriver : IDisposable
                     if (projection is not null)
                     {
                         botStats.Pump(eventStream, projection);
+
+                        // Slice 0 (Hunt) — push operator-authorised
+                        // initial intent on the first tick where a
+                        // projection is available. Baseline.Capture
+                        // needs real world+events data so since-push
+                        // predicates (units_traveled_since_push etc.)
+                        // start counting from a meaningful zero.
+                        //
+                        // Pushed once and only once: the flag is
+                        // never reset. If the operator wants to
+                        // re-arm, they restart the spike. If the
+                        // LLM pops the intent, that's a deliberate
+                        // strategic decision — code does NOT
+                        // re-push behind the LLM's back.
+                        if (!initialIntentPushed &&
+                            pendingInitialIntentKind is not null &&
+                            intentStack.IsEmpty)
+                        {
+                            var baseline = IntentBaseline.Capture(
+                                projection, eventStream, DateTime.UtcNow, botStats);
+                            var initial = new Strategy.Intent.Intent
+                            {
+                                Id = intentIds.Allocate(),
+                                Kind = pendingInitialIntentKind,
+                                Rationale = $"operator-supplied initial intent (AC_BOTS_INITIAL_INTENT={pendingInitialIntentKind})",
+                                Completion = new AlwaysFalsePredicate(),
+                                Baseline = baseline,
+                                Status = IntentLifecycle.Active,
+                            };
+                            var pushResult = intentStack.TryPush(initial);
+                            if (pushResult == StackOpResult.Ok)
+                            {
+                                initialIntentPushed = true;
+                                Console.WriteLine(
+                                    $"[intent-stack] operator push: id={initial.Id} kind={initial.Kind} " +
+                                    $"revision_now={intentStack.Revision} depth_now={intentStack.Depth}");
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[intent-stack] operator push REJECTED: kind={initial.Kind} " +
+                                    $"result={pushResult}");
+                                // Never retry — if the first push failed
+                                // there's something structurally wrong;
+                                // re-trying every tick would spam logs.
+                                initialIntentPushed = true;
+                            }
+                        }
+
                         var poppedTop = intentStack.CheckTopForCompletion(
                             projection, eventStream, DateTime.UtcNow, botStats);
                         if (poppedTop is not null)
