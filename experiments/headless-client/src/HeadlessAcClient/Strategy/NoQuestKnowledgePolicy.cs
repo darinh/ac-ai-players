@@ -8,8 +8,8 @@
 // What it WILL do (illustrating the schema-only behavior):
 //   - If a nearby creature is observed-hostile -> Attack goal
 //     (priority high)
-//   - If a nearby pickup-eligible item is on the ground -> Pickup
 //   - If inventory contains a wearable not yet wielded -> Wield
+//   - If a nearby pickup-eligible item is on the ground -> Pickup
 //   - If inventory contains a "newly-acquired" item (added since
 //     last goal) -> Use goal targeting the item itself (so the
 //     LLM gets to see the popup that follows, which often reveals

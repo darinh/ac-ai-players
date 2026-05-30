@@ -688,6 +688,20 @@ public class StrategyFoundationTests
         Assert.NotNull(secondGuid);
         Assert.NotEqual(firstGuid, secondGuid);
     }
+
+    // ---- ItemTypeMasks.MeleeWeapon constant ----
+
+    [Fact]
+    public void ItemTypeMasks_MeleeWeapon_BitValue()
+    {
+        // The Asheron's Call wire-protocol bit for
+        // ItemType.MeleeWeapon is 0x00000001 (see ACE-bots
+        // Source/ACE.Entity/Enum/ItemType.cs). This constant is
+        // the precondition gate for GameActionTargetedMeleeAttack
+        // (opcode 0x0008) which is the only attack message the
+        // driver currently ships.
+        Assert.Equal(0x00000001u, ItemTypeMasks.MeleeWeapon);
+    }
 }
 
 /// <summary>

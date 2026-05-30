@@ -186,6 +186,17 @@ internal static class ItemTypeMasks
     public const uint Container = 0x00000200u; // sacks, corpses, chests, bookshelves
 
     /// <summary>
+    /// ACE.Entity.Enum.ItemType.MeleeWeapon bit (0x1). Inventory item
+    /// whose ItemType has this bit and is wielded (WieldedAt != 0)
+    /// satisfies the wire-schema precondition for the
+    /// GameActionTargetedMeleeAttack message — the only attack path
+    /// the driver currently issues (see HandshakeDriver attack-loop
+    /// notes). Used by NoQuestKnowledgePolicy to gate Attack goals on
+    /// "do I actually have a weapon equipped".
+    /// </summary>
+    public const uint MeleeWeapon = 0x00000001u;
+
+    /// <summary>
     /// Mirror of HandshakeDriver.PickupItemTypeMask (0xD96F).
     /// Bits: MeleeWeapon (0x1) | Armor (0x2) | Clothing (0x4) |
     /// Jewelry (0x8) | Food (0x20) | Money (0x40) | MissileWeapon
