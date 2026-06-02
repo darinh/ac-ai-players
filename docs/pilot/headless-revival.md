@@ -74,10 +74,19 @@ and, where relevant, a live client run) before committing.
    `files/smoke-run-04.log` (session folder). Two minor follow-ups
    filed: CharacterList=0-vs-NameInUse create loop; first-call LLM
    goal-id parse-error fallback.
-3. **FOV node discovery.** Add synthesis of new nav nodes from the
-   bot's visible objects (sight-line / radius), persisted in
-   `NavGraph` — the missing half of "discover, never forget". Builds
-   on the existing `RecordVisit` / `RecordObservation`.
+3. **FOV node discovery.** ✅ DONE 2026-06-02 (PR #119, commit
+   `e5d88ad` on `anvil/revive-fov-nodes`). Bots remember WHERE they
+   have SEEN entities as a per-bot `SightedLocation` memory persisted
+   to JSONL — the missing half of "discover, never forget". Critically,
+   sighted locations are a SEPARATE concept from `NavNode`: they carry
+   no reachability guarantee, form no edges, and never appear in
+   routing-anchor queries, so they cannot forge a walkable shortcut
+   (the wall-shortcut invariant holds by construction). Only a real
+   `RecordVisit` ever makes a walkable node. Fully additive to
+   `RecordVisit`/`RecordObservation`. Build clean + 453/453 tests;
+   three adversarial reviews passed (hardcoded-audit OK, correctness
+   clean, design-alignment verified). A later slice consumes these by
+   routing toward the remembered coords via the static navmesh.
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
