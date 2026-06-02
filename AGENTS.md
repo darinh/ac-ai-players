@@ -6,11 +6,35 @@ cwd. Keep this file short; deeper context lives in linked docs.
 
 ## What this repo is
 
-A docs-only planning repo for ACE AI Players — a project to add
-NPC-bot players to an Asheron's Call Emulator (ACE) server. The
-shipped code lives in the fork repo `darinh/ACE-bots`. Until M0
-fully closes, this repo holds milestones, ADRs, research notes,
-and the public roadmap.
+A repo for ACE AI Players — a project to add NPC-bot players to an
+Asheron's Call Emulator (ACE) server. It holds the project's
+planning material (milestones, ADRs, research notes, roadmap) and
+the bot code under [`experiments/`](experiments).
+
+**The bot runtime is a distributed headless client**, not a
+server-side bot object. The bots run as headless AC network
+clients that connect to the server like a real player and play the
+game over the wire — no `BotPlayer`-in-`ACE.Server` objects, no
+admin commands.
+
+- [`experiments/headless-client/`](experiments/headless-client) —
+  the bot runtime (headless AC client + brain). NOTE: the source
+  currently lives on the spike branches under `.worktrees/`
+  (`anvil/llm-deliberation-race` is the furthest along); it is
+  being consolidated back onto `main`. Only `data/` is on `main`
+  today.
+- [`experiments/world-nav/`](experiments/world-nav) — the static
+  navmesh library: waypoints extracted from the AC1 DAT files. The
+  headless client consumes it for pathfinding; it also backs the
+  optional server-side `ACE.Mod.Pathfinding` Harmony mod (see
+  [ADR-0010](docs/adr/0010-pathfinding-as-standalone-mod.md)).
+
+The server fork `darinh/ACE-bots` hosts the ACE server you run the
+clients against, plus any server-side mods. **Bot decision-making
+lives in the headless client in THIS repo — not in the server
+fork.** A server-side `BotPlayer.cs` track exists in that fork from
+an earlier pivot; it is being retired in favor of the headless
+client.
 
 See [`README.md`](README.md) and [`CONTRIBUTING.md`](CONTRIBUTING.md)
 for the project overview, status, and contributor ground rules.
@@ -96,8 +120,8 @@ The architecture (Pilot Track) is:
 - LLM (Strategy) decides WHAT to do → pushes Intents.
 - IntentStack persists strategic decisions across ticks.
 - Goal = tactical decomposition of the current top Intent.
-- Motor (HandshakeDriver picker + action dispatch +
-  `BotPlayer.cs` tick in `ACE-bots`) executes Goals.
+- Motor (HandshakeDriver picker + action dispatch + the headless
+  client's tick loop) executes Goals.
 
 Source code MAY:
 - Decode wire-protocol bits into named projection properties
@@ -128,8 +152,9 @@ How to comply (per commit):
    into an Intent push) OR amend to remove offending hunks.
 4. Only push after a clean audit.
 
-This applies to commits in `ac-ai-players` (this repo) AND the
-companion `darinh/ACE-bots` fork. Doc-only commits, test-only
+This applies to commits touching the headless client's
+decision-making code in this repo
+(`experiments/headless-client/`). Doc-only commits, test-only
 commits, dependency bumps, and CI config changes are exempt.
 
 History: this discipline was added after the Slice U incident,

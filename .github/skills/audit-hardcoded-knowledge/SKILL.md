@@ -2,8 +2,8 @@
 
 Run an adversarial review of a code diff to catch **hardcoded game
 knowledge** before it ships. This is mandatory for any agent
-commit that touches the headless bot (`darinh/ACE-bots` repo) or
-this repo's strategy / motor / projection code.
+commit that touches the headless client bot or this repo's
+strategy / motor / projection code.
 
 > Why this exists: the Pilot Track architecture says LLMs decide
 > WHAT (push Intents), source code only decides HOW (decode wire
@@ -22,8 +22,6 @@ this repo's strategy / motor / projection code.
   - `experiments/headless-client/src/HeadlessAcClient/Strategy/**`
   - `experiments/headless-client/src/HeadlessAcClient/Tactics/**`
   - `experiments/headless-client/src/HeadlessAcClient/World/**`
-  - the equivalent code in `darinh/ACE-bots` (`BotPlayer.cs`,
-    `BotBrain*.cs`, etc.).
 - Optional but recommended for any RULES / system-prompt change
   in `LlmGoalPolicy.cs` or `NoQuestKnowledgePolicy.cs` — these are
   the boundary where "prompt knowledge" can become "spoilers /
@@ -60,8 +58,8 @@ The architecture is:
   the IntentStack.
 - IntentStack persists strategic decisions across ticks.
 - Goal = tactical decomposition of the current top Intent.
-- Motor (HandshakeDriver picker + action dispatch + BotPlayer
-  tick) executes Goals — walks to targets, sends opcodes,
+- Motor (HandshakeDriver picker + action dispatch + the headless
+  client tick) executes Goals — walks to targets, sends opcodes,
   records outcomes.
 
 The Pilot Track directive at `docs/pilot/improvement-loop.md` and

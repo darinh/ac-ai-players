@@ -60,10 +60,11 @@ Do NOT use this skill for:
    `git worktree list --porcelain` and reject if the target's
    parent directory chain crosses any existing worktree root other
    than the main checkout. (Being inside a linked worktree is
-   FINE — e.g., `ACE-bots` itself is a worktree of `ACE`. The
-   skill can still create siblings under `ACE-bots/.worktrees/`.
-   What's forbidden is putting `.worktrees/<task-id>` *underneath*
-   another worktree's working tree.)
+   FINE — a repo's working checkout may itself be a linked
+   worktree of another clone. The skill can still create siblings
+   under that checkout's `.worktrees/`. What's forbidden is
+   putting `.worktrees/<task-id>` *underneath* another worktree's
+   working tree.)
 3. **`task_id` is a valid slug.** Regex `^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$`.
    Reject empties, uppercase, underscores, slashes, leading/trailing
    hyphens. **PowerShell gotcha:** `-match` is case-insensitive by
@@ -113,8 +114,9 @@ Order of precedence:
 2. `<repo-root>/.github/skills/create-new-branch/default-base`
    (plain text file, one branch name, no other content). Use this
    for repos where the integration branch is NOT the one
-   `origin/HEAD` points at. Example: `ACE-bots` ships a
-   `default-base` file containing `botplayer-spike`.
+   `origin/HEAD` points at — e.g. a repo whose default branch is
+   `main` but whose active work lands on a long-lived integration
+   branch named in that `default-base` file.
 3. `origin/HEAD` (`git symbolic-ref --short refs/remotes/origin/HEAD`
    minus the `origin/` prefix).
 4. First of `main`, `master` that exists locally.
