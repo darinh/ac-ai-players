@@ -42,9 +42,9 @@ the ordered slices to bring it back to life.
 
 | Component | Location | State |
 |---|---|---|
-| Headless client | `anvil/portal-walkable-nodes` (158 commits, canonical; superset of `llm-deliberation-race`) | **Builds clean, 440/440 tests pass.** Source NOT yet on `main` (only `data/`). |
-| world-nav navmesh | `main` | On `main`; consumed by the client. |
-| services-common (`AcAiPlayers.ServicesClient`) | spike worktrees only | Build dep of the client; NOT on `main`. |
+| Headless client | **`main`** (consolidated 2026-06-02 from `anvil/portal-walkable-nodes`) | **Builds clean + 440/440 tests pass from the main checkout.** |
+| world-nav navmesh | `main` | On `main`; consumed by the client. ACE-bots cross-repo refs now resolve from either a normal checkout or a worktree (dual-depth probe in the csproj). |
+| services-common (`AcAiPlayers.ServicesClient`) | **`main`** | Consolidated; build dep of the client. |
 | ACE.Mod.Pathfinding | `ACE-bots/.worktrees/pathfinding-mod` | Functional indoor A* + `/pathfind-debug`; git worktree orphaned (gitdir points at a dead `ACE` clone). Indoor-only. |
 
 Build deps of the client (all resolve today in the worktree):
@@ -57,12 +57,12 @@ Target `net10.0`; `TreatWarningsAsErrors=true`.
 Each slice is independently shippable. Verify (build + 440 tests
 and, where relevant, a live client run) before committing.
 
-1. **Consolidate to `main`.** Bring `experiments/headless-client`,
-   `experiments/services-common`, and any `world-nav` deltas from
-   `anvil/portal-walkable-nodes` onto `main` (merge or subtree-import
-   the `experiments/` tree). Confirm build + 440 tests on `main`.
-   Settle the ACE-bots cross-repo `ProjectReference`s (siblings must
-   be checked out; document the assumption like world-nav's README).
+1. **Consolidate to `main`.** ✅ DONE 2026-06-02 (commits `2a9174d`
+   merge, `de520bd` build fix). Merged `experiments/{headless-client,
+   services-common,api-host}` + world-nav deltas + research specs from
+   `anvil/portal-walkable-nodes` onto `main`; build + 440 tests green
+   from the main checkout; world-nav csproj now probes both checkout
+   depths for the ACE-bots sibling.
 2. **Live smoke.** Run one client process against the live
    `ACEServer`; confirm login then enter-world then perception then
    an LLM goal then movement via `IndoorNavService`. Capture client
