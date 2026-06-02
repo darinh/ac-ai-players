@@ -1,0 +1,942 @@
+[main] target 127.0.0.1:9000, account 'headless-test'
+[selfcheck] OutboundPacket round-trip ...
+[selfcheck] OutboundPacket round-trip OK
+[api] WARNING: AC_BOTS_API_TOKEN not set; using dev-insecure-token
+[api] AcAiPlayers.ApiHost v1.0.0+9a6aaec8c3f11c3560bf0a962185aaed20301206: ok
+[api] WARNING: API host unreachable: HttpRequestException: Response status code does not indicate success: 401 (Unauthorized).
+[api] continuing without API; Phase 1 spike doesn't require it
+[handshake] bound UDP socket on 0.0.0.0:50171
+[handshake] sending LoginRequest (84 bytes) to 127.0.0.1:9000
+[handshake] received 52 bytes from 127.0.0.1:9000
+[handshake]   header: Seq=0 Id=11 Iter=1 Flags=ConnectRequest Size=32 CRC=0x24B0ADF8
+[handshake] received ConnectRequest:
+             serverTime  = 294106998.2264411
+             cookie      = 0x69210633E51DD740
+             clientId    = 0
+             serverSeed  = f6 2f 6c fd
+             clientSeed  = c5 af 8d ae
+[handshake] sending ConnectResponse (28 bytes) to 127.0.0.1:9001
+[handshake]   bytes: 00 00 00 00 00 00 08 00 58 4e 40 09 00 00 00 00 08 00 00 00 40 d7 1d e5 33 06 21 69
+[handshake]   sent 3× from local endpoint 0.0.0.0:50171
+[observe] listening for post-handshake packets for 65s; will send acks + timesync echoes ...
+[observe] #1 from 127.0.0.1:9001: Seq=2 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0x4D171441  [CRC_OK]
+[observe]   optional: TimeSync=294106998.3500942
+[observe]   -> sent Ack(2) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294106998.3500942) [28 bytes]
+[observe] #2 from 127.0.0.1:9001: Seq=3 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0xCD7E56B8  [CRC_OK]
+[observe]   Frag Seq=0 Id=0x80000000 Count=1 Size=44 Idx=0 Q=5 payload[28]: e5 f7 00 00 01 00 00 00 01 00 00 00 01 00 00 00 02 00 00 00 00 00 00 00 01 00 00 00
+[observe]   -> DDDInterrogation: region=1 lang=1 product=1 supportedLangs=[0,1]
+[observe]   -> sent Ack(3) [24 bytes] to 127.0.0.1:9000
+[observe] #3 from 127.0.0.1:9001: Seq=4 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=120 CRC=0x6A351A3D  [CRC_OK]
+[observe]   Frag Seq=1 Id=0x80000000 Count=1 Size=80 Idx=0 Q=9 payload[64]: 58 f6 00 00 00 00 00 00 01 00 00 00 06 00 00 50 0a 00 48 65 61 64 6c 65 73 73 30 31 00 00 00 00 ...
+[observe]   -> CharacterList: account="headless-test" slots=11 characters=1 turbineChat=1 tod=1
+[observe]      [0] id=0x50000006 name="Headless01" deleteIn=0s
+[observe]   Frag Seq=2 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: e1 f7 00 00 01 00 00 00 80 00 00 00 0a 00 41 43 45 6d 75 6c 61 74 6f 72
+[observe]   -> ServerName: name="ACEmulator" connections=1/128
+[observe]   -> sent Ack(4) [24 bytes] to 127.0.0.1:9000
+[observe]   -> PHASE3.3a SEND: CharacterEnterWorldRequest (chosenGuid=0x50000006, pktSeq=2, fragSeq=1, totalBytes=44)
+[observe]      Expect 0xF7DF CharacterEnterWorldServerReady (or 0xF659 CharacterError on shutdown)
+[observe] #4 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=20 CRC=0x7E1D53A6  [CRC_OK]
+[observe]   Frag Seq=3 Id=0x80000000 Count=1 Size=20 Idx=0 Q=9 payload[4]: df f7 00 00
+[observe]   -> CharacterEnterWorldServerReady (server ready, send 0xF657)
+[observe]   -> sent Ack(5) [24 bytes] to 127.0.0.1:9000
+[observe]   -> PHASE3.3b SEND: CharacterEnterWorld(guid=0x50000006, account="headless-test", payload=24B) pktSeq=3 fragSeq=2 totalBytes=64
+[observe]      Expect world-state firehose to begin (PlayerCreate, PlayerDescription, landblock data, ...) - or 0xF659 CharacterError on validation failure
+[observe] #5 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x9CF03C80  [CRC_OK]
+[observe]   Frag Seq=4 Id=0x80000000 Count=2 Size=464 Idx=0 Q=9 payload[448]: b0 f7 00 00 06 00 00 50 01 00 00 00 13 00 00 00 9f 00 00 00 0a 00 00 00 0d 00 40 00 05 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   -> sent Ack(6) [24 bytes] to 127.0.0.1:9000
+[observe] #6 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=424 CRC=0x2327D6B9  [CRC_OK]
+[observe]   Frag Seq=4 Id=0x80000000 Count=2 Size=252 Idx=1 Q=9 payload[236]: 00 00 01 00 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 34 00 00 00 ...
+[observe]   -> opcode 0x10000 (no decoder yet)
+[observe]   Frag Seq=5 Id=0x80000000 Count=1 Size=48 Idx=0 Q=9 payload[32]: b0 f7 00 00 06 00 00 50 02 00 00 00 29 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00 01 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=6 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: b0 f7 00 00 06 00 00 50 03 00 00 00 21 00 00 00 00 00 00 00 00 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=7 Id=0x80000000 Count=1 Size=36 Idx=0 Q=9 payload[20]: b0 f7 00 00 06 00 00 50 04 00 00 00 8a 02 00 00 1d 05 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=8 Id=0x80000000 Count=1 Size=48 Idx=0 Q=9 payload[32]: b0 f7 00 00 06 00 00 50 05 00 00 00 8b 02 00 00 1b 05 00 00 07 00 47 65 6e 65 72 61 6c 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   -> sent Ack(7) [24 bytes] to 127.0.0.1:9000
+[observe] #7 from 127.0.0.1:9001: Seq=8 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=456 CRC=0x7B4E975A  [CRC_OK]
+[observe]   Frag Seq=9 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 06 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=10 Id=0x80000000 Count=1 Size=44 Idx=0 Q=9 payload[28]: b0 f7 00 00 06 00 00 50 07 00 00 00 8b 02 00 00 1b 05 00 00 05 00 54 72 61 64 65 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=11 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 08 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=12 Id=0x80000000 Count=1 Size=44 Idx=0 Q=9 payload[28]: b0 f7 00 00 06 00 00 50 09 00 00 00 8b 02 00 00 1b 05 00 00 03 00 4c 46 47 00 00 00
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=13 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: b0 f7 00 00 06 00 00 50 0a 00 00 00 95 02 00 00 00 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 ...
+[observe]   -> opcode 0xF7B0 (no decoder yet)
+[observe]   Frag Seq=14 Id=0x80000000 Count=1 Size=152 Idx=0 Q=9 payload[136]: e0 f7 00 00 7c 00 57 65 6c 63 6f 6d 65 20 74 6f 20 41 73 68 65 72 6f 6e 27 73 20 43 61 6c 6c 0a ...
+[observe]   -> ServerMessage(chatType=0x0): "Welcome to Asheron's Call
+  powered by ACEmulator
+
+For more information on comma..."
+[observe]   -> sent Ack(8) [24 bytes] to 127.0.0.1:9000
+[observe] #8 from 127.0.0.1:9001: Seq=9 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0xCA55A7BC  [CRC_OK]
+[observe]   Frag Seq=15 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 00 7d 00 00 00 f2 01 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(9) [24 bytes] to 127.0.0.1:9000
+[observe] #9 from 127.0.0.1:9001: Seq=10 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=452 CRC=0x0EFCD823  [CRC_OK]
+[observe]   Frag Seq=16 Id=0x80000000 Count=1 Size=24 Idx=0 Q=10 payload[8]: 46 f7 00 00 06 00 00 50
+[observe]   -> PlayerCreate: guid=0x50000006
+[observe]   Frag Seq=17 Id=0x80000000 Count=1 Size=428 Idx=0 Q=10 payload[412]: 45 f7 00 00 06 00 00 50 11 09 17 24 7e 00 b1 1f 18 08 b6 02 00 18 bc 02 20 08 f3 05 40 08 8b 06 ...
+[observe]   -> ObjectCreate: guid=0x50000006 wcid=1 itemType=0x10 name="Headless01" wFlags=0x00800036/0x00000000 pFlags=0x019803 lb=0x860201AD xyz=(12.3,-28.5,0.0)
+[observe]   -> sent Ack(10) [24 bytes] to 127.0.0.1:9000
+[observe] #10 from 127.0.0.1:9001: Seq=11 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=460 CRC=0x7F10A58C  [CRC_OK]
+[observe]   Frag Seq=18 Id=0x80000000 Count=1 Size=152 Idx=0 Q=10 payload[136]: 45 f7 00 00 4a 02 00 80 11 00 00 00 01 18 02 00 14 04 00 00 65 00 00 00 14 00 00 20 2b 00 00 34 ...
+[observe]   -> ObjectCreate: guid=0x8000024A wcid=31000 itemType=0x800 name="Blackmoor's Favor" wFlags=0x10497090/0x00000006 pFlags=0x021801
+[observe]   Frag Seq=19 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 47 02 00 80 11 02 06 01 7e 00 f3 05 28 18 97 06 5c 04 00 d5 03 5f 02 00 d5 03 5e 02 ...
+[observe]   -> ObjectCreate: guid=0x80000247 wcid=130 itemType=0x4 name="Shirt" wFlags=0x00278018/0x00000000 pFlags=0x021801
+[observe]   Frag Seq=22 Id=0x80000000 Count=1 Size=140 Idx=0 Q=10 payload[124]: 45 f7 00 00 46 02 00 80 11 01 01 01 7e 00 f3 05 fa 06 00 a3 0c c9 0e 00 81 04 00 00 01 18 02 00 ...
+[observe]   -> ObjectCreate: guid=0x80000246 wcid=118 itemType=0x4 name="Cap" wFlags=0x10278018/0x00000000 pFlags=0x021801
+[observe]   -> sent Ack(11) [24 bytes] to 127.0.0.1:9000
+[observe] #11 from 127.0.0.1:9001: Seq=12 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=364 CRC=0x1DCCEFD3  [CRC_OK]
+[observe]   Frag Seq=20 Id=0x80000000 Count=1 Size=152 Idx=0 Q=10 payload[136]: 45 f7 00 00 49 02 00 80 11 01 02 01 7e 00 f3 05 a0 08 00 ce 03 ce 03 00 cb 03 cb 03 00 8c 04 00 ...
+[observe]   -> ObjectCreate: guid=0x80000249 wcid=115 itemType=0x2 name="Leather Boots" wFlags=0x00278018/0x00000000 pFlags=0x021801
+[observe]   Frag Seq=21 Id=0x80000000 Count=1 Size=160 Idx=0 Q=10 payload[144]: 45 f7 00 00 48 02 00 80 11 02 03 01 7e 00 f3 05 40 08 8b 06 48 08 00 d8 03 a1 00 00 b0 0b b0 0b ...
+[observe]   -> ObjectCreate: guid=0x80000248 wcid=2604 itemType=0x4 name="Wide Breeches" wFlags=0x00278018/0x00000000 pFlags=0x021801
+[observe]   Frag Seq=25 Id=0x80000000 Count=2 Size=52 Idx=1 Q=10 payload[36]: 08 00 50 69 6c 6f 74 2d 30 31 00 00 01 00 36 10 10 00 00 00 1c 00 00 00 66 07 01 00 00 00 00 00 ...
+[observe]   -> opcode 0x69500008 (no decoder yet)
+[observe]   -> sent Ack(12) [24 bytes] to 127.0.0.1:9000
+[observe] #12 from 127.0.0.1:9001: Seq=13 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=396 CRC=0xAE5CD714  [CRC_OK]
+[observe]   Frag Seq=23 Id=0x80000000 Count=1 Size=396 Idx=0 Q=10 payload[380]: 45 f7 00 00 d1 01 00 80 11 0b 0f 23 7e 00 c1 1f 18 08 a4 04 00 18 ae 04 20 08 78 10 f0 0a 75 10 ...
+[observe]   -> ObjectCreate: guid=0x800001D1 wcid=30991 itemType=0x10 name="Society Greeter" wFlags=0x00900036/0x00000000 pFlags=0x018803 lb=0x860201AD xyz=(9.8,-31.7,0.0)
+[observe]   -> sent Ack(13) [24 bytes] to 127.0.0.1:9000
+[observe] #13 from 127.0.0.1:9001: Seq=14 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0xA27051BA  [CRC_OK]
+[observe]   Frag Seq=24 Id=0x80000000 Count=1 Size=164 Idx=0 Q=10 payload[148]: 45 f7 00 00 fe 01 00 80 11 00 00 00 05 98 02 00 14 04 00 00 65 00 00 00 ad 01 02 86 e3 a5 f7 40 ...
+[observe]   -> ObjectCreate: guid=0x800001FE wcid=5090 itemType=0x20 name="Bruised Apple" wFlags=0x00213010/0x00000000 pFlags=0x029805 lb=0x860201AD xyz=(7.7,-30.1,0.9)
+[observe]   Frag Seq=26 Id=0x80000000 Count=1 Size=156 Idx=0 Q=10 payload[140]: 45 f7 00 00 2d 20 60 78 11 00 00 00 03 98 01 00 1c 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x7860202D wcid=12705 itemType=0x80 name="Door" wFlags=0x00000030/0x00000000 pFlags=0x019803 lb=0x860201B4 xyz=(15.0,-30.0,-0.0)
+[observe]   Frag Seq=32 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 2a 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 b1 01 02 86 de 13 b0 41 ...
+[observe]   -> ObjectCreate: guid=0x7860202A wcid=5141 itemType=0x2000 name="VIEW CONTROLS " wFlags=0x00200038/0x00000000 pFlags=0x028001 lb=0x860201B1 xyz=(22.0,-29.4,0.0)
+[observe]   -> sent Ack(14) [24 bytes] to 127.0.0.1:9000
+[observe] #14 from 127.0.0.1:9001: Seq=15 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0xCEED2F5D  [CRC_OK]
+[observe]   Frag Seq=25 Id=0x80000000 Count=2 Size=464 Idx=0 Q=10 payload[448]: 45 f7 00 00 05 00 00 50 11 0a 1b 26 7e 00 be 1f 18 08 ab 04 00 18 bd 02 20 08 f3 05 40 08 8b 06 ...
+[ObjectCreateDecoder] decode failed at offset 448/448: MessageReader underflow at local offset 448 (absolute 448): needed 2, remaining 0.
+[ObjectCreateDecoder] payload hex:
+  0000: 45 F7 00 00 05 00 00 50 11 0A 1B 26 7E 00 BE 1F 
+  0016: 18 08 AB 04 00 18 BD 02 20 08 F3 05 40 08 8B 06 
+  0032: 48 08 F3 05 28 18 97 06 5C 04 F3 05 FA 06 E7 05 
+  0048: A8 06 F3 05 A0 08 10 98 00 B7 10 10 4C 02 00 11 
+  0064: 10 F5 02 55 11 10 5C 02 85 11 00 B0 0B B0 0B 00 
+  0080: BE 0C BE 0C 05 D8 03 A1 00 01 D8 03 A1 00 06 DA 
+  0096: 03 CF 03 02 DA 03 CF 03 09 D5 03 5F 02 09 D4 03 
+  0112: 5E 02 00 B0 0B 5D 02 00 BE 0C EA 0C 0A CC 02 BE 
+  0128: 02 0D CC 02 BE 02 0B C4 02 0D 14 0E C4 02 0D 14 
+  0144: 10 A3 0C C9 0E 0F D3 03 41 20 0C D3 03 41 20 02 
+  0160: DA 03 CB 03 06 DA 03 CB 03 03 C0 0C CE 03 07 C0 
+  0176: 0C CE 03 04 DC 03 CE 03 08 DC 03 CE 03 10 F6 47 
+  0192: 00 4E 00 05 53 00 01 4F 00 06 00 12 02 FF 11 09 
+  0208: 54 00 00 0B 12 0A 2E 12 0D 2D 12 0B F4 11 0E F5 
+  0224: 11 10 6E 09 0F 77 00 0C 76 00 02 2A 12 06 28 12 
+  0240: 03 11 12 07 10 12 04 0E 12 08 0F 12 11 EC 01 12 
+  0256: EC 01 13 EC 01 14 EC 01 15 EC 01 16 EC 01 17 EC 
+  0272: 01 18 EC 01 19 EC 01 1A EC 01 1B EC 01 1C EC 01 
+  0288: 1D EC 01 1E EC 01 1F EC 01 20 EC 01 21 EC 01 00 
+  0304: 03 98 01 00 08 04 40 00 38 00 00 00 06 00 3D 00 
+  0320: 2D 20 60 78 B4 01 02 86 4B C8 70 41 35 EF EF C1 
+  0336: 00 00 A8 B3 1F EE 01 00 00 00 00 40 00 00 00 00 
+  0352: FF FF 7F 7F 00 00 80 3F 00 00 00 00 00 00 00 00 
+  0368: 00 00 80 3F 00 00 00 00 AD 01 02 86 98 90 A1 40 
+  0384: C1 E5 EF C1 00 D6 A3 3B AA 0F 35 3F 00 00 00 00 
+  0400: 00 00 00 00 3D FA 34 BF 01 00 00 09 01 00 00 20 
+  0416: 04 00 00 34 01 00 00 02 AC 4D 84 02 01 00 00 00 
+  0432: 00 00 84 02 00 00 00 00 04 00 00 00 36 00 80 00 
+[observe]   -> opcode 0xF745 (no decoder yet)
+[observe]   -> sent Ack(15) [24 bytes] to 127.0.0.1:9000
+[observe] #15 from 127.0.0.1:9001: Seq=16 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=388 CRC=0xE5FDDF91  [CRC_OK]
+[observe]   Frag Seq=27 Id=0x80000000 Count=1 Size=388 Idx=0 Q=10 payload[372]: 45 f7 00 00 ce 01 00 80 11 0b 0f 23 7e 00 db 1f 18 08 ba 02 00 18 bd 02 20 08 8b 06 f0 0a f0 05 ...
+[observe]   -> ObjectCreate: guid=0x800001CE wcid=29324 itemType=0x10 name="Jonathan" wFlags=0x00900036/0x00000000 pFlags=0x018803 lb=0x860201B0 xyz=(22.1,-19.1,0.0)
+[observe]   -> sent Ack(16) [24 bytes] to 127.0.0.1:9000
+[observe] #16 from 127.0.0.1:9001: Seq=17 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=348 CRC=0xB2242DDF  [CRC_OK]
+[observe]   Frag Seq=28 Id=0x80000000 Count=1 Size=172 Idx=0 Q=10 payload[156]: 45 f7 00 00 fb 01 00 80 11 01 01 01 7e 00 e7 05 a8 06 00 40 20 27 01 00 86 04 00 00 01 98 02 00 ...
+[observe]   -> ObjectCreate: guid=0x800001FB wcid=13240 itemType=0x2 name="Leather Gauntlets" wFlags=0x00250010/0x00000000 pFlags=0x029801 lb=0x860201B0 xyz=(18.4,-21.1,0.0)
+[observe]   Frag Seq=29 Id=0x80000000 Count=1 Size=176 Idx=0 Q=10 payload[160]: 45 f7 00 00 fa 01 00 80 11 01 02 01 7e 00 e7 05 98 08 00 d8 03 fa 0e 00 da 03 fa 0e 00 4d 06 00 ...
+[observe]   -> ObjectCreate: guid=0x800001FA wcid=13241 itemType=0x2 name="Leather Leggings" wFlags=0x00250010/0x00000000 pFlags=0x029801 lb=0x860201B6 xyz=(17.8,-41.7,-0.0)
+[observe]   -> sent Ack(17) [24 bytes] to 127.0.0.1:9000
+[observe] #17 from 127.0.0.1:9001: Seq=18 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=336 CRC=0x6BDBC20E  [CRC_OK]
+[observe]   Frag Seq=30 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 fc 01 00 80 11 00 00 00 01 98 02 00 14 04 00 00 65 00 00 00 b6 01 02 86 c1 ca 8e 41 ...
+[observe]   -> ObjectCreate: guid=0x800001FC wcid=13237 itemType=0x2000 name="Restoring the Training Academies" wFlags=0x00200030/0x00000000 pFlags=0x029801 lb=0x860201B6 xyz=(17.8,-37.9,0.1)
+[observe]   Frag Seq=31 Id=0x80000000 Count=1 Size=168 Idx=0 Q=10 payload[152]: 45 f7 00 00 fd 01 00 80 11 01 01 01 7e 00 e7 05 fa 06 00 a3 0c c9 0e 00 81 04 00 00 01 98 02 00 ...
+[observe]   -> ObjectCreate: guid=0x800001FD wcid=13239 itemType=0x2 name="Leather Cap" wFlags=0x10250010/0x00000000 pFlags=0x029801 lb=0x860201B6 xyz=(22.2,-40.2,0.5)
+[observe]   -> sent Ack(18) [24 bytes] to 127.0.0.1:9000
+[observe] #18 from 127.0.0.1:9001: Seq=19 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=384 CRC=0xCCE66F09  [CRC_OK]
+[observe]   Frag Seq=33 Id=0x80000000 Count=1 Size=384 Idx=0 Q=10 payload[368]: 45 f7 00 00 d4 01 00 80 11 0b 0f 23 7e 00 c5 1f 18 08 ad 04 00 18 ae 04 20 08 78 10 f0 0a 75 10 ...
+[observe]   -> ObjectCreate: guid=0x800001D4 wcid=29322 itemType=0x10 name="Samuel" wFlags=0x00900036/0x00000000 pFlags=0x018803 lb=0x860201B1 xyz=(21.9,-30.6,0.0)
+[observe]   -> sent Ack(19) [24 bytes] to 127.0.0.1:9000
+[observe] #19 from 127.0.0.1:9001: Seq=20 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=464 CRC=0x430F61C9  [CRC_OK]
+[observe]   Frag Seq=34 Id=0x80000000 Count=1 Size=164 Idx=0 Q=10 payload[148]: 45 f7 00 00 2c 20 60 78 11 00 00 00 03 98 01 00 18 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x7860202C wcid=29329 itemType=0x80 name="Training Area" wFlags=0x00000030/0x00000000 pFlags=0x019803 lb=0x860201B2 xyz=(24.8,-30.0,-0.0)
+[observe]   Frag Seq=35 Id=0x80000000 Count=1 Size=156 Idx=0 Q=10 payload[140]: 45 f7 00 00 38 20 60 78 11 00 00 00 03 98 01 00 18 00 01 00 0c 00 00 00 00 00 3d 00 03 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x78602038 wcid=278 itemType=0x80 name="Door" wFlags=0x00000030/0x00000000 pFlags=0x019803 lb=0x860201F2 xyz=(44.8,-20.0,-0.0)
+[observe]   Frag Seq=39 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 4f 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 6c 02 02 86 9f ad 83 42 ...
+[observe]   -> ObjectCreate: guid=0x7860204F wcid=5102 itemType=0x2000 name="COMBAT BAR " wFlags=0x00200038/0x00000000 pFlags=0x028001 lb=0x8602026C xyz=(65.8,-5.9,0.0)
+[observe]   -> sent Ack(20) [24 bytes] to 127.0.0.1:9000
+[observe] #20 from 127.0.0.1:9001: Seq=21 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=328 CRC=0x45A02C3D  [CRC_OK]
+[observe]   Frag Seq=36 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ab 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001AB wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x8602023A xyz=(60.9,-20.0,0.0)
+[observe]   Frag Seq=38 Id=0x80000000 Count=1 Size=148 Idx=0 Q=10 payload[132]: 45 f7 00 00 44 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 38 02 02 86 21 b0 70 42 ...
+[observe]   -> ObjectCreate: guid=0x78602044 wcid=5101 itemType=0x2000 name="WIELDING ITEMS " wFlags=0x00200038/0x00000000 pFlags=0x028001 lb=0x86020238 xyz=(60.2,-14.2,-0.0)
+[observe]   -> sent Ack(21) [24 bytes] to 127.0.0.1:9000
+[observe] #21 from 127.0.0.1:9001: Seq=22 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=396 CRC=0x9F1F3FE2  [CRC_OK]
+[observe]   Frag Seq=37 Id=0x80000000 Count=1 Size=396 Idx=0 Q=10 payload[380]: 45 f7 00 00 d7 01 00 80 11 0b 0f 23 7e 00 df 1f 18 08 a2 04 00 18 ae 04 20 08 7a 10 f0 0a 77 10 ...
+[observe]   -> ObjectCreate: guid=0x800001D7 wcid=29320 itemType=0x10 name="Training Master" wFlags=0x00900036/0x00000000 pFlags=0x018803 lb=0x8602023A xyz=(56.1,-20.1,0.0)
+[observe]   -> sent Ack(22) [24 bytes] to 127.0.0.1:9000
+[observe] #22 from 127.0.0.1:9001: Seq=23 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=360 CRC=0xA13DB4F5  [CRC_OK]
+[observe]   Frag Seq=40 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ae 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001AE wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x8602026C xyz=(69.9,-11.3,0.0)
+[observe]   Frag Seq=41 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 af 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001AF wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x86020283 xyz=(77.3,-20.3,0.0)
+[observe]   -> sent Ack(23) [24 bytes] to 127.0.0.1:9000
+[observe] #23 from 127.0.0.1:9001: Seq=24 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=360 CRC=0x04C7B432  [CRC_OK]
+[observe]   Frag Seq=42 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ac 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001AC wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x86020282 xyz=(78.0,-12.3,0.0)
+[observe]   Frag Seq=43 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 b0 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001B0 wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x86020282 xyz=(83.7,-7.0,0.0)
+[observe]   -> sent Ack(24) [24 bytes] to 127.0.0.1:9000
+[observe] #24 from 127.0.0.1:9001: Seq=25 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=324 CRC=0x258CF9F9  [CRC_OK]
+[observe]   Frag Seq=44 Id=0x80000000 Count=1 Size=144 Idx=0 Q=10 payload[128]: 45 f7 00 00 54 20 60 78 11 00 00 00 01 80 02 00 18 04 00 00 65 00 00 00 81 02 02 86 12 43 97 42 ...
+[observe]   -> ObjectCreate: guid=0x78602054 wcid=5103 itemType=0x2000 name="STATUS BARS " wFlags=0x00200038/0x00000000 pFlags=0x028001 lb=0x86020281 xyz=(75.6,-4.1,-0.0)
+[observe]   Frag Seq=45 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 ad 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001AD wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x86020299 xyz=(86.9,-20.2,0.0)
+[observe]   -> sent Ack(25) [24 bytes] to 127.0.0.1:9000
+[observe] #25 from 127.0.0.1:9001: Seq=26 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=180 CRC=0x7F08BC51  [CRC_OK]
+[observe]   Frag Seq=46 Id=0x80000000 Count=1 Size=180 Idx=0 Q=10 payload[164]: 45 f7 00 00 b1 01 00 80 11 01 00 00 48 0f 0c 13 00 00 00 00 83 98 01 00 08 04 00 00 0c 00 00 00 ...
+[observe]   -> ObjectCreate: guid=0x800001B1 wcid=12698 itemType=0x10 name="Sparring Golem" wFlags=0x00800036/0x00000000 pFlags=0x019883 lb=0x86020299 xyz=(88.0,-15.9,0.0)
+[observe]   -> sent Ack(26) [24 bytes] to 127.0.0.1:9000
+[observe] #26 from 127.0.0.1:9001: Seq=27 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=72 CRC=0xC75D3331  [CRC_OK]
+[observe]   Frag Seq=47 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: bb 02 00 00 1b 00 61 72 65 20 79 6f 75 20 6e 65 77 20 74 6f 6f 20 48 65 61 64 6c 65 73 73 30 31 ...
+[observe]   -> opcode 0x02BB (no decoder yet)
+[observe]   -> sent Ack(27) [24 bytes] to 127.0.0.1:9000
+[observe] #27 from 127.0.0.1:9001: Seq=28 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x8DA560FA  [CRC_OK]
+[observe]   Frag Seq=48 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 85 02 85 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(28) [24 bytes] to 127.0.0.1:9000
+[observe] #28 from 127.0.0.1:9001: Seq=28 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x726EB10B  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #29 from 127.0.0.1:9001: Seq=29 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xE0503B88  [CRC_OK]
+[observe]   Frag Seq=49 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 86 02 86 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(29) [24 bytes] to 127.0.0.1:9000
+[observe] #30 from 127.0.0.1:9001: Seq=29 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7270B10C  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #31 from 127.0.0.1:9001: Seq=30 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xA6464BA0  [CRC_OK]
+[observe]   Frag Seq=50 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 87 02 87 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(30) [24 bytes] to 127.0.0.1:9000
+[observe] #32 from 127.0.0.1:9001: Seq=30 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7272B10D  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #33 from 127.0.0.1:9001: Seq=31 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=72 CRC=0x37D907EF  [CRC_OK]
+[observe]   Frag Seq=51 Id=0x80000000 Count=1 Size=72 Idx=0 Q=9 payload[56]: bb 02 00 00 1e 00 61 6e 79 6f 6e 65 20 73 65 6c 6c 69 6e 67 20 61 20 67 6f 6f 64 20 62 6f 77 3f ...
+[observe]   -> opcode 0x02BB (no decoder yet)
+[observe]   -> sent Ack(31) [24 bytes] to 127.0.0.1:9000
+[observe] #34 from 127.0.0.1:9001: Seq=32 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0xCDB2F8DE  [CRC_OK]
+[observe]   Frag Seq=52 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 01 7d 00 00 00 f9 01 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(32) [24 bytes] to 127.0.0.1:9000
+[observe] #35 from 127.0.0.1:9001: Seq=33 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x3F769C3A  [CRC_OK]
+[observe]   Frag Seq=53 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 88 02 88 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(33) [24 bytes] to 127.0.0.1:9000
+[observe] #36 from 127.0.0.1:9001: Seq=33 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7274B110  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #37 from 127.0.0.1:9001: Seq=34 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x08578563  [CRC_OK]
+[observe]   Frag Seq=54 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 89 02 89 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(34) [24 bytes] to 127.0.0.1:9000
+[observe] #38 from 127.0.0.1:9001: Seq=34 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7276B111  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #39 from 127.0.0.1:9001: Seq=35 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x599513D7  [CRC_OK]
+[observe]   Frag Seq=55 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8a 02 8a 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(35) [24 bytes] to 127.0.0.1:9000
+[observe] #40 from 127.0.0.1:9001: Seq=35 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7278B112  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #41 from 127.0.0.1:9001: Seq=36 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xB452B065  [CRC_OK]
+[observe]   Frag Seq=56 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8b 02 8b 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(36) [24 bytes] to 127.0.0.1:9000
+[observe] #42 from 127.0.0.1:9001: Seq=36 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x727AB113  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #43 from 127.0.0.1:9001: Seq=37 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x163A9DC0  [CRC_OK]
+[observe]   Frag Seq=57 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 02 7d 00 00 00 00 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(37) [24 bytes] to 127.0.0.1:9000
+[observe] #44 from 127.0.0.1:9001: Seq=37 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x727CB114  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #45 from 127.0.0.1:9001: Seq=38 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x1112587C  [CRC_OK]
+[observe]   Frag Seq=58 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8c 02 8c 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(38) [24 bytes] to 127.0.0.1:9000
+[observe] #46 from 127.0.0.1:9001: Seq=38 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x727EB115  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #47 from 127.0.0.1:9001: Seq=39 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x3607A226  [CRC_OK]
+[observe]   Frag Seq=59 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8d 02 8d 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(39) [24 bytes] to 127.0.0.1:9000
+[observe] #48 from 127.0.0.1:9001: Seq=39 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7280B116  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #49 from 127.0.0.1:9001: Seq=40 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x238E5FC8  [CRC_OK]
+[observe]   Frag Seq=60 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8e 02 8e 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(40) [24 bytes] to 127.0.0.1:9000
+[observe] #50 from 127.0.0.1:9001: Seq=41 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0x11C8FEEA  [CRC_OK]
+[observe]   optional: TimeSync=294107018.3496243
+[observe]   -> sent Ack(41) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294107018.3496243) [28 bytes]
+[observe] #51 from 127.0.0.1:9001: Seq=42 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x36DA1C4C  [CRC_OK]
+[observe]   Frag Seq=61 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 03 7d 00 00 00 07 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(42) [24 bytes] to 127.0.0.1:9000
+[observe] #52 from 127.0.0.1:9001: Seq=42 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7282B119  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #53 from 127.0.0.1:9001: Seq=43 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x610C05D4  [CRC_OK]
+[observe]   Frag Seq=62 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 8f 02 8f 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(43) [24 bytes] to 127.0.0.1:9000
+[observe] #54 from 127.0.0.1:9001: Seq=44 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=88 CRC=0xA073C89C  [CRC_OK]
+[observe]   Frag Seq=63 Id=0x80000000 Count=1 Size=88 Idx=0 Q=10 payload[72]: 4c f7 00 00 05 00 00 50 04 00 90 02 90 02 00 00 06 00 3d 00 2c 20 60 78 b2 01 02 86 cc 6e c6 41 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(44) [24 bytes] to 127.0.0.1:9000
+[observe] #55 from 127.0.0.1:9001: Seq=45 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xDE3FD1E3  [CRC_OK]
+[observe]   Frag Seq=64 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 98 90 a1 40 c1 e5 ef c1 00 d6 a3 3b aa 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(45) [24 bytes] to 127.0.0.1:9000
+[observe] #56 from 127.0.0.1:9001: Seq=46 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x5698DCD9  [CRC_OK]
+[observe]   Frag Seq=65 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 65 5d ae 40 22 e6 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(46) [24 bytes] to 127.0.0.1:9000
+[observe] #57 from 127.0.0.1:9001: Seq=47 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xD5A775C1  [CRC_OK]
+[observe]   Frag Seq=66 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 25 2e bd 40 92 e6 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(47) [24 bytes] to 127.0.0.1:9000
+[observe] #58 from 127.0.0.1:9001: Seq=48 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xF2772DAF  [CRC_OK]
+[observe]   Frag Seq=67 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 53 0d cc 40 02 e7 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(48) [24 bytes] to 127.0.0.1:9000
+[observe] #59 from 127.0.0.1:9001: Seq=49 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x7FB2CEE7  [CRC_OK]
+[observe]   Frag Seq=68 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 bd fe d8 40 64 e7 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(49) [24 bytes] to 127.0.0.1:9000
+[observe] #60 from 127.0.0.1:9001: Seq=50 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4B510713  [CRC_OK]
+[observe]   Frag Seq=69 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 b7 e4 e7 40 d5 e7 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(50) [24 bytes] to 127.0.0.1:9000
+[observe] #61 from 127.0.0.1:9001: Seq=51 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x7413ED4C  [CRC_OK]
+[observe]   Frag Seq=70 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 b5 c3 f6 40 45 e8 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(51) [24 bytes] to 127.0.0.1:9000
+[observe] #62 from 127.0.0.1:9001: Seq=52 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1C9EB267  [CRC_OK]
+[observe]   Frag Seq=71 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 6d ce 01 41 a6 e8 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(52) [24 bytes] to 127.0.0.1:9000
+[observe] #63 from 127.0.0.1:9001: Seq=53 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x335E9F02  [CRC_OK]
+[observe]   Frag Seq=72 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 78 4f 09 41 17 e9 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(53) [24 bytes] to 127.0.0.1:9000
+[observe] #64 from 127.0.0.1:9001: Seq=53 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7284B124  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #65 from 127.0.0.1:9001: Seq=54 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=116 CRC=0xCF045079  [CRC_OK]
+[observe]   Frag Seq=73 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 7f ca 0f 41 79 e9 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   Frag Seq=74 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 91 02 91 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(54) [24 bytes] to 127.0.0.1:9000
+[observe] #66 from 127.0.0.1:9001: Seq=55 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x34678224  [CRC_OK]
+[observe]   Frag Seq=75 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 3f 3c 17 41 ea e9 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(55) [24 bytes] to 127.0.0.1:9000
+[observe] #67 from 127.0.0.1:9001: Seq=56 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x2C306059  [CRC_OK]
+[observe]   Frag Seq=76 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 38 b6 1e 41 5b ea ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(56) [24 bytes] to 127.0.0.1:9000
+[observe] #68 from 127.0.0.1:9001: Seq=57 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x948D9F84  [CRC_OK]
+[observe]   Frag Seq=77 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 bb 27 26 41 cc ea ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(57) [24 bytes] to 127.0.0.1:9000
+[observe] #69 from 127.0.0.1:9001: Seq=58 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xF08EDD87  [CRC_OK]
+[observe]   Frag Seq=78 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 9a 8f 2c 41 2d eb ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(58) [24 bytes] to 127.0.0.1:9000
+[observe] #70 from 127.0.0.1:9001: Seq=59 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x9D75CD29  [CRC_OK]
+[observe]   Frag Seq=79 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 01 fd 33 41 9d eb ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(59) [24 bytes] to 127.0.0.1:9000
+[observe] #71 from 127.0.0.1:9001: Seq=60 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x58F86E8C  [CRC_OK]
+[observe]   Frag Seq=80 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 5e 6c 3a 41 fe eb ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(60) [24 bytes] to 127.0.0.1:9000
+[observe] #72 from 127.0.0.1:9001: Seq=61 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xE43A73EE  [CRC_OK]
+[observe]   Frag Seq=81 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 fd c9 41 41 6d ec ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(61) [24 bytes] to 127.0.0.1:9000
+[observe] #73 from 127.0.0.1:9001: Seq=62 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4BB848AD  [CRC_OK]
+[observe]   Frag Seq=82 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 70 31 48 41 ce ec ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(62) [24 bytes] to 127.0.0.1:9000
+[observe] #74 from 127.0.0.1:9001: Seq=63 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x267AD147  [CRC_OK]
+[observe]   Frag Seq=83 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 6d b4 4e 41 30 ed ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(63) [24 bytes] to 127.0.0.1:9000
+[observe] #75 from 127.0.0.1:9001: Seq=64 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xBE0E15BF  [CRC_OK]
+[observe]   Frag Seq=84 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 70 20 56 41 a0 ed ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(64) [24 bytes] to 127.0.0.1:9000
+[observe] #76 from 127.0.0.1:9001: Seq=65 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x915DE1BB  [CRC_OK]
+[observe]   Frag Seq=85 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 be 96 5c 41 02 ee ef c1 00 d6 a3 3b 41 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(65) [24 bytes] to 127.0.0.1:9000
+[observe] #77 from 127.0.0.1:9001: Seq=66 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x2231A680  [CRC_OK]
+[observe]   Frag Seq=86 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 95 f0 63 41 71 ee ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(66) [24 bytes] to 127.0.0.1:9000
+[observe] #78 from 127.0.0.1:9001: Seq=67 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x0A37F4C1  [CRC_OK]
+[observe]   Frag Seq=87 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 0e 67 6a 41 d3 ee ef c1 00 d6 a3 3b 41 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(67) [24 bytes] to 127.0.0.1:9000
+[observe] #79 from 127.0.0.1:9001: Seq=68 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x01A29D99  [CRC_OK]
+[observe]   Frag Seq=88 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b4 01 02 86 23 d2 70 41 34 ef ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(68) [24 bytes] to 127.0.0.1:9000
+[observe] #80 from 127.0.0.1:9001: Seq=69 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x6DAE39E8  [CRC_OK]
+[observe]   Frag Seq=89 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b4 01 02 86 ee 49 78 41 a5 ef ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(69) [24 bytes] to 127.0.0.1:9000
+[observe] #81 from 127.0.0.1:9001: Seq=70 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x8A26FE0A  [CRC_OK]
+[observe]   Frag Seq=90 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 3c ca 7f 41 16 f0 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(70) [24 bytes] to 127.0.0.1:9000
+[observe] #82 from 127.0.0.1:9001: Seq=71 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x42C0EAE9  [CRC_OK]
+[observe]   Frag Seq=91 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 ec 9c 83 41 86 f0 ef c1 00 d6 a3 3b 41 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(71) [24 bytes] to 127.0.0.1:9000
+[observe] #83 from 127.0.0.1:9001: Seq=71 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7286B136  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #84 from 127.0.0.1:9001: Seq=72 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xD8E11360  [CRC_OK]
+[observe]   Frag Seq=92 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 2b d4 86 41 e7 f0 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(72) [24 bytes] to 127.0.0.1:9000
+[observe] #85 from 127.0.0.1:9001: Seq=73 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x9A278ABB  [CRC_OK]
+[observe]   Frag Seq=93 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 92 02 92 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(73) [24 bytes] to 127.0.0.1:9000
+[observe] #86 from 127.0.0.1:9001: Seq=74 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x7860AAE6  [CRC_OK]
+[observe]   Frag Seq=94 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 a6 08 8a 41 48 f1 ef c1 00 d6 a3 3b 3f fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(74) [24 bytes] to 127.0.0.1:9000
+[observe] #87 from 127.0.0.1:9001: Seq=75 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA57A2E89  [CRC_OK]
+[observe]   Frag Seq=95 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 cd bb 8d 41 b8 f1 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(75) [24 bytes] to 127.0.0.1:9000
+[observe] #88 from 127.0.0.1:9001: Seq=76 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4FB220DD  [CRC_OK]
+[observe]   Frag Seq=96 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 31 76 91 41 29 f2 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(76) [24 bytes] to 127.0.0.1:9000
+[observe] #89 from 127.0.0.1:9001: Seq=77 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xB836DD25  [CRC_OK]
+[observe]   Frag Seq=97 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 9c aa 94 41 8a f2 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(77) [24 bytes] to 127.0.0.1:9000
+[observe] #90 from 127.0.0.1:9001: Seq=78 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x422D36BD  [CRC_OK]
+[observe]   Frag Seq=98 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 13 e0 97 41 eb f2 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(78) [24 bytes] to 127.0.0.1:9000
+[observe] #91 from 127.0.0.1:9001: Seq=79 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x0CFC00E3  [CRC_OK]
+[observe]   Frag Seq=99 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 f9 93 9b 41 5b f3 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(79) [24 bytes] to 127.0.0.1:9000
+[observe] #92 from 127.0.0.1:9001: Seq=80 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1C55FC90  [CRC_OK]
+[observe]   Frag Seq=100 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 e5 d4 9e 41 bd f3 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(80) [24 bytes] to 127.0.0.1:9000
+[observe] #93 from 127.0.0.1:9001: Seq=81 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xC09AA49E  [CRC_OK]
+[observe]   Frag Seq=101 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 4d 90 a2 41 2e f4 ef c1 00 d6 a3 3b 3d fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(81) [24 bytes] to 127.0.0.1:9000
+[observe] #94 from 127.0.0.1:9001: Seq=82 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x66786C33  [CRC_OK]
+[observe]   Frag Seq=102 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 2f cc a5 41 90 f4 ef c1 00 d6 a3 3b 3d fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(82) [24 bytes] to 127.0.0.1:9000
+[observe] #95 from 127.0.0.1:9001: Seq=83 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x81783D07  [CRC_OK]
+[observe]   Frag Seq=103 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 29 84 a9 41 01 f5 ef c1 00 d6 a3 3b 3d fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(83) [24 bytes] to 127.0.0.1:9000
+[observe] #96 from 127.0.0.1:9001: Seq=84 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xDC2928D2  [CRC_OK]
+[observe]   Frag Seq=104 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 22 3d ad 41 72 f5 ef c1 00 d6 a3 3b 40 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(84) [24 bytes] to 127.0.0.1:9000
+[observe] #97 from 127.0.0.1:9001: Seq=85 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xFED51E9C  [CRC_OK]
+[observe]   Frag Seq=105 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 61 fa b0 41 e3 f5 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(85) [24 bytes] to 127.0.0.1:9000
+[observe] #98 from 127.0.0.1:9001: Seq=86 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xFEED2DF6  [CRC_OK]
+[observe]   Frag Seq=106 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 d1 b7 b4 41 54 f6 ef c1 00 d6 a3 3b 41 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(86) [24 bytes] to 127.0.0.1:9000
+[observe] #99 from 127.0.0.1:9001: Seq=87 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x94B87C66  [CRC_OK]
+[observe]   Frag Seq=107 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 c8 75 b8 41 c5 f6 ef c1 00 d6 a3 3b 3f fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(87) [24 bytes] to 127.0.0.1:9000
+[observe] #100 from 127.0.0.1:9001: Seq=88 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=132 CRC=0x186CA408  [CRC_OK]
+[observe]   Frag Seq=108 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 93 02 93 02 00 00 08 00 3d 00 2c 20 60 78 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   Frag Seq=109 Id=0x80000000 Count=1 Size=44 Idx=0 Q=10 payload[28]: 4c f7 00 00 2c 20 60 78 00 00 b3 00 b3 00 00 00 00 00 3d 00 03 00 00 00 3d 00 0b 00
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   Frag Seq=110 Id=0x80000000 Count=1 Size=32 Idx=0 Q=10 payload[16]: 4b f7 00 00 2c 20 60 78 1c 00 01 00 00 00 b3 00
+[observe]   -> opcode 0xF74B (no decoder yet)
+[observe]   -> sent Ack(88) [24 bytes] to 127.0.0.1:9000
+[observe] #101 from 127.0.0.1:9001: Seq=89 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0x48D0A418  [CRC_OK]
+[observe]   Frag Seq=111 Id=0x80000000 Count=1 Size=44 Idx=0 Q=10 payload[28]: 4c f7 00 00 2d 20 60 78 00 00 b2 00 b2 00 00 00 00 00 3d 00 03 00 00 00 3d 00 0c 00
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(89) [24 bytes] to 127.0.0.1:9000
+[observe] #102 from 127.0.0.1:9001: Seq=89 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7288B148  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #103 from 127.0.0.1:9001: Seq=90 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x2FF79FF0  [CRC_OK]
+[observe]   Frag Seq=112 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 94 02 94 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(90) [24 bytes] to 127.0.0.1:9000
+[observe] #104 from 127.0.0.1:9001: Seq=91 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4C76567A  [CRC_OK]
+[observe]   Frag Seq=113 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 cc 6e ba 41 01 f7 ef c1 00 d6 a3 3b 32 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(91) [24 bytes] to 127.0.0.1:9000
+[observe] #105 from 127.0.0.1:9001: Seq=92 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x38F38FB3  [CRC_OK]
+[observe]   Frag Seq=114 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 04 7d 00 00 00 0e 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(92) [24 bytes] to 127.0.0.1:9000
+[observe] #106 from 127.0.0.1:9001: Seq=93 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA4254CF3  [CRC_OK]
+[observe]   Frag Seq=115 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 ff a1 bd 41 62 f7 ef c1 00 d6 a3 3b 41 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(93) [24 bytes] to 127.0.0.1:9000
+[observe] #107 from 127.0.0.1:9001: Seq=94 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xC703B917  [CRC_OK]
+[observe]   Frag Seq=116 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 39 dc c0 41 c4 f7 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(94) [24 bytes] to 127.0.0.1:9000
+[observe] #108 from 127.0.0.1:9001: Seq=95 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xBE6848FE  [CRC_OK]
+[observe]   Frag Seq=117 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b2 01 02 86 a4 0f c4 41 25 f8 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(95) [24 bytes] to 127.0.0.1:9000
+[observe] #109 from 127.0.0.1:9001: Seq=96 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x64BCD320  [CRC_OK]
+[observe]   Frag Seq=118 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b2 01 02 86 45 c3 c7 41 95 f8 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(96) [24 bytes] to 127.0.0.1:9000
+[observe] #110 from 127.0.0.1:9001: Seq=97 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x2B7ADBCB  [CRC_OK]
+[observe]   Frag Seq=119 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 36 fd ca 41 f7 f8 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(97) [24 bytes] to 127.0.0.1:9000
+[observe] #111 from 127.0.0.1:9001: Seq=98 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=32 CRC=0x601D3872  [CRC_OK]
+[observe]   Frag Seq=120 Id=0x80000000 Count=1 Size=32 Idx=0 Q=10 payload[16]: 4b f7 00 00 2d 20 60 78 18 00 01 00 00 00 b2 00
+[observe]   -> opcode 0xF74B (no decoder yet)
+[observe]   -> sent Ack(98) [24 bytes] to 127.0.0.1:9000
+[observe] #112 from 127.0.0.1:9001: Seq=99 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x401CA621  [CRC_OK]
+[observe]   Frag Seq=121 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 bf b2 ce 41 67 f9 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(99) [24 bytes] to 127.0.0.1:9000
+[observe] #113 from 127.0.0.1:9001: Seq=100 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x809E79A0  [CRC_OK]
+[observe]   Frag Seq=122 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 4d f2 d1 41 c9 f9 ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(100) [24 bytes] to 127.0.0.1:9000
+[observe] #114 from 127.0.0.1:9001: Seq=101 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xAEE6C62C  [CRC_OK]
+[observe]   Frag Seq=123 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 20 ab d5 41 3a fa ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(101) [24 bytes] to 127.0.0.1:9000
+[observe] #115 from 127.0.0.1:9001: Seq=102 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xE99596A7  [CRC_OK]
+[observe]   Frag Seq=124 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 7d e0 d8 41 9b fa ef c1 00 d6 a3 3b 43 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(102) [24 bytes] to 127.0.0.1:9000
+[observe] #116 from 127.0.0.1:9001: Seq=103 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=48 CRC=0xED7BA741  [CRC_OK]
+[observe]   Frag Seq=125 Id=0x80000000 Count=1 Size=48 Idx=0 Q=10 payload[32]: 4c f7 00 00 05 00 00 50 04 00 95 02 95 02 00 00 00 00 3d 00 43 00 00 00 3d 00 87 00 00 00 10 40
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(103) [24 bytes] to 127.0.0.1:9000
+[observe] #117 from 127.0.0.1:9001: Seq=104 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x58306ADD  [CRC_OK]
+[observe]   Frag Seq=126 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 51 aa dc 41 0e fb ef c1 00 d6 a3 3b 43 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(104) [24 bytes] to 127.0.0.1:9000
+[observe] #118 from 127.0.0.1:9001: Seq=105 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x67CCCC98  [CRC_OK]
+[observe]   Frag Seq=127 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 9f 61 e0 41 7e fb ef c1 00 d6 a3 3b 44 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(105) [24 bytes] to 127.0.0.1:9000
+[observe] #119 from 127.0.0.1:9001: Seq=106 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xDC9FF1D3  [CRC_OK]
+[observe]   Frag Seq=128 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 5e 18 e4 41 ee fb ef c1 00 d6 a3 3b 43 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(106) [24 bytes] to 127.0.0.1:9000
+[observe] #120 from 127.0.0.1:9001: Seq=107 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xFAF3F4EF  [CRC_OK]
+[observe]   Frag Seq=129 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 28 de e7 41 60 fc ef c1 00 d6 a3 3b 42 fa 34 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(107) [24 bytes] to 127.0.0.1:9000
+[observe] #121 from 127.0.0.1:9001: Seq=108 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=88 CRC=0x83735EE8  [CRC_OK]
+[observe]   Frag Seq=130 Id=0x80000000 Count=1 Size=88 Idx=0 Q=10 payload[72]: 4c f7 00 00 05 00 00 50 04 00 96 02 96 02 00 00 06 00 3d 00 2d 20 60 78 b4 01 02 86 4b c8 70 41 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(108) [24 bytes] to 127.0.0.1:9000
+[observe] #122 from 127.0.0.1:9001: Seq=109 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x0F9280AB  [CRC_OK]
+[observe]   Frag Seq=131 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 a8 64 e8 41 70 fc ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(109) [24 bytes] to 127.0.0.1:9000
+[observe] #123 from 127.0.0.1:9001: Seq=110 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA2310662  [CRC_OK]
+[observe]   Frag Seq=132 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 6b 26 e5 41 0e fc ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(110) [24 bytes] to 127.0.0.1:9000
+[observe] #124 from 127.0.0.1:9001: Seq=111 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1C20FE66  [CRC_OK]
+[observe]   Frag Seq=133 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 3c 71 e1 41 9e fb ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(111) [24 bytes] to 127.0.0.1:9000
+[observe] #125 from 127.0.0.1:9001: Seq=111 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x728AB15E  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #126 from 127.0.0.1:9001: Seq=112 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x89C74EAE  [CRC_OK]
+[observe]   Frag Seq=134 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 3c 71 e1 41 9e fb ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(112) [24 bytes] to 127.0.0.1:9000
+[observe] #127 from 127.0.0.1:9001: Seq=113 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xFEC57296  [CRC_OK]
+[observe]   Frag Seq=135 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 07 a9 dd 41 2c fb ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(113) [24 bytes] to 127.0.0.1:9000
+[observe] #128 from 127.0.0.1:9001: Seq=114 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x7026D3B8  [CRC_OK]
+[observe]   Frag Seq=136 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 97 02 97 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(114) [24 bytes] to 127.0.0.1:9000
+[observe] #129 from 127.0.0.1:9001: Seq=115 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xD229C699  [CRC_OK]
+[observe]   Frag Seq=137 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 dc 01 02 86 f0 f9 d9 41 bd fa ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(115) [24 bytes] to 127.0.0.1:9000
+[observe] #130 from 127.0.0.1:9001: Seq=116 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xDBC0B5A9  [CRC_OK]
+[observe]   Frag Seq=138 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 02 33 d6 41 4b fa ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(116) [24 bytes] to 127.0.0.1:9000
+[observe] #131 from 127.0.0.1:9001: Seq=117 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1BD37FD4  [CRC_OK]
+[observe]   Frag Seq=139 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 45 7d d2 41 db f9 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(117) [24 bytes] to 127.0.0.1:9000
+[observe] #132 from 127.0.0.1:9001: Seq=118 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x3EF3B58D  [CRC_OK]
+[observe]   Frag Seq=140 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 43 ca ce 41 6b f9 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(118) [24 bytes] to 127.0.0.1:9000
+[observe] #133 from 127.0.0.1:9001: Seq=119 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xF35CE853  [CRC_OK]
+[observe]   Frag Seq=141 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 2c 91 cb 41 09 f9 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(119) [24 bytes] to 127.0.0.1:9000
+[observe] #134 from 127.0.0.1:9001: Seq=120 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xB70B79B2  [CRC_OK]
+[observe]   Frag Seq=142 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 de 01 02 86 a1 55 c8 41 a7 f8 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(120) [24 bytes] to 127.0.0.1:9000
+[observe] #135 from 127.0.0.1:9001: Seq=121 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x5889E615  [CRC_OK]
+[observe]   Frag Seq=143 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b2 01 02 86 1e 13 c5 41 44 f8 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(121) [24 bytes] to 127.0.0.1:9000
+[observe] #136 from 127.0.0.1:9001: Seq=122 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x551F0AC0  [CRC_OK]
+[observe]   Frag Seq=144 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 96 58 c1 41 d3 f7 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(122) [24 bytes] to 127.0.0.1:9000
+[observe] #137 from 127.0.0.1:9001: Seq=123 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xE2BC1F15  [CRC_OK]
+[observe]   Frag Seq=145 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 d5 a4 bd 41 63 f7 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(123) [24 bytes] to 127.0.0.1:9000
+[observe] #138 from 127.0.0.1:9001: Seq=124 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=48 CRC=0x94048CB1  [CRC_OK]
+[observe]   Frag Seq=146 Id=0x80000000 Count=1 Size=48 Idx=0 Q=10 payload[32]: 4c f7 00 00 05 00 00 50 04 00 98 02 98 02 00 00 00 00 3d 00 43 00 00 00 3d 00 03 00 00 00 10 40
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(124) [24 bytes] to 127.0.0.1:9000
+[observe] #139 from 127.0.0.1:9001: Seq=125 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x13E1CA25  [CRC_OK]
+[observe]   Frag Seq=147 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 b3 70 ba 41 02 f7 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(125) [24 bytes] to 127.0.0.1:9000
+[observe] #140 from 127.0.0.1:9001: Seq=126 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x3EC45218  [CRC_OK]
+[observe]   Frag Seq=148 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 3a 32 b7 41 a0 f6 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(126) [24 bytes] to 127.0.0.1:9000
+[observe] #141 from 127.0.0.1:9001: Seq=127 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x5A0B6D0D  [CRC_OK]
+[observe]   Frag Seq=149 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 54 83 b3 41 31 f6 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(127) [24 bytes] to 127.0.0.1:9000
+[observe] #142 from 127.0.0.1:9001: Seq=128 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x63502450  [CRC_OK]
+[observe]   Frag Seq=150 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 60 46 b0 41 cf f5 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(128) [24 bytes] to 127.0.0.1:9000
+[observe] #143 from 127.0.0.1:9001: Seq=129 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4D3CEC21  [CRC_OK]
+[observe]   Frag Seq=151 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 c8 88 ac 41 5e f5 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(129) [24 bytes] to 127.0.0.1:9000
+[observe] #144 from 127.0.0.1:9001: Seq=130 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1B47C3EE  [CRC_OK]
+[observe]   Frag Seq=152 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 bc d4 a8 41 ee f4 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(130) [24 bytes] to 127.0.0.1:9000
+[observe] #145 from 127.0.0.1:9001: Seq=131 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA3C1B818  [CRC_OK]
+[observe]   Frag Seq=153 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 fe 97 a5 41 8c f4 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(131) [24 bytes] to 127.0.0.1:9000
+[observe] #146 from 127.0.0.1:9001: Seq=131 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x728CB172  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #147 from 127.0.0.1:9001: Seq=132 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xC919766D  [CRC_OK]
+[observe]   Frag Seq=154 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 0c 64 a2 41 2b f4 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(132) [24 bytes] to 127.0.0.1:9000
+[observe] #148 from 127.0.0.1:9001: Seq=133 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xD08F7184  [CRC_OK]
+[observe]   Frag Seq=155 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 9f ac 9e 41 bb f3 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(133) [24 bytes] to 127.0.0.1:9000
+[observe] #149 from 127.0.0.1:9001: Seq=134 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x983DFEF2  [CRC_OK]
+[observe]   Frag Seq=156 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 99 02 99 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(134) [24 bytes] to 127.0.0.1:9000
+[observe] #150 from 127.0.0.1:9001: Seq=135 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4445D208  [CRC_OK]
+[observe]   Frag Seq=157 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 2a 73 9b 41 59 f3 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(135) [24 bytes] to 127.0.0.1:9000
+[observe] #151 from 127.0.0.1:9001: Seq=136 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x40803D58  [CRC_OK]
+[observe]   Frag Seq=158 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 b4 b5 97 41 e8 f2 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(136) [24 bytes] to 127.0.0.1:9000
+[observe] #152 from 127.0.0.1:9001: Seq=137 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x19EAB6BA  [CRC_OK]
+[observe]   Frag Seq=159 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 e1 81 94 41 87 f2 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(137) [24 bytes] to 127.0.0.1:9000
+[observe] #153 from 127.0.0.1:9001: Seq=138 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4FEB307A  [CRC_OK]
+[observe]   Frag Seq=160 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 6d d0 90 41 17 f2 ef c1 00 d6 a3 3b a2 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(138) [24 bytes] to 127.0.0.1:9000
+[observe] #154 from 127.0.0.1:9001: Seq=139 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x01628930  [CRC_OK]
+[observe]   Frag Seq=161 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 c4 95 8d 41 b6 f1 ef c1 00 d6 a3 3b 9f 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(139) [24 bytes] to 127.0.0.1:9000
+[observe] #155 from 127.0.0.1:9001: Seq=140 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x07D490B5  [CRC_OK]
+[observe]   Frag Seq=162 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 54 60 8a 41 55 f1 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(140) [24 bytes] to 127.0.0.1:9000
+[observe] #156 from 127.0.0.1:9001: Seq=141 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xEC308025  [CRC_OK]
+[observe]   Frag Seq=163 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 03 2c 87 41 f4 f0 ef c1 00 d6 a3 3b a4 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(141) [24 bytes] to 127.0.0.1:9000
+[observe] #157 from 127.0.0.1:9001: Seq=142 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x4B6F3677  [CRC_OK]
+[observe]   Frag Seq=164 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 25 64 84 41 a0 f0 ef c1 00 d6 a3 3b a1 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(142) [24 bytes] to 127.0.0.1:9000
+[observe] #158 from 127.0.0.1:9001: Seq=143 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=132 CRC=0xC52936F3  [CRC_OK]
+[observe]   Frag Seq=165 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9a 02 9a 02 00 00 08 00 3d 00 2d 20 60 78 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   Frag Seq=166 Id=0x80000000 Count=1 Size=44 Idx=0 Q=10 payload[28]: 4c f7 00 00 2d 20 60 78 00 00 b3 00 b3 00 00 00 00 00 3d 00 03 00 00 00 3d 00 0b 00
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   Frag Seq=167 Id=0x80000000 Count=1 Size=32 Idx=0 Q=10 payload[16]: 4b f7 00 00 2d 20 60 78 1c 00 01 00 00 00 b3 00
+[observe]   -> opcode 0xF74B (no decoder yet)
+[observe]   -> sent Ack(143) [24 bytes] to 127.0.0.1:9000
+[observe] #159 from 127.0.0.1:9001: Seq=144 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xD58570AC  [CRC_OK]
+[observe]   Frag Seq=168 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 25 64 84 41 a0 f0 ef c1 00 d6 a3 3b a1 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(144) [24 bytes] to 127.0.0.1:9000
+[observe] #160 from 127.0.0.1:9001: Seq=145 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x07050010  [CRC_OK]
+[observe]   Frag Seq=169 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 f2 30 81 41 3f f0 ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(145) [24 bytes] to 127.0.0.1:9000
+[observe] #161 from 127.0.0.1:9001: Seq=146 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x6439B690  [CRC_OK]
+[observe]   Frag Seq=170 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b1 01 02 86 52 e4 7b 41 dd ef ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(146) [24 bytes] to 127.0.0.1:9000
+[observe] #162 from 127.0.0.1:9001: Seq=146 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x728EB181  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #163 from 127.0.0.1:9001: Seq=147 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xB2F31D48  [CRC_OK]
+[observe]   Frag Seq=171 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 b4 01 02 86 66 62 74 41 6b ef ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(147) [24 bytes] to 127.0.0.1:9000
+[observe] #164 from 127.0.0.1:9001: Seq=148 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x3B2C5CCC  [CRC_OK]
+[observe]   Frag Seq=172 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 6e 04 6d 41 fc ee ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(148) [24 bytes] to 127.0.0.1:9000
+[observe] #165 from 127.0.0.1:9001: Seq=149 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xA54CAB95  [CRC_OK]
+[observe]   Frag Seq=173 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9b 02 9b 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(149) [24 bytes] to 127.0.0.1:9000
+[observe] #166 from 127.0.0.1:9001: Seq=150 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x431A58B7  [CRC_OK]
+[observe]   Frag Seq=174 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 b5 82 66 41 9a ee ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(150) [24 bytes] to 127.0.0.1:9000
+[observe] #167 from 127.0.0.1:9001: Seq=151 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x89D30EBB  [CRC_OK]
+[observe]   Frag Seq=175 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 cc 0a 5f 41 29 ee ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(151) [24 bytes] to 127.0.0.1:9000
+[observe] #168 from 127.0.0.1:9001: Seq=152 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x948E74BA  [CRC_OK]
+[observe]   Frag Seq=176 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 8b a1 57 41 b9 ed ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(152) [24 bytes] to 127.0.0.1:9000
+[observe] #169 from 127.0.0.1:9001: Seq=153 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x6A4F7B7B  [CRC_OK]
+[observe]   Frag Seq=177 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 89 37 51 41 58 ed ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(153) [24 bytes] to 127.0.0.1:9000
+[observe] #170 from 127.0.0.1:9001: Seq=154 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x72541715  [CRC_OK]
+[observe]   Frag Seq=178 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 c9 c9 4a 41 f7 ec ef c1 00 d6 a3 3b a5 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(154) [24 bytes] to 127.0.0.1:9000
+[observe] #171 from 127.0.0.1:9001: Seq=155 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xE712A215  [CRC_OK]
+[observe]   Frag Seq=179 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 b5 4d 43 41 86 ec ef c1 00 d6 a3 3b a6 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(155) [24 bytes] to 127.0.0.1:9000
+[observe] #172 from 127.0.0.1:9001: Seq=156 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xEAE373E0  [CRC_OK]
+[observe]   Frag Seq=180 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 c9 e7 3b 41 16 ec ef c1 00 d6 a3 3b a6 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(156) [24 bytes] to 127.0.0.1:9000
+[observe] #173 from 127.0.0.1:9001: Seq=157 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA75EA871  [CRC_OK]
+[observe]   Frag Seq=181 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 c7 7e 35 41 b5 eb ef c1 00 d6 a3 3b a6 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(157) [24 bytes] to 127.0.0.1:9000
+[observe] #174 from 127.0.0.1:9001: Seq=158 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA2B88728  [CRC_OK]
+[observe]   Frag Seq=182 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 d1 16 2f 41 54 eb ef c1 00 d6 a3 3b a6 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(158) [24 bytes] to 127.0.0.1:9000
+[observe] #175 from 127.0.0.1:9001: Seq=159 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0xB259D70A  [CRC_OK]
+[observe]   Frag Seq=183 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 05 7d 00 00 00 15 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(159) [24 bytes] to 127.0.0.1:9000
+[observe] #176 from 127.0.0.1:9001: Seq=160 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xCB578C10  [CRC_OK]
+[observe]   Frag Seq=184 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 f7 a6 28 41 f3 ea ef c1 00 d6 a3 3b a6 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(160) [24 bytes] to 127.0.0.1:9000
+[observe] #177 from 127.0.0.1:9001: Seq=161 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1AAA7D8A  [CRC_OK]
+[observe]   Frag Seq=185 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 2e 40 22 41 92 ea ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(161) [24 bytes] to 127.0.0.1:9000
+[observe] #178 from 127.0.0.1:9001: Seq=162 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x6248E530  [CRC_OK]
+[observe]   Frag Seq=186 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 95 d6 1b 41 31 ea ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(162) [24 bytes] to 127.0.0.1:9000
+[observe] #179 from 127.0.0.1:9001: Seq=163 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xB835B4B4  [CRC_OK]
+[observe]   Frag Seq=187 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 9e 6b 14 41 c1 e9 ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(163) [24 bytes] to 127.0.0.1:9000
+[observe] #180 from 127.0.0.1:9001: Seq=164 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xA1325360  [CRC_OK]
+[observe]   Frag Seq=188 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 12 f7 0d 41 5f e9 ef c1 00 d6 a3 3b a8 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(164) [24 bytes] to 127.0.0.1:9000
+[observe] #181 from 127.0.0.1:9001: Seq=165 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x3FD6FFA6  [CRC_OK]
+[observe]   Frag Seq=189 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 f3 8d 06 41 ef e8 ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(165) [24 bytes] to 127.0.0.1:9000
+[observe] #182 from 127.0.0.1:9001: Seq=166 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xE6616AF8  [CRC_OK]
+[observe]   Frag Seq=190 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 98 fc ff 40 8c e8 ef c1 00 d6 a3 3b a8 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(166) [24 bytes] to 127.0.0.1:9000
+[observe] #183 from 127.0.0.1:9001: Seq=166 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7290B195  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #184 from 127.0.0.1:9001: Seq=167 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x1D11CCB1  [CRC_OK]
+[observe]   Frag Seq=191 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 64 1f f1 40 1b e8 ef c1 00 d6 a3 3b a8 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(167) [24 bytes] to 127.0.0.1:9000
+[observe] #185 from 127.0.0.1:9001: Seq=168 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x782226CF  [CRC_OK]
+[observe]   Frag Seq=192 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 54 2e e2 40 aa e7 ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(168) [24 bytes] to 127.0.0.1:9000
+[observe] #186 from 127.0.0.1:9001: Seq=169 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xEF674B75  [CRC_OK]
+[observe]   Frag Seq=193 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 da 2e d3 40 38 e7 ef c1 00 d6 a3 3b a7 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(169) [24 bytes] to 127.0.0.1:9000
+[observe] #187 from 127.0.0.1:9001: Seq=170 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x861F667F  [CRC_OK]
+[observe]   Frag Seq=194 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9c 02 9c 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(170) [24 bytes] to 127.0.0.1:9000
+[observe] #188 from 127.0.0.1:9001: Seq=171 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x3A0C88FE  [CRC_OK]
+[observe]   Frag Seq=195 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 88 61 c4 40 c8 e6 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(171) [24 bytes] to 127.0.0.1:9000
+[observe] #189 from 127.0.0.1:9001: Seq=172 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x0E99FEC7  [CRC_OK]
+[observe]   Frag Seq=196 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 ba 88 b7 40 67 e6 ef c1 00 d6 a3 3b a2 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(172) [24 bytes] to 127.0.0.1:9000
+[observe] #190 from 127.0.0.1:9001: Seq=173 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0xCEAB57CB  [CRC_OK]
+[observe]   Frag Seq=197 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 00 a3 a8 40 f6 e5 ef c1 00 d6 a3 3b a3 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(173) [24 bytes] to 127.0.0.1:9000
+[observe] #191 from 127.0.0.1:9001: Seq=174 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=60 CRC=0x96F0BE53  [CRC_OK]
+[observe]   Frag Seq=198 Id=0x80000000 Count=1 Size=60 Idx=0 Q=10 payload[44]: 48 f7 00 00 05 00 00 50 34 00 00 00 ad 01 02 86 98 90 a1 40 c1 e5 ef c1 00 d6 a3 3b 8d 0f 35 3f ...
+[observe]   -> opcode 0xF748 (no decoder yet)
+[observe]   -> sent Ack(174) [24 bytes] to 127.0.0.1:9000
+[observe] #192 from 127.0.0.1:9001: Seq=174 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7292B19D  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #193 from 127.0.0.1:9001: Seq=175 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xD7C1ACAC  [CRC_OK]
+[observe]   Frag Seq=199 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9d 02 9d 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(175) [24 bytes] to 127.0.0.1:9000
+[observe] #194 from 127.0.0.1:9001: Seq=175 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7294B19E  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #195 from 127.0.0.1:9001: Seq=176 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0x8586F15E  [CRC_OK]
+[observe]   optional: TimeSync=294107038.3502654
+[observe]   -> sent Ack(176) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294107038.3502654) [28 bytes]
+[observe] #196 from 127.0.0.1:9001: Seq=177 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xED6EE6CC  [CRC_OK]
+[observe]   Frag Seq=200 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9e 02 9e 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(177) [24 bytes] to 127.0.0.1:9000
+[observe] #197 from 127.0.0.1:9001: Seq=177 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7296B1A0  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #198 from 127.0.0.1:9001: Seq=178 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x2DCC71A1  [CRC_OK]
+[observe]   Frag Seq=201 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 06 7d 00 00 00 1c 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(178) [24 bytes] to 127.0.0.1:9000
+[observe] #199 from 127.0.0.1:9001: Seq=179 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xB011CA08  [CRC_OK]
+[observe]   Frag Seq=202 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 9f 02 9f 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(179) [24 bytes] to 127.0.0.1:9000
+[observe] #200 from 127.0.0.1:9001: Seq=179 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x7298B1A2  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #201 from 127.0.0.1:9001: Seq=180 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x55F91B3B  [CRC_OK]
+[observe]   Frag Seq=203 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a0 02 a0 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(180) [24 bytes] to 127.0.0.1:9000
+[observe] #202 from 127.0.0.1:9001: Seq=180 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x729AB1A3  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #203 from 127.0.0.1:9001: Seq=181 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x24CC8568  [CRC_OK]
+[observe]   Frag Seq=204 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a1 02 a1 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(181) [24 bytes] to 127.0.0.1:9000
+[observe] #204 from 127.0.0.1:9001: Seq=181 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x729CB1A4  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #205 from 127.0.0.1:9001: Seq=182 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x8BB41F8A  [CRC_OK]
+[observe]   Frag Seq=205 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a2 02 a2 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(182) [24 bytes] to 127.0.0.1:9000
+[observe] #206 from 127.0.0.1:9001: Seq=183 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x94DD9BFC  [CRC_OK]
+[observe]   Frag Seq=206 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 07 7d 00 00 00 23 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(183) [24 bytes] to 127.0.0.1:9000
+[observe] #207 from 127.0.0.1:9001: Seq=183 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x729EB1A6  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #208 from 127.0.0.1:9001: Seq=184 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x01877DC4  [CRC_OK]
+[observe]   Frag Seq=207 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a3 02 a3 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(184) [24 bytes] to 127.0.0.1:9000
+[observe] #209 from 127.0.0.1:9001: Seq=184 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x72A0B1A7  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #210 from 127.0.0.1:9001: Seq=185 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x28D38D5A  [CRC_OK]
+[observe]   Frag Seq=208 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a4 02 a4 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(185) [24 bytes] to 127.0.0.1:9000
+[observe] #211 from 127.0.0.1:9001: Seq=185 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x72A2B1A8  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #212 from 127.0.0.1:9001: Seq=186 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0x69D9490F  [CRC_OK]
+[observe]   Frag Seq=209 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a5 02 a5 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(186) [24 bytes] to 127.0.0.1:9000
+[observe] #213 from 127.0.0.1:9001: Seq=186 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x72A4B1A9  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #214 from 127.0.0.1:9001: Seq=187 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=29 CRC=0x2A377A41  [CRC_OK]
+[observe]   Frag Seq=210 Id=0x80000000 Count=1 Size=29 Idx=0 Q=9 payload[13]: cd 02 00 00 08 7d 00 00 00 2a 02 00 00
+[observe]   -> opcode 0x02CD (no decoder yet)
+[observe]   -> sent Ack(187) [24 bytes] to 127.0.0.1:9000
+[observe] #215 from 127.0.0.1:9001: Seq=188 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xA5433FFA  [CRC_OK]
+[observe]   Frag Seq=211 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a6 02 a6 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(188) [24 bytes] to 127.0.0.1:9000
+[observe] #216 from 127.0.0.1:9001: Seq=189 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0xDB65214E  [CRC_OK]
+[observe]   Frag Seq=212 Id=0x80000000 Count=1 Size=44 Idx=0 Q=10 payload[28]: 4c f7 00 00 2c 20 60 78 00 00 b4 00 b4 00 00 00 00 00 3d 00 03 00 00 00 3d 00 0c 00
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(189) [24 bytes] to 127.0.0.1:9000
+[observe] #217 from 127.0.0.1:9001: Seq=189 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x72A6B1AC  [CRC_OK]
+[observe]   optional: AckSequence=3
+[observe] #218 from 127.0.0.1:9001: Seq=190 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=56 CRC=0xE1F6330C  [CRC_OK]
+[observe]   Frag Seq=213 Id=0x80000000 Count=1 Size=56 Idx=0 Q=10 payload[40]: 4c f7 00 00 05 00 00 50 04 00 a7 02 a7 02 00 00 08 00 3d 00 06 00 00 50 00 00 00 00 0f ee 00 00 ...
+[observe]   -> opcode 0xF74C (no decoder yet)
+[observe]   -> sent Ack(190) [24 bytes] to 127.0.0.1:9000
+[observe] #219 from 127.0.0.1:9001: Seq=191 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=32 CRC=0x6F6C291B  [CRC_OK]
+[observe]   Frag Seq=214 Id=0x80000000 Count=1 Size=32 Idx=0 Q=10 payload[16]: 4b f7 00 00 2c 20 60 78 18 00 01 00 00 00 b4 00
+[observe]   -> opcode 0xF74B (no decoder yet)
+[observe]   -> sent Ack(191) [24 bytes] to 127.0.0.1:9000
+[observe] observation window elapsed
+[observe] total packets observed: 219 (CRC pass=219, fail=0)
+[observe] sent: 190 acks, 3 timesync echoes, characterCreate=False, enterWorldRequest=True, enterWorld=True
+[observe] CharacterEnterWorldServerReady received
+[main] PHASE 3.3 PASS — EnterWorld two-step handshake committed (guid=0x50000006); world-state firehose should follow.

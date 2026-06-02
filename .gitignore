@@ -30,8 +30,8 @@ node_modules/
 # Local-only: Copilot CLI session state (per-machine agent scratch)
 .copilot/
 
-# Local-only: runtime artifacts written by headless-client spikes
-# (nav memo + LLM training jsonl). Source lives in the worktrees.
+# Local-only: headless-client telemetry sinks (LLM decisions + nav graph)
+# Source lives in the worktrees.
 experiments/headless-client/data/
 
 # Local-only: regeneratable output from WorldNavBuilder. Reference

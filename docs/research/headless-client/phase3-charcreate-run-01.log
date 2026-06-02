@@ -1,0 +1,112 @@
+[main] target 127.0.0.1:9000, account 'headless-test'
+[selfcheck] OutboundPacket round-trip ...
+[selfcheck] OutboundPacket round-trip OK
+[api] WARNING: AC_BOTS_API_TOKEN not set; using dev-insecure-token
+[api] AcAiPlayers.ApiHost v1.0.0+9a6aaec8c3f11c3560bf0a962185aaed20301206: ok
+[api] WARNING: API host unreachable: HttpRequestException: Response status code does not indicate success: 401 (Unauthorized).
+[api] continuing without API; Phase 1 spike doesn't require it
+[handshake] bound UDP socket on 0.0.0.0:52103
+[handshake] sending LoginRequest (84 bytes) to 127.0.0.1:9000
+[handshake] received 52 bytes from 127.0.0.1:9000
+[handshake]   header: Seq=0 Id=11 Iter=1 Flags=ConnectRequest Size=32 CRC=0x6D5065F3
+[handshake] received ConnectRequest:
+             serverTime  = 294104524.3256245
+             cookie      = 0x1940547EB82CDF73
+             clientId    = 0
+             serverSeed  = b4 c0 20 e4
+             clientSeed  = 78 1c db 40
+[handshake] sending ConnectResponse (28 bytes) to 127.0.0.1:9001
+[handshake]   bytes: 00 00 00 00 00 00 08 00 d6 a4 6e 8c 00 00 00 00 08 00 00 00 73 df 2c b8 7e 54 40 19
+[handshake]   sent 3× from local endpoint 0.0.0.0:52103
+[observe] listening for post-handshake packets for 65s; will send acks + timesync echoes ...
+[observe] #1 from 127.0.0.1:9001: Seq=2 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0x3DFBC98E  [CRC_OK]
+[observe]   optional: TimeSync=294104524.4413642
+[observe]   -> sent Ack(2) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294104524.4413642) [28 bytes]
+[observe] #2 from 127.0.0.1:9001: Seq=3 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0x2869CDF7  [CRC_OK]
+[observe]   Frag Seq=0 Id=0x80000000 Count=1 Size=44 Idx=0 Q=5 payload[28]: e5 f7 00 00 01 00 00 00 01 00 00 00 01 00 00 00 02 00 00 00 00 00 00 00 01 00 00 00
+[observe]   -> DDDInterrogation: region=1 lang=1 product=1 supportedLangs=[0,1]
+[observe]   -> sent Ack(3) [24 bytes] to 127.0.0.1:9000
+[observe] #3 from 127.0.0.1:9001: Seq=4 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=100 CRC=0x01795AFB  [CRC_OK]
+[observe]   Frag Seq=1 Id=0x80000000 Count=1 Size=60 Idx=0 Q=9 payload[44]: 58 f6 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0b 00 00 00 0d 00 68 65 61 64 6c 65 73 73 2d 74 ...
+[observe]   -> CharacterList: account="headless-test" slots=11 characters=0 turbineChat=1 tod=1
+[observe]   Frag Seq=2 Id=0x80000000 Count=1 Size=40 Idx=0 Q=9 payload[24]: e1 f7 00 00 01 00 00 00 80 00 00 00 0a 00 41 43 45 6d 75 6c 61 74 6f 72
+[observe]   -> ServerName: name="ACEmulator" connections=1/128
+[observe]   -> sent Ack(4) [24 bytes] to 127.0.0.1:9000
+[observe]   -> PHASE3.2 SEND: CharacterCreate(account="headless-test" name="Headless01" payload=420B) pktSeq=2 fragSeq=1 totalBytes=460
+[observe]      Expect 0xF643 CharacterCreateResponse (Ok=1, NameInUse=3, Corrupt=5, etc.)
+[observe] #4 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=EncryptedChecksum, BlobFragments Size=44 CRC=0xECAC42BE  [CRC_OK]
+[observe]   Frag Seq=3 Id=0x80000000 Count=1 Size=44 Idx=0 Q=9 payload[28]: 43 f6 00 00 01 00 00 00 06 00 00 50 0a 00 48 65 61 64 6c 65 73 73 30 31 00 00 00 00
+[observe]   -> CharacterCreateResponse: Ok guid=0x50000006 name="Headless01"
+[observe]   -> sent Ack(5) [24 bytes] to 127.0.0.1:9000
+[observe] #5 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68C4B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #6 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68C6B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #7 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68C8B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #8 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68CAB0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #9 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68CCB0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #10 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68CEB0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #11 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68D0B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #12 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68D2B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #13 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68D4B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #14 from 127.0.0.1:9001: Seq=5 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68D6B0F3  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #15 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0xD71B4037  [CRC_OK]
+[observe]   optional: TimeSync=294104544.44072306
+[observe]   -> sent Ack(6) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294104544.44072306) [28 bytes]
+[observe] #16 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68D8B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #17 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68DAB0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #18 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68DCB0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #19 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68DEB0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #20 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68E0B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #21 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68E2B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #22 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68E4B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #23 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68E6B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #24 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68E8B0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #25 from 127.0.0.1:9001: Seq=6 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68EAB0F4  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #26 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=EncryptedChecksum, TimeSync Size=8 CRC=0xA652BE60  [CRC_OK]
+[observe]   optional: TimeSync=294104564.44103223
+[observe]   -> sent Ack(7) [24 bytes] to 127.0.0.1:9000
+[observe]   -> sent TimeSync(294104564.44103223) [28 bytes]
+[observe] #27 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68ECB0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #28 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68EEB0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #29 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68F0B0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #30 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68F2B0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #31 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68F4B0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #32 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68F6B0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #33 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68F8B0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #34 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68FAB0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] #35 from 127.0.0.1:9001: Seq=7 Id=11 Iter=1 Flags=AckSequence Size=4 CRC=0x68FCB0F5  [CRC_OK]
+[observe]   optional: AckSequence=2
+[observe] observation window elapsed
+[observe] total packets observed: 35 (CRC pass=35, fail=0)
+[observe] sent: 6 acks, 3 timesync echoes, characterCreate=True
+[observe] CharacterCreateResponse received: Ok (code=1)
+[main] PHASE 2 PASS — handshake + crypto + keepalive + game-message decode all working.

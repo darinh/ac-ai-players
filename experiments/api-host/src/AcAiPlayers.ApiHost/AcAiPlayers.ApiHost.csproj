@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AcAiPlayers.ApiHost</RootNamespace>
+    <AssemblyName>AcAiPlayers.ApiHost</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <UserSecretsId>ac-ai-players-api-host-dev</UserSecretsId>
+    <NoWarn>$(NoWarn);MsgPack017</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\services-common\src\AcAiPlayers.ServicesClient\AcAiPlayers.ServicesClient.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MessagePack" Version="3.0.300" />
+  </ItemGroup>
+
+</Project>

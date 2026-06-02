@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>AcAiPlayers.Services</RootNamespace>
+    <AssemblyName>AcAiPlayers.ServicesClient</AssemblyName>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- MsgPack017 flags init+default sentinels; we intentionally use
+         them so an absent field deserializes to the type default. -->
+    <NoWarn>$(NoWarn);MsgPack017</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MessagePack" Version="3.0.300" />
+  </ItemGroup>
+
+</Project>
