@@ -188,6 +188,18 @@ internal sealed class NavGraph : IDisposable
     public float MergeRadiusMeters { get; init; } = 4.0f;
 
     /// <summary>
+    /// Two sightings of the SAME entity (same wcid, or same name when
+    /// wcid is absent) closer than this in the same cell update one
+    /// <see cref="SightedLocation"/> rather than spawning a new record.
+    /// A sighted location is a remembered "X is here" landmark derived
+    /// purely from sight — it is NOT a navmesh node and never implies
+    /// the bot can walk there. Only RecordVisit creates traversable
+    /// nodes/edges, so sighted locations cannot violate the
+    /// wall-shortcut invariant.
+    /// </summary>
+    public float SightedMergeRadiusMeters { get; init; } = 4.0f;
+
+    /// <summary>
     /// Per-tick walkability gate. Consecutive RecordVisit calls within
     /// this distance prove the bot WALKED between those positions
     /// (not teleported / lag-corrected / sync'd). Walked edges only
@@ -266,6 +278,13 @@ internal sealed class NavGraph : IDisposable
     // through both views.
     private readonly Dictionary<Guid, List<NavEdge>> _outgoingByNode = new();
 
+    // Sighted-location memory — entities the bot has SEEN but not
+    // necessarily reached, located in absolute coords. Kept entirely
+    // separate from the routing graph (_nodes/_edges) so it can never
+    // be mistaken for a walkable waypoint or a routing anchor.
+    private readonly Dictionary<Guid, SightedLocation>       _sighted       = new();
+    private readonly Dictionary<uint, List<SightedLocation>> _sightedByCell = new();
+
     // Continuation state (per-graph-instance; resets across sessions
     // intentionally — chronological Walked edges should NOT span a
     // restart since intervening state is unknown).
@@ -318,6 +337,8 @@ internal sealed class NavGraph : IDisposable
 
     public IReadOnlyList<NavNode>   SnapshotNodes()   { lock (_lock) return _nodes.Values.ToArray(); }
     public IReadOnlyList<NavEdge>   SnapshotEdges()   { lock (_lock) return _edges.Values.ToArray(); }
+    public int SightedCount { get { lock (_lock) return _sighted.Count; } }
+    public IReadOnlyList<SightedLocation> SnapshotSighted() { lock (_lock) return _sighted.Values.ToArray(); }
     public IReadOnlyList<NavArea>   SnapshotAreas()   { lock (_lock) return _areas.Values.ToArray(); }
     public IReadOnlyList<NavPlace>  SnapshotPlaces()  { lock (_lock) return _places.Values.ToArray(); }
     public IReadOnlyList<NavRegion> SnapshotRegions() { lock (_lock) return _regions.Values.ToArray(); }
@@ -425,6 +446,62 @@ internal sealed class NavGraph : IDisposable
             hits.Sort((a, b) => b.Observation.LastSeenUtc.CompareTo(a.Observation.LastSeenUtc));
             return hits;
         }
+    }
+
+    /// <summary>
+    /// Search remembered sighted locations whose entity name matches
+    /// <paramref name="namePattern"/> (case-insensitive substring),
+    /// most-recently-seen first. Sighted locations are absolute-coord
+    /// "X is here" landmarks; they are NOT routing nodes. A consumer
+    /// uses the returned <see cref="SightedLocation.WorldX"/>/WorldY
+    /// (or CoordNS/EW) plus the static navmesh to actually travel there.
+    /// </summary>
+    public IReadOnlyList<SightedLocation> FindSightedLocations(string namePattern)
+    {
+            if (string.IsNullOrEmpty(namePattern)) return Array.Empty<SightedLocation>();
+            lock (_lock)
+            {
+                var hits = _sighted.Values
+                    .Where(s => s.Name.Contains(namePattern, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                hits.Sort((a, b) => b.LastSeenUtc.CompareTo(a.LastSeenUtc));
+                return hits;
+            }
+    }
+
+    /// <summary>
+    /// Returns sighted locations within <paramref name="radiusMeters"/>
+    /// of <paramref name="position"/> in the same landblock, nearest
+    /// first. Use to answer "what have I seen near here?" — never as a
+    /// routing anchor (sighted locations are not proven reachable).
+    /// </summary>
+    public IReadOnlyList<(SightedLocation Location, float Distance)> FindSightedLocationsWithin(
+            uint cellId, Vector3 position, float radiusMeters)
+    {
+            lock (_lock)
+            {
+                var landblock = cellId >> 16;
+                // Use the codebase's centralized cell-aware distance
+                // (WorldDistance.SquaredDistanceBetween): Position.X/Y are
+                // landblock-local, so a raw Vector3 delta is only valid
+                // within one landblock. The helper is the single source of
+                // truth and keeps this query consistent with the rest of
+                // the spatial code.
+                var radiusSq = radiusMeters * radiusMeters;
+                var hits = new List<(SightedLocation, float)>();
+                foreach (var (cid, list) in _sightedByCell)
+                {
+                    if ((cid >> 16) != landblock) continue;
+                    foreach (var s in list)
+                    {
+                        var dSq = HeadlessAcClient.World.WorldDistance.SquaredDistanceBetween(
+                            cellId, position, s.CellId, s.Position);
+                        if (dSq <= radiusSq) hits.Add((s, MathF.Sqrt(dSq)));
+                    }
+                }
+                hits.Sort((a, b) => a.Item2.CompareTo(b.Item2));
+                return hits;
+            }
     }
 
     public IReadOnlyList<NavPlace> QueryPlaces(string? name = null, PlaceKind? kind = null, string? tag = null)
@@ -708,6 +785,100 @@ internal sealed class NavGraph : IDisposable
                 node.Observations.Add(obs);
                 Append("observations", ObservationDto.From(fromNodeId, obs));
             }
+        }
+    }
+
+    /// <summary>
+    /// Records that an entity was SEEN at an absolute world location
+    /// (the entity's own <paramref name="cellId"/> + cell-local
+    /// <paramref name="position"/>), independent of where the bot stood.
+    /// This is field-of-view discovery memory: "X is here, and I will
+    /// not forget." It creates a <see cref="SightedLocation"/>, NOT a
+    /// NavNode — so it never adds a traversable edge and cannot imply
+    /// the bot can walk to the entity. A later navigation slice routes
+    /// toward the remembered coords via the static navmesh; only a real
+    /// RecordVisit ever produces a walkable node.
+    ///
+    /// Dedup: a re-sighting of the SAME entity (matched by wcid when
+    /// present, else by name) within <see cref="SightedMergeRadiusMeters"/>
+    /// in the same cell updates the existing record's latest position,
+    /// timestamp, and sighting count instead of spawning a duplicate.
+    /// Does NOT touch the per-tick walked chain.
+    /// </summary>
+    public Guid RecordSightedLocation(uint cellId, Vector3 position, uint? wcid, string name,
+                                       EntityKind kind, Guid? observerNodeId, DateTimeOffset utc)
+    {
+        if (cellId == 0)
+            throw new ArgumentException("cellId must be non-zero", nameof(cellId));
+        if (string.IsNullOrEmpty(name)) return Guid.Empty;
+
+        lock (_lock)
+        {
+            SightedLocation? near = null;
+            if (_sightedByCell.TryGetValue(cellId, out var inCell))
+            {
+                var bestD = SightedMergeRadiusMeters;
+                foreach (var s in inCell)
+                {
+                    var sameIdentity = wcid is not null
+                        ? s.Wcid == wcid
+                        : (s.Wcid is null && string.Equals(s.Name, name, StringComparison.OrdinalIgnoreCase));
+                    if (!sameIdentity) continue;
+                    var d = Vector3.Distance(s.Position, position);
+                    if (d <= bestD) { near = s; bestD = d; }
+                }
+            }
+
+            if (near is not null)
+            {
+                near.Position = position;
+                var (nwx, nwy) = AcCoords.ToGlobalXY(cellId, position);
+                near.WorldX = nwx; near.WorldY = nwy;
+                var nmap = AcCoords.ToMapCoords(cellId, position);
+                near.CoordNS = nmap?.NS; near.CoordEW = nmap?.EW;
+                near.LastSeenUtc = utc;
+                near.SightingCount++;
+                if (observerNodeId is Guid obs && obs != Guid.Empty) near.ObserverNodeId = obs;
+                if (kind != EntityKind.Unknown) near.Kind = kind;
+                // Throttle re-persistence of an unchanged re-sighting, same
+                // as node dedup — the receive loop sees the same object far
+                // faster than it meaningfully moves.
+                if (utc - near.LastPersistedUtc >= NodeRewriteInterval)
+                {
+                    near.LastPersistedUtc = utc;
+                    Append("sighted", SightedLocationDto.From(near));
+                }
+                return near.Id;
+            }
+
+            var landblock = cellId >> 16;
+            var (wx, wy) = AcCoords.ToGlobalXY(cellId, position);
+            var map = AcCoords.ToMapCoords(cellId, position);
+            var loc = new SightedLocation
+            {
+                Id = Guid.NewGuid(),
+                CellId = cellId,
+                Landblock = landblock,
+                Position = position,
+                WorldX = wx,
+                WorldY = wy,
+                CoordNS = map?.NS,
+                CoordEW = map?.EW,
+                Wcid = wcid,
+                Name = name,
+                FirstSeenUtc = utc,
+            };
+            loc.Kind = kind;
+            loc.ObserverNodeId = (observerNodeId is Guid o && o != Guid.Empty) ? observerNodeId : null;
+            loc.LastSeenUtc = utc;
+            loc.SightingCount = 1;
+            loc.LastPersistedUtc = utc;
+            _sighted[loc.Id] = loc;
+            if (!_sightedByCell.TryGetValue(cellId, out var list))
+                _sightedByCell[cellId] = list = new();
+            list.Add(loc);
+            Append("sighted", SightedLocationDto.From(loc));
+            return loc.Id;
         }
     }
 
@@ -1094,6 +1265,10 @@ internal sealed class NavGraph : IDisposable
                 var d = JsonSerializer.Deserialize<EdgeDto>(line, JsonOpts);
                 if (d is not null) { var e = d.To(); _edges[e.Id] = e; }
             });
+            LoadJournal("sighted", line => {
+                var d = JsonSerializer.Deserialize<SightedLocationDto>(line, JsonOpts);
+                if (d is not null) { var s = d.To(); _sighted[s.Id] = s; }
+            });
 
             // Stage 2: rebuild spatial / structural indexes from the
             // deduplicated entity dictionaries.
@@ -1104,6 +1279,13 @@ internal sealed class NavGraph : IDisposable
                 if (!_nodesByCell.TryGetValue(n.CellId, out var list))
                     _nodesByCell[n.CellId] = list = new();
                 list.Add(n);
+            }
+            // Sighted-location spatial index (separate from routing nodes).
+            foreach (var s in _sighted.Values)
+            {
+                if (!_sightedByCell.TryGetValue(s.CellId, out var slist))
+                    _sightedByCell[s.CellId] = slist = new();
+                slist.Add(s);
             }
             // Outgoing-edges adjacency: bucketize once after dedup so
             // node-centric "where can I go from here?" queries are O(degree).
@@ -1245,6 +1427,31 @@ internal sealed class NavGraph : IDisposable
             return o;
         }
     }
+
+    internal sealed record SightedLocationDto(Guid Id, uint CellId, uint Landblock, Vec3Dto Position,
+                                               float WorldX, float WorldY, float? CoordNS, float? CoordEW,
+                                               uint? Wcid, string Name, EntityKind Kind, Guid? ObserverNodeId,
+                                               DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc,
+                                               int SightingCount)
+    {
+        public static SightedLocationDto From(SightedLocation s) => new(s.Id, s.CellId, s.Landblock,
+            Vec3Dto.From(s.Position), s.WorldX, s.WorldY, s.CoordNS, s.CoordEW,
+            s.Wcid, s.Name, s.Kind, s.ObserverNodeId, s.FirstSeenUtc, s.LastSeenUtc, s.SightingCount);
+        public SightedLocation To()
+        {
+            var s = new SightedLocation
+            {
+                Id = Id, CellId = CellId, Landblock = Landblock, Position = Position.To(),
+                WorldX = WorldX, WorldY = WorldY, CoordNS = CoordNS, CoordEW = CoordEW,
+                Wcid = Wcid, Name = Name, FirstSeenUtc = FirstSeenUtc,
+            };
+            s.Kind = Kind;
+            s.ObserverNodeId = ObserverNodeId;
+            s.LastSeenUtc = LastSeenUtc;
+            s.SightingCount = SightingCount;
+            return s;
+        }
+    }
 }
 
 // ─── Domain types ────────────────────────────────────────────────────
@@ -1335,6 +1542,41 @@ internal sealed class EntityObservation
     public required DateTimeOffset FirstSeenUtc { get; init; }
     public DateTimeOffset LastSeenUtc { get; set; }
     public int SightingCount { get; set; }
+}
+
+/// <summary>
+/// An entity remembered at an absolute world location, discovered by
+/// sight (field of view) rather than by the bot physically standing
+/// there. Deliberately NOT a <see cref="NavNode"/>: a sighted location
+/// is "X is here" memory and carries no reachability guarantee, so it
+/// never participates in routing/anchor queries or walked-edge
+/// formation. A navigation consumer travels toward the remembered
+/// coords using the static navmesh; only a real visit (RecordVisit)
+/// ever produces a walkable node.
+/// </summary>
+internal sealed class SightedLocation
+{
+    public required Guid Id { get; init; }
+    public required uint CellId { get; init; }
+    public required uint Landblock { get; init; }
+    // Latest observed cell-local position (updated on re-sighting).
+    public required Vector3 Position { get; set; }
+    // Absolute world coords (recomputed whenever Position updates).
+    public required float WorldX { get; set; }
+    public required float WorldY { get; set; }
+    public float? CoordNS { get; set; }
+    public float? CoordEW { get; set; }
+    public uint? Wcid { get; init; }
+    public required string Name { get; init; }
+    public EntityKind Kind { get; set; } = EntityKind.Unknown;
+    // Nearest visited node from which the entity was seen, when known.
+    public Guid? ObserverNodeId { get; set; }
+    public required DateTimeOffset FirstSeenUtc { get; init; }
+    public DateTimeOffset LastSeenUtc { get; set; }
+    public int SightingCount { get; set; }
+
+    [System.Text.Json.Serialization.JsonIgnore]
+    public DateTimeOffset LastPersistedUtc { get; set; } = DateTimeOffset.MinValue;
 }
 
 internal sealed record EntitySighting(NavNode Node, EntityObservation Observation);
