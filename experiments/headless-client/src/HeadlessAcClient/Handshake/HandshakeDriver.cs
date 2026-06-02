@@ -920,12 +920,26 @@ internal sealed class HandshakeDriver : IDisposable
                                 lastObservedSelfLandblock is uint selfLb &&
                                 (lmPos.LandblockId & 0xFFFF0000u) == selfLb)
                             {
+                                var sightedPos = new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z);
                                 navGraph.RecordObservation(
                                     lastVisitNodeId,
                                     oc.Weenie.WeenieClassId,
                                     oc.Weenie.Name!,
-                                    new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z),
+                                    sightedPos,
                                     EntityKind.Unknown,
+                                    DateTimeOffset.UtcNow);
+                                // FOV discovery: remember WHERE the entity is
+                                // (its own cell + absolute coords) as a sighted
+                                // location, so the bot can later navigate toward
+                                // it. This is location memory, not a walkable
+                                // node — see NavGraph.RecordSightedLocation.
+                                navGraph.RecordSightedLocation(
+                                    lmPos.LandblockId,
+                                    sightedPos,
+                                    oc.Weenie.WeenieClassId,
+                                    oc.Weenie.Name!,
+                                    EntityKind.Unknown,
+                                    lastVisitNodeId,
                                     DateTimeOffset.UtcNow);
                             }
                             break;
