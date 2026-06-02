@@ -20,9 +20,10 @@ admin commands.
 - [`experiments/headless-client/`](experiments/headless-client) —
   the bot runtime (headless AC client + brain). NOTE: the source
   currently lives on the spike branches under `.worktrees/`
-  (`anvil/llm-deliberation-race` is the furthest along); it is
-  being consolidated back onto `main`. Only `data/` is on `main`
-  today.
+  (`anvil/portal-walkable-nodes` is the canonical, furthest-along
+  branch — builds clean, 440/440 tests pass); it is being
+  consolidated back onto `main`. Only `data/` is on `main` today.
+  See [`docs/pilot/headless-revival.md`](docs/pilot/headless-revival.md).
 - [`experiments/world-nav/`](experiments/world-nav) — the static
   navmesh library: waypoints extracted from the AC1 DAT files. The
   headless client consumes it for pathfinding; it also backs the

@@ -4,6 +4,15 @@
 [`../../AGENTS.md`](../../AGENTS.md) until the success criteria below are
 met. **Do not stop and wait for the user** during normal loop execution.
 
+> **RUNTIME (read first):** the bot is a **distributed headless
+> client** ([`../../experiments/headless-client/`](../../experiments/headless-client)),
+> not a server-side `BotPlayer` object. The server-side
+> `BotPlayer.cs` track in the `darinh/ACE-bots` fork is **retired**.
+> The client's source is being consolidated from
+> `anvil/portal-walkable-nodes` onto `main`; until that lands and the
+> gameplay loop resumes, the current work is the consolidation
+> slices in [`headless-revival.md`](headless-revival.md).
+
 ## North star
 
 Pilot-01 — a single autonomous bot — plays Asheron's Call competently
@@ -39,7 +48,7 @@ When all nine hold, the loop exits and the user is notified.
 | Session checkpoints | `~/.copilot/session-state/<id>/checkpoints/` | What prior sessions accomplished; current loop position |
 | Live server log | `C:\ACE\Logs\ACE_Log.txt` | Ground truth for bot behavior |
 | Live service | `Get-Service ACEServer` | NSSM-wrapped ACE.Server.exe |
-| Code | `C:\Users\darin\repos\ACE-bots`, branch `botplayer-spike` | Bot implementation |
+| Code | `experiments/headless-client/` in THIS repo (canonical branch `anvil/portal-walkable-nodes`, consolidating to `main`) | Bot implementation (distributed headless client) |
 | Docs progress | `docs/pilot/` in this repo | Vocabulary, ADRs (when written), this loop |
 | Memories | Copilot memory store, subject `pilot-loop` | Cross-session learnings |
 
@@ -53,7 +62,7 @@ verification.
 - Read `plan.md` if not yet loaded this session.
 - Read the most recent 1–2 checkpoints.
 - Read this doc.
-- `git --no-pager log -5 --oneline` in `ACE-bots` to know the deployed code.
+- `git --no-pager log -5 --oneline` in this repo to know the latest headless-client code.
 - Check `Get-Service ACEServer` status.
 - Tail the last 60 lines of `C:\ACE\Logs\ACE_Log.txt`.
 
@@ -91,29 +100,38 @@ of work, decompose it further.
 
 ### Phase 3 — Build (variable)
 
-In `C:\Users\darin\repos\ACE-bots` on `botplayer-spike` (or a child
-branch for risky work):
+In `experiments/headless-client/` in this repo (on `main` once
+consolidated, or an `anvil/<task-id>` worktree branch for risky
+work):
 
 - Implement the smallest viable change.
 - Keep changes scoped: one capability per commit when possible.
-- Reuse existing ACE engine code (combat, inventory, navigation
-  primitives) rather than reinventing it.
-- Behind a feature flag when a behavior might regress others.
-- Match the existing BotPlayer.cs / Bots/ folder style.
+- Reuse the existing client subsystems (Handshake, World/WorldState,
+  Strategy, Tactics, NavGraph, IndoorNavService, world-nav) rather
+  than reinventing them.
+- Behind a config flag when a behavior might regress others.
+- Match the existing HeadlessAcClient folder style.
 
 ### Phase 4 — Deploy (≤ 3 min)
 
-- Stop service: `Stop-Service ACEServer` (or `Manage-ACEService.bat stop`).
-- Build: `dotnet build Source/ACE.Server -c Release` (verify exit 0).
-- The bin output overwrites the running binary location, so no copy
-  step needed — but VERIFY the timestamp on `ACE.Server.exe` in
-  `Source/ACE.Server/bin/x64/Release/net10.0/` is fresh.
-- Start service: `Start-Service ACEServer`.
-- Confirm world open by tailing the log for `World is now open`.
+The bot is a client process, not the server. The ACE server runs
+continuously as the NSSM `ACEServer` service — you do NOT rebuild or
+restart it to deploy bot changes; you only need it up
+(`Get-Service ACEServer`; confirm `World is now open` in
+`C:\ACE\Logs\ACE_Log.txt`).
+
+- Build the client: `dotnet build experiments/headless-client/HeadlessAcClient.sln -c Release` (verify exit 0).
+- Launch one (or more) client processes against the server:
+  `dotnet run --project experiments/headless-client/src/HeadlessAcClient -c Release -- <args>` (see `Program.cs` for the arg / config surface and account credentials).
+- Each client instance is one bot; run several for distributed /
+  fellowship behavior.
 
 ### Phase 5 — Verify (≤ 10 min)
 
-- Tail the log; wait for the bot to auto-spawn (rehydration handles this).
+- Run the client's own test suite first:
+  `dotnet test experiments/headless-client/tests/HeadlessAcClient.Tests` (baseline: 440 passing). Do not ship a red suite.
+- Launch the client against the live server and watch BOTH the
+  client's stdout / log AND the server log `C:\ACE\Logs\ACE_Log.txt`.
 - Wait 30–120 seconds for the new behavior to have a chance to fire.
 - Confirm the targeted log line appears (success) OR the failure mode
   changes to something else (also progress — pick that up next iteration).
@@ -122,11 +140,13 @@ branch for risky work):
 
 ### Phase 6 — Commit + push (≤ 3 min)
 
-- `git add -p` the relevant files in `ACE-bots`.
+- `git add -p` the relevant files in this repo
+  (`experiments/headless-client/`).
 - Commit message style: imperative title naming the capability, body
   describing what changed and what log evidence proved it works.
   Include the `Co-authored-by: Copilot` trailer.
-- `git push origin botplayer-spike`.
+- `git push origin <branch>` (the consolidated `main`, or the
+  `anvil/<task-id>` branch for review-bound work).
 
 ### Phase 7 — Checkpoint + assess (≤ 3 min)
 
@@ -180,11 +200,14 @@ Everything else — including "I don't know how this ACE subsystem works"
 
 ## Scheduled auto-kick
 
-A scheduled prompt named `pilot-loop` wakes a fresh Copilot session
-every 2 hours (see `manage_schedule`). Each kick is self-contained: it
-reads this doc, the latest checkpoint, the plan, runs one or more loop
-iterations, and checkpoints out. Adjust cadence by editing the
-schedule; remove it when the success criteria are met.
+A scheduled prompt named `pilot-loop` previously woke a fresh Copilot
+session every 2 hours (see `manage_schedule`). It was **stopped on
+2026-06-02** because it drove the now-retired server-side track.
+**Do not re-create it** until the headless client is consolidated onto
+`main` and builds + runs there (slice 1 in
+[`headless-revival.md`](headless-revival.md)). When re-created, each
+kick is self-contained: it reads this doc, the latest checkpoint, the
+plan, runs one or more loop iterations, and checkpoints out.
 
 ## When the loop is done
 
