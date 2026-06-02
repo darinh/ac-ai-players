@@ -63,10 +63,17 @@ and, where relevant, a live client run) before committing.
    `anvil/portal-walkable-nodes` onto `main`; build + 440 tests green
    from the main checkout; world-nav csproj now probes both checkout
    depths for the ACE-bots sibling.
-2. **Live smoke.** Run one client process against the live
-   `ACEServer`; confirm login then enter-world then perception then
-   an LLM goal then movement via `IndoorNavService`. Capture client
-   and server log evidence.
+2. **Live smoke.** ✅ DONE 2026-06-02. A client (`dotnet run` from
+   `main`, account `spike-bot`, fresh char name) drove the full chain
+   against the live `ACEServer`: CharacterCreate Ok
+   (`guid=0x5000005C`) -> EnterWorld -> IndoorNav loaded the academy
+   navmesh (`landblock 0x8602: cells=568 bridges=756
+   walk-nodes=31910`) -> perception (Door, Bruised Apple) -> LLM goal
+   compile (`success goal=kind=Use target="Door"`, llama-3.3-70b) ->
+   movement via GameActionMoveToState. Evidence:
+   `files/smoke-run-04.log` (session folder). Two minor follow-ups
+   filed: CharacterList=0-vs-NameInUse create loop; first-call LLM
+   goal-id parse-error fallback.
 3. **FOV node discovery.** Add synthesis of new nav nodes from the
    bot's visible objects (sight-line / radius), persisted in
    `NavGraph` — the missing half of "discover, never forget". Builds
