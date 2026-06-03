@@ -1898,6 +1898,34 @@ internal static class AcCoords
     }
 
     /// <summary>
+    /// True when a self-observation that CHANGED landblock looks like the
+    /// bot WALKED across an outdoor landblock seam, rather than teleported
+    /// (portal / recall / calling-stone / login warp). Both cells must be
+    /// outdoor and the GLOBAL-coordinate distance between the two
+    /// observations must be within <paramref name="maxMeters"/>: a seam
+    /// step is only a few meters physically even though the landblock-local
+    /// coords jump from ~191 to ~1. A teleport moves hundreds-to-thousands
+    /// of meters and/or involves an indoor cell, so it returns false and
+    /// the caller classifies it as a portal edge. Purely geometric — no
+    /// game knowledge. Mirrors the retired server-side BotPlayer's on-foot
+    /// crossing, which the server accepts (update_object_server re-derives
+    /// the destination cell from the coordinates).
+    /// </summary>
+    public static bool IsOnFootSeamCrossing(
+        uint fromCellId, Vector3 fromPos, uint toCellId, Vector3 toPos, float maxMeters)
+    {
+        // Same landblock is not a crossing at all.
+        if ((fromCellId & 0xFFFF0000u) == (toCellId & 0xFFFF0000u)) return false;
+        // Indoor transitions are doors/portals, never an on-foot surface seam.
+        if (IsIndoor(fromCellId) || IsIndoor(toCellId)) return false;
+        var (fx, fy) = ToGlobalXY(fromCellId, fromPos);
+        var (tx, ty) = ToGlobalXY(toCellId, toPos);
+        var dx = fx - tx;
+        var dy = fy - ty;
+        return dx * dx + dy * dy <= maxMeters * maxMeters;
+    }
+
+    /// <summary>
     /// Returns (NS, EW) decimal map coordinates matching the in-game
     /// `/loc` display, or null for indoor cells (no surface-map
     /// position). NS positive = North, EW positive = East.
