@@ -1103,11 +1103,12 @@ internal sealed class NavGraph : IDisposable
     /// <summary>
     /// Plan an on-foot route prefix toward a remembered location in a
     /// DIFFERENT landblock, using only the bot's own explored routing
-    /// graph. The plan walks the bot cell-to-cell THROUGH its current
-    /// landblock along the route, then stops at the landblock boundary (or
-    /// at the first door/portal/item hop) so the LLM owns the crossing
-    /// decision. This is route-GUIDED execution within ONE landblock, never
-    /// an auto-crossing executor.
+    /// graph. The plan walks the bot cell-to-cell along the route and MAY
+    /// cross ONE landblock boundary on foot (re-walking an edge it already
+    /// recorded), then stops — before a SECOND landblock change, or before
+    /// the first door/portal/item hop — so the LLM owns the remaining
+    /// decisions. Route-GUIDED execution bounded to adjacent landblocks,
+    /// never an unbounded auto-crossing executor.
     /// </summary>
     /// <remarks>
     /// A cross-landblock route only exists where the bot has previously
@@ -1115,23 +1116,22 @@ internal sealed class NavGraph : IDisposable
     /// observed transitions), so this returns <see cref="RouteWaypointKind.NoRoute"/>
     /// until the bot's personal navmesh actually links the two landblocks.
     /// When a route exists, the plan offers the contiguous prefix of route
-    /// nodes that stay in the bot's CURRENT landblock and are reachable by
-    /// on-foot (<see cref="NavEdgeKind.Walked"/> /
+    /// nodes reachable by on-foot (<see cref="NavEdgeKind.Walked"/> /
     /// <see cref="NavEdgeKind.CrossedBoundary"/>) edges only
-    /// (<see cref="RouteWaypointKind.Advance"/>). The prefix STOPS before
-    /// the first hop that (a) leaves the landblock or (b) uses a door,
+    /// (<see cref="RouteWaypointKind.Advance"/>), allowing at most one
+    /// on-foot landblock crossing. The prefix STOPS before the first hop
+    /// that (a) would cross a SECOND landblock boundary or (b) uses a door,
     /// portal, or item — those are decisions the motor must not take on its
     /// own. The start anchor must be a node in the bot's EXACT current cell
     /// (no landblock-wide fallback): executing a multi-cell walk requires a
     /// proven on-foot path from where the bot actually stands, not from a
     /// far node it merely explored. When the bot is already at the on-foot
-    /// limit (the next hop crosses the landblock boundary or is an
-    /// action edge), it reports <see cref="RouteWaypointKind.TransitionPending"/>
-    /// so the caller stops and re-deliberates rather than auto-cross.
+    /// limit (the next hop is an action edge), it reports
+    /// <see cref="RouteWaypointKind.TransitionPending"/> so the caller stops
+    /// and re-deliberates rather than auto-cross.
     /// <see cref="RouteWaypointPlan.NextLandblock"/> /
     /// <see cref="RouteWaypointPlan.NextEdgeKind"/> describe that blocking
-    /// hop. Actual crossing — using a portal or continuing on foot into the
-    /// next landblock — is a later slice.
+    /// hop. Portal/door/item crossing remains a later slice.
     /// </remarks>
     public RouteWaypointPlan PlanWaypointToward(
         uint fromCell, Vector3 fromPos, uint goalCell, Vector3 goalPos,
@@ -1166,21 +1166,34 @@ internal sealed class NavGraph : IDisposable
         if (route is null || route.Steps.Count == 0) return none;
         var steps = route.Steps;
 
-        // Walk the contiguous prefix that (a) stays in the bot's CURRENT
-        // landblock and (b) is reached only by on-foot edges (Walked /
-        // CrossedBoundary). Stop BEFORE the first hop that leaves the
-        // landblock or uses a door/portal/item — those crossings are
+        // Walk the contiguous prefix reached only by on-foot edges (Walked /
+        // CrossedBoundary). The prefix MAY cross ONE landblock boundary on
+        // foot (Slice 7) — the bot re-walks an edge it already recorded into
+        // the adjacent landblock — but stops before a SECOND landblock change
+        // so the bot re-deliberates (re-perceives) after each seam. Stop also
+        // BEFORE the first hop that uses a door/portal/item: those are
         // decisions the motor must not take on its own (the LLM owns them).
-        // steps[0] is the start anchor (the bot's current cell, guaranteed
-        // in-landblock).
+        // steps[0] is the start anchor (the bot's current cell).
         var fromLandblock = startNode.Landblock;
+        var prefixLandblock = fromLandblock;
+        var landblockCrossings = 0;
         var stopIdx = 0;
         for (int i = 1; i < steps.Count; i++)
         {
             var step = steps[i];
-            if (step.Node.Landblock != fromLandblock) break;
             var kind = step.EdgeFromPrevious?.Kind;
             if (kind != NavEdgeKind.Walked && kind != NavEdgeKind.CrossedBoundary) break;
+            var nodeLandblock = step.Node.Landblock;
+            if (nodeLandblock != prefixLandblock)
+            {
+                // This hop crosses a landblock boundary on foot. Allow at
+                // most one per plan (blast-radius cap: keeps the executed
+                // route within adjacent landblocks and forces frequent
+                // re-deliberation).
+                if (landblockCrossings >= 1) break;
+                landblockCrossings++;
+                prefixLandblock = nodeLandblock;
+            }
             stopIdx = i;
         }
 
@@ -1208,15 +1221,19 @@ internal sealed class NavGraph : IDisposable
             // <=4 m apart (RecordVisit's 2 m tick chain + 4 m merge
             // radius), but a segment can still clip the corner of an
             // intermediate cell that has no node of its own; without it
-            // the motor's cell-crossing gate would stop early there.
+            // the motor's cell-crossing gate would stop early there. The
+            // segment that crosses a landblock seam is rasterized in GLOBAL
+            // coords so its cells land in BOTH landblocks correctly.
             var prevPos = fromPos;
+            var prevCell = fromCell;
             for (int i = 1; i <= stopIdx; i++)
             {
                 var node = steps[i].Node;
                 waypoints.Add(node);
                 pathCells.Add(node.CellId);
-                AddOutdoorSegmentCells(pathCells, fromCell, prevPos, node.Position);
+                AddOutdoorSegmentCells(pathCells, prevCell, prevPos, node.CellId, node.Position);
                 prevPos = node.Position;
+                prevCell = node.CellId;
             }
             return new RouteWaypointPlan(
                 RouteWaypointKind.Advance, boundaryNode, nextLb,
@@ -1232,21 +1249,29 @@ internal sealed class NavGraph : IDisposable
     }
 
     // Rasterize the OUTDOOR surface cells a straight segment crosses, adding
-    // each to <paramref name="cells"/>. No-op for indoor cells (their ids
-    // are not derivable from x,y). Samples every ~4 m plus both endpoints —
-    // segments are short (<=4 m) so this is 1-2 samples in practice; the
-    // first segment (bot pos -> first waypoint) may be longer.
+    // each to <paramref name="cells"/>. The endpoints are landblock-LOCAL
+    // positions in (possibly) DIFFERENT landblocks, so we sample in GLOBAL
+    // coords and map each sample back to its own landblock's 24 m cell. This
+    // is what makes a seam-crossing segment land cells in BOTH landblocks
+    // (a naive local lerp would fabricate a 190 m sweep across the
+    // destination landblock). No-op if either endpoint is indoor (structural
+    // cell ids are not derivable from x,y). Samples every ~4 m plus both
+    // endpoints — non-crossing segments are short (<=4 m), 1-2 samples.
     private static void AddOutdoorSegmentCells(
-        ISet<uint> cells, uint landblockCellId, Vector3 a, Vector3 b)
+        ISet<uint> cells, uint fromCellId, Vector3 a, uint toCellId, Vector3 b)
     {
-        if (AcCoords.IsIndoor(landblockCellId)) return;
+        if (AcCoords.IsIndoor(fromCellId) || AcCoords.IsIndoor(toCellId)) return;
+        var (agx, agy) = AcCoords.ToGlobalXY(fromCellId, a);
+        var (bgx, bgy) = AcCoords.ToGlobalXY(toCellId, b);
         const float sampleStep = 4f;
-        var dist = Vector3.Distance(a, b);
+        var dx = bgx - agx;
+        var dy = bgy - agy;
+        var dist = MathF.Sqrt(dx * dx + dy * dy);
         var n = Math.Max(1, (int)Math.Ceiling(dist / sampleStep));
         for (int s = 0; s <= n; s++)
         {
-            var p = Vector3.Lerp(a, b, (float)s / n);
-            var c = AcCoords.OutdoorCellId(landblockCellId, p);
+            var t = (float)s / n;
+            var c = AcCoords.OutdoorCellIdFromGlobal(agx + dx * t, agy + dy * t);
             if (c != 0u) cells.Add(c);
         }
     }
@@ -1746,8 +1771,9 @@ internal sealed record NavConnection(NavEdge Edge, NavNode To);
 /// For <see cref="RouteWaypointKind.Advance"/>: <see cref="Waypoints"/>
 /// is the ordered run of route nodes the bot should walk through (the
 /// forward hops after the start anchor, up to and including
-/// <see cref="BoundaryNode"/>), all within the bot's CURRENT landblock
-/// and reached only by on-foot (<see cref="NavEdgeKind.Walked"/> /
+/// <see cref="BoundaryNode"/>), within the bot's current landblock or the
+/// one adjacent landblock the prefix may cross into on foot, reached only
+/// by on-foot (<see cref="NavEdgeKind.Walked"/> /
 /// <see cref="NavEdgeKind.CrossedBoundary"/>) edges.
 /// <see cref="BoundaryNode"/> is the final node of the prefix (the stop
 /// point); the immediate next hop is simply Waypoints[0].
@@ -1841,6 +1867,33 @@ internal static class AcCoords
         int cy = (int)(pos.Y / CellLength);
         if (cx < 0) cx = 0; else if (cx >= CellSide) cx = CellSide - 1;
         if (cy < 0) cy = 0; else if (cy >= CellSide) cy = CellSide - 1;
+        return lb | (uint)(cx * CellSide + cy + 1);
+    }
+
+    /// <summary>
+    /// The OUTDOOR surface cell id for a GLOBAL (x,y) position (meters from
+    /// the world origin, as produced by <see cref="ToGlobalXY"/>). Recovers
+    /// the landblock from the global coords and the 24 m cell within it.
+    /// Used to rasterize a segment that crosses a landblock seam, where a
+    /// single landblock-local cell id is not enough.
+    /// </summary>
+    public static uint OutdoorCellIdFromGlobal(float globalX, float globalY)
+    {
+        const float CellLength = 24f;
+        const int CellSide = 8;
+        if (globalX < 0f) globalX = 0f;
+        if (globalY < 0f) globalY = 0f;
+        int lbx = (int)(globalX / BlockLength);
+        int lby = (int)(globalY / BlockLength);
+        if (lbx > 0xFF) lbx = 0xFF;
+        if (lby > 0xFF) lby = 0xFF;
+        float lx = globalX - lbx * BlockLength;
+        float ly = globalY - lby * BlockLength;
+        int cx = (int)(lx / CellLength);
+        int cy = (int)(ly / CellLength);
+        if (cx < 0) cx = 0; else if (cx >= CellSide) cx = CellSide - 1;
+        if (cy < 0) cy = 0; else if (cy >= CellSide) cy = CellSide - 1;
+        var lb = ((uint)lbx << 24) | ((uint)lby << 16);
         return lb | (uint)(cx * CellSide + cy + 1);
     }
 
