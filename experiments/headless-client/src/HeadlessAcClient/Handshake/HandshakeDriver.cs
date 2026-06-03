@@ -56,6 +56,15 @@ internal sealed class HandshakeDriver : IDisposable
     private const int ConnectResponseRetries = 3;
     private const int ConnectResponseRetryDelayMs = 100;
 
+    // Slice 8 — max global-coord distance (meters) between two consecutive
+    // self-observations that straddle a landblock boundary for the change
+    // to be classified as an on-foot seam crossing rather than a teleport.
+    // A walked seam step is a few meters physically; even with sparse
+    // self-updates (~1/s at ~5 u/s walk speed) it stays well under this.
+    // A landblock is 192 m and teleports move far more, so this cleanly
+    // separates the two without risking false negatives on real crossings.
+    private const float OnFootSeamMaxMeters = 48f;
+
     private readonly IPEndPoint _serverPort0;
     private readonly IPEndPoint _serverPort1;
     private readonly string _account;
@@ -445,6 +454,11 @@ internal sealed class HandshakeDriver : IDisposable
         // block iteration to fire a fresh LC even though we already
         // sent one at spawn.
         uint? lastObservedSelfLandblock = null;
+        // Slice 8 — track the last observed self cell + position so a
+        // landblock change can be classified as an on-foot seam crossing
+        // (small global-coord delta, both cells outdoor) vs a teleport.
+        uint lastObservedSelfCellId = 0u;
+        System.Numerics.Vector3 lastObservedSelfPos = default;
         bool loginCompleteResendNeeded = false;
         // Commit B — track the last NavGraph node id the bot stood on.
         // Updated on every RecordVisit so RecordObservation can anchor
@@ -1587,20 +1601,56 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     var lb = lcTeleSelfCell & 0xFFFF0000u;
                     var landblockChanged = false;
+                    // Slice 8 — set when the landblock change was an on-foot
+                    // seam crossing (the bot WALKED across), not a teleport.
+                    var onFootSeamCross = false;
+                    var lcTeleSelfPos2 = new System.Numerics.Vector3(
+                        lcTeleSelf.Position.X,
+                        lcTeleSelf.Position.Y,
+                        lcTeleSelf.Position.Z);
                     if (lastObservedSelfLandblock is uint prevLb)
                     {
                         if (lb != prevLb && loginCompleteSent)
                         {
-                            Console.WriteLine(
-                                $"[teleport] mid-session landblock change " +
-                                $"0x{prevLb:X8} -> 0x{lb:X8}; queueing " +
-                                $"LoginComplete resend to clear Teleporting.");
-                            loginCompleteResendNeeded = true;
+                            // Distinguish an organic on-foot landblock-seam
+                            // crossing from a teleport. A seam step moves only
+                            // a few meters in global coords (local coords jump
+                            // ~191 -> ~1); a teleport moves hundreds-to-
+                            // thousands of meters and/or involves an indoor
+                            // cell. Purely geometric — no game knowledge.
+                            onFootSeamCross = lastObservedSelfCellId != 0u &&
+                                Strategy.AcCoords.IsOnFootSeamCrossing(
+                                    lastObservedSelfCellId, lastObservedSelfPos,
+                                    lcTeleSelfCell, lcTeleSelfPos2,
+                                    OnFootSeamMaxMeters);
+
+                            if (!onFootSeamCross)
+                            {
+                                Console.WriteLine(
+                                    $"[teleport] mid-session landblock change " +
+                                    $"0x{prevLb:X8} -> 0x{lb:X8}; queueing " +
+                                    $"LoginComplete resend to clear Teleporting.");
+                                // A real teleport leaves the server-side
+                                // Teleporting flag set; resending LoginComplete
+                                // clears it. An on-foot crossing never set it,
+                                // so we must NOT resend (it would re-run
+                                // OnTeleportComplete mid-walk).
+                                loginCompleteResendNeeded = true;
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[nav] on-foot seam crossing 0x{prevLb:X8} " +
+                                    $"-> 0x{lb:X8} (walked); recording CrossedBoundary edge.");
+                            }
                             // M1.6 — surface to EventStream so the
                             // LLM policy re-deliberates on the new
                             // landblock (clears any stale "use
                             // calling stone" goal that was tied to
-                            // the previous map).
+                            // the previous map). Fired for BOTH a
+                            // teleport and an on-foot crossing — the
+                            // LLM benefits from knowing the landblock
+                            // changed regardless of mechanism.
                             eventStream.Append(new StreamEvent
                             {
                                 Sequence = 0,
@@ -1614,15 +1664,12 @@ internal sealed class HandshakeDriver : IDisposable
                             // arrival node via RecordVisit). Setting
                             // landblockChanged here drives the post-
                             // RecordVisit RecordEdge that joins the
-                            // pre-teleport node to the arrival node.
+                            // pre-transition node to the arrival node.
                             landblockChanged = true;
                         }
                     }
                     var prevNodeId = lastVisitNodeId;
-                    var lcTeleSelfPos = new System.Numerics.Vector3(
-                        lcTeleSelf.Position.X,
-                        lcTeleSelf.Position.Y,
-                        lcTeleSelf.Position.Z);
+                    var lcTeleSelfPos = lcTeleSelfPos2;
                     if (landblockChanged)
                     {
                         // Same-landblock check in NavGraph.RecordVisit
@@ -1633,6 +1680,8 @@ internal sealed class HandshakeDriver : IDisposable
                         navGraph.BreakWalkedChain();
                     }
                     lastObservedSelfLandblock = lb;
+                    lastObservedSelfCellId = lcTeleSelfCell;
+                    lastObservedSelfPos = lcTeleSelfPos;
                     // Commit B — record self-position waypoint every
                     // observed self-update. NavGraph's per-tick gate
                     // (MaxTickWalkMeters=2m + MergeRadius=4m) handles
@@ -1646,29 +1695,34 @@ internal sealed class HandshakeDriver : IDisposable
                         prevNodeId != Guid.Empty &&
                         prevNodeId != lastVisitNodeId)
                     {
-                        // Best-effort kind: we don't (yet) know whether
-                        // the teleport came from an item (Calling Stone),
-                        // a world portal, an NPC trigger, or a spell.
-                        // UsedPortal is a safe default — fixed cost, same
-                        // semantics as a portal, doesn't poison the A*
-                        // heuristic. Future work: plumb the LLM-issued
-                        // goal's selected item/portal name through and
-                        // pass it as useItemName / useObjectGuid.
+                        // Slice 8 — an on-foot seam crossing is recorded as
+                        // a CrossedBoundary edge (re-walkable on foot, so the
+                        // route executor's one-crossing prefix can re-use it).
+                        // A teleport is recorded as UsedPortal.
+                        //
+                        // For UsedPortal we don't (yet) know whether the
+                        // teleport came from an item (Calling Stone), a world
+                        // portal, an NPC trigger, or a spell. UsedPortal is a
+                        // safe default — fixed cost, doesn't poison the A*
+                        // heuristic. Future work: plumb the LLM-issued goal's
+                        // selected item/portal name through and pass it as
+                        // useItemName / useObjectGuid.
                         //
                         // Executor contract (see ac-ai-players#75): an
                         // edge with useItemName == null AND useObjectGuid
-                        // == null is observational only. The future path
-                        // executor must treat such edges as a hint that
-                        // a transition happens here, then ask the LLM
-                        // for an action to dispatch. A* may include the
-                        // edge in a route; the executor stops at the
-                        // edge boundary and re-deliberates.
+                        // == null is observational only. The path executor
+                        // treats a UsedPortal edge as a hint that a transition
+                        // happens here, then asks the LLM for an action. A
+                        // CrossedBoundary edge IS directly re-walkable.
+                        var crossKind = onFootSeamCross
+                            ? NavEdgeKind.CrossedBoundary
+                            : NavEdgeKind.UsedPortal;
                         try
                         {
                             navGraph.RecordEdge(
                                 prevNodeId,
                                 lastVisitNodeId,
-                                NavEdgeKind.UsedPortal,
+                                crossKind,
                                 useItemName: null,
                                 useObjectGuid: null,
                                 DateTimeOffset.UtcNow);

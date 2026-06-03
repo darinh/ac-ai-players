@@ -826,6 +826,98 @@ public sealed class NavGraphTests : IDisposable
     }
 
     [Fact]
+    public void AcCoords_IsOnFootSeamCrossing_true_for_adjacent_outdoor_walk()
+    {
+        // Bot near the east edge of landblock 0x8602 (LBX=0x86, LBY=0x02)
+        // at local (190, 100), then one tick later just across the seam in
+        // 0x8603 (LBX=0x86, LBY=0x03) at local (100, 2). Wait — east edge
+        // is +X (landblock X), so the adjacent block is 0x8702. Use that.
+        // From 0x8602 @ (190,100) -> 0x8702 @ (2,100): global delta ~4m.
+        const uint fromCell = 0x86020001u;
+        const uint toCell = 0x87020001u;
+        var fromPos = new Vector3(190f, 100f, 0f);
+        var toPos = new Vector3(2f, 100f, 0f);
+
+        Assert.True(AcCoords.IsOnFootSeamCrossing(
+            fromCell, fromPos, toCell, toPos, 48f));
+    }
+
+    [Fact]
+    public void AcCoords_IsOnFootSeamCrossing_true_across_y_seam()
+    {
+        // North/south seam: 0x8602 (LBY=0x02) @ (100,190) -> 0x8603
+        // (LBY=0x03) @ (100,2). Global delta ~4m.
+        var fromPos = new Vector3(100f, 190f, 0f);
+        var toPos = new Vector3(100f, 2f, 0f);
+
+        Assert.True(AcCoords.IsOnFootSeamCrossing(
+            0x86020001u, fromPos, 0x86030001u, toPos, 48f));
+    }
+
+    [Fact]
+    public void AcCoords_IsOnFootSeamCrossing_false_for_same_landblock()
+    {
+        // Same landblock is not a crossing at all, even if far apart.
+        Assert.False(AcCoords.IsOnFootSeamCrossing(
+            0x86020001u, new Vector3(10f, 10f, 0f),
+            0x86020009u, new Vector3(180f, 180f, 0f), 48f));
+    }
+
+    [Fact]
+    public void AcCoords_IsOnFootSeamCrossing_false_when_indoor_involved()
+    {
+        // An indoor cell on either side means a door/portal transition,
+        // never an on-foot outdoor seam — even if the global delta is tiny.
+        Assert.False(AcCoords.IsOnFootSeamCrossing(
+            0x860201ADu, new Vector3(190f, 100f, 0f),  // indoor (low-16 >= 0x100)
+            0x87020001u, new Vector3(2f, 100f, 0f), 48f));
+        Assert.False(AcCoords.IsOnFootSeamCrossing(
+            0x86020001u, new Vector3(190f, 100f, 0f),
+            0x870201ADu, new Vector3(2f, 100f, 0f), 48f));   // indoor dest
+    }
+
+    [Fact]
+    public void AcCoords_IsOnFootSeamCrossing_false_for_teleport_distance()
+    {
+        // A real teleport jumps to a far landblock: global delta is huge,
+        // so it must NOT be classified as a walked seam crossing.
+        const uint fromCell = 0x86020001u; // LBX=0x86, LBY=0x02
+        const uint toCell = 0xA9B40001u;   // Holtburg, far away
+        var fromPos = new Vector3(100f, 100f, 0f);
+        var toPos = new Vector3(100f, 100f, 0f);
+
+        Assert.False(AcCoords.IsOnFootSeamCrossing(
+            fromCell, fromPos, toCell, toPos, 48f));
+    }
+
+    [Fact]
+    public void NavGraph_advances_over_a_recorded_CrossedBoundary_edge()
+    {
+        // Execution gate (Slice 8): a route whose seam hop is recorded as
+        // CrossedBoundary (what the live driver now records for an on-foot
+        // crossing) must be re-walked by PlanWaypointToward, exactly like a
+        // Walked seam. A(0x8602)->B(0x8602) Walked, B->C(0x8703) crossing.
+        var g = new NavGraph();
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var a = g.RecordVisit(0x86020001u, new Vector3(0, 0, 0), t0);
+        g.BreakWalkedChain();
+        var b = g.RecordVisit(0x86020001u, new Vector3(10, 0, 0), t0.AddSeconds(2));
+        g.BreakWalkedChain();
+        var c = g.RecordVisit(0x87020001u, new Vector3(20, 0, 0), t0.AddSeconds(4));
+        g.RecordEdge(a, b, NavEdgeKind.Walked, null, null, t0.AddSeconds(5));
+        g.RecordEdge(b, c, NavEdgeKind.CrossedBoundary, null, null, t0.AddSeconds(5));
+
+        var plan = g.PlanWaypointToward(
+            0x86020001u, new Vector3(0, 0, 0),
+            0x87020001u, new Vector3(20, 0, 0));
+
+        Assert.Equal(RouteWaypointKind.Advance, plan.Kind);
+        // Crosses the single CrossedBoundary seam to C.
+        Assert.Equal(c, plan.BoundaryNode!.Id);
+        Assert.Contains(plan.PathCells, cell => (cell >> 16) == 0x8702u);
+    }
+
+    [Fact]
     public void AcCoords_MapCoordsToGlobalXY_round_trips()
     {
         // NPC-direction parsing path: a quest text like "travel to
