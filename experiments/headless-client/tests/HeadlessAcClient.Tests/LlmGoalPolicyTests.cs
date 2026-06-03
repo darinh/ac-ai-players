@@ -1190,6 +1190,213 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsGoalRecentlyRejected_TransportFailure_StaleAfterArrival_DoesNotMatch()
+    {
+        // Deadlock repro (RaceFix26160 live run): the bot walk-timed-out
+        // toward a pickup-eligible item (Unreachable), then the picker
+        // SUBSEQUENTLY arrived in range of that same item. A later Pickup
+        // of it must NOT be deduped — the transport failure is stale and
+        // the bot is now standing on the item. Otherwise it loops forever.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Leather Leggings",
+            Text = "Unreachable: 'Leather Leggings' (walk timeout 30s)",
+            ItemGuid = 0x8000104Du,
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Leather Leggings",
+            ItemGuid = 0x8000104Du,
+            Text = "in-range: picker auto-lock without LLM verb goal",
+        });
+
+        var pickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Leather Leggings" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(pickup, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_TransportFailure_ArrivalAtDifferentTarget_StillMatches()
+    {
+        // Arrival at a DIFFERENT guid must not clear the transport
+        // rejection for our target.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Leather Leggings",
+            Text = "Unreachable: 'Leather Leggings' (walk timeout 30s)",
+            ItemGuid = 0x8000104Du,
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Training Spadone",
+            ItemGuid = 0x80005514u,
+        });
+
+        var pickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Leather Leggings" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(pickup, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_TransportFailure_ArrivalBeforeRejection_StillMatches()
+    {
+        // Ordering matters: an arrival that PRECEDES the transport
+        // rejection does not clear it (the bot reached, then later
+        // walk-timed-out again on a re-approach).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Leather Leggings",
+            ItemGuid = 0x8000104Du,
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Leather Leggings",
+            Text = "Unreachable: 'Leather Leggings' (walk timeout 30s)",
+            ItemGuid = 0x8000104Du,
+        });
+
+        var pickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Leather Leggings" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(pickup, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_SemanticReject_NotClearedByArrival()
+    {
+        // A server-side semantic refusal (TradeAiDoesntWant, real
+        // WeenieError code) must stay blocking even after a later
+        // arrival — arriving in range doesn't change that the NPC
+        // refused the trade.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Name = "Worcer",
+            Text = "Worcer doesn't want that.",
+            ItemGuid = 0x80001269u,
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Worcer",
+            ItemGuid = 0x80001269u,
+        });
+
+        var talk = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Worcer" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(talk, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_TransportFailure_ArrivalMatchedByName_WhenNoGuid()
+    {
+        // When the transport rejection carries no guid, arrival is
+        // matched by name.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFC, ErrorLabel = "NoIndoorPath",
+            Name = "Leather Cap",
+            Text = "NoIndoorPath: 'Leather Cap' — indoor pathfinder found no walkable route (unknown)",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Leather Cap",
+            ItemGuid = 0x80001051u,
+        });
+
+        var pickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Leather Cap" },
+        };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(pickup, es));
+    }
+
+    [Fact]
+    public void IsTransportFailureRejection_DiscriminatesSyntheticFromServerCodes()
+    {
+        StreamEvent Reject(uint code) => new()
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ErrorCode = code,
+        };
+        Assert.True(LlmGoalPolicy.IsTransportFailureRejection(Reject(0xFFFE))); // Unreachable
+        Assert.True(LlmGoalPolicy.IsTransportFailureRejection(Reject(0xFFFD))); // Blocked
+        Assert.True(LlmGoalPolicy.IsTransportFailureRejection(Reject(0xFFFC))); // NoIndoorPath
+        Assert.False(LlmGoalPolicy.IsTransportFailureRejection(Reject(0x046A))); // TradeAiDoesntWant
+        Assert.False(LlmGoalPolicy.IsTransportFailureRejection(Reject(0x0035))); // server error
+        // Non-rejection kind is never a transport failure.
+        Assert.False(LlmGoalPolicy.IsTransportFailureRejection(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction, ErrorCode = 0xFFFE,
+        }));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_Unreachable_NoArrival_StillMatches()
+    {
+        // Guard against the fix over-firing: a transport rejection with
+        // NO subsequent arrival must STILL dedup (preserves the original
+        // anti-thrash behavior when the bot truly can't reach the target).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Distant Chest",
+            Text = "Unreachable: 'Distant Chest' (walk timeout 30s)",
+            ItemGuid = 0x80009999u,
+        });
+
+        var use = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Distant Chest" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(use, es));
+    }
+
+    [Fact]
     public void IsGoalRecentlyRejected_InventoryServerSaveFailed_MatchesByItemWcid()
     {
         // Mirrors HandshakeDriver's Slice J rejection for unreachable

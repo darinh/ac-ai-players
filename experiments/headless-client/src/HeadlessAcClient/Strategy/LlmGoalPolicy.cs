@@ -587,41 +587,106 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             if (ev.Kind != EventKind.ActionRejected) continue;
 
+            bool matched = false;
+
             // Item-specific rejection (carries item wcid/name —
             // typically Slice J's InventoryServerSaveFailed).
-            if (itemWcid is uint w && ev.Wcid == w) return true;
-            if (!string.IsNullOrWhiteSpace(itemName) &&
+            if (itemWcid is uint w && ev.Wcid == w) matched = true;
+            else if (!string.IsNullOrWhiteSpace(itemName) &&
                 !string.IsNullOrWhiteSpace(ev.Name) &&
                 string.Equals(ev.Name, itemName, StringComparison.OrdinalIgnoreCase))
             {
-                return true;
+                matched = true;
             }
-
             // Target-name match: NPC name carried in Name (Unreachable)
             // or Text (WeenieErrorWithString puts the NPC name there).
-            if (!string.IsNullOrWhiteSpace(targetName))
+            else if (!string.IsNullOrWhiteSpace(targetName))
             {
                 if (!string.IsNullOrWhiteSpace(ev.Name) &&
                     string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
                 {
-                    return true;
+                    matched = true;
                 }
-                if (!string.IsNullOrWhiteSpace(ev.Text))
+                else if (!string.IsNullOrWhiteSpace(ev.Text))
                 {
                     if (string.Equals(ev.Text, targetName, StringComparison.OrdinalIgnoreCase))
-                        return true;
+                        matched = true;
                     // Substring match (for "Unreachable: 'X' (walk timeout ...)")
                     // gated on a minimum target-name length to avoid
                     // false positives on short common substrings.
-                    if (targetName.Length >= 4 &&
+                    else if (targetName.Length >= 4 &&
                         ev.Text.Contains(targetName, StringComparison.OrdinalIgnoreCase))
                     {
-                        return true;
+                        matched = true;
                     }
                 }
             }
+
+            if (!matched) continue;
+
+            // Transport-failure staleness. Synthetic motor-side
+            // rejections (Unreachable / Blocked / NoIndoorPath, codes
+            // 0xFFFC-0xFFFE) mean the bot could not WALK to the target
+            // — NOT that the server refused the interaction. They are
+            // transient: once the bot has SINCE arrived in range of the
+            // same target (a later PickerArrivedNoAction for the same
+            // guid/name), the rejection is obsolete and must not block
+            // the interact verb. Without this, a bot parked in range of
+            // a pickup-eligible item it earlier walk-timed-out toward
+            // deadlocks — the picker keeps re-selecting the nearest item
+            // and the LLM's correct Pickup is dropped every cycle.
+            // Server (semantic) rejections — TradeAiDoesntWant,
+            // InventoryServerSaveFailed, WeenieErrorWithString — carry
+            // real WeenieError codes and stay blocking regardless.
+            if (IsTransportFailureRejection(ev) && HasArrivedAtTargetSince(events, ev))
+                continue;
+
+            return true;
         }
 
+        return false;
+    }
+
+    /// <summary>
+    /// True iff the ActionRejected is a synthetic motor-side transport
+    /// failure (the bot could not walk to the target), as opposed to a
+    /// server-side semantic refusal. Transport failures are emitted by
+    /// the motor with reserved codes 0xFFFC (NoIndoorPath), 0xFFFD
+    /// (Blocked), and 0xFFFE (Unreachable) — see HandshakeDriver. Real
+    /// WeenieError codes are far smaller, so the reserved high range is
+    /// an unambiguous discriminator.
+    /// </summary>
+    internal static bool IsTransportFailureRejection(StreamEvent ev) =>
+        ev.Kind == EventKind.ActionRejected &&
+        ev.ErrorCode is 0xFFFCu or 0xFFFDu or 0xFFFEu;
+
+    /// <summary>
+    /// True iff a <see cref="EventKind.PickerArrivedNoAction"/> event for
+    /// the SAME target as <paramref name="rejection"/> occurred AFTER the
+    /// rejection (strictly higher Sequence) — i.e. the bot has since
+    /// reached the target it earlier failed to walk to. Matches by target
+    /// guid (ItemGuid) when both carry one; otherwise by Name.
+    /// </summary>
+    internal static bool HasArrivedAtTargetSince(EventStream events, StreamEvent rejection)
+    {
+        foreach (var ev in events.Recent())
+        {
+            if (ev.Kind != EventKind.PickerArrivedNoAction) continue;
+            if (ev.Sequence <= rejection.Sequence) continue;
+
+            if (rejection.ItemGuid is uint rg && rg != 0 &&
+                ev.ItemGuid is uint ag && ag != 0)
+            {
+                if (ag == rg) return true;
+                continue;
+            }
+            if (!string.IsNullOrWhiteSpace(rejection.Name) &&
+                !string.IsNullOrWhiteSpace(ev.Name) &&
+                string.Equals(ev.Name, rejection.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
         return false;
     }
 
