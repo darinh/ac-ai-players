@@ -485,10 +485,12 @@ internal sealed class HandshakeDriver : IDisposable
         // Commit B — capture spatial trajectory + observed landmarks
         // + landblock-to-landblock edges in the persistent NavGraph
         // (append-on-write JSONL at experiments/headless-client/data/
-        // nav/, replacing the per-landblock NavGraphRecorder JSON
-        // files). The graph is global across sessions, characters
-        // and accounts; the LLM/planner can query it for routes.
-        var navGraph = new NavGraph();
+        // nav/<character>/, replacing the per-landblock NavGraphRecorder
+        // JSON files). The graph is PER-BOT: each character keeps its own
+        // navmesh populated by its own exploration, so one bot's routes
+        // never leak into another's. The LLM/planner queries it for
+        // routes the bot has personally walked.
+        var navGraph = new NavGraph(profile: _characterName);
         // Slice R wiring — the strategic intent stack persists across
         // LLM deliberations. The LLM authors push/pop/replace ops in
         // its response; the bot's per-tick code (below) checks the

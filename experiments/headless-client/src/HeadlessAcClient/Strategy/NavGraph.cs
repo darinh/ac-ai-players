@@ -2,9 +2,10 @@
 //
 // NavGraph — topological-semantic spatial memory for the bot.
 //
-// One global graph, persistent across sessions / characters / accounts.
-// Replaces the per-landblock-JSON NavGraphRecorder. Designed for the
-// whole game (academies, towns, dungeons, raids), not one location.
+// One graph PER BOT (keyed by character via the constructor `profile`),
+// persistent across that character's sessions. Replaces the
+// per-landblock-JSON NavGraphRecorder. Designed for the whole game
+// (academies, towns, dungeons, raids), not one location.
 //
 // Hierarchy (smallest to largest):
 //
@@ -173,6 +174,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Numerics;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -310,11 +313,18 @@ internal sealed class NavGraph : IDisposable
 
     public string Directory => _directory;
 
-    public NavGraph(string? directory = null)
+    // <param name="profile">Optional per-bot subfolder (typically the
+    // character name). When set, journals persist under
+    // &lt;baseDir&gt;/&lt;profile&gt; so each bot keeps its OWN navmesh populated
+    // by its OWN exploration, instead of sharing one global graph.</param>
+    public NavGraph(string? directory = null, string? profile = null)
     {
-        _directory = directory ?? Path.Combine(
+        var baseDir = directory ?? Path.Combine(
             Environment.CurrentDirectory,
             "experiments", "headless-client", "data", "nav");
+        _directory = string.IsNullOrWhiteSpace(profile)
+            ? baseDir
+            : Path.Combine(baseDir, SanitizeProfile(profile));
         try
         {
             System.IO.Directory.CreateDirectory(_directory);
@@ -325,6 +335,46 @@ internal sealed class NavGraph : IDisposable
         }
         _minCostPerMeter = float.PositiveInfinity;
         TryLoadJournals();
+    }
+
+    /// <summary>
+    /// Reduce an arbitrary profile string (e.g. a character name) to a
+    /// safe single path segment for the per-bot navmesh directory. Real
+    /// AC character names need no cleaning and are used verbatim so the
+    /// folder stays human-readable. If the name contains path separators
+    /// or invalid filename characters (or is empty after cleaning), a
+    /// short stable hash of the ORIGINAL name is appended so two distinct
+    /// names can never collapse onto the same directory and silently
+    /// merge their navmeshes. This is filesystem bookkeeping, not game
+    /// logic — the name itself carries no behavioral meaning.
+    /// </summary>
+    internal static string SanitizeProfile(string profile)
+    {
+        var original = profile ?? string.Empty;
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = original.Trim()
+            .Where(c => Array.IndexOf(invalid, c) < 0 && c != Path.DirectorySeparatorChar
+                        && c != Path.AltDirectorySeparatorChar)
+            .ToArray();
+        var cleaned = new string(chars).Trim().Trim('.');
+
+        // Fast path: nothing was removed — use the name as-is (readable).
+        if (cleaned.Length > 0 && cleaned == original)
+            return cleaned;
+
+        // The name was altered or is empty; append a hash of the ORIGINAL
+        // to keep distinct names distinct (collision-resistance).
+        var hash = ShortHash(original);
+        return cleaned.Length == 0 ? $"bot-{hash}" : $"{cleaned}-{hash}";
+    }
+
+    private static string ShortHash(string s)
+    {
+        Span<byte> buf = stackalloc byte[32];
+        SHA256.HashData(Encoding.UTF8.GetBytes(s), buf);
+        // 128 bits (GUID-strength) so distinct names cannot collide on the
+        // per-bot navmesh directory for any practical input.
+        return Convert.ToHexString(buf[..16]).ToLowerInvariant();
     }
 
     // ─── Snapshots / queries ─────────────────────────────────────────
