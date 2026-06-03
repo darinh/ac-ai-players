@@ -213,6 +213,9 @@ and, where relevant, a live client run) before committing.
 
 ## Related
 
+- [`road-to-endgame.md`](road-to-endgame.md) — the ordered plan from
+  "stuck in the academy" to the north star (Phases A-E), ratified by a
+  three-model adversarial review.
 - [`improvement-loop.md`](improvement-loop.md) — the loop, retargeted
   to the headless client.
 - [ADR-0010](../adr/0010-pathfinding-as-standalone-mod.md) — pathfinding mod.
