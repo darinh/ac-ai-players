@@ -161,8 +161,33 @@ and, where relevant, a live client run) before committing.
    for same-landblock endpoints, so indoor/same-LB walks are unchanged,
    and are correct for the new cross-landblock case). Door/portal/item
    hops remain LLM re-deliberation points. Build clean + 482/482 tests;
-   hardcoded-audit OK (0 FORBIDDEN). LIVE-VERIFY of actual seam AP
-   acceptance is the immediate follow-up.
+   hardcoded-audit OK (0 FORBIDDEN). The seam-AP-acceptance risk was
+   RESOLVED by server-source analysis (ACE re-derives the destination
+   cell from AP coords in `update_object_server`; the retired BotPlayer
+   Slice B used the identical old-cellId+overshoot pattern, historically
+   live-verified).
+
+   **Organic seam-edge recording ✅ DONE 2026-06-03 (PR #124,
+   `revive-navgraph-seam-record`).** Closes the structural gap that made
+   the on-foot route executor (Slices 5-7) unreachable from organic
+   play: the live landblock-change handler recorded EVERY mid-session
+   landblock change as a `UsedPortal` edge (treating it as a teleport),
+   and `PlanWaypointToward` stops before any non-`Walked`/
+   `CrossedBoundary` edge — so a bot that WALKED across an outdoor seam
+   produced an edge its own executor would never re-walk. The handler now
+   classifies the transition via the pure geometric
+   `AcCoords.IsOnFootSeamCrossing` (both cells outdoor AND global-coord
+   delta ≤ `OnFootSeamMaxMeters` 48m → an on-foot seam crossing; local
+   coords jump ~191→~1 but the physical move is a few meters, vs a
+   teleport's hundreds-to-thousands of meters and/or an indoor cell). An
+   on-foot crossing records a `CrossedBoundary` edge and SKIPS the
+   `LoginComplete` resend (a walk never set the server `Teleporting`
+   flag — the resend only existed to clear it after a real teleport); a
+   teleport is unchanged (`UsedPortal` + resend). The `LandblockChanged`
+   EventStream event fires for both so the LLM re-deliberates regardless
+   of mechanism. Build clean + 488/488 tests (+6); hardcoded-audit OK
+   (0 FORBIDDEN — classifier is purely geometric, no names/wcids/
+   landblock-ids).
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
