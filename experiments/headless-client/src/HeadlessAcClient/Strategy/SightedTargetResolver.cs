@@ -47,6 +47,34 @@ internal static class SightedTargetResolver
         Selector selector,
         uint currentCellId,
         IReadOnlySet<Guid>? excluded = null)
+        => ResolveCore(sighted, selector, currentCellId, sameLandblock: true, excluded);
+
+    /// <summary>
+    /// Returns the best remembered match for <paramref name="selector"/>
+    /// in a landblock OTHER than the bot's current one, or null. Same
+    /// mechanical selector matching as <see cref="Resolve"/>; this is the
+    /// entry point a route-guided navigation consumer uses to head toward
+    /// a target last seen elsewhere in the world over the bot's own
+    /// explored connectivity. Most-recently-seen wins on ties.
+    /// </summary>
+    public static SightedLocation? ResolveCrossLandblock(
+        IReadOnlyList<SightedLocation> sighted,
+        Selector selector,
+        uint currentCellId,
+        IReadOnlySet<Guid>? excluded = null)
+        => ResolveCore(sighted, selector, currentCellId, sameLandblock: false, excluded);
+
+    /// <summary>
+    /// Shared matcher. <paramref name="sameLandblock"/> selects whether a
+    /// candidate must be in the bot's current landblock (true) or in any
+    /// OTHER landblock (false). All other semantics are identical.
+    /// </summary>
+    private static SightedLocation? ResolveCore(
+        IReadOnlyList<SightedLocation> sighted,
+        Selector selector,
+        uint currentCellId,
+        bool sameLandblock,
+        IReadOnlySet<Guid>? excluded)
     {
         if (sighted is null || sighted.Count == 0 || selector is null)
             return null;
@@ -63,7 +91,8 @@ internal static class SightedTargetResolver
         foreach (var s in sighted)
         {
             if (excluded is not null && excluded.Contains(s.Id)) continue;
-            if ((s.CellId & 0xFFFF0000u) != landblock) continue;
+            var inSameLandblock = (s.CellId & 0xFFFF0000u) == landblock;
+            if (inSameLandblock != sameLandblock) continue;
             if (hasName &&
                 !string.Equals(s.Name, selector.Name, StringComparison.OrdinalIgnoreCase))
                 continue;

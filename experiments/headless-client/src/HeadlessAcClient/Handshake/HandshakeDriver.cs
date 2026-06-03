@@ -638,6 +638,13 @@ internal sealed class HandshakeDriver : IDisposable
         // re-selected in a tight loop. Keyed by SightedLocation.Id.
         var rememberedSightedCooldownUntil = new Dictionary<Guid, DateTime>();
         var rememberedSightedRevisitCooldown = TimeSpan.FromSeconds(45);
+        // Slice 5 — per-advance-node throttle for cross-landblock route
+        // guidance: when the bot keeps re-selecting the same explored
+        // waypoint without moving (stuck), this short cooldown forces a
+        // wander/re-perception instead of re-locking the identical node.
+        // Keyed by NavNode.Id of the advance waypoint.
+        var crossLbAdvanceCooldownUntil = new Dictionary<Guid, DateTime>();
+        var crossLbAdvanceCooldown = TimeSpan.FromSeconds(20);
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -2468,6 +2475,94 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"cell=0x{remembered.CellId:X8} " +
                                         $"pos=({remembered.Position.X:F1},{remembered.Position.Y:F1}) " +
                                         $"lastSeen={remembered.LastSeenUtc:HH:mm:ss}; steering to remembered coords");
+                                }
+                            }
+                        }
+
+                        // Slice 5 (cross-landblock FOV consumption): the
+                        // target was not found live, nor in same-landblock
+                        // memory. If the bot remembers seeing it in ANOTHER
+                        // landblock, use the bot's OWN explored routing
+                        // graph to make safe progress toward it. This only
+                        // ever advances to a same-cell route waypoint and
+                        // never auto-crosses a landblock — the LLM still
+                        // owns the crossing decision (it re-deliberates,
+                        // e.g. to use a portal, at the boundary). Still
+                        // mechanical resolution of the LLM's selector: the
+                        // "what" is goal.Target; pathfinding over explored
+                        // connectivity is the "how".
+                        if (exploreTarget is null && goal.Target is not null)
+                        {
+                            var nowWall = DateTime.UtcNow;
+                            // Bound the advance-node cooldown map: drop
+                            // expired entries once it grows past a small cap
+                            // so a long-running bot that visits thousands of
+                            // waypoints doesn't leak them.
+                            if (crossLbAdvanceCooldownUntil.Count > 256)
+                            {
+                                var expiredAdv = new List<Guid>();
+                                foreach (var kv in crossLbAdvanceCooldownUntil)
+                                    if (kv.Value <= nowWall) expiredAdv.Add(kv.Key);
+                                foreach (var k in expiredAdv)
+                                    crossLbAdvanceCooldownUntil.Remove(k);
+                            }
+                            var onCooldown = new HashSet<Guid>();
+                            foreach (var kv in rememberedSightedCooldownUntil)
+                                if (kv.Value > nowWall) onCooldown.Add(kv.Key);
+
+                            var farSighting = SightedTargetResolver.ResolveCrossLandblock(
+                                navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldown);
+                            if (farSighting is not null)
+                            {
+                                var plan = navGraph.PlanWaypointToward(
+                                    tacticsSelfCell, tacticsSelf.Position,
+                                    farSighting.CellId, farSighting.Position);
+                                if (plan.Kind == RouteWaypointKind.AdvanceSameCell &&
+                                    plan.AdvanceNode is NavNode adv &&
+                                    (!crossLbAdvanceCooldownUntil.TryGetValue(adv.Id, out var advCd) ||
+                                     advCd <= nowWall))
+                                {
+                                    var dest = new WorldObjectSnapshot(0u)
+                                    {
+                                        Name = farSighting.Name,
+                                        CellId = adv.CellId,
+                                        Position = adv.Position,
+                                    };
+                                    exploreTarget = dest;
+                                    motionRememberedDest = dest;
+                                    motionRememberedSightingId = farSighting.Id;
+                                    crossLbAdvanceCooldownUntil[adv.Id] =
+                                        nowWall + crossLbAdvanceCooldown;
+                                    if (WorldDistance.TrySquaredDistance(tacticsSelf, dest, out var d2adv))
+                                        bestDist = (float)Math.Sqrt(d2adv);
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Explore{{target}} CROSS-LB route advance " +
+                                        $"(selector {goal.Target}) -> '{farSighting.Name}' in lb " +
+                                        $"0x{(farSighting.CellId >> 16):X4}; stepping to explored node " +
+                                        $"0x{adv.CellId:X8} pos=({adv.Position.X:F1},{adv.Position.Y:F1}) " +
+                                        $"routeCost={plan.RouteCostSeconds:F1}s nextLb=0x{plan.NextLandblock:X4}");
+                                }
+                                else
+                                {
+                                    // No safe same-cell progress: either the
+                                    // bot is already at the on-foot limit
+                                    // (TransitionPending — next hop crosses a
+                                    // cell boundary the motor can't yet take;
+                                    // actual crossing/portal re-deliberation
+                                    // is a later slice), there's no explored
+                                    // route (NoRoute), or the advance node is
+                                    // on cooldown. Cool the sighting so we
+                                    // don't re-plan it every tick and fall
+                                    // through to undirected wander; the LLM
+                                    // re-deliberates on its own cadence.
+                                    rememberedSightedCooldownUntil[farSighting.Id] =
+                                        nowWall + rememberedSightedRevisitCooldown;
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Explore{{target}} '{farSighting.Name}' is " +
+                                        $"cross-landblock (lb 0x{(farSighting.CellId >> 16):X4}); " +
+                                        $"{plan.Kind} (no on-foot same-cell step), boundary nextLb=" +
+                                        $"0x{plan.NextLandblock:X4}; cooling down " +
+                                        $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s, wandering");
                                 }
                             }
                         }

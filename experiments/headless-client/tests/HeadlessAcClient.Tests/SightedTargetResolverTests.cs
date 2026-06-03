@@ -188,4 +188,80 @@ public sealed class SightedTargetResolverTests : IDisposable
             g.SnapshotSighted(), new Selector { Name = "Jonathan" }, CellA);
         Assert.Null(hit);
     }
+
+    // ─── ResolveCrossLandblock (slice 5) ─────────────────────────────
+
+    [Fact]
+    public void ResolveCrossLandblock_matches_entity_in_another_landblock()
+    {
+        var g = NewGraph();
+        g.RecordSightedLocation(OtherLandblockCell, new Vector3(5, 0, 5), 100u, "Jonathan",
+            EntityKind.Unknown, null, _t0);
+
+        var hit = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { Name = "jonathan" }, CellA);
+
+        Assert.NotNull(hit);
+        Assert.Equal("Jonathan", hit!.Name);
+        Assert.Equal(OtherLandblockCell, hit.CellId);
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_excludes_same_landblock()
+    {
+        var g = NewGraph();
+        // Same landblock as the bot (0x8602) -> NOT a cross-landblock hit.
+        g.RecordSightedLocation(CellA, new Vector3(5, 0, 5), 100u, "Jonathan",
+            EntityKind.Unknown, null, _t0);
+
+        var hit = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { Name = "Jonathan" }, CellB);
+
+        Assert.Null(hit);
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_tie_breaks_most_recently_seen_across_landblocks()
+    {
+        var g = NewGraph();
+        // Two matches, both in landblocks OTHER than the bot's current
+        // one, seen at different times. Most-recent wins.
+        const uint farCellOlder = 0x8603001Au; // lb 0x8603
+        const uint farCellNewer = 0x8604002Bu; // lb 0x8604
+        g.RecordSightedLocation(farCellOlder, new Vector3(5, 0, 5), 100u, "Guard Alpha",
+            EntityKind.Unknown, null, _t0);
+        g.RecordSightedLocation(farCellNewer, new Vector3(9, 0, 9), 101u, "Guard Beta",
+            EntityKind.Unknown, null, _t0.AddSeconds(60));
+
+        var hit = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { NameContains = "Guard" }, CellA);
+
+        Assert.NotNull(hit);
+        Assert.Equal("Guard Beta", hit!.Name);
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_declines_unsupported_only_selectors()
+    {
+        var g = NewGraph();
+        g.RecordSightedLocation(OtherLandblockCell, new Vector3(5, 0, 5), 100u, "Jonathan",
+            EntityKind.Unknown, null, _t0);
+
+        Assert.Null(SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { Guid = 0x5000_0001u }, CellA));
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_skips_excluded_ids()
+    {
+        var g = NewGraph();
+        var id = g.RecordSightedLocation(OtherLandblockCell, new Vector3(5, 0, 5), 100u, "Jonathan",
+            EntityKind.Unknown, null, _t0);
+
+        var excluded = new HashSet<Guid> { id };
+        var hit = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { Name = "Jonathan" }, CellA, excluded);
+
+        Assert.Null(hit);
+    }
 }
