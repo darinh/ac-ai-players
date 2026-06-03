@@ -781,6 +781,117 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsPlanInvalidatingKind_NoActivePlan_ExcludesGoalLifecycleChurn()
+    {
+        // Deliberation-race fix: when there was NO LLM plan at
+        // call-start (an *establishment* call), the Goal* lifecycle
+        // kinds are the autonomous fallback policy's own set-then-Clear
+        // churn — NOT a real change to the prompt's world. They must
+        // not invalidate the in-flight establishment response.
+        var goalLifecycle = new[]
+        {
+            EventKind.GoalCompleted,
+            EventKind.GoalFailed,
+            EventKind.GoalExpired,
+        };
+        foreach (var kind in goalLifecycle)
+        {
+            Assert.False(LlmGoalPolicy.IsPlanInvalidatingKind(kind, hasActivePlan: false),
+                $"{kind} should NOT invalidate an establishment call (no plan at call-start).");
+            Assert.True(LlmGoalPolicy.IsPlanInvalidatingKind(kind, hasActivePlan: true),
+                $"{kind} should still invalidate when a real plan was active at call-start.");
+        }
+    }
+
+    [Fact]
+    public void IsPlanInvalidatingKind_NoActivePlan_StillInvalidatesWorldMovement()
+    {
+        // World-movement kinds reflect the prompt no longer matching
+        // reality. They invalidate regardless of whether a plan was
+        // active at call-start.
+        var worldMovement = new[]
+        {
+            EventKind.LandblockChanged,
+            EventKind.InventoryItemRemoved,
+            EventKind.ActionRejected,
+        };
+        foreach (var kind in worldMovement)
+        {
+            Assert.True(LlmGoalPolicy.IsPlanInvalidatingKind(kind, hasActivePlan: false),
+                $"{kind} should invalidate even an establishment call (world moved past the prompt).");
+            Assert.True(LlmGoalPolicy.IsPlanInvalidatingKind(kind, hasActivePlan: true),
+                $"{kind} should invalidate when a plan was active too.");
+        }
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_NoActivePlan_IgnoresFallbackGoalChurn()
+    {
+        // Reproduce the object-rich-academy failure mode: a fresh L1
+        // bot has no LLM plan, kicks off an establishment call at
+        // 'floor', and the autonomous picker fallback set-then-Clears a
+        // CurrentGoal (each Clear emitting GoalCompleted) every ~2s
+        // while the ~7s LLM call is in flight. With hasActivePlan:false
+        // those GoalCompleted events must NOT discard the response.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, GoalId = Guid.NewGuid() });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+
+        // Establishment call (no plan at call-start): fallback churn is ignored.
+        Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            "Fallback GoalCompleted churn must not discard an establishment-call response.");
+        // Same events WOULD invalidate a call that had a real plan to protect.
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: true),
+            "With a real plan active at call-start, a GoalCompleted is a genuine invalidation.");
+        // The zero-arg form keeps the conservative legacy behavior.
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor),
+            "Backward-compat short form defaults to hasActivePlan:true.");
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_NoActivePlan_StillCatchesWorldMovement()
+    {
+        // Even during an establishment call, a real world move
+        // (landblock change from a teleport) must still discard the
+        // now-stale response so the bot re-deliberates from the new
+        // observations.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged, LandblockFrom = 0x8602, LandblockTo = 0xA9B4 });
+
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            "A LandblockChanged during an establishment call must still invalidate it.");
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_NoActivePlan_StillCatchesIntentStackCompletion()
+    {
+        // Strategic intent-stack completion emits GoalCompleted with NO
+        // tactical GoalId (HandshakeDriver auto-pop path). That stales the
+        // prompt's intent context even on an establishment call, so it
+        // must still invalidate — only GoalId-stamped tactical churn is
+        // ignored.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+
+        // Tactical fallback churn (has GoalId) — ignored.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+        // Intent-stack completion (no GoalId) — invalidates.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, Text = "IntentCompleted id=3 kind=ReachExit" });
+
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            "A GoalId-less GoalCompleted (intent-stack completion) must invalidate an establishment call.");
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_ActionRejected_DropsCurrentGoalAndAddsRejectionSection()
     {
         // Two-call scenario matching the LandblockChange test:
@@ -850,6 +961,112 @@ public class LlmGoalPolicyTests
         Assert.Contains("Society Greeter", requestBodies[1]);
         // c) the prompt rules instruct against retry
         Assert.Contains("ActionRejected", requestBodies[1]);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
+    {
+        // Deliberation-race regression guard. A fresh L1 bot in an
+        // object-rich room has NO LLM plan. It kicks off an
+        // establishment call; while that ~7s call is in flight the
+        // autonomous picker fallback set-then-Clears a CurrentGoal
+        // every ~2s, each Clear emitting GoalCompleted. Before the fix
+        // every establishment response was discarded as "stale" by
+        // that churn, trapping the bot in the picker fallback forever.
+        // After the fix (call-start plan state threaded through the
+        // in-flight tuple), the GoalCompleted churn no longer discards
+        // an establishment response, so the LLM goal is accepted.
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Society Greeter" },
+          "item":   { "name": "Calling Stone" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        // 1) Establishment kickoff: no plan at call-start.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+
+        // 2) Fallback churn arrives DURING the in-flight call: the
+        //    picker set-then-Clears goals, emitting GoalCompleted.
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+
+        await policy.WaitForInFlightAsync();
+
+        // 3) Consume the result. The establishment response must be
+        //    ACCEPTED despite the GoalCompleted churn.
+        var established = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(established);
+        Assert.Equal(GoalKind.Give, established!.Kind);
+        Assert.Equal("Society Greeter", established.Target?.Name);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_EstablishmentCall_StillDiscardedOnRealWorldMove()
+    {
+        // Counterpart to the churn-survival test: a LandblockChanged
+        // (real teleport) during an establishment call still discards
+        // the now-stale response, because the prompt described a world
+        // the bot has since left.
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Society Greeter" },
+          "item":   { "name": "Calling Stone" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged, LandblockFrom = 0x8602, LandblockTo = 0xA9B4 });
+        await policy.WaitForInFlightAsync();
+
+        // Discarded: ProposeGoal returns the (null) currentGoal, not the
+        // stale Give goal.
+        var consumed = policy.ProposeGoal(world, events, null);
+        Assert.Null(consumed);
     }
 
     [Fact]

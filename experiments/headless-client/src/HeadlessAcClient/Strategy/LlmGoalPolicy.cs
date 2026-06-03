@@ -132,7 +132,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// kick off a Task on the first triggering tick and poll its
     /// completion on subsequent ticks.
     /// </summary>
-    private Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart)>? _inflight;
+    private Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart, bool HadCurrentGoalAtCallStart)>? _inflight;
 
     /// <summary>True iff an LLM call is currently in flight (no result consumed yet).</summary>
     public bool HasInflight => _inflight is not null && !_inflight.IsCompleted;
@@ -285,11 +285,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
             $"prompt-bytes={userPrompt.Length} model={_client.Model}");
 
-        _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart);
+        _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
     }
 
-    private async Task<(LlmResult, Guid, string, string, long)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart)
+    private async Task<(LlmResult, Guid, string, string, long, bool)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart, bool hadCurrentGoalAtCallStart)
     {
         LlmResult result;
         using var cts = new CancellationTokenSource(LlmCallTimeout);
@@ -310,17 +310,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             result = new LlmResult(false, "", "", 0, $"unhandled: {ex.Message}");
         }
-        return (result, decisionId, userPrompt, projJson, eventSeqAtCallStart);
+        return (result, decisionId, userPrompt, projJson, eventSeqAtCallStart, hadCurrentGoalAtCallStart);
     }
 
     private Goal? ConsumeResult(
-        Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart)> finishedTask,
+        Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart, bool HadCurrentGoalAtCallStart)> finishedTask,
         WorldStateProjection world,
         EventStream events,
         Goal? currentGoal,
         DateTimeOffset nowUtc)
     {
-        var (result, decisionId, userPrompt, projJson, eventSeqAtCallStart) = finishedTask.GetAwaiter().GetResult();
+        var (result, decisionId, userPrompt, projJson, eventSeqAtCallStart, hadCurrentGoalAtCallStart) = finishedTask.GetAwaiter().GetResult();
 
         // Stale-result detection (narrow). If a plan-INVALIDATING
         // event arrived after we kicked off the LLM call, the world
@@ -337,7 +337,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // mid-flight by the ServerMessage / NpcDialog firehose,
         // making active combat impossible (every Attack goal
         // would be cancelled by its own damage-number stream).
-        var staleSinceCall = HasPlanInvalidatingSince(events, eventSeqAtCallStart);
+        //
+        // DELIBERATION-RACE FIX: when there was NO LLM plan at
+        // call-start (an *establishment* call), Goal* lifecycle
+        // events that arrive during the call do NOT invalidate the
+        // response — they are the autonomous fallback policy's own
+        // churn (it sets then Clears a CurrentGoal every ~2s as it
+        // visits nearby objects, each Clear emitting GoalCompleted).
+        // Gating on the CALL-START plan state (not consume-time
+        // currentGoal, which can legitimately go null mid-call) lets
+        // a fresh L1 bot in an object-rich room actually land an LLM
+        // goal instead of having every ~7s establishment call
+        // discarded by the 2s picker cadence. LandblockChanged /
+        // InventoryItemRemoved / ActionRejected stay invalidating
+        // regardless — those reflect real world movement the prompt
+        // no longer matches.
+        var staleSinceCall = HasPlanInvalidatingSince(events, eventSeqAtCallStart, hadCurrentGoalAtCallStart);
 
         _training?.RecordDecision(new TrainingDecision
         {
@@ -732,24 +747,89 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </list>
     /// </remarks>
     internal static bool HasPlanInvalidatingSince(EventStream events, long sequenceFloor)
+        => HasPlanInvalidatingSince(events, sequenceFloor, hasActivePlan: true);
+
+    /// <summary>
+    /// Plan-invalidation test with explicit knowledge of whether an
+    /// LLM plan was active when the in-flight call was kicked off.
+    /// When <paramref name="hasActivePlan"/> is false the call was an
+    /// *establishment* call (no tactical goal to protect at call-start);
+    /// Goal* lifecycle events that carry a tactical <c>GoalId</c> are
+    /// then EXCLUDED from invalidation because they are the autonomous
+    /// fallback policy's own set-then-Clear churn (TacticsExecutor.Clear
+    /// /Fail always stamp the completing goal's id). Goal* events WITHOUT
+    /// a GoalId represent strategic intent-stack completion — that does
+    /// stale the prompt's intent context, so it stays invalidating even
+    /// for an establishment call. World-movement kinds (LandblockChanged
+    /// / InventoryItemRemoved / ActionRejected) stay invalidating in both
+    /// modes.
+    /// </summary>
+    internal static bool HasPlanInvalidatingSince(EventStream events, long sequenceFloor, bool hasActivePlan)
     {
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
-            .Any(e => IsPlanInvalidatingKind(e.Kind));
+            .Any(e => IsPlanInvalidatingEvent(e, hasActivePlan));
     }
 
     /// <summary>
-    /// The plan-invalidating event-kind classifier used by
-    /// <see cref="HasPlanInvalidatingSince"/>. See that method's
-    /// remarks for the include / exclude rationale.
+    /// Event-level plan-invalidation classifier. Unlike the kind-only
+    /// <see cref="IsPlanInvalidatingKind(EventKind, bool)"/> it can
+    /// distinguish tactical goal churn (non-null <c>GoalId</c>) from
+    /// strategic intent-stack completion (null <c>GoalId</c>) when there
+    /// was no tactical plan at call-start. See
+    /// <see cref="HasPlanInvalidatingSince(EventStream, long, bool)"/>.
+    /// </summary>
+    private static bool IsPlanInvalidatingEvent(StreamEvent e, bool hasActivePlan)
+    {
+        if (e.Kind is EventKind.LandblockChanged
+                   or EventKind.InventoryItemRemoved
+                   or EventKind.ActionRejected)
+            return true;
+
+        var isGoalLifecycle = e.Kind is EventKind.GoalCompleted
+                                     or EventKind.GoalFailed
+                                     or EventKind.GoalExpired;
+        if (!isGoalLifecycle)
+            return false;
+
+        if (hasActivePlan)
+            return true;
+
+        // Establishment call: a tactical-goal lifecycle event (has a
+        // GoalId) is fallback churn → ignore. A GoalId-less one is
+        // intent-stack completion → still invalidates.
+        return e.GoalId is null;
+    }
+
+    /// <summary>
+    /// The plan-invalidating event-kind classifier (kind-only). See
+    /// <see cref="HasPlanInvalidatingSince(EventStream, long)"/> for the
+    /// include / exclude rationale.
     /// </summary>
     internal static bool IsPlanInvalidatingKind(EventKind kind) =>
-        kind is EventKind.LandblockChanged
-             or EventKind.InventoryItemRemoved
-             or EventKind.ActionRejected
-             or EventKind.GoalCompleted
-             or EventKind.GoalFailed
-             or EventKind.GoalExpired;
+        IsPlanInvalidatingKind(kind, hasActivePlan: true);
+
+    /// <summary>
+    /// Kind-only plan-invalidation classifier with explicit active-plan
+    /// context. The Goal* lifecycle kinds only invalidate when a plan was
+    /// active at call-start; otherwise they are treated as fallback-policy
+    /// churn (the event-level <see cref="IsPlanInvalidatingEvent"/> refines
+    /// this further using the GoalId to spare strategic intent completion).
+    /// </summary>
+    internal static bool IsPlanInvalidatingKind(EventKind kind, bool hasActivePlan)
+    {
+        if (kind is EventKind.LandblockChanged
+                 or EventKind.InventoryItemRemoved
+                 or EventKind.ActionRejected)
+            return true;
+
+        if (!hasActivePlan)
+            return false;
+
+        return kind is EventKind.GoalCompleted
+                    or EventKind.GoalFailed
+                    or EventKind.GoalExpired;
+    }
 
     /// <summary>
     /// The "wake the LLM" event-kind classifier used by
