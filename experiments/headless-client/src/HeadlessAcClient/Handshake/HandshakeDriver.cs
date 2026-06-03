@@ -2481,18 +2481,20 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
-                        // Slice 5 (cross-landblock FOV consumption): the
+                        // Cross-landblock FOV consumption (Slices 5-7): the
                         // target was not found live, nor in same-landblock
                         // memory. If the bot remembers seeing it in ANOTHER
-                        // landblock, use the bot's OWN explored routing
-                        // graph to make safe progress toward it. This only
-                        // ever advances to a same-cell route waypoint and
-                        // never auto-crosses a landblock — the LLM still
-                        // owns the crossing decision (it re-deliberates,
-                        // e.g. to use a portal, at the boundary). Still
-                        // mechanical resolution of the LLM's selector: the
-                        // "what" is goal.Target; pathfinding over explored
-                        // connectivity is the "how".
+                        // landblock, use the bot's OWN explored routing graph
+                        // to make safe progress toward it. The route prefix
+                        // walks the bot node-to-node through its own recorded
+                        // cells and may re-walk a SINGLE recorded landblock
+                        // seam on foot (Slice 7), but stops before a second
+                        // crossing or any door/portal/item hop — the LLM still
+                        // owns those crossing decisions (it re-deliberates,
+                        // e.g. to use a portal, at the limit). Still mechanical
+                        // resolution of the LLM's selector: the "what" is
+                        // goal.Target; pathfinding over explored connectivity
+                        // (incl. the one-seam re-walk) is the "how".
                         if (exploreTarget is null && goal.Target is not null)
                         {
                             var nowWall = DateTime.UtcNow;
@@ -2526,13 +2528,16 @@ internal sealed class HandshakeDriver : IDisposable
                                      advCd <= nowWall))
                                 {
                                     // Steer toward the boundary node (the
-                                    // farthest on-foot route node still in the
-                                    // bot's landblock) and pre-populate the
-                                    // motor's waypoint follower with the route
-                                    // prefix so the bot walks node-to-node
-                                    // THROUGH its own explored cells. The
-                                    // PathCells set lets the cell-crossing gate
-                                    // slide forward instead of stopping; setting
+                                    // farthest on-foot route node the prefix
+                                    // reaches — within the bot's landblock or
+                                    // the one adjacent landblock the prefix may
+                                    // re-walk into across a single recorded
+                                    // seam) and pre-populate the motor's
+                                    // waypoint follower with the route prefix so
+                                    // the bot walks node-to-node THROUGH its own
+                                    // explored cells. The PathCells set lets the
+                                    // cell-crossing gate slide forward (across
+                                    // the seam too) instead of stopping; setting
                                     // motionIndoorPathAttempted suppresses the
                                     // indoor-nav planner from overwriting this
                                     // route-fed path for the lock's lifetime.
@@ -2576,17 +2581,17 @@ internal sealed class HandshakeDriver : IDisposable
                                 else
                                 {
                                     // No safe on-foot progress: either the
-                                    // bot is already at the landblock limit
-                                    // (TransitionPending — next hop leaves the
-                                    // landblock or is a door/portal/item the
-                                    // LLM must decide on; actual crossing/portal
-                                    // re-deliberation is a later slice), there's
-                                    // no explored route (NoRoute), the route
-                                    // start anchor isn't in the bot's cell, or
-                                    // the boundary node is on cooldown. Cool the
-                                    // sighting so we don't re-plan it every tick
-                                    // and fall through to undirected wander; the
-                                    // LLM re-deliberates on its own cadence.
+                                    // bot is already at the prefix limit
+                                    // (TransitionPending — the next hop would be
+                                    // a SECOND landblock crossing, or is a
+                                    // door/portal/item the LLM must decide on),
+                                    // there's no explored route (NoRoute), the
+                                    // route start anchor isn't in the bot's
+                                    // cell, or the boundary node is on cooldown.
+                                    // Cool the sighting so we don't re-plan it
+                                    // every tick and fall through to undirected
+                                    // wander; the LLM re-deliberates on its own
+                                    // cadence.
                                     rememberedSightedCooldownUntil[farSighting.Id] =
                                         nowWall + rememberedSightedRevisitCooldown;
                                     Console.WriteLine(
