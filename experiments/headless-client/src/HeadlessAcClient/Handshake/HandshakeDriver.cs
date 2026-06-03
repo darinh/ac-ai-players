@@ -625,6 +625,14 @@ internal sealed class HandshakeDriver : IDisposable
         // completed — the goal's named target becomes perceivable once the
         // probed room loads, so the selector must re-resolve it next tick.
         bool                 motionIsFrontierProbe = false;
+        // Deliberation-race guard (road-to-endgame Phase A1): the Goal.Id
+        // this motion lock was created to EXECUTE, or null for locks that
+        // own no tactics goal (auto-loot, picker no-op arrival, frontier
+        // probe). On arrival the reset cascade only signals GoalCompleted
+        // when the still-current goal IS this one — so a freshly-landed
+        // LLM goal that arrived mid-motion is never clobbered by an
+        // unrelated (older / fallback) lock's completion.
+        Guid?                motionLockedGoalId = null;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
@@ -2051,12 +2059,33 @@ internal sealed class HandshakeDriver : IDisposable
                     // named target only just became perceivable by entering
                     // the room. Preserve it so the selector re-resolves it
                     // next tick instead of falsely reporting it complete.
-                    if (motionTarget is not null && !motionIsFrontierProbe)
+                    //
+                    // DELIBERATION-RACE GUARD: only signal completion for
+                    // the goal THIS lock was created to execute. If a fresh
+                    // LLM goal landed mid-motion (CurrentGoal.Id no longer
+                    // matches the locked id) or this lock owned no goal at
+                    // all (auto-loot / picker no-op arrival → motionLocked
+                    // GoalId is null), do NOT Clear — clearing would wipe
+                    // the just-established plan before the motor ever
+                    // pursues it. That clobber is what stranded fresh L1
+                    // bots in the object-rich academy: a 2s fallback lock's
+                    // arrival cleared the 7s-latency LLM goal the instant it
+                    // landed.
+                    var lockOwnsCurrentGoal =
+                        motionLockedGoalId is Guid lockedGoalId &&
+                        tactics.CurrentGoal is not null &&
+                        tactics.CurrentGoal.Id == lockedGoalId;
+                    if (motionTarget is not null && !motionIsFrontierProbe && lockOwnsCurrentGoal)
                         tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
                     else if (motionIsFrontierProbe)
                         Console.WriteLine(
                             "[strategy] frontier probe arrived; LLM goal preserved " +
                             "(room loaded -> selector re-resolves next tick)");
+                    else if (motionTarget is not null && tactics.CurrentGoal is not null && !lockOwnsCurrentGoal)
+                        Console.WriteLine(
+                            "[strategy] motion lock arrived but a different goal is now current " +
+                            $"(locked={motionLockedGoalId?.ToString() ?? "none"} current={tactics.CurrentGoal.Id}); " +
+                            "preserving the fresh goal (deliberation-race guard)");
 
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}') " +
@@ -2071,6 +2100,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionRememberedDest = null;
                     motionRememberedSightingId = null;
                     motionIsFrontierProbe = false;
+                    motionLockedGoalId = null;
                     motionRotation = null;
                     motionInitialDistance = null;
                     motionStartedAt = null;
@@ -2761,6 +2791,7 @@ internal sealed class HandshakeDriver : IDisposable
                             motionTarget   = exploreTarget;
                             motionRotation = rotX;
                             lockedGoalKind = GoalKind.Explore;
+                            motionLockedGoalId = goal.Id;
                             motionInitialDistance = bestDist;
 
                             autonomousPositionSent = true;
@@ -3000,6 +3031,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // the correct verb even if Tactics
                                 // re-deliberates during motion.
                                 lockedGoalKind = goal.Kind;
+                                motionLockedGoalId = goal.Id;
                                 if (goal.Kind == GoalKind.Give)
                                     pendingGiveItemGuid = itemSnap!.Guid;
                                 if (WorldDistance.TrySquaredDistance(tacticsSelf, targetSnap!, out var d2lock))
@@ -3750,6 +3782,33 @@ internal sealed class HandshakeDriver : IDisposable
                             pickerActivityCurrent = arrivedActivity with { Arrived = true };
                             llmPolicyForPickerSurface?.SetCurrentPickerActivity(pickerActivityCurrent);
                         }
+                        goto _slice_l_explore_done;
+                    }
+
+                    // Deliberation-race guard (motor side): if a DIFFERENT
+                    // goal became current while this verb lock was walking
+                    // (or the locked goal is gone entirely), do NOT dispatch
+                    // the now-stale verb. Park for the post-action cooldown
+                    // so the reset cascade picks the fresh goal on the next
+                    // lock cycle. Without this, a fallback lock (or an old
+                    // LLM lock) that arrives just after a new goal landed
+                    // would fire the wrong opcode against motionTarget, and
+                    // a semantically-identical-but-regenerated goal could be
+                    // dispatched twice (old lock + re-locked fresh goal).
+                    var dispatchLockOwnsGoal =
+                        motionLockedGoalId is Guid dispatchGoalId &&
+                        tactics.CurrentGoal is not null &&
+                        tactics.CurrentGoal.Id == dispatchGoalId;
+                    if (!dispatchLockOwnsGoal)
+                    {
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        Console.WriteLine(
+                            $"[strategy] motion lock arrived but its goal is no longer current " +
+                            $"(locked={motionLockedGoalId?.ToString() ?? "none"} " +
+                            $"current={tactics.CurrentGoal?.Id.ToString() ?? "none"}); " +
+                            $"skipping stale {lockedGoalKind} dispatch on '{motionTarget.Name}' " +
+                            "(deliberation-race guard)");
                         goto _slice_l_explore_done;
                     }
 
