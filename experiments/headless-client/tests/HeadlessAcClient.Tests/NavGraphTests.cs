@@ -1066,4 +1066,87 @@ public sealed class NavGraphTests : IDisposable
         Assert.Null(nIn.CoordNS);
         Assert.Null(nIn.CoordEW);
     }
+
+    // ─── Per-bot navmesh (profile sub-directory) ─────────────────────
+
+    [Fact]
+    public void Profile_PersistsUnderPerCharacterSubdirectory()
+    {
+        using var g = new NavGraph(_dir, profile: "Pilot-01");
+        Assert.Equal(Path.Combine(_dir, "Pilot-01"), g.Directory);
+        // Recording a visit must write the journal under the per-bot dir.
+        g.RecordVisit(0x86020001u, new Vector3(0, 0, 0), _t0);
+        g.Flush();
+        Assert.True(File.Exists(Path.Combine(_dir, "Pilot-01", "nodes.jsonl")));
+    }
+
+    [Fact]
+    public void Profiles_AreIsolated_OneBotsExplorationDoesNotLeakToAnother()
+    {
+        using (var a = new NavGraph(_dir, profile: "Pilot-01"))
+        {
+            a.RecordVisit(0x86020001u, new Vector3(0, 0, 0), _t0);
+            a.BreakWalkedChain();
+            a.RecordVisit(0x86020001u, new Vector3(5, 0, 0), _t0.AddSeconds(1));
+            a.Flush();
+        }
+        // A separate bot's graph starts empty — it never sees Pilot-01's nodes.
+        using var b = new NavGraph(_dir, profile: "Pilot-02");
+        Assert.Equal(0, b.NodeCount);
+        Assert.Equal(Path.Combine(_dir, "Pilot-02"), b.Directory);
+    }
+
+    [Fact]
+    public void NullOrWhitespaceProfile_KeepsBaseDirectory()
+    {
+        using var g1 = new NavGraph(_dir);
+        using var g2 = new NavGraph(_dir, profile: null);
+        using var g3 = new NavGraph(_dir, profile: "   ");
+        Assert.Equal(_dir, g1.Directory);
+        Assert.Equal(_dir, g2.Directory);
+        Assert.Equal(_dir, g3.Directory);
+    }
+
+    [Theory]
+    [InlineData("Pilot-01")]
+    [InlineData("Bob The Bot")]
+    [InlineData("Frodo")]
+    public void SanitizeProfile_UsesCleanNamesVerbatim(string name)
+    {
+        // Real AC names need no cleaning — folder stays human-readable.
+        Assert.Equal(name, NavGraph.SanitizeProfile(name));
+    }
+
+    [Fact]
+    public void SanitizeProfile_KeepsDistinctNamesDistinct()
+    {
+        // The reviewer's collision example: stripping alone would alias
+        // "a/b" and "ab" to the same segment, merging two bots' navmeshes.
+        var ab1 = NavGraph.SanitizeProfile("a/b");
+        var ab2 = NavGraph.SanitizeProfile("ab");
+        Assert.NotEqual(ab1, ab2);
+        // Empty-after-cleaning names also stay distinct via the hash.
+        var dots = NavGraph.SanitizeProfile("..");
+        var spaces = NavGraph.SanitizeProfile("   ");
+        Assert.NotEqual(dots, spaces);
+        // Every result is a single safe segment (no separators/invalid).
+        foreach (var seg in new[] { ab1, ab2, dots, spaces })
+        {
+            Assert.NotEqual(0, seg.Length);
+            Assert.Equal(-1, seg.IndexOfAny(Path.GetInvalidFileNameChars()));
+            Assert.DoesNotContain('/', seg);
+            Assert.DoesNotContain('\\', seg);
+        }
+    }
+
+    [Fact]
+    public void SanitizeProfile_CannotEscapeBaseDirectory()
+    {
+        // A traversal-style name must collapse to a single safe segment
+        // directly under the base dir — never a parent of it.
+        using var g = new NavGraph(_dir, profile: "../../etc");
+        var full = Path.GetFullPath(g.Directory);
+        Assert.StartsWith(Path.GetFullPath(_dir) + Path.DirectorySeparatorChar, full + Path.DirectorySeparatorChar);
+        Assert.Equal(Path.GetFullPath(_dir), Path.GetFullPath(Path.Combine(g.Directory, "..")));
+    }
 }
