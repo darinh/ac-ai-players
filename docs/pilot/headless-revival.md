@@ -141,6 +141,28 @@ and, where relevant, a live client run) before committing.
    portal re-deliberation remains a later slice. Build clean +
    481/481 tests; hardcoded-audit OK (0 FORBIDDEN) + correctness +
    design reviews folded in.
+
+   **On-foot landblock-boundary crossing ✅ DONE 2026-06-03 (PR #123,
+   `revive-navgraph-xcross`).** `PlanWaypointToward` now lets the
+   on-foot prefix re-walk the bot's OWN recorded route across AT MOST
+   ONE landblock seam (previously it stopped at the boundary with
+   `TransitionPending` → cool + wander). It still stops before a SECOND
+   landblock crossing and before any door/portal/item hop, bounding the
+   blast radius so the planner's local-coord A*/edge-cost assumptions
+   stay valid — the executed prefix is short and made of real recorded
+   edges, and the 30s motion timeout naturally chunks longer routes into
+   re-deliberation points. Two supporting fixes: outdoor segment
+   rasterization is now GLOBAL-coord aware (`AddOutdoorSegmentCells`
+   takes both endpoint cells and samples via the new
+   `AcCoords.OutdoorCellIdFromGlobal`) so a seam segment whose local
+   coords look ~190m apart rasterizes into the correct cells in BOTH
+   landblocks; and the motor's AP step math + blocked-motion delta are
+   computed in global coords (which cancel to the old local subtraction
+   for same-landblock endpoints, so indoor/same-LB walks are unchanged,
+   and are correct for the new cross-landblock case). Door/portal/item
+   hops remain LLM re-deliberation points. Build clean + 482/482 tests;
+   hardcoded-audit OK (0 FORBIDDEN). LIVE-VERIFY of actual seam AP
+   acceptance is the immediate follow-up.
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
