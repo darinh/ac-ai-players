@@ -1069,6 +1069,204 @@ public class LlmGoalPolicyTests
         Assert.Null(consumed);
     }
 
+    // ---- Transport-failure rejections are not plan-invalidating ----
+    //
+    // A synthetic motor transport-failure ActionRejected (codes
+    // 0xFFFC NoIndoorPath / 0xFFFD Blocked / 0xFFFE Unreachable) means
+    // the bot could not WALK to a target — the object snapshot the LLM
+    // reasoned about is unchanged. It must NOT discard an in-flight LLM
+    // response (HasPlanInvalidatingSince) nor drop the current goal from
+    // the prompt anchor (HasRejectionSince). Semantic server rejections
+    // (real WeenieError) still do both. Same-target transport suppression
+    // is owned by IsGoalRecentlyRejected. Live repro: transfix-live.log
+    // lines 855-871 (picker walk-timeout staled an establishment call).
+
+    [Theory]
+    [InlineData(0xFFFCu)]
+    [InlineData(0xFFFDu)]
+    [InlineData(0xFFFEu)]
+    public void HasPlanInvalidatingSince_TransportFailureRejection_DoesNotInvalidate(uint code)
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = code,
+            ErrorLabel = "Unreachable",
+            Name = "Leather Leggings",
+        });
+
+        // Neither an establishment call nor an active-plan call should be
+        // discarded by a transient could-not-walk failure.
+        Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            $"Transport-failure rejection 0x{code:X4} must not stale an establishment call.");
+        Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: true),
+            $"Transport-failure rejection 0x{code:X4} must not stale an active-plan call.");
+        Assert.False(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor),
+            $"Transport-failure rejection 0x{code:X4} must not stale via the short form either.");
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_SemanticRejection_StillInvalidates()
+    {
+        // A real server WeenieError (e.g. TradeAiDoesntWant 0x046A) means
+        // the world refused the interaction — the prompt is obsolete.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A,
+            ErrorLabel = "TradeAiDoesntWant",
+            Text = "Society Greeter",
+        });
+
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            "Semantic rejection must still invalidate an establishment call.");
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: true),
+            "Semantic rejection must still invalidate an active-plan call.");
+    }
+
+    [Fact]
+    public void HasPlanInvalidatingSince_TransportFailureWithLandblockChange_StillInvalidates()
+    {
+        // Independence check: a transport rejection returning false must
+        // not swallow a genuine world move arriving in the same window —
+        // .Any() evaluates each event independently.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Name = "Leather Leggings" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged, LandblockFrom = 0x8602, LandblockTo = 0xA9B4 });
+
+        Assert.True(LlmGoalPolicy.HasPlanInvalidatingSince(es, floor, hasActivePlan: false),
+            "A LandblockChanged alongside a transport rejection must still invalidate.");
+    }
+
+    [Theory]
+    [InlineData(0xFFFCu)]
+    [InlineData(0xFFFDu)]
+    [InlineData(0xFFFEu)]
+    public void HasRejectionSince_TransportFailure_DoesNotDropAnchor(uint code)
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorCode = code, ErrorLabel = "Unreachable", Name = "Leather Leggings" });
+
+        Assert.False(LlmGoalPolicy.HasRejectionSince(es, floor),
+            $"Transport-failure rejection 0x{code:X4} must not drop the current goal from the prompt anchor.");
+    }
+
+    [Fact]
+    public void HasRejectionSince_SemanticRejection_DropsAnchor()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction, Name = "Door" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant", Text = "Society Greeter" });
+
+        Assert.True(LlmGoalPolicy.HasRejectionSince(es, floor),
+            "Semantic rejection must still drop the current goal anchor (Give-loop protection).");
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_EstablishmentCall_SurvivesTransportRejectionMidCall()
+    {
+        // The live deadlock fix (transfix-live.log): a fresh bot kicks off
+        // an establishment call; while it is in flight the autonomous
+        // picker's walk-to-candidate times out, emitting a transport
+        // ActionRejected (Unreachable 0xFFFE). Before this fix the
+        // establishment response was discarded as stale. After: accepted.
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Society Greeter" },
+          "item":   { "name": "Calling Stone" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        // Transport failure during the in-flight establishment call.
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Name = "Leather Leggings" });
+        await policy.WaitForInFlightAsync();
+
+        var established = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(established);
+        Assert.Equal(GoalKind.Give, established!.Kind);
+        Assert.Equal("Society Greeter", established.Target?.Name);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_EstablishmentCall_StillDiscardedOnSemanticRejection()
+    {
+        // Counterpart: a SEMANTIC ActionRejected during an establishment
+        // call must still discard the now-stale response.
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Society Greeter" },
+          "item":   { "name": "Calling Stone" },
+          "priority": 8,
+          "rationale": "ShortDesc directive"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant", Text = "Society Greeter" });
+        await policy.WaitForInFlightAsync();
+
+        var consumed = policy.ProposeGoal(world, events, null);
+        Assert.Null(consumed);
+    }
+
     [Fact]
     public void StreamEvent_ActionRejected_FormatsCleanly()
     {

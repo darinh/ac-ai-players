@@ -207,7 +207,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         // 2.6) Action-rejected guard. If the server told us our last
-        // action failed (WeenieErrorWithString surfaced as
+        // action failed (WeenieErrorWithString surfaced as a SEMANTIC
         // ActionRejected) since our last LLM look, drop currentGoal
         // so the LLM is not anchored on the failed goal in the
         // prompt's '## Current goal' section. Parallels the
@@ -215,6 +215,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // stalefix-run-01 where the Society Greeter kept rejecting
         // the Calling Stone with TradeAiDoesntWant and the LLM kept
         // re-emitting Give(Society Greeter, Calling Stone) forever.
+        // Transport-failure rejections (could-not-walk) are excluded
+        // by HasRejectionSince — they don't invalidate the goal.
         if (currentGoal is not null && HasRejectionSince(events, _lastEventConsideredSequence))
         {
             Console.WriteLine(
@@ -349,9 +351,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // a fresh L1 bot in an object-rich room actually land an LLM
         // goal instead of having every ~7s establishment call
         // discarded by the 2s picker cadence. LandblockChanged /
-        // InventoryItemRemoved / ActionRejected stay invalidating
-        // regardless — those reflect real world movement the prompt
-        // no longer matches.
+        // InventoryItemRemoved / SEMANTIC ActionRejected stay
+        // invalidating regardless — those reflect real world movement
+        // the prompt no longer matches. A TRANSPORT-failure
+        // ActionRejected (synthetic motor codes 0xFFFC-0xFFFE: the
+        // autonomous picker could not WALK to a candidate) is NOT
+        // invalidating — it does not change the object snapshot the LLM
+        // reasoned about. Same-target suppression for transport failures
+        // is owned by IsGoalRecentlyRejected (which has target matching
+        // and arrival-clearing); see IsPlanInvalidatingEvent.
         var staleSinceCall = HasPlanInvalidatingSince(events, eventSeqAtCallStart, hadCurrentGoalAtCallStart);
 
         _training?.RecordDecision(new TrainingDecision
@@ -847,9 +855,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private static bool IsPlanInvalidatingEvent(StreamEvent e, bool hasActivePlan)
     {
         if (e.Kind is EventKind.LandblockChanged
-                   or EventKind.InventoryItemRemoved
-                   or EventKind.ActionRejected)
+                   or EventKind.InventoryItemRemoved)
             return true;
+
+        // ActionRejected splits two ways. A SEMANTIC rejection (real
+        // server WeenieError, e.g. TradeAiDoesntWant) means the world
+        // refused the interaction — the prompt snapshot is obsolete, so
+        // it stays invalidating. A TRANSPORT-failure rejection (synthetic
+        // motor codes 0xFFFC-0xFFFE: NoIndoorPath / Blocked / Unreachable)
+        // only means the motor could not WALK to a target; the object
+        // snapshot the LLM reasoned about is unchanged, so it must NOT
+        // discard the in-flight response. Without this carve-out a fresh
+        // bot's autonomous-picker walk-timeout (transport failure) during
+        // an establishment call wrongly staled the response. Same-target
+        // suppression for transport failures is handled downstream by
+        // IsGoalRecentlyRejected.
+        if (e.Kind is EventKind.ActionRejected)
+            return !IsTransportFailureRejection(e);
 
         var isGoalLifecycle = e.Kind is EventKind.GoalCompleted
                                      or EventKind.GoalFailed
@@ -880,6 +902,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// active at call-start; otherwise they are treated as fallback-policy
     /// churn (the event-level <see cref="IsPlanInvalidatingEvent"/> refines
     /// this further using the GoalId to spare strategic intent completion).
+    /// NOTE: kind-only cannot see ErrorCode, so it conservatively treats
+    /// ALL <see cref="EventKind.ActionRejected"/> as invalidating. The
+    /// event-level classifier refines this — a transport-failure rejection
+    /// (synthetic motor codes 0xFFFC-0xFFFE) is NOT invalidating there.
     /// </summary>
     internal static bool IsPlanInvalidatingKind(EventKind kind, bool hasActivePlan)
     {
@@ -941,12 +967,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     internal static bool HasRejectionSince(EventStream events, long sequenceFloor)
     {
-        // Same shape as HasLandblockChangeSince — look for an
-        // ActionRejected (server told us the last action failed)
-        // newer than our last LLM look.
+        // Same shape as HasLandblockChangeSince — look for a SEMANTIC
+        // ActionRejected (server told us the last action failed) newer
+        // than our last LLM look. TRANSPORT-failure rejections (synthetic
+        // motor codes 0xFFFC-0xFFFE: the bot could not WALK to the target)
+        // are deliberately excluded: they do not mean the goal is invalid,
+        // only that the route failed, so they must NOT drop the current
+        // goal from the prompt anchor. Dropping on a transient walk-timeout
+        // would force a needless re-establishment and undo a just-landed
+        // LLM goal. Transport-failure same-target suppression is owned by
+        // IsGoalRecentlyRejected (target matching + arrival-clearing).
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
-            .Any(e => e.Kind == EventKind.ActionRejected);
+            .Any(e => e.Kind == EventKind.ActionRejected
+                      && !IsTransportFailureRejection(e));
     }
 
     internal static bool HasPickerActivityStartedSince(EventStream events, long sequenceFloor)
