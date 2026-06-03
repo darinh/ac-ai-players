@@ -613,6 +613,7 @@ internal sealed class HandshakeDriver : IDisposable
         // walk ticks within a single motion lock; reset whenever the
         // lock is released (see ResetMotion block).
         Vector3?             prevSelfBeforeAp = null;
+        uint?                prevSelfCellBeforeAp = null;
         float                prevExpectedStepLen = 0f;
         int                  consecutiveBlockedTicks = 0;
         uint                 motionLockedCellId = 0;
@@ -2003,6 +2004,7 @@ internal sealed class HandshakeDriver : IDisposable
                     // previous lock may have ended in a "stuck on
                     // wall" state we don't want to inherit).
                     prevSelfBeforeAp = null;
+                    prevSelfCellBeforeAp = null;
                     prevExpectedStepLen = 0f;
                     consecutiveBlockedTicks = 0;
                     // Phase 3.1 — wipe the indoor-path cache so the
@@ -3955,8 +3957,24 @@ internal sealed class HandshakeDriver : IDisposable
                         if (prevSelfBeforeAp is Vector3 prevSelf &&
                             prevExpectedStepLen >= BlockedMinExpectedStep)
                         {
-                            var moveDx = walkSelf.Position.X - prevSelf.X;
-                            var moveDy = walkSelf.Position.Y - prevSelf.Y;
+                            // Slice 7 — if the bot crossed a landblock seam
+                            // since the last AP, the local-coord delta wraps
+                            // (e.g. 191 -> 1) and fabricates a ~190 m move.
+                            // Measure in GLOBAL coords when the cell changed
+                            // so a genuine block at a seam still registers.
+                            float moveDx, moveDy;
+                            if (prevSelfCellBeforeAp is uint prevCell && prevCell != walkCell)
+                            {
+                                var (pgx, pgy) = Strategy.AcCoords.ToGlobalXY(prevCell, prevSelf);
+                                var (cgx, cgy) = Strategy.AcCoords.ToGlobalXY(walkCell, walkSelf.Position);
+                                moveDx = cgx - pgx;
+                                moveDy = cgy - pgy;
+                            }
+                            else
+                            {
+                                moveDx = walkSelf.Position.X - prevSelf.X;
+                                moveDy = walkSelf.Position.Y - prevSelf.Y;
+                            }
                             var actualMove = MathF.Sqrt(moveDx * moveDx + moveDy * moveDy);
                             if (actualMove < prevExpectedStepLen * BlockedMoveRatioThreshold)
                             {
@@ -4102,12 +4120,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // close-in (the existing stop-radius /
                             // asymptote rules then govern arrival).
                             Vector3 stepTargetPos = liveTarget.Position;
+                            uint stepTargetCell = liveTarget.CellId ?? walkCell;
                             bool aimingAtWaypoint = false;
                             if (!motionDone &&
                                 motionIndoorPath is not null &&
                                 motionIndoorPathIndex < motionIndoorPath.Count - 1)
                             {
                                 stepTargetPos = motionIndoorPath[motionIndoorPathIndex].Position;
+                                stepTargetCell = motionIndoorPath[motionIndoorPathIndex].CellId;
                                 aimingAtWaypoint = true;
                             }
 
@@ -4232,8 +4252,23 @@ internal sealed class HandshakeDriver : IDisposable
                             // get flagged by Player_Tick's z-jump hacking
                             // check, and don't try to chase the apple's
                             // floor Z (~0.9) when we're at 0.0.
-                            var dx = stepTargetPos.X - walkSelf.Position.X;
-                            var dy = stepTargetPos.Y - walkSelf.Position.Y;
+                            //
+                            // Slice 7 — compute dx/dy in GLOBAL coords so a
+                            // step target in a DIFFERENT landblock walks the
+                            // correct physical direction. Landblock-local
+                            // subtraction would be wrong across a seam
+                            // (self x~191 in lbA, target x~1 in lbB is +2 m
+                            // physically, not -190 m). Within one landblock
+                            // the landblock offset cancels, so same-landblock
+                            // behavior is byte-identical. The step is a
+                            // frame-invariant delta, so newPos stays
+                            // walkSelf.Position (local to walkCell) + step.
+                            var (selfGX, selfGY) =
+                                Strategy.AcCoords.ToGlobalXY(walkCell, walkSelf.Position);
+                            var (tgtGX, tgtGY) =
+                                Strategy.AcCoords.ToGlobalXY(stepTargetCell, stepTargetPos);
+                            var dx = tgtGX - selfGX;
+                            var dy = tgtGY - selfGY;
                             var lenXY = MathF.Sqrt(dx * dx + dy * dy);
 
                             // Target-aware terminal stop radius.
@@ -4371,6 +4406,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // compares (current walkSelf - prevSelf)
                                 // against prevExpectedStepLen.
                                 prevSelfBeforeAp    = walkSelf.Position;
+                                prevSelfCellBeforeAp = walkCell;
                                 prevExpectedStepLen = stepLen;
                                 Console.WriteLine(
                                     $"[motion] walk-tick #{walkTickAps}: AP " +

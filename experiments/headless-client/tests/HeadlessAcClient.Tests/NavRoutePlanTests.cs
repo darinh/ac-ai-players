@@ -11,16 +11,16 @@ using Xunit;
 namespace HeadlessAcClient.Tests;
 
 /// <summary>
-/// Slice 6 (cross-cell on-foot traversal): NavGraph.PlanWaypointToward —
+/// Slice 7 (on-foot landblock-boundary crossing): NavGraph.PlanWaypointToward —
 /// route-guided execution toward a remembered location in another
-/// landblock, over the bot's OWN explored connectivity. The planner now
-/// returns the contiguous prefix of route nodes that stay in the bot's
-/// CURRENT landblock and are reachable by on-foot (Walked / CrossedBoundary)
-/// edges only, walking the bot cell-to-cell up to the landblock boundary.
-/// It stops BEFORE the first hop that leaves the landblock or uses a
-/// door/portal/item (TransitionPending), or reports no explored route
-/// (NoRoute). The start anchor must be a node in the bot's EXACT current
-/// cell (no landblock-wide fallback for an executor).
+/// landblock, over the bot's OWN explored connectivity. The planner
+/// returns the contiguous prefix of route nodes reachable by on-foot
+/// (Walked / CrossedBoundary) edges only, walking the bot cell-to-cell
+/// and allowing AT MOST ONE on-foot landblock crossing per plan. It stops
+/// before a SECOND landblock crossing, before any door/portal/item hop
+/// (TransitionPending when the bot is already at such a hop), or reports
+/// no explored route (NoRoute). The start anchor must be a node in the
+/// bot's EXACT current cell (no landblock-wide fallback for an executor).
 /// </summary>
 public sealed class NavRoutePlanTests : IDisposable
 {
@@ -245,11 +245,12 @@ public sealed class NavRoutePlanTests : IDisposable
     }
 
     [Fact]
-    public void Plan_stops_before_leaving_the_landblock_on_foot()
+    public void Plan_crosses_one_landblock_boundary_on_foot()
     {
         var g = NewGraph();
-        // A->B walked same landblock, B->F walked into a DIFFERENT landblock.
-        // The bot must not auto-cross the landblock even on foot.
+        // A->B walked (lb 0x8602), B->F walked into a DIFFERENT landblock
+        // (0x8603), F->goal walked within 0x8603. Slice 7 lets the bot
+        // re-walk its recorded on-foot edge across ONE landblock seam.
         var a = Visit(g, TownCellA, new Vector3(0, 0, 0), 0);
         var b = Visit(g, TownCellA, new Vector3(10, 0, 0), 1);
         var f = Visit(g, NextCell, new Vector3(20, 0, 0), 2);
@@ -262,9 +263,38 @@ public sealed class NavRoutePlanTests : IDisposable
             NextCell, new Vector3(30, 0, 0));
 
         Assert.Equal(RouteWaypointKind.Advance, plan.Kind);
-        // Advances to B (the last node in landblock 0x8602) and stops there.
-        Assert.Equal(b, plan.BoundaryNode!.Id);
-        Assert.Equal((ushort)0x8603, plan.NextLandblock);
+        // Walks the whole recorded on-foot route (one seam crossing).
+        Assert.Equal(new[] { b, f, goal }, plan.Waypoints.Select(n => n.Id).ToArray());
+        Assert.Equal(goal, plan.BoundaryNode!.Id);
+        // Cells in BOTH landblocks are in the slide set.
+        Assert.Contains(TownCellA, plan.PathCells);
+        Assert.Contains(plan.PathCells, c => (c >> 16) == 0x8603u);
+    }
+
+    [Fact]
+    public void Plan_stops_before_a_second_landblock_crossing()
+    {
+        var g = NewGraph();
+        // A(0x8602)->B(0x8602)->F(0x8603)->H(0x8604), all walked. The
+        // prefix may cross ONE landblock seam (to F) but must stop before
+        // the SECOND (F->H) so the bot re-deliberates after each seam.
+        const uint ThirdCell = 0x8604001Au;
+        var a = Visit(g, TownCellA, new Vector3(0, 0, 0), 0);
+        var b = Visit(g, TownCellA, new Vector3(10, 0, 0), 1);
+        var f = Visit(g, NextCell, new Vector3(20, 0, 0), 2);
+        var h = Visit(g, ThirdCell, new Vector3(30, 0, 0), 3);
+        g.RecordEdge(a, b, NavEdgeKind.Walked, null, null, _t0.AddSeconds(5));
+        g.RecordEdge(b, f, NavEdgeKind.Walked, null, null, _t0.AddSeconds(5));
+        g.RecordEdge(f, h, NavEdgeKind.Walked, null, null, _t0.AddSeconds(5));
+
+        var plan = g.PlanWaypointToward(TownCellA, new Vector3(0, 0, 0),
+            ThirdCell, new Vector3(30, 0, 0));
+
+        Assert.Equal(RouteWaypointKind.Advance, plan.Kind);
+        // Stops at F (the first node past one seam); does not reach H.
+        Assert.Equal(new[] { b, f }, plan.Waypoints.Select(n => n.Id).ToArray());
+        Assert.Equal(f, plan.BoundaryNode!.Id);
+        Assert.Equal((ushort)0x8604, plan.NextLandblock);
         Assert.Equal(NavEdgeKind.Walked, plan.NextEdgeKind);
     }
 
