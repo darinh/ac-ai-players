@@ -594,6 +594,14 @@ internal sealed class HandshakeDriver : IDisposable
         // match, case-sensitive) to force a specific target name.
         // Useful for repeatable testing against a known landmark.
         WorldObjectSnapshot? motionTarget = null;
+        // Slice 4 (FOV consumption): when motionTarget is a REMEMBERED
+        // sighted location (a recalled coordinate, not a live object),
+        // motionRememberedDest holds that same synthetic snapshot and
+        // motionRememberedSightingId the source SightedLocation.Id. The
+        // walk-tick steers toward the fixed remembered coords instead of
+        // re-finding a live guid in the current worldState.
+        WorldObjectSnapshot? motionRememberedDest = null;
+        Guid?                motionRememberedSightingId = null;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
@@ -625,6 +633,11 @@ internal sealed class HandshakeDriver : IDisposable
         // it to open. Keyed by door object guid; value is the wall-
         // clock tick we last dispatched USE.
         var doorUseDispatchedAt = new Dictionary<uint, DateTime>();
+        // Slice 4 — per-sighting revisit cooldown so a stale remembered
+        // location (entity moved/despawned by the time we arrive) is not
+        // re-selected in a tight loop. Keyed by SightedLocation.Id.
+        var rememberedSightedCooldownUntil = new Dictionary<Guid, DateTime>();
+        var rememberedSightedRevisitCooldown = TimeSpan.FromSeconds(45);
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -1966,6 +1979,8 @@ internal sealed class HandshakeDriver : IDisposable
                     moveToStateStartSent = false;
                     moveToStateStopSent = false;
                     motionTarget = null;
+                    motionRememberedDest = null;
+                    motionRememberedSightingId = null;
                     motionRotation = null;
                     motionInitialDistance = null;
                     motionStartedAt = null;
@@ -2388,6 +2403,72 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"name={(goal.Target.Name ?? "-")} " +
                                     $"wcid={(goal.Target.Wcid?.ToString() ?? "-")}); " +
                                     $"falling back to farthest-unvisited in 200u");
+                            }
+                        }
+
+                        // Slice 4 (FOV consumption): the live worldState
+                        // could not resolve the LLM-specified target (it's
+                        // out of the bot's current view). Before falling
+                        // back to undirected wander, consult remembered
+                        // SightedLocation memory for a same-landblock match
+                        // and steer toward those coords. This is mechanical
+                        // resolution of the LLM's selector against memory —
+                        // not autonomous targeting. Only a real arrival
+                        // re-perceives (and can later promote the spot to a
+                        // visited node); here we just aim the existing walk
+                        // machinery at a remembered coordinate.
+                        if (exploreTarget is null && goal.Target is not null)
+                        {
+                            var nowWall = DateTime.UtcNow;
+                            var onCooldown = new HashSet<Guid>();
+                            foreach (var kv in rememberedSightedCooldownUntil)
+                                if (kv.Value > nowWall) onCooldown.Add(kv.Key);
+
+                            var remembered = SightedTargetResolver.Resolve(
+                                navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldown);
+                            if (remembered is not null)
+                            {
+                                var dest = new WorldObjectSnapshot(0u)
+                                {
+                                    Name = remembered.Name,
+                                    CellId = remembered.CellId,
+                                    Position = remembered.Position,
+                                };
+                                bool destResolved =
+                                    WorldDistance.TrySquaredDistance(tacticsSelf, dest, out var d2mem);
+                                // Guard: if the bot is already standing on the
+                                // remembered coords the live worldState still did
+                                // NOT surface the entity — it has moved or
+                                // despawned. Selecting it would lock a zero-unit
+                                // walk that "arrives" instantly and re-perceives
+                                // the same empty spot. Stamp the revisit cooldown
+                                // and fall through to undirected wander instead.
+                                var memStopRadius = MotorStopRadius.For(dest);
+                                if (destResolved && d2mem <= memStopRadius * memStopRadius)
+                                {
+                                    rememberedSightedCooldownUntil[remembered.Id] =
+                                        nowWall + rememberedSightedRevisitCooldown;
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Explore{{target}} memory hit " +
+                                        $"'{remembered.Name}' already at bot position but entity " +
+                                        $"not in view (moved/despawned); cooling down {rememberedSightedRevisitCooldown.TotalSeconds:F0}s, wandering");
+                                }
+                                else
+                                {
+                                    exploreTarget = dest;
+                                    motionRememberedDest = dest;
+                                    motionRememberedSightingId = remembered.Id;
+                                    rememberedSightedCooldownUntil[remembered.Id] =
+                                        nowWall + rememberedSightedRevisitCooldown;
+                                    if (destResolved)
+                                        bestDist = (float)Math.Sqrt(d2mem);
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Explore{{target}} resolved from MEMORY " +
+                                        $"(selector {goal.Target}) -> sighted '{remembered.Name}' " +
+                                        $"cell=0x{remembered.CellId:X8} " +
+                                        $"pos=({remembered.Position.X:F1},{remembered.Position.Y:F1}) " +
+                                        $"lastSeen={remembered.LastSeenUtc:HH:mm:ss}; steering to remembered coords");
+                                }
                             }
                         }
 
@@ -3796,10 +3877,26 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
-                        var liveTarget = motionDone
-                            ? null
-                            : worldState.WithinRadius(walkSelf, 999f)
+                        WorldObjectSnapshot? liveTarget;
+                        if (motionDone)
+                        {
+                            liveTarget = null;
+                        }
+                        else if (motionRememberedDest is not null)
+                        {
+                            // Remembered-coordinate motion: the target is a
+                            // recalled sighted location, not a live object in
+                            // the current snapshot. Keep steering toward the
+                            // fixed remembered coords; on arrival the Explore
+                            // short-circuit re-perceives, and the next goal can
+                            // resolve the entity live if it is really there.
+                            liveTarget = motionRememberedDest;
+                        }
+                        else
+                        {
+                            liveTarget = worldState.WithinRadius(walkSelf, 999f)
                                 .FirstOrDefault(s => s.Guid == motionTarget.Guid);
+                        }
                         if (!motionDone && liveTarget is null)
                         {
                             motionDone = true;
