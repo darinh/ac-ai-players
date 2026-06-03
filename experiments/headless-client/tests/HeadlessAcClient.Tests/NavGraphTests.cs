@@ -918,6 +918,56 @@ public sealed class NavGraphTests : IDisposable
     }
 
     [Fact]
+    public void Remembered_cross_landblock_target_plans_over_an_organic_seam_edge()
+    {
+        // End-to-end organic chain (the north-star unit proof, no live
+        // server): a bot explores a route (RecordVisit), records an on-foot
+        // landblock-seam crossing as the live driver now does (Slice 8:
+        // CrossedBoundary), remembers a target it saw across the world in
+        // the FARTHER landblock (RecordSightedLocation), then — standing back
+        // at the start — resolves that out-of-PVS target
+        // (ResolveCrossLandblock) and routes toward it over its OWN recorded
+        // edges (PlanWaypointToward), re-walking the seam it explored.
+        var g = new NavGraph();
+        _graphs.Add(g);
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        // Explored route: A,B in landblock 0x8602; C across the seam in 0x8702.
+        var a = g.RecordVisit(0x86020001u, new Vector3(0, 0, 0), t0);
+        g.BreakWalkedChain();
+        var b = g.RecordVisit(0x86020001u, new Vector3(10, 0, 0), t0.AddSeconds(2));
+        g.BreakWalkedChain();
+        var c = g.RecordVisit(0x87020001u, new Vector3(20, 0, 0), t0.AddSeconds(4));
+        g.RecordEdge(a, b, NavEdgeKind.Walked, null, null, t0.AddSeconds(5));
+        // The seam edge the Slice 8 classifier records for an on-foot crossing.
+        g.RecordEdge(b, c, NavEdgeKind.CrossedBoundary, null, null, t0.AddSeconds(5));
+
+        // A target remembered in the FARTHER landblock (0x8702), near node C.
+        g.RecordSightedLocation(
+            0x87020001u, new Vector3(25, 0, 0), null, "Mossy Drudge",
+            EntityKind.Mob, null, t0.AddSeconds(6));
+
+        // Standing back at the start (cell 0x86020001), resolve the
+        // out-of-PVS LLM target against remembered cross-landblock sightings.
+        var resolved = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { Name = "Mossy Drudge" },
+            currentCellId: 0x86020001u);
+
+        Assert.NotNull(resolved);
+        // The remembered sighting is in the OTHER landblock (0x8702).
+        Assert.Equal(0x8702u, resolved!.CellId >> 16);
+
+        // Route toward the remembered coords over the bot's own edges.
+        var plan = g.PlanWaypointToward(
+            0x86020001u, new Vector3(0, 0, 0), resolved.CellId, resolved.Position);
+
+        Assert.Equal(RouteWaypointKind.Advance, plan.Kind);
+        // The plan re-walks the recorded seam and stops at the boundary node C.
+        Assert.Equal(c, plan.BoundaryNode!.Id);
+        Assert.Contains(plan.PathCells, cell => (cell >> 16) == 0x8702u);
+    }
+
+    [Fact]
     public void AcCoords_MapCoordsToGlobalXY_round_trips()
     {
         // NPC-direction parsing path: a quest text like "travel to
