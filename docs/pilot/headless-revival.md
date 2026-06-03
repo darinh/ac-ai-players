@@ -122,6 +122,25 @@ and, where relevant, a live client run) before committing.
    cell-crossing gate + portal re-deliberation) is the next slice.
    Build clean + 475/475 tests (12 new); three adversarial reviews
    (hardcoded-audit OK, correctness, design) + re-audit clean.
+
+   **On-foot cross-cell traversal ✅ DONE 2026-06-03 (PR #122,
+   `revive-navgraph-xcell`).** `PlanWaypointToward` is now a walked-
+   prefix route EXECUTOR, not just a same-cell waypointer: it returns
+   the contiguous run of the bot's OWN explored route nodes that stay
+   in the current landblock and are reached only by on-foot
+   (`Walked`/`CrossedBoundary`) edges, stopping BEFORE the first hop
+   that leaves the landblock or uses a door/portal/item (the LLM owns
+   those). The motor's cross-LB seam follows that prefix node-to-node
+   and slides its cell-crossing lock over `PathCells` instead of
+   halting at the first cell boundary. `PathCells` rasterizes each
+   outdoor segment (`AcCoords.OutdoorCellId`) so node-less
+   intermediate cells a straight hop clips do not trip the gate. The
+   walk holds because the seam runs once per motion lock (gated on
+   `motionTarget == null`). At the landblock boundary it still returns
+   `TransitionPending` → cool + wander; actual landblock crossing /
+   portal re-deliberation remains a later slice. Build clean +
+   481/481 tests; hardcoded-audit OK (0 FORBIDDEN) + correctness +
+   design reviews folded in.
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
