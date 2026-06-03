@@ -2517,51 +2517,81 @@ internal sealed class HandshakeDriver : IDisposable
                                 var plan = navGraph.PlanWaypointToward(
                                     tacticsSelfCell, tacticsSelf.Position,
                                     farSighting.CellId, farSighting.Position);
-                                if (plan.Kind == RouteWaypointKind.AdvanceSameCell &&
-                                    plan.AdvanceNode is NavNode adv &&
-                                    (!crossLbAdvanceCooldownUntil.TryGetValue(adv.Id, out var advCd) ||
+                                if (plan.Kind == RouteWaypointKind.Advance &&
+                                    plan.BoundaryNode is NavNode boundary &&
+                                    plan.Waypoints.Count > 0 &&
+                                    (!crossLbAdvanceCooldownUntil.TryGetValue(boundary.Id, out var advCd) ||
                                      advCd <= nowWall))
                                 {
+                                    // Steer toward the boundary node (the
+                                    // farthest on-foot route node still in the
+                                    // bot's landblock) and pre-populate the
+                                    // motor's waypoint follower with the route
+                                    // prefix so the bot walks node-to-node
+                                    // THROUGH its own explored cells. The
+                                    // PathCells set lets the cell-crossing gate
+                                    // slide forward instead of stopping; setting
+                                    // motionIndoorPathAttempted suppresses the
+                                    // indoor-nav planner from overwriting this
+                                    // route-fed path for the lock's lifetime.
                                     var dest = new WorldObjectSnapshot(0u)
                                     {
                                         Name = farSighting.Name,
-                                        CellId = adv.CellId,
-                                        Position = adv.Position,
+                                        CellId = boundary.CellId,
+                                        Position = boundary.Position,
                                     };
+                                    var routeWaypoints = new List<IndoorWaypoint>(plan.Waypoints.Count);
+                                    // Forced Floor kind: these are OUTDOOR
+                                    // surface hops, not indoor mesh nodes.
+                                    // Floor keeps them inert to the door-USE
+                                    // pre-emptor (which only fires on Doorway)
+                                    // so the follower just walks them as plain
+                                    // waypoints. Door/portal/item edges are
+                                    // already excluded from the route prefix.
+                                    foreach (var wp in plan.Waypoints)
+                                        routeWaypoints.Add(new IndoorWaypoint(
+                                            wp.Position, wp.CellId,
+                                            WalkableNodeKind.Floor, null));
                                     exploreTarget = dest;
                                     motionRememberedDest = dest;
                                     motionRememberedSightingId = farSighting.Id;
-                                    crossLbAdvanceCooldownUntil[adv.Id] =
+                                    motionIndoorPath = routeWaypoints;
+                                    motionIndoorPathIndex = 0;
+                                    motionIndoorPathCells = plan.PathCells;
+                                    motionIndoorPathAttempted = true;
+                                    crossLbAdvanceCooldownUntil[boundary.Id] =
                                         nowWall + crossLbAdvanceCooldown;
                                     if (WorldDistance.TrySquaredDistance(tacticsSelf, dest, out var d2adv))
                                         bestDist = (float)Math.Sqrt(d2adv);
                                     Console.WriteLine(
                                         $"[strategy] LLM-GOAL Explore{{target}} CROSS-LB route advance " +
                                         $"(selector {goal.Target}) -> '{farSighting.Name}' in lb " +
-                                        $"0x{(farSighting.CellId >> 16):X4}; stepping to explored node " +
-                                        $"0x{adv.CellId:X8} pos=({adv.Position.X:F1},{adv.Position.Y:F1}) " +
+                                        $"0x{(farSighting.CellId >> 16):X4}; following {routeWaypoints.Count}-hop " +
+                                        $"route prefix through {plan.PathCells.Count} cells to boundary node " +
+                                        $"0x{boundary.CellId:X8} pos=({boundary.Position.X:F1},{boundary.Position.Y:F1}) " +
                                         $"routeCost={plan.RouteCostSeconds:F1}s nextLb=0x{plan.NextLandblock:X4}");
                                 }
                                 else
                                 {
-                                    // No safe same-cell progress: either the
-                                    // bot is already at the on-foot limit
-                                    // (TransitionPending — next hop crosses a
-                                    // cell boundary the motor can't yet take;
-                                    // actual crossing/portal re-deliberation
-                                    // is a later slice), there's no explored
-                                    // route (NoRoute), or the advance node is
-                                    // on cooldown. Cool the sighting so we
-                                    // don't re-plan it every tick and fall
-                                    // through to undirected wander; the LLM
-                                    // re-deliberates on its own cadence.
+                                    // No safe on-foot progress: either the
+                                    // bot is already at the landblock limit
+                                    // (TransitionPending — next hop leaves the
+                                    // landblock or is a door/portal/item the
+                                    // LLM must decide on; actual crossing/portal
+                                    // re-deliberation is a later slice), there's
+                                    // no explored route (NoRoute), the route
+                                    // start anchor isn't in the bot's cell, or
+                                    // the boundary node is on cooldown. Cool the
+                                    // sighting so we don't re-plan it every tick
+                                    // and fall through to undirected wander; the
+                                    // LLM re-deliberates on its own cadence.
                                     rememberedSightedCooldownUntil[farSighting.Id] =
                                         nowWall + rememberedSightedRevisitCooldown;
                                     Console.WriteLine(
                                         $"[strategy] LLM-GOAL Explore{{target}} '{farSighting.Name}' is " +
                                         $"cross-landblock (lb 0x{(farSighting.CellId >> 16):X4}); " +
-                                        $"{plan.Kind} (no on-foot same-cell step), boundary nextLb=" +
-                                        $"0x{plan.NextLandblock:X4}; cooling down " +
+                                        $"{plan.Kind} (no on-foot route prefix), boundary nextLb=" +
+                                        $"0x{plan.NextLandblock:X4} nextEdge={plan.NextEdgeKind}; cooling down " +
                                         $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s, wandering");
                                 }
                             }

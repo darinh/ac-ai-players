@@ -1101,55 +1101,58 @@ internal sealed class NavGraph : IDisposable
     }
 
     /// <summary>
-    /// Plan the next SAFE motor waypoint toward a remembered location in a
+    /// Plan an on-foot route prefix toward a remembered location in a
     /// DIFFERENT landblock, using only the bot's own explored routing
-    /// graph. This is route-GUIDED waypointing, not a route executor: it
-    /// never crosses a landblock and never leaves the bot's current cell.
+    /// graph. The plan walks the bot cell-to-cell THROUGH its current
+    /// landblock along the route, then stops at the landblock boundary (or
+    /// at the first door/portal/item hop) so the LLM owns the crossing
+    /// decision. This is route-GUIDED execution within ONE landblock, never
+    /// an auto-crossing executor.
     /// </summary>
     /// <remarks>
     /// A cross-landblock route only exists where the bot has previously
     /// explored a connection (cross-landblock edges are recorded on
     /// observed transitions), so this returns <see cref="RouteWaypointKind.NoRoute"/>
     /// until the bot's personal navmesh actually links the two landblocks.
-    /// When a route exists, the returned plan only ever offers the
-    /// farthest contiguous SAME-CELL node along the route's prefix
-    /// (<see cref="RouteWaypointKind.AdvanceSameCell"/>) — the most
-    /// progress the existing same-cell walk machinery can make without
-    /// tripping the motor's cell-crossing stop gate. The same-cell prefix
-    /// necessarily stops at the FIRST cell boundary on the route (whether
-    /// that boundary is intra-landblock or the landblock exit), because the
-    /// motor cannot yet cross any cell boundary. When the bot is already at
-    /// that farthest same-cell node (the very next hop leaves the cell), it
-    /// reports <see cref="RouteWaypointKind.TransitionPending"/> so the
-    /// caller stops and re-deliberates rather than auto-cross.
-    /// <see cref="RouteWaypointPlan.BoundaryNode"/> is the node the bot
-    /// stops at (the farthest same-cell node); <see cref="RouteWaypointPlan.NextLandblock"/>
-    /// is the landblock the route enters on the hop immediately after that
-    /// node (which may equal the current landblock if that hop is an
-    /// intra-landblock cell crossing). Actual crossing — lifting the
-    /// cell-crossing stop gate and re-deliberating at portals — is a later
-    /// slice; until then TransitionPending means "as far as the motor can
-    /// safely go on foot."
+    /// When a route exists, the plan offers the contiguous prefix of route
+    /// nodes that stay in the bot's CURRENT landblock and are reachable by
+    /// on-foot (<see cref="NavEdgeKind.Walked"/> /
+    /// <see cref="NavEdgeKind.CrossedBoundary"/>) edges only
+    /// (<see cref="RouteWaypointKind.Advance"/>). The prefix STOPS before
+    /// the first hop that (a) leaves the landblock or (b) uses a door,
+    /// portal, or item — those are decisions the motor must not take on its
+    /// own. The start anchor must be a node in the bot's EXACT current cell
+    /// (no landblock-wide fallback): executing a multi-cell walk requires a
+    /// proven on-foot path from where the bot actually stands, not from a
+    /// far node it merely explored. When the bot is already at the on-foot
+    /// limit (the next hop crosses the landblock boundary or is an
+    /// action edge), it reports <see cref="RouteWaypointKind.TransitionPending"/>
+    /// so the caller stops and re-deliberates rather than auto-cross.
+    /// <see cref="RouteWaypointPlan.NextLandblock"/> /
+    /// <see cref="RouteWaypointPlan.NextEdgeKind"/> describe that blocking
+    /// hop. Actual crossing — using a portal or continuing on foot into the
+    /// next landblock — is a later slice.
     /// </remarks>
     public RouteWaypointPlan PlanWaypointToward(
         uint fromCell, Vector3 fromPos, uint goalCell, Vector3 goalPos,
         float anchorRadiusMeters = 50f)
     {
-        // Fallback/goal anchoring spans the whole landblock: a node a bot
-        // has explored may be far from a sighting it only saw from across
-        // the world (FOV), and the bot's exact cell may have no node. A
-        // landblock is ~192 m square (~271 m diagonal), so this covers it.
+        // The goal anchor spans the whole landblock: a node a bot has
+        // explored may be far from a sighting it only saw from across the
+        // world (FOV). A landblock is ~192 m square (~271 m diagonal), so
+        // this covers it. The goal is only a DIRECTION; the bot never walks
+        // all the way there in one plan.
         const float anchorLandblockRadiusMeters = 400f;
-        var none = new RouteWaypointPlan(RouteWaypointKind.NoRoute, null, null, 0, 0f);
+        var none = new RouteWaypointPlan(
+            RouteWaypointKind.NoRoute, null, 0, 0f,
+            Array.Empty<NavNode>(), EmptyCellSet, null);
 
-        // Anchor the bot to a routing node: prefer one in the bot's exact
-        // cell, else the nearest node anywhere in the current landblock.
+        // Anchor the bot to a routing node in its EXACT current cell. No
+        // landblock-wide fallback here: executing a multi-cell walk needs a
+        // proven on-foot path from where the bot actually stands. If the
+        // bot's cell has no explored node, there's no safe route prefix to
+        // execute (FindNearestNode searches the given cell only).
         var startNode = FindNearestNode(fromCell, fromPos, anchorRadiusMeters);
-        if (startNode is null)
-        {
-            var near = FindNodesWithin(fromCell, fromPos, anchorLandblockRadiusMeters);
-            if (near.Count > 0) startNode = near[0].Node;
-        }
         if (startNode is null) return none;
 
         // Anchor the goal to the nearest explored node in the sighting's
@@ -1163,41 +1166,93 @@ internal sealed class NavGraph : IDisposable
         if (route is null || route.Steps.Count == 0) return none;
         var steps = route.Steps;
 
-        // Advance only along the contiguous SAME-CELL prefix that starts in
-        // the bot's CURRENT cell — all the same-cell motor can execute. The
-        // prefix necessarily stops at the first cell boundary on the route
-        // (intra-landblock cell change OR landblock exit); the motor cannot
-        // cross either yet. If the start node isn't even in the bot's cell
-        // (rare landblock-wide fallback), no safe same-cell step exists.
+        // Walk the contiguous prefix that (a) stays in the bot's CURRENT
+        // landblock and (b) is reached only by on-foot edges (Walked /
+        // CrossedBoundary). Stop BEFORE the first hop that leaves the
+        // landblock or uses a door/portal/item — those crossings are
+        // decisions the motor must not take on its own (the LLM owns them).
+        // steps[0] is the start anchor (the bot's current cell, guaranteed
+        // in-landblock).
+        var fromLandblock = startNode.Landblock;
         var stopIdx = 0;
-        if (steps[0].Node.CellId == fromCell)
+        for (int i = 1; i < steps.Count; i++)
         {
-            for (int i = 1; i < steps.Count; i++)
-            {
-                if (steps[i].Node.CellId == fromCell) stopIdx = i;
-                else break;
-            }
+            var step = steps[i];
+            if (step.Node.Landblock != fromLandblock) break;
+            var kind = step.EdgeFromPrevious?.Kind;
+            if (kind != NavEdgeKind.Walked && kind != NavEdgeKind.CrossedBoundary) break;
+            stopIdx = i;
         }
+
         var boundaryNode = steps[stopIdx].Node;
+        // Describe the blocking hop after the prefix (if any): the landblock
+        // it would enter and the edge kind that blocks on-foot continuation.
         ushort nextLb = stopIdx + 1 < steps.Count
             ? (ushort)steps[stopIdx + 1].Node.Landblock
             : (ushort)0;
+        NavEdgeKind? nextEdgeKind = stopIdx + 1 < steps.Count
+            ? steps[stopIdx + 1].EdgeFromPrevious?.Kind
+            : null;
 
-        // Real same-cell progress: the bot can walk to a farther node still
-        // in its own cell before the first cell boundary.
-        if (stopIdx > 0 && boundaryNode.CellId == fromCell)
+        // Real forward progress: the bot can walk through one or more route
+        // nodes (possibly crossing intra-landblock cell boundaries) before
+        // hitting the on-foot limit. Waypoints are the forward hops after
+        // the start anchor, up to and including the boundary node.
+        if (stopIdx > 0)
+        {
+            var waypoints = new List<NavNode>(stopIdx);
+            var pathCells = new HashSet<uint> { fromCell };
+            // Each route node's own cell, PLUS — for an outdoor route —
+            // every 24 m surface cell each straight segment between
+            // consecutive waypoints passes through. Recorded nodes are
+            // <=4 m apart (RecordVisit's 2 m tick chain + 4 m merge
+            // radius), but a segment can still clip the corner of an
+            // intermediate cell that has no node of its own; without it
+            // the motor's cell-crossing gate would stop early there.
+            var prevPos = fromPos;
+            for (int i = 1; i <= stopIdx; i++)
+            {
+                var node = steps[i].Node;
+                waypoints.Add(node);
+                pathCells.Add(node.CellId);
+                AddOutdoorSegmentCells(pathCells, fromCell, prevPos, node.Position);
+                prevPos = node.Position;
+            }
             return new RouteWaypointPlan(
-                RouteWaypointKind.AdvanceSameCell, boundaryNode, boundaryNode, nextLb,
-                route.TotalCostSeconds);
+                RouteWaypointKind.Advance, boundaryNode, nextLb,
+                route.TotalCostSeconds, waypoints, pathCells, nextEdgeKind);
+        }
 
-        // No safe same-cell progress: the bot is already at the farthest
-        // same-cell node (or has no node in its cell), so the next hop
-        // crosses a cell boundary the motor can't yet take. Caller stops
-        // and re-deliberates.
+        // No safe on-foot progress: the bot is already at the on-foot limit
+        // (the next hop leaves the landblock or is a door/portal/item the
+        // LLM must decide on). Caller stops and re-deliberates.
         return new RouteWaypointPlan(
-            RouteWaypointKind.TransitionPending, null, boundaryNode, nextLb,
-            route.TotalCostSeconds);
+            RouteWaypointKind.TransitionPending, boundaryNode, nextLb,
+            route.TotalCostSeconds, Array.Empty<NavNode>(), EmptyCellSet, nextEdgeKind);
     }
+
+    // Rasterize the OUTDOOR surface cells a straight segment crosses, adding
+    // each to <paramref name="cells"/>. No-op for indoor cells (their ids
+    // are not derivable from x,y). Samples every ~4 m plus both endpoints —
+    // segments are short (<=4 m) so this is 1-2 samples in practice; the
+    // first segment (bot pos -> first waypoint) may be longer.
+    private static void AddOutdoorSegmentCells(
+        ISet<uint> cells, uint landblockCellId, Vector3 a, Vector3 b)
+    {
+        if (AcCoords.IsIndoor(landblockCellId)) return;
+        const float sampleStep = 4f;
+        var dist = Vector3.Distance(a, b);
+        var n = Math.Max(1, (int)Math.Ceiling(dist / sampleStep));
+        for (int s = 0; s <= n; s++)
+        {
+            var p = Vector3.Lerp(a, b, (float)s / n);
+            var c = AcCoords.OutdoorCellId(landblockCellId, p);
+            if (c != 0u) cells.Add(c);
+        }
+    }
+
+    private static readonly IReadOnlySet<uint> EmptyCellSet =
+        new HashSet<uint>();
 
     // ─── Persistence ─────────────────────────────────────────────────
 
@@ -1686,24 +1741,45 @@ internal sealed record NavConnection(NavEdge Edge, NavNode To);
 
 /// <summary>
 /// Outcome of <see cref="NavGraph.PlanWaypointToward"/>. See that method
-/// for the contract. <see cref="AdvanceNode"/> is non-null only for
-/// <see cref="RouteWaypointKind.AdvanceSameCell"/> (the same-cell node to
-/// steer toward). <see cref="BoundaryNode"/> is the farthest same-cell
-/// node the bot can reach on the route (the stop point) and
-/// <see cref="NextLandblock"/> is the landblock the route enters on the
-/// hop immediately after it (may equal the current landblock when that
-/// hop is an intra-landblock cell crossing); both are populated for
-/// AdvanceSameCell and TransitionPending. For
-/// <see cref="RouteWaypointKind.NoRoute"/> all node fields are null.
+/// for the contract.
+/// <para>
+/// For <see cref="RouteWaypointKind.Advance"/>: <see cref="Waypoints"/>
+/// is the ordered run of route nodes the bot should walk through (the
+/// forward hops after the start anchor, up to and including
+/// <see cref="BoundaryNode"/>), all within the bot's CURRENT landblock
+/// and reached only by on-foot (<see cref="NavEdgeKind.Walked"/> /
+/// <see cref="NavEdgeKind.CrossedBoundary"/>) edges.
+/// <see cref="BoundaryNode"/> is the final node of the prefix (the stop
+/// point); the immediate next hop is simply Waypoints[0].
+/// <see cref="PathCells"/> is the de-duplicated set of cells that prefix
+/// traverses (INCLUDING the bot's starting cell, and — for outdoor routes
+/// — every 24 m surface cell each straight segment between waypoints
+/// passes through). The motor uses it to slide its cell-crossing lock
+/// forward instead of stopping.
+/// </para>
+/// <para>
+/// For <see cref="RouteWaypointKind.TransitionPending"/>: the bot is
+/// already at the on-foot landblock limit (the next route hop leaves the
+/// landblock OR uses a door/portal/item the LLM must decide on).
+/// <see cref="BoundaryNode"/> is that limit node, <see cref="NextLandblock"/>
+/// the landblock the route enters next, and <see cref="NextEdgeKind"/> the
+/// kind of that blocking hop. <see cref="Waypoints"/> is empty.
+/// </para>
+/// <para>
+/// For <see cref="RouteWaypointKind.NoRoute"/>: all node fields are null,
+/// <see cref="Waypoints"/>/<see cref="PathCells"/> are empty.
+/// </para>
 /// </summary>
 internal sealed record RouteWaypointPlan(
     RouteWaypointKind Kind,
-    NavNode? AdvanceNode,
     NavNode? BoundaryNode,
     ushort NextLandblock,
-    float RouteCostSeconds);
+    float RouteCostSeconds,
+    IReadOnlyList<NavNode> Waypoints,
+    IReadOnlySet<uint> PathCells,
+    NavEdgeKind? NextEdgeKind);
 
-internal enum RouteWaypointKind { NoRoute, AdvanceSameCell, TransitionPending }
+internal enum RouteWaypointKind { NoRoute, Advance, TransitionPending }
 
 internal enum EntityKind  { Unknown, NPC, Player, Item, Mob, Portal, Door, Vendor, Healer, Lifestone, Corpse }
 internal enum AreaKind    { Unknown, Room, Hall, Plaza, Outdoor, Dungeon }
@@ -1743,6 +1819,29 @@ internal static class AcCoords
         var lbx = (int)((cellId >> 24) & 0xFFu);
         var lby = (int)((cellId >> 16) & 0xFFu);
         return (lbx * BlockLength + pos.X, lby * BlockLength + pos.Y);
+    }
+
+    /// <summary>
+    /// The OUTDOOR surface cell id for a landblock-local position. AC
+    /// divides each 192 m landblock into an 8x8 grid of 24 m surface
+    /// cells; the cell index is cellX*8 + cellY + 1 (matches ACE
+    /// Position cell math). Returns 0 for indoor cells — structural
+    /// (dungeon/building) cell ids are not derivable from x,y alone.
+    /// The landblock high bits are taken from <paramref name="landblockCellId"/>,
+    /// so the result is always in the SAME landblock (callers rasterize
+    /// intra-landblock segments with it).
+    /// </summary>
+    public static uint OutdoorCellId(uint landblockCellId, Vector3 pos)
+    {
+        if (IsIndoor(landblockCellId)) return 0u;
+        const float CellLength = 24f;
+        const int CellSide = 8;
+        var lb = landblockCellId & 0xFFFF0000u;
+        int cx = (int)(pos.X / CellLength);
+        int cy = (int)(pos.Y / CellLength);
+        if (cx < 0) cx = 0; else if (cx >= CellSide) cx = CellSide - 1;
+        if (cy < 0) cy = 0; else if (cy >= CellSide) cy = CellSide - 1;
+        return lb | (uint)(cx * CellSide + cy + 1);
     }
 
     /// <summary>
