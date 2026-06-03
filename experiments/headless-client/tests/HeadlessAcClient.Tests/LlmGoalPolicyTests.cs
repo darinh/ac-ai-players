@@ -105,21 +105,50 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void TryParseGoal_RejectsMalformedGuid()
+    public void TryParseGoal_KeepsGoal_WhenGoalIdIsNonGuidSlug()
     {
-        // A clearly-malformed guid (too short / non-hex) should still
-        // be rejected — we widened tolerance, not removed it.
+        // Live regression (2026-06-03): Llama-3.3-70B emits a slug for the
+        // id, e.g. `goal-001`, which is not any Guid format. Previously the
+        // converter threw and TryParseGoal dropped the ENTIRE goal — so
+        // every LLM Attack/Talk/Use goal was discarded and the bot silently
+        // ran on the keyword fallback policy. The goal_id is only a
+        // correlation handle, so a non-Guid id must NOT discard the goal: it
+        // normalizes to Guid.Empty, and LlmGoalPolicy.ProposeGoal then
+        // assigns a fresh unique id (preserving Goal.Id uniqueness even when
+        // a model reuses the same slug).
         var json = """
         {
-          "goal_id": "not-a-guid-at-all",
+          "goal_id": "goal-001",
           "kind": "Talk",
           "target": { "name": "Greeter" },
           "rationale": "x",
           "priority": 3
         }
         """;
-        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
-        Assert.Contains("Guid", err, System.StringComparison.OrdinalIgnoreCase);
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Talk, g!.Kind);
+        Assert.Equal("Greeter", g.Target.Name);
+        // Normalized to Empty here; ProposeGoal assigns the real unique id.
+        Assert.Equal(System.Guid.Empty, g.Id);
+    }
+
+    [Fact]
+    public void FlexibleGuidConverter_MapsNonGuidToEmpty_AndKeepsValidGuids()
+    {
+        var opts = new JsonSerializerOptions();
+        opts.Converters.Add(new FlexibleGuidConverter());
+        // Slug shapes models emit normalize to Empty (caller regenerates).
+        Assert.Equal(System.Guid.Empty, JsonSerializer.Deserialize<System.Guid>("\"goal-001\"", opts));
+        Assert.Equal(System.Guid.Empty, JsonSerializer.Deserialize<System.Guid>("\"goal_1\"", opts));
+        Assert.Equal(System.Guid.Empty, JsonSerializer.Deserialize<System.Guid>("\"\"", opts));
+        // Valid Guid forms (dashless / dashed) still parse exactly — the
+        // tolerance we already had is preserved, not removed.
+        Assert.Equal(
+            new System.Guid("d3c59293cfd04e2e8a587ca1a4c0af34"),
+            JsonSerializer.Deserialize<System.Guid>("\"d3c59293cfd04e2e8a587ca1a4c0af34\"", opts));
+        Assert.Equal(
+            new System.Guid("11111111-2222-3333-4444-555555555555"),
+            JsonSerializer.Deserialize<System.Guid>("\"11111111-2222-3333-4444-555555555555\"", opts));
     }
 
     // ---- LlmGoalClient with mock HTTP ----
