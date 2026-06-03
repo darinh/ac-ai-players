@@ -1851,6 +1851,142 @@ public class LlmGoalPolicyTests
         Assert.Contains("Pickup{target: name=\"<item>\"}", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_RetainsEarlyExitPopup_UnderLaterPopupFlood()
+    {
+        // Codex review: newest-first Take(N) alone would let an early
+        // one-time exit directive be crowded out by a flood of later
+        // unique popups. The earliest-anchor bucket must retain it.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "Go talk to Jonathan in the next room. Once you leave you can never return.",
+        });
+        // 12 LATER distinct popups (well past any single Take bucket).
+        for (int i = 0; i < 12; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.PopupString,
+                Text = $"Cosmetic tutorial tip number {i}.",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Server hints", prompt);
+        Assert.Contains("Go talk to Jonathan in the next room", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ContainsServerInstructionPrecedenceRule()
+    {
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", prompt);
+        Assert.Contains("you can never return", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ContainsFinishMultiStepDirectiveRule()
+    {
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("FINISH MULTI-STEP DIRECTIVES", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RetainsEarlyNpcDirective_UnderLaterNpcChatter()
+    {
+        // An NPC's early "give the token back to leave" instruction must
+        // survive a later flood of unrelated NpcDialog (other tutors,
+        // bystanders) — same durability requirement as PopupString.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Name = "Jonathan",
+            Text = "If you want to skip your training and leave the Academy early, give this token back to me.",
+        });
+        for (int i = 0; i < 12; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.NpcDialog, Name = $"Tutor{i}",
+                Text = $"Unrelated tutorial chatter number {i}.",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Server hints", prompt);
+        Assert.Contains("give this token back to me", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersPopupStringHint_Durably()
+    {
+        // A PopupString carrying an exit directive must survive in the
+        // durable "## Server hints" section even after the 25-event
+        // generic tail has been flooded with newer events — otherwise
+        // the one-time "go talk to X to leave" instruction is lost.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "If you wish to skip this tutorial, go talk to Jonathan in the next room.",
+        });
+        // Bury it under 30 newer generic events (beyond the 25-tail).
+        for (int i = 0; i < 30; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.HealthChanged,
+                Text = $"move {i}",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Server hints", prompt);
+        Assert.Contains("PopupString:", prompt);
+        Assert.Contains("go talk to Jonathan in the next room", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DeduplicatesRepeatedPopupStrings()
+    {
+        var es = new EventStream();
+        for (int i = 0; i < 5; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.PopupString,
+                Text = "Double-click on an armor piece in your inventory in order to wear it.",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        // The hint section renders each unique popup once as
+        // `- PopupString: "..."`. (The raw text may also appear in the
+        // generic Recent-events tail, so match the hint-line prefix.)
+        var needle = "- PopupString: \"Double-click on an armor piece";
+        var idx = prompt.IndexOf(needle, StringComparison.Ordinal);
+        Assert.True(idx >= 0, "expected the popup hint to render");
+        var idx2 = prompt.IndexOf(needle, idx + 1, StringComparison.Ordinal);
+        Assert.True(idx2 < 0, "duplicate popup strings should be collapsed to one");
+    }
+
     // ---- Slice G — server-hints prompt section regression ----
     //
     // In rejfix-run-01 the bot teleported to Holtburg, saw the Life
@@ -1976,11 +2112,12 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public async Task LlmGoalPolicy_ServerHints_OrderingNewestFirst()
+    public async Task LlmGoalPolicy_ServerHints_OrderingOldestFirst()
     {
-        // The hints section is newest-first. Append two distinct
-        // hints in order then assert the second one appears earlier
-        // (smaller offset) than the first within the section.
+        // The hints section now renders oldest-first (chronological) so a
+        // multi-step directive reads in the order it was given. Append two
+        // distinct hints in order then assert the first one appears earlier
+        // (smaller offset) than the second within the section.
         var requestBodies = new System.Collections.Generic.List<string>();
         var goalJson = """
         {
@@ -2036,7 +2173,7 @@ public class LlmGoalPolicyTests
         var firstHintAt = block.IndexOf("FIRST-HINT", StringComparison.Ordinal);
         var secondHintAt = block.IndexOf("SECOND-HINT", StringComparison.Ordinal);
         Assert.True(firstHintAt > 0 && secondHintAt > 0);
-        Assert.True(secondHintAt < firstHintAt, "newer hint should appear earlier (newest-first)");
+        Assert.True(firstHintAt < secondHintAt, "older hint should appear earlier (oldest-first chronological)");
     }
 
     [Fact]

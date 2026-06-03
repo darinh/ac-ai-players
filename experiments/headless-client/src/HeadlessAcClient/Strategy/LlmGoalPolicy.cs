@@ -1144,6 +1144,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- TRANSITIONS — doors and portals: objects with the visible-nearby tag `door` or `portal` are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). A `door` typically toggles open/closed; a `portal` typically teleports you elsewhere — the exact behaviour comes from the server (read `short_desc` and the server-hints section for any hint text on the object). When the picker has arrived at a `door` or `portal` and you have no better verb to emit, `Use{}` it: that is how the bot transitions between rooms, buildings, and landblocks. If a door rejects `Use` with a Locked-style ActionRejected and you have any item in inventory whose `short_desc` calls itself a key (or whose name contains 'key'), retry as `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
         sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback picker is choosing the nearest off-screen object addressable from your current landblock. The TOP entry is the one the fallback will walk to. To pick a DIFFERENT candidate (e.g. backtrack through a visited door to re-stimulate a prior room, or skip a distant pickup in favour of a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` or `Explore{target: {name: \"...\"}}` with the candidate you want. The candidate guid is the most reliable selector (names duplicate). Visited candidates are marked — they're still legitimate Explore targets when you want to backtrack.");
         sb.AppendLine("- PURSUE UNSEEN OBJECTIVES: when dialog or a server hint tells you to find, reach, or talk to someone/something that is NOT in your visible-nearby list (e.g. \"go talk to the trainer in the next room\", \"find the captain\", \"head to the courtyard\"), emit a goal that NAMES that objective by its name or role — `Talk{target: {name: \"<role-or-name>\"}}`, `Give{...}`, or `Explore{target: {name: \"<role-or-name>\"}}` — EVEN THOUGH it is not yet visible. The bot will autonomously walk through rooms/doorways to discover it; once it comes into view your goal resolves and acts. A role phrase in the hint (\"the guard\", \"the trainer\", \"an agent\") is your best available selector when no proper name is given — use it as the target name. Do NOT keep re-talking an NPC whose dialog you have already received — that is a loop; instead pursue the objective that dialog gave you, even if its target is out of sight. If you have no named objective and nothing useful is visible, emit `Explore{target: {name: \"anywhere\"}}` and the bot will explore unvisited areas on its own.");
+        sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: read `## Server hints` for text that tells you HOW TO LEAVE, EXIT, PROCEED PAST, SKIP, or ADVANCE BEYOND the current area — especially text that NAMES a specific person or place to reach/talk-to, or that WARNS the step is irreversible (e.g. \"you can never return\"). Acting on that instruction is HIGHER priority than repeating a local interaction whose effect you have ALREADY observed: re-picking an item you already hold, re-talking an NPC who gave you no new dialog this time, or re-using an object that produced no visible change last time. When such an exit/advance instruction is present and you have not yet acted on it, emit a `Talk`/`Use`/`Explore` goal toward the named target (even if it is not yet visible — the bot walks toward it) INSTEAD of looping on completed tutorial steps. An area's quest-giver may instruct you to collect/equip items first; do those, but once they are done, advance toward the exit the server named rather than re-collecting.");
+        sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: when a hint or NPC describes a sequence to act on (\"take this and bring it back\", \"give X to Y\", \"use this to leave\") AND the server has just handed you an item to carry it out, COMPLETING that sequence outranks unrelated local looting or exploration. If you are holding an item the server gave you for an objective you have not finished, do NOT wander off or fall back to picking up incidental loot — return to the NAMED npc or object and `Give`/`Use` that item as instructed. Treat an unused objective item in your inventory as an open task, not as done.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
         sb.AppendLine();
 
@@ -1408,40 +1410,62 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         sb.AppendLine();
 
-        // Pull ServerMessage + NpcDialog from the full retained
-        // window (capacity 256). These are high-signal cues
-        // ("Double click the lifestone", "I need a token") that get
-        // pushed out of the generic Recent events tail fast. Without
-        // this section ambient NPC chatter can fully evict a one-
-        // time tutorial hint within ~25 events.
+        // Pull ServerMessage + NpcDialog + PopupString from the full
+        // retained window (capacity 256). These are high-signal cues
+        // ("Double click the lifestone", "give the token back to leave")
+        // that get pushed out of the generic Recent events tail fast.
+        // Without this section ambient NPC chatter can fully evict a
+        // one-time tutorial/exit directive within ~25 events.
         //
-        // Budgets are split per-kind so server tutorials survive
-        // bursts of NPC small-talk in a busy town:
-        //   - up to 8 ServerMessages (rare, high-value)
-        //   - up to 6 NpcDialog lines (denser, more chatty)
+        // Each surface keeps both the earliest and newest distinct
+        // entries (see RetainEnds): early one-time directives are durable
+        // anchors that must outlive later chatter, while the newest give
+        // current context. Per-surface budgets:
+        //   - ServerMessage: 4 earliest + 8 newest
+        //   - NpcDialog:      4 earliest + 6 newest
+        //   - PopupString:    6 earliest + 6 newest
         // Dedup exact repeats so the same banner doesn't waste tokens.
+        // For every durable hint surface we keep BOTH ends of the history
+        // (earliest + newest distinct), content-blind, via RetainEnds:
+        //   - the earliest-seen distinct entries are durable anchors —
+        //     one-time directives ("go talk to X to leave; give the token
+        //     back; you can never return") arrive early and must NOT be
+        //     evicted by a later flood of similar events before the bot
+        //     acts on them;
+        //   - the newest distinct entries give current context.
+        // Selection is purely by event age (Sequence), never by parsing
+        // event TEXT (which would be hardcoded game knowledge).
         var hintPool = events.Recent(EventStream.DefaultCapacity);
-        var serverHints = hintPool
-            .Where(e => e.Kind == EventKind.ServerMessage)
-            .GroupBy(e => (e.ChatType, e.Text))
-            .Select(g => g.First())  // newest-first ordering preserved
-            .OrderByDescending(e => e.Sequence)
-            .Take(8)
-            .ToList();
-        var npcHints = hintPool
-            .Where(e => e.Kind == EventKind.NpcDialog)
-            .GroupBy(e => (e.Name, e.Text))
-            .Select(g => g.First())
-            .OrderByDescending(e => e.Sequence)
-            .Take(6)
-            .ToList();
-        if (serverHints.Count > 0 || npcHints.Count > 0)
+        var serverHints = RetainEnds(
+            hintPool
+                .Where(e => e.Kind == EventKind.ServerMessage && !string.IsNullOrEmpty(e.Text))
+                .GroupBy(e => (e.ChatType, e.Text))
+                .Select(g => g.First())  // newest occurrence of each unique line
+                .ToList(),
+            earliest: 4, newest: 8);
+        var npcHints = RetainEnds(
+            hintPool
+                .Where(e => e.Kind == EventKind.NpcDialog && !string.IsNullOrEmpty(e.Text))
+                .GroupBy(e => (e.Name, e.Text))
+                .Select(g => g.First())
+                .ToList(),
+            earliest: 4, newest: 6);
+        var popupHints = RetainEnds(
+            hintPool
+                .Where(e => e.Kind == EventKind.PopupString && !string.IsNullOrEmpty(e.Text))
+                .GroupBy(e => e.Text)
+                .Select(g => g.First())
+                .ToList(),
+            earliest: 6, newest: 6);
+        if (serverHints.Count > 0 || npcHints.Count > 0 || popupHints.Count > 0)
         {
             sb.AppendLine("## Server hints (recent — text the server sent you, dedupe'd)");
             foreach (var h in serverHints)
                 sb.AppendLine($"- ServerMessage[chat=0x{h.ChatType ?? 0:X}]: \"{Truncate(h.Text, 320)}\"");
             foreach (var h in npcHints)
                 sb.AppendLine($"- NpcDialog from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"");
+            foreach (var h in popupHints)
+                sb.AppendLine($"- PopupString: \"{Truncate(h.Text, 320)}\"");
             sb.AppendLine();
         }
 
@@ -1522,6 +1546,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     private static string Truncate(string? s, int n) =>
         string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s[..n] + "...");
+
+    /// <summary>
+    /// Keep both ends of an already-deduped hint list: the N earliest and
+    /// the M newest distinct entries (by Sequence), unioned and returned
+    /// oldest-first. This keeps an early one-time directive (e.g. an exit
+    /// instruction) from being evicted by a later flood of similar events,
+    /// while still surfacing the most recent context. Selection is purely
+    /// by event age — it never inspects event text — so it introduces no
+    /// game knowledge.
+    /// </summary>
+    private static List<StreamEvent> RetainEnds(List<StreamEvent> distinct, int earliest, int newest)
+    {
+        if (distinct.Count <= earliest + newest)
+            return distinct.OrderBy(e => e.Sequence).ToList();
+        var head = distinct.OrderBy(e => e.Sequence).Take(earliest);
+        var tail = distinct.OrderByDescending(e => e.Sequence).Take(newest);
+        return head.Concat(tail)
+            .GroupBy(e => e.Sequence)
+            .Select(g => g.First())
+            .OrderBy(e => e.Sequence)
+            .ToList();
+    }
 
     internal static bool TryParseGoal(string json, out Goal? goal, out string? error)
     {
