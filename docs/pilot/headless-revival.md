@@ -101,6 +101,27 @@ and, where relevant, a live client run) before committing.
    routing is deferred to `revive-navgraph-wire-xlb` (no NavRoute
    executor yet). Build clean + 463/463 tests; three adversarial
    reviews + re-audit clean.
+
+   **Cross-landblock ✅ DONE 2026-06-02 (PR #121,
+   `revive-navgraph-wire-xlb`).** When the `Explore` Target is out of
+   live view AND not in same-landblock memory, the bot consults its
+   OWN explored routing graph to make SAFE on-foot progress toward a
+   sighting remembered in ANOTHER landblock.
+   `SightedTargetResolver.ResolveCrossLandblock` finds the most-recent
+   matching sighting in a different landblock;
+   `NavGraph.PlanWaypointToward` anchors start + goal to explored
+   nodes, runs A* over the bot's recorded edges, and returns the
+   farthest contiguous SAME-CELL waypoint (`AdvanceSameCell`) — the
+   most the existing walk machinery can execute without tripping the
+   motor's cell-crossing stop gate. It is route-GUIDED waypointing,
+   NOT a route executor: it never auto-crosses a cell or landblock.
+   When the bot is already at that on-foot limit it returns
+   `TransitionPending` (next hop crosses a cell boundary the motor
+   can't yet take) and the seam cools the sighting + wanders; the LLM
+   re-deliberates on its own cadence. Actual crossing (lifting the
+   cell-crossing gate + portal re-deliberation) is the next slice.
+   Build clean + 475/475 tests (12 new); three adversarial reviews
+   (hardcoded-audit OK, correctness, design) + re-audit clean.
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
