@@ -85,8 +85,22 @@ and, where relevant, a live client run) before committing.
    `RecordVisit` ever makes a walkable node. Fully additive to
    `RecordVisit`/`RecordObservation`. Build clean + 453/453 tests;
    three adversarial reviews passed (hardcoded-audit OK, correctness
-   clean, design-alignment verified). A later slice consumes these by
-   routing toward the remembered coords via the static navmesh.
+   clean, design-alignment verified).
+
+   **Consumer ✅ DONE 2026-06-02 (PR #120, `revive-navgraph-wire`).**
+   When an LLM `Explore` goal names a `Target` that is out of the
+   bot's current view, `SightedTargetResolver` resolves the LLM
+   selector (Name / NameContains / Wcid, ANDed) against remembered
+   sightings (current-landblock only, most-recent tie-break) and the
+   motor steers the existing walk machinery toward the remembered
+   coordinates instead of wandering. The remembered coord is held only
+   as a synthetic motion target — never promoted to a `NavNode` and
+   never asserted as reachable, so the wall-shortcut invariant still
+   holds. A 45s per-sighting revisit cooldown plus an
+   already-arrived guard prevent stale-memory loops. Cross-landblock
+   routing is deferred to `revive-navgraph-wire-xlb` (no NavRoute
+   executor yet). Build clean + 463/463 tests; three adversarial
+   reviews + re-audit clean.
 4. **Finish NavGraph wiring** (`nav-graph-wire`,
    `navgraph-doorway-kind` todos): route the picker through NavGraph
    routes; retire `NavGraphRecorder`; add a Doorway node kind.
