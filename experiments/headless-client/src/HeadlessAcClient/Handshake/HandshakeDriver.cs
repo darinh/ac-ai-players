@@ -618,6 +618,13 @@ internal sealed class HandshakeDriver : IDisposable
         // re-finding a live guid in the current worldState.
         WorldObjectSnapshot? motionRememberedDest = null;
         Guid?                motionRememberedSightingId = null;
+        // Autonomous frontier probe (road-to-endgame Phase A1): when the
+        // current motion lock is a discovery step toward an unexplored
+        // cell (NOT a goal action), this is true so the arrival reset
+        // cascade preserves the original LLM goal instead of marking it
+        // completed — the goal's named target becomes perceivable once the
+        // probed room loads, so the selector must re-resolve it next tick.
+        bool                 motionIsFrontierProbe = false;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
@@ -662,6 +669,13 @@ internal sealed class HandshakeDriver : IDisposable
         // Keyed by NavNode.Id of the advance waypoint.
         var crossLbAdvanceCooldownUntil = new Dictionary<Guid, DateTime>();
         var crossLbAdvanceCooldown = TimeSpan.FromSeconds(20);
+        // Autonomous indoor frontier exploration (road-to-endgame
+        // Phase A1) — per-cell revisit cooldown so a frontier cell the
+        // bot targeted but couldn't reach (or reached without resolving
+        // the goal) isn't re-selected every tick. Keyed by target cell
+        // id. Coverage is otherwise bounded naturally: once entered, a
+        // cell joins _seenIndoorCells and stops being a frontier.
+        var frontierCellCooldownUntil = new Dictionary<uint, DateTime>();
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -2030,8 +2044,19 @@ internal sealed class HandshakeDriver : IDisposable
                     // Used by LlmGoalPolicy to surface a GoalCompleted
                     // event on the EventStream and re-deliberate on
                     // the next ProposeGoal call.
-                    if (motionTarget is not null)
+                    //
+                    // EXCEPTION — frontier probe: a discovery step toward
+                    // an unexplored cell is NOT a goal action. The original
+                    // LLM goal (e.g. Talk{Agent}) is still active and its
+                    // named target only just became perceivable by entering
+                    // the room. Preserve it so the selector re-resolves it
+                    // next tick instead of falsely reporting it complete.
+                    if (motionTarget is not null && !motionIsFrontierProbe)
                         tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
+                    else if (motionIsFrontierProbe)
+                        Console.WriteLine(
+                            "[strategy] frontier probe arrived; LLM goal preserved " +
+                            "(room loaded -> selector re-resolves next tick)");
 
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}') " +
@@ -2045,6 +2070,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionTarget = null;
                     motionRememberedDest = null;
                     motionRememberedSightingId = null;
+                    motionIsFrontierProbe = false;
                     motionRotation = null;
                     motionInitialDistance = null;
                     motionStartedAt = null;
@@ -2660,6 +2686,39 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
+                        // Autonomous indoor frontier exploration
+                        // (road-to-endgame Phase A1, redesigned per the
+                        // 3-model architecture consensus 2026-06-03). The
+                        // LLM emitted Explore with no resolvable target.
+                        // Before the outdoor-scenery wander fallback below,
+                        // if the bot is INDOORS, steer toward the nearest
+                        // unexplored reachable cell in the static navmesh.
+                        // The existing indoor motor (whose K-hop planner
+                        // already routes into not-yet-entered cells) walks
+                        // there and opens doors en route; crossing the
+                        // threshold loads the next room's content so a
+                        // named-but-unseen target becomes perceivable next
+                        // tick. Domain-general spatial search: reads only
+                        // navmesh geometry + the bot's own visited-cell set,
+                        // never object names/wcids/types/quest state.
+                        if (exploreTarget is null)
+                        {
+                            var frontier = TryChooseFrontierDest(
+                                tacticsSelfCell, frontierCellCooldownUntil);
+                            if (frontier is not null)
+                            {
+                                exploreTarget = frontier;
+                                motionRememberedDest = frontier;
+                                if (WorldDistance.TrySquaredDistance(tacticsSelf, frontier, out var d2front))
+                                    bestDist = (float)Math.Sqrt(d2front);
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Explore -> autonomous frontier " +
+                                    $"(no resolvable target); stepping toward unexplored cell " +
+                                    $"0x{(frontier.CellId ?? 0):X8} " +
+                                    $"pos=({frontier.Position.X:F1},{frontier.Position.Y:F1})");
+                            }
+                        }
+
                         if (exploreTarget is null)
                         {
                             // Original Explore{anywhere} behaviour:
@@ -2834,13 +2893,96 @@ internal sealed class HandshakeDriver : IDisposable
 
                             if (!actionable)
                             {
-                                Console.WriteLine(
-                                    $"[strategy] goal {goal.Kind} unresolved -- " +
-                                    $"target={(targetSnap is null ? "MISS" : "ok")} " +
-                                    $"item={(goal.Kind == GoalKind.Give ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
-                                    $"selector target={goal.Target} item={goal.Item}; " +
-                                    $"clearing and falling through to picker");
-                                tactics.Fail("selector resolved to no live object", eventStream);
+                                // Autonomous indoor frontier exploration:
+                                // the LLM named a target we can't yet see
+                                // (e.g. "the Agent in the next room"). Rather
+                                // than fail to the picker — which re-locks an
+                                // already-visited NPC and loops forever — steer
+                                // toward the nearest unexplored reachable cell
+                                // so the named target's room loads and it
+                                // becomes perceivable. The LLM goal is PRESERVED
+                                // (not failed) so its intent persists; on
+                                // arrival the selector re-resolves against the
+                                // newly-loaded content. Only fires when the
+                                // TARGET itself is unresolved (targetSnap null);
+                                // a resolved target missing only a Give item is
+                                // an inventory problem, not a spatial one.
+                                // Geometry-only search; reads no names/wcids/
+                                // types/quest state.
+                                WorldObjectSnapshot? frontier = null;
+                                if (targetSnap is null)
+                                    frontier = TryChooseFrontierDest(
+                                        tacticsSelfCell, frontierCellCooldownUntil);
+
+                                if (frontier is not null)
+                                {
+                                    Quaternion frot;
+                                    float fyaw;
+                                    if (WorldHeading.TryYawToTarget(tacticsSelf, frontier, out fyaw))
+                                        frot = WorldHeading.RotationFromYaw(fyaw);
+                                    else { fyaw = 0f; frot = tacticsSelf.Rotation; }
+
+                                    motionTarget         = frontier;
+                                    motionRememberedDest = frontier;
+                                    motionRotation       = frot;
+                                    // Inert on arrival (no Talk/Use at an empty
+                                    // floor): this is a discovery step, not the
+                                    // goal action. The unchanged LLM goal re-
+                                    // resolves once the room's content loads.
+                                    lockedGoalKind = GoalKind.Explore;
+                                    // Preserve the LLM goal across arrival (the
+                                    // arrival reset cascade keys off this).
+                                    motionIsFrontierProbe = true;
+                                    if (WorldDistance.TrySquaredDistance(tacticsSelf, frontier, out var d2fr))
+                                        motionInitialDistance = (float)Math.Sqrt(d2fr);
+
+                                    autonomousPositionSent = true;
+                                    autonomousPositionPacketIndex = count;
+
+                                    var apPacketSeqF = nextOutboundPacketSequence++;
+                                    var apFragSeqF   = nextOutboundFragmentSequence++;
+                                    var apBufF = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                    var apLenF = GameActionAutonomousPositionMessage.Pack(
+                                        apBufF,
+                                        cellId: tacticsSelfCell,
+                                        pos:    tacticsSelf.Position,
+                                        rot:    frot,
+                                        instanceSequence:      tacticsSelf.SeqInstance      ?? 0,
+                                        serverControlSequence: tacticsSelf.SeqServerControl ?? 0,
+                                        teleportSequence:      tacticsSelf.SeqTeleport      ?? 0,
+                                        forcePositionSequence: tacticsSelf.SeqForcePosition ?? 0,
+                                        contact: true);
+                                    var apMsgF = new OutboundPacket();
+                                    if (lastReceivedSeq != 0)
+                                        apMsgF.AddAckSequence(lastReceivedSeq);
+                                    apMsgF.AddBlobFragment(
+                                        fragSequence: apFragSeqF,
+                                        fragId: OutboundFragmentId,
+                                        queue: (ushort)GameMessageGroup.UIQueue,
+                                        gameMessagePayload: apBufF.AsSpan(0, apLenF));
+                                    var apSentF = apMsgF.Pack(sendBuf, myClientId,
+                                                              sequence: apPacketSeqF, iteration: 1,
+                                                              encrypt: true, cryptoSend: cryptoSend);
+                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, apSentF),
+                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                                    Console.WriteLine(
+                                        $"[strategy] goal {goal.Kind} target '{goal.Target?.Name ?? "-"}' " +
+                                        $"not yet visible -> autonomous frontier explore toward unexplored " +
+                                        $"cell 0x{(frontier.CellId ?? 0):X8} " +
+                                        $"pos=({frontier.Position.X:F1},{frontier.Position.Y:F1}); goal preserved, " +
+                                        $"sent AP yaw={fyaw:F3}rad pktSeq={apPacketSeqF} fragSeq={apFragSeqF} bytes={apSentF}");
+                                }
+                                else
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] goal {goal.Kind} unresolved -- " +
+                                        $"target={(targetSnap is null ? "MISS" : "ok")} " +
+                                        $"item={(goal.Kind == GoalKind.Give ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
+                                        $"selector target={goal.Target} item={goal.Item}; " +
+                                        $"clearing and falling through to picker");
+                                    tactics.Fail("selector resolved to no live object", eventStream);
+                                }
                             }
                             else
                             {
@@ -4656,6 +4798,72 @@ internal sealed class HandshakeDriver : IDisposable
         foreach (var s in slots) mask |= s;
         return mask;
     }
+
+    /// <summary>
+    /// Autonomous indoor frontier exploration (road-to-endgame Phase A1).
+    /// When the active goal's target can't be resolved against current
+    /// perception and the bot is indoors, pick the nearest unexplored
+    /// reachable cell from the static navmesh and return a synthetic
+    /// destination at a stand-able floor point inside it. The existing
+    /// indoor motor routes there (its K-hop planner already plans into
+    /// not-yet-entered cells) and opens doors en route; crossing the
+    /// threshold loads the next room's server-side visibility so its
+    /// occupants become perceivable. Returns null when not indoors, the
+    /// landblock has no indoor graph, or every reachable cell is already
+    /// seen / on cooldown.
+    ///
+    /// This is domain-general spatial search: it reads ONLY navmesh
+    /// geometry (DAT — treated as "what a human player's client renders
+    /// and collides against") plus the bot's own visited-cell set. It
+    /// never inspects object names, wcids, item types, or quest state —
+    /// the DECISION of WHAT to find is the LLM's goal; this only supplies
+    /// WHERE to look next. <paramref name="frontierCooldownUntil"/> is the
+    /// per-session per-cell revisit throttle (pruned in place).
+    /// </summary>
+    private WorldObjectSnapshot? TryChooseFrontierDest(
+        uint currentCellId,
+        Dictionary<uint, DateTime> frontierCooldownUntil)
+    {
+        if (!_indoorNav.IsEnabled ||
+            !Strategy.IndoorNavService.IsIndoorCell(currentCellId))
+            return null;
+
+        var graph = _indoorNav.GetOrLoad(
+            Strategy.IndoorNavService.GetLandblockId(currentCellId));
+        if (graph is null) return null;
+
+        var now = DateTime.UtcNow;
+        var cooled = new HashSet<uint>();
+        if (frontierCooldownUntil.Count > 0)
+        {
+            var expired = new List<uint>();
+            foreach (var kv in frontierCooldownUntil)
+            {
+                if (kv.Value > now) cooled.Add(kv.Key);
+                else expired.Add(kv.Key);
+            }
+            foreach (var k in expired) frontierCooldownUntil.Remove(k);
+        }
+
+        var ft = Strategy.IndoorFrontierExplorer.ChooseFrontier(
+            graph, currentCellId, _seenIndoorCells, cooled);
+        if (ft is not Strategy.IndoorFrontierExplorer.FrontierTarget target)
+            return null;
+
+        frontierCooldownUntil[target.CellId] = now + _frontierRevisitCooldown;
+        return new WorldObjectSnapshot(0u)
+        {
+            Name = "(unexplored area)",
+            CellId = target.CellId,
+            Position = target.Position,
+        };
+    }
+
+    /// <summary>How long a frontier cell the bot targeted but couldn't
+    /// reach (or reached without the goal resolving) is suppressed before
+    /// it can be re-selected. Prevents tight re-target loops; coverage is
+    /// otherwise bounded because entered cells join the seen set.</summary>
+    private readonly TimeSpan _frontierRevisitCooldown = TimeSpan.FromSeconds(45);
 
     public void Dispose() => _socket?.Dispose();
 
