@@ -4174,7 +4174,45 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
 
-                    if (walkCell != motionLockedCellId)
+                    // Indoor multi-cell traversal (academy escape fix).
+                    //
+                    // AC autonomous-position is CLIENT-AUTHORITATIVE for
+                    // INDOOR cells: ACE's GameActionAutonomousPosition.Handle
+                    // adopts the cellId the client claims and does NOT
+                    // re-derive a new structural cell on its own (unlike the
+                    // OUTDOOR seam case, where update_object_server recomputes
+                    // the landblock cell from the AP coords — that's why the
+                    // Slice 6/7 cross-landblock route below works via the
+                    // server-reported-cell slide). So an indoor bot whose
+                    // walk-tick keeps sending the OLD cellId never advances:
+                    // its POSITION dead-reckons across the landblock-shared
+                    // coordinate frame but its server CELL stays frozen at the
+                    // start cell, the next room never streams, and any
+                    // named-but-unseen target there is never perceivable.
+                    //
+                    // The fix: when following a planned MULTI-CELL INDOOR path,
+                    // proactively advance the cell we claim in the AP packet to
+                    // the cell of the most-recently-REACHED waypoint (see the
+                    // AP-send site below). All indoor cells in a landblock share
+                    // ONE continuous coordinate frame (verified live: adjacent
+                    // cells report numerically-adjacent positions, and the
+                    // navmesh world coords match wire positions to <1u), so the
+                    // AP position needs NO conversion — only the cellId field
+                    // changes. We gate strictly on indoor + >1 distinct cell +
+                    // the server-reported cell being ON the planned path so the
+                    // OUTDOOR cross-landblock route (motionIndoorPath is reused
+                    // for it) and SAME-CELL indoor walks are untouched, AND an
+                    // UNEXPECTED indoor cell (server adopted a cell not on our
+                    // path) still falls through to the reconciliation/stop below
+                    // instead of blindly stepping on.
+                    bool followingIndoorPath =
+                        motionIndoorPath is not null &&
+                        motionIndoorPathCells is not null &&
+                        motionIndoorPathCells.Count > 1 &&
+                        Strategy.IndoorNavService.IsIndoorCell(walkCell) &&
+                        motionIndoorPathCells.Contains(walkCell);
+
+                    if (!followingIndoorPath && walkCell != motionLockedCellId)
                     {
                         // Phase 3.1 — if we're following a multi-cell
                         // indoor path AND the new cell is one the
@@ -4200,7 +4238,7 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
 
-                    if (!motionDone && walkCell == motionLockedCellId)
+                    if (!motionDone && (walkCell == motionLockedCellId || followingIndoorPath))
                     {
                         // Slice S — blocked-motion detection. Before
                         // we compute and send another AP, check what
@@ -4611,6 +4649,49 @@ internal sealed class HandshakeDriver : IDisposable
 
                                 var packetSeq = nextOutboundPacketSequence++;
                                 var fragSeq   = nextOutboundFragmentSequence++;
+
+                                // Indoor multi-cell traversal — advance the
+                                // cell we CLAIM in the AP packet. The AP cell is
+                                // the cell of the most-recently-REACHED waypoint
+                                // (or the bot's current cell before any waypoint
+                                // is reached). This keeps us claiming cell A
+                                // while we walk toward the A-side doorway node,
+                                // then switches to B exactly when we reach the
+                                // B-side doorway node (just inside B) — i.e. we
+                                // only ever claim a cell we have demonstrably
+                                // stepped into. The position is unchanged
+                                // (landblock-shared frame), so no coord
+                                // conversion is needed; only cellId advances.
+                                // This breaks the client-authoritative cellId
+                                // freeze deadlock for indoor rooms. Resent every
+                                // tick until the server adopts the new cell
+                                // (followingIndoorPath keeps the send path live
+                                // even while walkCell still lags motionLockedCellId).
+                                if (followingIndoorPath)
+                                {
+                                    // Claim the cell of the most-recently-REACHED
+                                    // waypoint only — never a cell we have not yet
+                                    // demonstrably stepped into. For a normal
+                                    // doorway path [.., B-door(B), B-floor(B),
+                                    // target-snap(B)] the last-reached node at
+                                    // final approach is already in the
+                                    // destination cell, so this still advances us
+                                    // into the next room; for a degenerate short
+                                    // path it conservatively stays in the cell we
+                                    // last reached rather than claiming ahead.
+                                    uint apCell = motionIndoorPathIndex > 0 &&
+                                                  motionIndoorPathIndex - 1 < motionIndoorPath!.Count
+                                        ? motionIndoorPath[motionIndoorPathIndex - 1].CellId
+                                        : walkCell;
+                                    if (apCell != motionLockedCellId)
+                                    {
+                                        Console.WriteLine(
+                                            $"[motion] walk-tick: indoor AP cell advance " +
+                                            $"0x{motionLockedCellId:X8} -> 0x{apCell:X8} " +
+                                            $"(reached waypoint {motionIndoorPathIndex}/{motionIndoorPath!.Count}; claiming last-reached planned cell)");
+                                        motionLockedCellId = apCell;
+                                    }
+                                }
 
                                 var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
                                 var apLen = GameActionAutonomousPositionMessage.Pack(
