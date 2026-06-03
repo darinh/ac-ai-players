@@ -17,6 +17,17 @@
 // We accept whatever Guid.Parse accepts (D, N, B, P, X formats) and
 // emit the canonical dashed form on serialization to keep training
 // logs consistent and downstream tooling simple.
+//
+// Hardening: models ALSO frequently emit a human-readable slug for the
+// id, e.g. { "goal_id": "goal-001" } or { "goal_id": "goal_1" }, which
+// is not any Guid format. Throwing on those dropped the ENTIRE goal
+// response (turning the LLM into a no-op and silently degrading the bot
+// to the keyword fallback policy — observed live 2026-06-03). The id is
+// only a correlation/training handle, so a non-Guid string must NOT
+// discard the response. We normalize it to Guid.Empty; the caller
+// (LlmGoalPolicy.ProposeGoal) already assigns a fresh unique id when the
+// parsed id is empty, which also preserves Goal.Id global uniqueness
+// even when a model lazily reuses the same slug across goals.
 
 using System;
 using System.Text.Json;
@@ -38,7 +49,10 @@ internal sealed class FlexibleGuidConverter : JsonConverter<Guid>
         if (Guid.TryParse(s, out var g))
             return g;
 
-        throw new JsonException($"Could not parse Guid from '{s}'");
+        // Not a Guid format (e.g. "goal-001"). Normalize to Empty so the
+        // caller assigns a fresh unique id, rather than throwing and
+        // dropping the whole goal.
+        return Guid.Empty;
     }
 
     public override void Write(Utf8JsonWriter writer, Guid value, JsonSerializerOptions options)
