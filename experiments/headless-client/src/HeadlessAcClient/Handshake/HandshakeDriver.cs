@@ -56,6 +56,16 @@ internal sealed class HandshakeDriver : IDisposable
     private const int ConnectResponseRetries = 3;
     private const int ConnectResponseRetryDelayMs = 100;
 
+    // Login resilience — when the server rejects login with a transient
+    // CharacterError (prior session for this account still being torn down
+    // server-side after an abrupt kill+relaunch), re-run the FULL connect
+    // handshake after a backoff. Bounded so a permanent failure can't
+    // livelock. The lingering-session teardown observed on the co-hosted
+    // ACE server clears within ~20-25s, so the cumulative backoff
+    // (5s,10s,15s,... ≈ 75s over 5 retries) comfortably covers it.
+    private const int MaxLoginReconnects = 5;
+    private const int LoginReconnectBackoffBaseMs = 5000;
+
     // Slice 8 — max global-coord distance (meters) between two consecutive
     // self-observations that straddle a landblock boundary for the change
     // to be classified as an on-foot seam crossing rather than a teleport.
@@ -95,82 +105,130 @@ internal sealed class HandshakeDriver : IDisposable
 
     public async Task<HandshakeResult> RunAsync(CancellationToken ct)
     {
-        _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
-        _socket.Bind(new IPEndPoint(IPAddress.Any, 0));
-        var localPort = ((IPEndPoint)_socket.LocalEndPoint!).Port;
-        Console.WriteLine($"[handshake] bound UDP socket on 0.0.0.0:{localPort}");
-
         var loginBuf = ArrayPool<byte>.Shared.Rent(RecvBufferSize);
         var recvBuf = ArrayPool<byte>.Shared.Rent(RecvBufferSize);
         try
         {
-            var loginLen = BuildLoginRequest(loginBuf);
-            Console.WriteLine($"[handshake] sending LoginRequest ({loginLen} bytes) to {_serverPort0}");
-            await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, loginLen),
-                                      SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-
-            var connectReq = await ReceiveConnectRequestAsync(recvBuf, ct).ConfigureAwait(false);
-            Console.WriteLine($"[handshake] received ConnectRequest:");
-            Console.WriteLine($"             serverTime  = {connectReq.ServerTime:R}");
-            Console.WriteLine($"             cookie      = 0x{connectReq.Cookie:X16}");
-            Console.WriteLine($"             clientId    = {connectReq.ClientId}");
-            Console.WriteLine($"             serverSeed  = {Hex(connectReq.ServerSeed)}");
-            Console.WriteLine($"             clientSeed  = {Hex(connectReq.ClientSeed)}");
-
-            var respLen = BuildConnectResponse(loginBuf, connectReq.Cookie, connectReq.ClientId);
-            Console.WriteLine($"[handshake] sending ConnectResponse ({respLen} bytes) to {_serverPort1}");
-            Console.WriteLine($"[handshake]   bytes: {Hex(new ReadOnlySpan<byte>(loginBuf, 0, respLen))}");
-
-            // ConnectResponse retransmit: the server's session-state transition
-            // to AuthConnectResponse is gated on bcrypt password verification,
-            // which races our ConnectResponse on a co-hosted server (bcrypt
-            // ~20ms vs loopback RTT ~0.5ms). If our packet arrives before the
-            // state transition, NetworkManager.cs lookup fails (state still
-            // AuthLoginRequest) and the packet is silently dropped. Retransmit
-            // a few times with a short delay to cover the bcrypt window.
-            // See spec/04-handshake.md "Race condition" for details.
-            for (int attempt = 0; attempt < ConnectResponseRetries; attempt++)
+            // Login resilience loop: a transient CharacterError before
+            // world-entry (lingering prior session) leaves the connection
+            // dead, so recovery is a full reconnect with a fresh socket and
+            // a fresh LoginRequest, after a backoff. Bounded by
+            // MaxLoginReconnects so a permanent failure cannot livelock.
+            for (int reconnect = 0; ; reconnect++)
             {
-                await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, respLen),
-                                          SocketFlags.None, _serverPort1, ct).ConfigureAwait(false);
-                if (attempt < ConnectResponseRetries - 1)
-                    await Task.Delay(ConnectResponseRetryDelayMs, ct).ConfigureAwait(false);
+                // (Re)bind a fresh UDP socket for this attempt — mirrors a
+                // real client relaunch and avoids reusing a source port the
+                // server may still associate with the dead session.
+                _socket?.Dispose();
+                _socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+                _socket.Bind(new IPEndPoint(IPAddress.Any, 0));
+                var localPort = ((IPEndPoint)_socket.LocalEndPoint!).Port;
+                Console.WriteLine($"[handshake] bound UDP socket on 0.0.0.0:{localPort}");
+
+                ConnectRequestData connectReq;
+                try
+                {
+                    var loginLen = BuildLoginRequest(loginBuf);
+                    Console.WriteLine($"[handshake] sending LoginRequest ({loginLen} bytes) to {_serverPort0}");
+                    await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, loginLen),
+                                              SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                    connectReq = await ReceiveConnectRequestAsync(recvBuf, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (
+                    (ex is OperationCanceledException || ex is SocketException || ex is InvalidOperationException)
+                    && !ct.IsCancellationRequested
+                    && reconnect < MaxLoginReconnects)
+                {
+                    // A relaunch during the prior session's teardown can leave the
+                    // server briefly unresponsive or rejecting at the connect stage:
+                    // the LoginRequest is dropped (10s receive timeout -> Operation
+                    // Canceled), a UDP packet is lost (SocketException), or the server
+                    // replies with something other than a ConnectRequest because it is
+                    // still tearing down the prior session (InvalidOperationException).
+                    // Treat all of these as retryable attempt failures -- same bounded
+                    // backoff as a transient CharacterError -- instead of letting them
+                    // escape the reconnect loop. Past the cap (or on outer-ct
+                    // cancellation) the exception propagates and the run ends, so a
+                    // genuinely dead/misconfigured server still fails loud (and each
+                    // attempt logs the cause).
+                    var backoffMs = LoginReconnectBackoffBaseMs * (reconnect + 1);
+                    Console.WriteLine($"[handshake] connect handshake failed ({ex.GetType().Name}: {ex.Message}) -> reconnect {reconnect + 1}/{MaxLoginReconnects} after {backoffMs}ms");
+                    await Task.Delay(backoffMs, ct).ConfigureAwait(false);
+                    continue;
+                }
+                Console.WriteLine($"[handshake] received ConnectRequest:");
+                Console.WriteLine($"             serverTime  = {connectReq.ServerTime:R}");
+                Console.WriteLine($"             cookie      = 0x{connectReq.Cookie:X16}");
+                Console.WriteLine($"             clientId    = {connectReq.ClientId}");
+                Console.WriteLine($"             serverSeed  = {Hex(connectReq.ServerSeed)}");
+                Console.WriteLine($"             clientSeed  = {Hex(connectReq.ClientSeed)}");
+
+                var respLen = BuildConnectResponse(loginBuf, connectReq.Cookie, connectReq.ClientId);
+                Console.WriteLine($"[handshake] sending ConnectResponse ({respLen} bytes) to {_serverPort1}");
+                Console.WriteLine($"[handshake]   bytes: {Hex(new ReadOnlySpan<byte>(loginBuf, 0, respLen))}");
+
+                // ConnectResponse retransmit: the server's session-state transition
+                // to AuthConnectResponse is gated on bcrypt password verification,
+                // which races our ConnectResponse on a co-hosted server (bcrypt
+                // ~20ms vs loopback RTT ~0.5ms). If our packet arrives before the
+                // state transition, NetworkManager.cs lookup fails (state still
+                // AuthLoginRequest) and the packet is silently dropped. Retransmit
+                // a few times with a short delay to cover the bcrypt window.
+                // See spec/04-handshake.md "Race condition" for details.
+                for (int attempt = 0; attempt < ConnectResponseRetries; attempt++)
+                {
+                    await _socket.SendToAsync(new ArraySegment<byte>(loginBuf, 0, respLen),
+                                              SocketFlags.None, _serverPort1, ct).ConfigureAwait(false);
+                    if (attempt < ConnectResponseRetries - 1)
+                        await Task.Delay(ConnectResponseRetryDelayMs, ct).ConfigureAwait(false);
+                }
+                Console.WriteLine($"[handshake]   sent {ConnectResponseRetries}× from local endpoint {_socket.LocalEndPoint}");
+
+                // Phase 1 gate: receive whatever the server sends next on
+                // port 0 (the handshake socket). Phase 2 wires CRC verification
+                // using the ISAAC keystream seeded from ServerSeed -- every
+                // EncryptedChecksum packet should now verify.
+                //
+                // Phase 3 adds the outbound encryption path. Per
+                // SessionConnectionData.cs:60-61, the server seeds:
+                //   CryptoClient = CryptoSystem(ClientSeed) -- for VERIFYING our packets
+                //   IssacServer  = ISAAC(ServerSeed)         -- for ENCRYPTING server packets
+                // So our client must mirror:
+                //   cryptoRecv = CryptoSystem(ServerSeed)    -- to verify server packets
+                //   cryptoSend = CryptoSystem(ClientSeed)    -- to encrypt our outbound
+                var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
+                var cryptoSend = new CryptoSystem(connectReq.ClientSeed);
+                var observe = await ObservePostHandshakePackets(
+                    recvBuf, ObserveSeconds, cryptoRecv, cryptoSend, connectReq.ClientId, ct).ConfigureAwait(false);
+
+                if (observe.ReconnectRequested && reconnect < MaxLoginReconnects)
+                {
+                    var backoffMs = LoginReconnectBackoffBaseMs * (reconnect + 1);
+                    Console.WriteLine($"[handshake] transient login rejection -> reconnect {reconnect + 1}/{MaxLoginReconnects} after {backoffMs}ms");
+                    await Task.Delay(backoffMs, ct).ConfigureAwait(false);
+                    continue;
+                }
+                if (observe.ReconnectRequested)
+                    Console.WriteLine($"[handshake] transient login rejection persisted past {MaxLoginReconnects} reconnects - giving up");
+
+                return new HandshakeResult(
+                    connectReq.ServerTime,
+                    connectReq.Cookie,
+                    connectReq.ClientId,
+                    connectReq.ServerSeed,
+                    connectReq.ClientSeed,
+                    observe.PacketCount > 0,
+                    observe.CharacterList,
+                    observe.ServerName,
+                    observe.DDDInterrogation,
+                    observe.CharacterCreateResponse,
+                    observe.EnterWorldRequestSent,
+                    observe.EnterWorldServerReady,
+                    observe.EnterWorldSent,
+                    observe.LastCharacterError,
+                    observe.ChosenCharacterGuid);
             }
-            Console.WriteLine($"[handshake]   sent {ConnectResponseRetries}× from local endpoint {_socket.LocalEndPoint}");
-
-            // Phase 1 gate: receive whatever the server sends next on
-            // port 0 (the handshake socket). Phase 2 wires CRC verification
-            // using the ISAAC keystream seeded from ServerSeed -- every
-            // EncryptedChecksum packet should now verify.
-            //
-            // Phase 3 adds the outbound encryption path. Per
-            // SessionConnectionData.cs:60-61, the server seeds:
-            //   CryptoClient = CryptoSystem(ClientSeed) -- for VERIFYING our packets
-            //   IssacServer  = ISAAC(ServerSeed)         -- for ENCRYPTING server packets
-            // So our client must mirror:
-            //   cryptoRecv = CryptoSystem(ServerSeed)    -- to verify server packets
-            //   cryptoSend = CryptoSystem(ClientSeed)    -- to encrypt our outbound
-            var cryptoRecv = new CryptoSystem(connectReq.ServerSeed);
-            var cryptoSend = new CryptoSystem(connectReq.ClientSeed);
-            var observe = await ObservePostHandshakePackets(
-                recvBuf, ObserveSeconds, cryptoRecv, cryptoSend, connectReq.ClientId, ct).ConfigureAwait(false);
-
-            return new HandshakeResult(
-                connectReq.ServerTime,
-                connectReq.Cookie,
-                connectReq.ClientId,
-                connectReq.ServerSeed,
-                connectReq.ClientSeed,
-                observe.PacketCount > 0,
-                observe.CharacterList,
-                observe.ServerName,
-                observe.DDDInterrogation,
-                observe.CharacterCreateResponse,
-                observe.EnterWorldRequestSent,
-                observe.EnterWorldServerReady,
-                observe.EnterWorldSent,
-                observe.LastCharacterError,
-                observe.ChosenCharacterGuid);
         }
         finally
         {
@@ -328,6 +386,28 @@ internal sealed class HandshakeDriver : IDisposable
         var enterWorldRequestSent = false;
         var enterWorldSent = false;
         var loginCompleteSent = false;
+
+        // Login resilience: if the server rejects this connection with a
+        // TRANSIENT CharacterError BEFORE we commit to the world, the whole
+        // login attempt is dead — recovery means re-running the full connect
+        // handshake (the caller loops on this flag), not nudging an in-flight
+        // sub-step. These fire when a prior session for the same account is
+        // still being torn down server-side after an abrupt kill+relaunch.
+        // Codes from the authoritative ACE enum
+        // (Source/ACE.Server/Network/Enum/CharacterError.cs):
+        //   0x01 Logon                       - two accounts logged on (pre-list)
+        //   0x0D EnterGameCharacterInWorld   - character still in world
+        //   0x10 EnterGameCharacterInWorldServer - character currently in world
+        //   0x17 EnterGameCharacterLocked    - a save is still in progress
+        // All resolve on their own once the prior session finishes its
+        // server-side teardown (~20-25s observed locally). PERMANENT codes
+        // (0x0B Generic, 0x0F NotOwned, 0x12 Corrupt, 0x14 CouldntPlace,
+        // 0x15 ServerFull, 0x18 SubscriptionExpired, ...) are NOT reconnectable.
+        const uint CharacterErrorLogon = 0x01;
+        const uint CharacterErrorInWorld = 0x0D;
+        const uint CharacterErrorInWorldServer = 0x10;
+        const uint CharacterErrorCharacterLocked = 0x17;
+        var reconnectRequested = false;
         var autonomousPositionSent = false;
         var moveToStateStartSent = false;
         var moveToStateStopSent = false;
@@ -791,6 +871,7 @@ internal sealed class HandshakeDriver : IDisposable
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
+            if (reconnectRequested) break;
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero) break;
             // Phase 6b — wake the loop either when a packet arrives OR
@@ -909,6 +990,19 @@ internal sealed class HandshakeDriver : IDisposable
                         case CharacterErrorMessage cerr:
                             lastCharacterError = cerr;
                             Console.WriteLine($"[observe]   -> CharacterError: code=0x{cerr.ErrorCode:X4}");
+                            // A transient enter-world rejection received before
+                            // we commit to the world (lingering prior session)
+                            // is recoverable by reconnecting. Signal the caller
+                            // and stop processing this dead connection.
+                            if (!loginCompleteSent
+                                && (cerr.ErrorCode == CharacterErrorLogon
+                                    || cerr.ErrorCode == CharacterErrorInWorld
+                                    || cerr.ErrorCode == CharacterErrorInWorldServer
+                                    || cerr.ErrorCode == CharacterErrorCharacterLocked))
+                            {
+                                reconnectRequested = true;
+                                Console.WriteLine($"[observe]      transient login error 0x{cerr.ErrorCode:X4} before world-entry -> request reconnect");
+                            }
                             break;
                         case PlayerCreateMessage pc:
                             Console.WriteLine($"[observe]   -> PlayerCreate: guid=0x{pc.Guid:X8}");
@@ -5004,7 +5098,8 @@ internal sealed class HandshakeDriver : IDisposable
             Console.Error.WriteLine($"[training] WARN dispose failed: {tsEx.Message}");
         }
         return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse,
-            enterWorldRequestSent, enterWorldServerReady, enterWorldSent, lastCharacterError, chosenCharacterGuid);
+            enterWorldRequestSent, enterWorldServerReady, enterWorldSent, lastCharacterError, chosenCharacterGuid,
+            reconnectRequested);
     }
 
     private readonly record struct ObserveResult(
@@ -5018,7 +5113,8 @@ internal sealed class HandshakeDriver : IDisposable
         CharacterEnterWorldServerReadyMessage? EnterWorldServerReady,
         bool EnterWorldSent,
         CharacterErrorMessage? LastCharacterError,
-        uint ChosenCharacterGuid);
+        uint ChosenCharacterGuid,
+        bool ReconnectRequested);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
