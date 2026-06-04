@@ -3299,4 +3299,249 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
         Assert.Contains("LOOP-BREAK (inventory-USE loop)", prompt);
     }
+
+    // ---- Sticky LLM-objective (call-volume reduction) ----
+    //
+    // When the tactical goal clears (currentGoal == null) and the
+    // world has not changed externally (only Goal* lifecycle churn),
+    // the policy re-drives the last LLM objective WITHOUT another LLM
+    // round-trip. A real EXTERNAL salient event (NpcDialog,
+    // InventoryItemAdded, ActionRejected, ...) suppresses the re-emit
+    // so the LLM decides fresh. A retry budget bounds spin on an
+    // unreachable target.
+
+    // Builds a policy whose LLM always returns the same Give(Jonathan,
+    // Token) goal, tracking the number of HTTP calls made (== LLM
+    // deliberations). MinCallInterval=0 and a large StuckTimeout so the
+    // sticky gate is the only thing suppressing calls.
+    private static (LlmGoalPolicy Policy, Func<int> HttpCalls) MakeStickyPolicy(int maxStickyReEmits = 3)
+    {
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Jonathan" },
+          "item":   { "name": "Academy Exit Token" },
+          "priority": 8,
+          "rationale": "directed pursuit"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var count = 0;
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            Interlocked.Increment(ref count);
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+            MaxStickyReEmits = maxStickyReEmits,
+        };
+        return (policy, () => count);
+    }
+
+    // Drives one establishment call to completion and returns the
+    // policy with a remembered LLM objective.
+    private static async Task<Goal> EstablishLlmGoalAsync(LlmGoalPolicy policy, WorldStateProjection world, EventStream events)
+    {
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(goal);
+        return goal!;
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_ReEmitsLastGoal_OnNullWithNoExternalSalient()
+    {
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        var firstGoal = await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // The tactical goal cleared on its own (lifecycle churn only).
+        // GoalCompleted is salient but is NOT an external signal, so it
+        // must NOT suppress the sticky re-emit.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalCompleted, Text = "goal cleared",
+        });
+
+        var reEmitted = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(reEmitted);
+        Assert.Equal(GoalKind.Give, reEmitted!.Kind);
+        Assert.Equal("Jonathan", reEmitted.Target?.Name);
+        // No new LLM call — the objective was re-driven for free.
+        Assert.Equal(1, httpCalls());
+        // Fresh instance (new Id) so the Motor re-pursues rather than
+        // treating it as the already-completed goal.
+        Assert.NotEqual(firstGoal.Id, reEmitted.Id);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_ExternalSalientEvent_SuppressesReEmit_AndCallsLlm()
+    {
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // A genuinely completed Talk/Give emits NpcDialog — an EXTERNAL
+        // salient event. The sticky gate must defer to a fresh LLM call.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "Jonathan: well done",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        // A new LLM call WAS kicked off (returns the passed currentGoal,
+        // i.e. null, while the call is in flight).
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_RetryBudgetExhaustion_FallsThroughToLlm()
+    {
+        var (policy, httpCalls) = MakeStickyPolicy(maxStickyReEmits: 2);
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // Re-clear the goal repeatedly with no external event. The first
+        // two null-calls re-emit (budget 2); the third exhausts the
+        // budget and forces a fresh LLM call.
+        var r1 = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(r1);
+        Assert.Equal(1, httpCalls()); // re-emit #1, no call
+
+        var r2 = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(r2);
+        Assert.Equal(1, httpCalls()); // re-emit #2, no call
+
+        var r3 = policy.ProposeGoal(world, events, null);
+        Assert.Null(r3);              // kickoff returns passed currentGoal (null)
+        Assert.Equal(2, httpCalls()); // budget exhausted → LLM called
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_ActionRejected_SuppressesReEmit_AndCallsLlm()
+    {
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // A semantic ActionRejected is an external salient event → the
+        // bot must re-deliberate, not blindly re-pursue the same target.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Text = "Jonathan",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_InventoryItemRemoved_SuppressesReEmit_AndCallsLlm()
+    {
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // A completed Give removes the item from inventory and may emit
+        // NO NpcDialog. InventoryItemRemoved must count as an external
+        // change so the bot re-deliberates rather than re-driving a Give
+        // whose item is already gone.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.InventoryItemRemoved, Text = "Academy Exit Token",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_ClearedAfterFailedDeliberation()
+    {
+        // First call succeeds (establishes the sticky objective); every
+        // subsequent call returns HTTP 500 (failed deliberation). After
+        // a failed fresh call, _lastLlmGoal must be cleared so a later
+        // no-event tick does NOT re-drive the stale objective.
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Give",
+          "target": { "name": "Jonathan" },
+          "item":   { "name": "Academy Exit Token" },
+          "priority": 8,
+          "rationale": "directed pursuit"
+        }
+        """;
+        var cannedOk = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var count = 0;
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var n = Interlocked.Increment(ref count);
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return n == 1
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(cannedOk) }
+                : new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("boom") };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, count); // objective established
+
+        // External event triggers a fresh (2nd) deliberation that fails.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "Jonathan: ...",
+        });
+        policy.ProposeGoal(world, events, null); // kicks off call 2
+        Assert.Equal(2, count);
+        await policy.WaitForInFlightAsync();
+        policy.ProposeGoal(world, events, null); // consume the failure → _lastLlmGoal cleared
+        Assert.Equal(2, count); // consuming did not kick off a new call
+
+        // A clean no-external-event tick: sticky must NOT fire (objective
+        // was cleared by the failed deliberation) → a real LLM call.
+        policy.ProposeGoal(world, events, null);
+        Assert.Equal(3, count);
+    }
 }
