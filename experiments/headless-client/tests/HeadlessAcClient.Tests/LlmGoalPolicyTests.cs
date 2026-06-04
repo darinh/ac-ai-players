@@ -964,6 +964,51 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public async Task LlmGoalPolicy_Prompt_IncludesProactiveLevelingDrive()
+    {
+        // Regression guard for the combat-engage-drive slice: the
+        // compiled prompt must carry the PROACTIVE leveling value and
+        // the combat-safety/pace guardrails, so the LLM treats gaining
+        // experience as a first-class objective (seek monsters / Explore
+        // toward them) rather than only reacting when attacked.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "priority": 5,
+          "rationale": "seek combat experience"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.Single(requestBodies);
+
+        Assert.Contains("LEVELING is core progress", requestBodies[0]);
+        Assert.Contains("COMBAT SAFETY", requestBodies[0]);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {
         // Deliberation-race regression guard. A fresh L1 bot in an
