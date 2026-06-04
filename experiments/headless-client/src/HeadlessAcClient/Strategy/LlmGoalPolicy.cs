@@ -71,6 +71,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private long _lastEventConsideredSequence = -1;
     private DateTimeOffset _lastCalledAtUtc = DateTimeOffset.MinValue;
 
+    // Durable landblock-dwell tracking. The prompt's `minutes in current
+    // landblock` signal (gate for the town-stuck and world-object USE
+    // loop-break rules) must NOT depend on a LandblockChanged event still
+    // sitting in the retained EventStream window: a bot that entered its
+    // landblock via login/enter-world never emits that event, and after a
+    // long idle any old one is evicted — so the signal silently degraded
+    // to "(no LandblockChanged event in retained window)" and the `> 5`
+    // gate became unevaluable, leaving a bot milling in a safe town
+    // forever (never exploring out to monsters). We instead stamp the
+    // entry time whenever the OBSERVED self-landblock value changes.
+    // Purely mechanical bookkeeping — a timestamp keyed on a wire-derived
+    // landblock id, no game knowledge.
+    private uint? _dwellLandblock;
+    private DateTimeOffset _dwellEntryUtc = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastProposeTickUtc = DateTimeOffset.MinValue;
+    // A gap larger than this between ProposeGoal ticks means the bot was
+    // disconnected/reconnected (ProposeGoal is otherwise called every
+    // brain tick, even during 429 backoff). On resume we reseed the entry
+    // stamp so a reconnect into the SAME landblock does not inherit a
+    // stale, falsely-large dwell.
+    private static readonly TimeSpan DwellSessionGap = TimeSpan.FromSeconds(60);
+
     // Sticky LLM-objective (call-volume reduction). _lastLlmGoal holds
     // the most-recent LLM-authored goal so the policy can RE-DRIVE it
     // when the tactical goal clears with no external world change,
@@ -224,6 +246,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var nowUtc = DateTimeOffset.UtcNow;
+
+        // Stamp the durable landblock-entry time BEFORE any early return
+        // so the `minutes in current landblock` prompt signal reflects the
+        // latest observation regardless of which path this tick takes
+        // (in-flight poll, backoff, coalesce, fallback). See field docs.
+        UpdateDwellTracking(world.Self.Landblock, events, nowUtc);
 
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
@@ -454,7 +482,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _lastPickerStartWakeAtUtc = nowUtc;
         }
 
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, DwellEntryForPrompt(world.Self.Landblock));
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -1307,6 +1335,59 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
 
+    // Durable landblock-dwell bookkeeping. Called at the top of every
+    // ProposeGoal tick. Stamps _dwellEntryUtc whenever the observed
+    // self-landblock changes, on first observation, or when a session
+    // gap (disconnect/reconnect) is detected. Mechanical only — keyed on
+    // a wire-derived landblock id, no game knowledge.
+    private void UpdateDwellTracking(uint? currentLandblock, EventStream events, DateTimeOffset nowUtc)
+    {
+        // Unknown landblock this tick (pre-enter-world, or a disconnect/
+        // reconnect gap): keep the prior stamp AND do NOT advance the tick
+        // clock. That way a reconnect's idle gap accumulates against the
+        // last KNOWN-landblock tick, so re-entering the same landblock
+        // after a reconnect still trips the session-resume reseed below
+        // even when null ticks keep firing during the reconnect. The
+        // prompt falls back to event-window rendering when we pass null.
+        if (currentLandblock is null)
+            return;
+
+        var sessionResumed = _lastProposeTickUtc != DateTimeOffset.MinValue
+            && (nowUtc - _lastProposeTickUtc) > DwellSessionGap;
+        _lastProposeTickUtc = nowUtc;
+
+        if (sessionResumed || _dwellLandblock is null || _dwellLandblock != currentLandblock)
+        {
+            _dwellLandblock = currentLandblock;
+            // Anchor the entry time. Prefer an in-window LandblockChanged
+            // whose DESTINATION is this landblock (accurate when the
+            // transition was actually observed); else fall back to now
+            // (first observation / login-placement, which emits no
+            // LandblockChanged — the exact case the old event-window-only
+            // logic mis-rendered). On a session resume (disconnect gap) we
+            // ignore any pre-disconnect event and use now, so a reconnect
+            // into the SAME landblock does not inherit a stale dwell.
+            var entry = nowUtc;
+            if (!sessionResumed)
+            {
+                var match = events.Recent(EventStream.DefaultCapacity)
+                    .FirstOrDefault(e => e.Kind == EventKind.LandblockChanged
+                        && e.LandblockTo == currentLandblock);
+                if (match is not null && match.Utc < entry)
+                    entry = match.Utc;
+            }
+            _dwellEntryUtc = entry;
+        }
+    }
+
+    // The durable entry time to hand the prompt builder, but ONLY when it
+    // corresponds to the landblock the bot is observed in THIS tick.
+    // Otherwise null → the builder uses its event-window fallback.
+    private DateTimeOffset? DwellEntryForPrompt(uint? currentLandblock)
+        => (currentLandblock is uint lb && _dwellLandblock == lb)
+            ? _dwellEntryUtc
+            : (DateTimeOffset?)null;
+
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
@@ -1327,7 +1408,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Goal? currentGoal,
         IntentStack? stack,
         PickerActivity? pickerActivity,
-        IReadOnlyList<ExplorationCandidate>? explorationCandidates)
+        IReadOnlyList<ExplorationCandidate>? explorationCandidates,
+        DateTimeOffset? dwellEntryUtc = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -1658,16 +1740,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // references the recent-Talk counts directly.
         sb.AppendLine("## Location & recency");
         var hintPoolForRecency = events.Recent(EventStream.DefaultCapacity);
-        var lastLandblockChange = hintPoolForRecency
-            .FirstOrDefault(e => e.Kind == EventKind.LandblockChanged);
-        if (lastLandblockChange is not null)
+        if (dwellEntryUtc is DateTimeOffset entryUtc)
         {
-            var dwellMin = (DateTimeOffset.UtcNow - lastLandblockChange.Utc).TotalMinutes;
+            // Durable signal: time since the observed self-landblock last
+            // changed, independent of whether a LandblockChanged event is
+            // still retained in the event window. Clamp against backward
+            // clock adjustments so the LLM never sees a negative dwell.
+            var dwellMin = Math.Max(0.0, (DateTimeOffset.UtcNow - entryUtc).TotalMinutes);
             sb.AppendLine($"- minutes in current landblock: {dwellMin:F1}");
         }
         else
         {
-            sb.AppendLine("- minutes in current landblock: (no LandblockChanged event in retained window)");
+            var lastLandblockChange = hintPoolForRecency
+                .FirstOrDefault(e => e.Kind == EventKind.LandblockChanged);
+            if (lastLandblockChange is not null)
+            {
+                var dwellMin = (DateTimeOffset.UtcNow - lastLandblockChange.Utc).TotalMinutes;
+                sb.AppendLine($"- minutes in current landblock: {dwellMin:F1}");
+            }
+            else
+            {
+                sb.AppendLine("- minutes in current landblock: (no LandblockChanged event in retained window)");
+            }
         }
         // Per-NPC recent Talk emissions (last 10 GoalEmitted events
         // of kind Talk). Tactics formats GoalEmitted Text as
