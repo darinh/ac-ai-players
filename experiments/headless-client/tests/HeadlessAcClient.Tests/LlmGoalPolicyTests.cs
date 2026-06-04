@@ -1006,6 +1006,10 @@ public class LlmGoalPolicyTests
 
         Assert.Contains("LEVELING is core progress", requestBodies[0]);
         Assert.Contains("COMBAT SAFETY", requestBodies[0]);
+        // hunt-excursion slice: the prompt must also carry the bounded
+        // "leave a tapped-out safe zone to find monsters" excursion rule
+        // so a combat-ready, quest-idle bot crosses out of a mob-free town.
+        Assert.Contains("HUNT EXCURSION", requestBodies[0]);
     }
 
     [Fact]
