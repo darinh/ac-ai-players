@@ -482,7 +482,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _lastPickerStartWakeAtUtc = nowUtc;
         }
 
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, DwellEntryForPrompt(world.Self.Landblock));
+        var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -501,9 +502,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : (pickerArrived ? "picker-arrived"
                     : (pickerStartWake ? "picker-start"
                         : (stuck ? "stuck-timeout" : "unknown"))));
+        var dwellMinStr = dwellEntry is DateTimeOffset de
+            ? Math.Max(0.0, (nowUtc - de).TotalMinutes).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)
+            : "n/a";
         Console.WriteLine(
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
-            $"prompt-bytes={userPrompt.Length} model={_client.Model}");
+            $"prompt-bytes={userPrompt.Length} dwell-min={dwellMinStr} model={_client.Model}");
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
