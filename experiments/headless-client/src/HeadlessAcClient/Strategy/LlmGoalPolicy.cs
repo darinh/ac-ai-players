@@ -77,7 +77,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // instead of burning an LLM round-trip on every goal completion.
     // _stickyReEmitCount bounds consecutive re-drives of the SAME
     // objective (reset to 0 when a fresh LLM goal is consumed). See the
-    // sticky gate in ProposeGoal and HasNewExternalSalientEvent.
+    // sticky gate in ProposeGoal (which consults hasNonPickerExternal /
+    // pickerArrived / pickerStartWake).
     private Goal? _lastLlmGoal;
     private int _stickyReEmitCount;
 
@@ -333,7 +334,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // are deliberately ignoring. Without advancing, the single
         // per-switch picker-start would linger in the stream and (a) re-log
         // this suppression every tick, and (b) later trip the
-        // sticky-objective gate's HasNewExternalSalientEvent once the goal
+        // sticky-objective gate's external-event check once the goal
         // clears, defeating the free sticky re-emit. The picker-start
         // dedupe window itself is tracked by SEPARATE state
         // (_lastPickerStartWakeKey/_lastPickerStartWakeAtUtc), so advancing
@@ -366,9 +367,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         //
         // Discriminator: a genuinely completed Talk/Pickup/Use emits an
         // EXTERNAL salient event (NpcDialog / InventoryItemAdded /
-        // PopupString / ServerMessage / ActionRejected /
-        // LandblockChanged / picker arrival) — that trips
-        // HasNewExternalSalientEvent and lets the LLM decide fresh. A
+        // PopupString / ServerMessage / ActionRejected / LandblockChanged /
+        // picker arrival) — that breaks this gate (via hasNonPickerExternal
+        // or pickerArrived) and lets the LLM decide fresh. A genuinely NEW
+        // picker target (pickerStartWake) also breaks it, so the bot is not
+        // blinded to discoveries while aimless. Only same-target picker
+        // FLUTTER (pickerStartWake == false — same target within the
+        // PickerStartCoalesce window) is ignored, matching the current-goal
+        // path's debounce. A
         // directed pursuit that cleared WITHOUT arriving (e.g. a
         // walk-to-unseen-target whose motion lock timed out) emits ONLY
         // Goal* lifecycle events, so we keep pursuing the same target.
@@ -386,8 +392,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && _lastLlmGoal is not null
             && !stuck
             && _stickyReEmitCount < MaxStickyReEmits
-            && !HasNewExternalSalientEvent(events))
+            && !hasNonPickerExternal
+            && !pickerArrived
+            && !pickerStartWake)
         {
+            // Call-volume reduction (aimless path). Live evidence: a fresh
+            // L1 bot is dominantly aimless (currentGoal == null) in an
+            // object-rich area, and the autonomous picker constantly
+            // re-fires PickerActivityStarted as it switches its auto-driven
+            // target. A picker-START is in the external-change set, so it
+            // used to trip the sticky gate and burn a multi-second LLM
+            // establishment call.
+            //
+            // We re-drive the unfinished LLM objective for free ONLY when
+            // the picker-start is mere FLUTTER — i.e. !pickerStartWake, the
+            // SAME target that last woke the LLM, within PickerStartCoalesce
+            // (the exact debounce the current-goal path uses, so aimless and
+            // busy are consistent). A genuinely NEW picker target makes
+            // pickerStartWake true and breaks this gate, so the LLM still
+            // gets to weigh the discovery — the bot is not blinded to new
+            // objects while aimless. A picker ARRIVAL (pickerArrived, the
+            // verb-naming moment) and any non-picker external change
+            // (NpcDialog / InventoryItemAdded / InventoryItemRemoved /
+            // ActionRejected / LandblockChanged …) also break the gate.
+            // Bounded by MaxStickyReEmits re-clears and the 30s stuck-timeout
+            // exactly as before.
+            //
+            // ADVANCE the event floor past the consumed flutter picker-
+            // start(s). The gate above proves the window holds NO genuinely
+            // external event (no non-picker external, no arrival) and no
+            // wake-worthy picker-start — only flutter we are deliberately
+            // ignoring — so this hides nothing real. It is necessary: a
+            // re-emitted sticky goal makes currentGoal non-null next tick,
+            // and a lingering flutter picker-start would otherwise re-log /
+            // re-evaluate every tick. The picker-start dedupe window is
+            // tracked by SEPARATE state (_lastPickerStartWakeKey/At), so
+            // advancing the floor does not disturb it.
+            _lastEventConsideredSequence = events.NextSequence;
             _stickyReEmitCount++;
             var sticky = _lastLlmGoal with { Id = Guid.NewGuid(), CreatedAtUtc = nowUtc };
             Console.WriteLine(
@@ -1239,44 +1280,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // Call-volume reduction: EXTERNAL change events EXCLUDING the two
-    // picker kinds. Used by the picker-start suppression guard to prove it
-    // is safe to advance the event floor past a consumed picker-start.
+    // picker kinds. Used by the picker-start suppression guard (current-goal
+    // path) AND the sticky-objective gate (aimless path, which additionally
+    // consults pickerArrived / pickerStartWake) to prove it is safe to
+    // advance the event floor past consumed picker-start noise.
     // IsExternalChangeKind is a SUPERSET of (salient && !goal-lifecycle) —
     // critically it also includes InventoryItemRemoved, which is external
     // but NOT salient (a completed Give removes an item, often with no
     // accompanying NpcDialog). Guarding on this prevents advancing the
-    // floor past — and thereby hiding from the later sticky-objective
-    // gate — a real InventoryItemRemoved that merely happens to share the
-    // window with picker-start noise.
+    // floor past — and thereby hiding from the sticky-objective gate — a
+    // real InventoryItemRemoved that merely happens to share the window
+    // with picker-start noise.
     private bool HasNewNonPickerExternalEvent(EventStream events)
     {
         return events.Recent()
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
             .Any(e => IsExternalChangeKind(e.Kind) && !IsPickerKind(e.Kind));
-    }
-
-    // True iff a salient event that is NOT a Goal* lifecycle event has
-    // arrived since our last LLM look. The sticky-objective gate uses
-    // this so that a goal clearing on its own (GoalCompleted/Failed/
-    // Expired — our own bookkeeping churn) does NOT count as the world
-    // having changed, while a real EXTERNAL signal does. The external
-    // set is the salient-non-lifecycle kinds UNION InventoryItemRemoved:
-    // a completed Give removes an item (and may emit no NpcDialog), so
-    // without InventoryItemRemoved the bot would re-drive a Give whose
-    // item is already gone. This mirrors the world-moved kinds in
-    // IsPlanInvalidatingKind (LandblockChanged / InventoryItemRemoved /
-    // ActionRejected), plus the chatty "wake the LLM" kinds. Compared
-    // against the same _lastEventConsideredSequence floor as
-    // HasNewSalientEvent. That floor advances on a real LLM kickoff and
-    // ALSO when a pure picker-start is suppressed (the suppression branch
-    // consumes the picker-start noise only after proving no non-picker
-    // external event shares the window) — so sticky re-emits keep
-    // measuring "anything external since the LLM last looked".
-    private bool HasNewExternalSalientEvent(EventStream events)
-    {
-        return events.Recent()
-            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
-            .Any(e => IsExternalChangeKind(e.Kind));
     }
 
     internal static bool IsExternalChangeKind(EventKind kind) =>

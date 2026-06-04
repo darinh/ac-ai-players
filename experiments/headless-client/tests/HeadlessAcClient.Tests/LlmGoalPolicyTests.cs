@@ -3800,6 +3800,189 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCalls());
     }
 
+    // Drives a busy-path picker-start wake for the given target so the
+    // policy's _lastPickerStartWakeKey is set to it. After this returns, a
+    // same-target picker-start while aimless is FLUTTER (pickerStartWake ==
+    // false) within the PickerStartCoalesce window. Costs one LLM call.
+    private static async Task PrimePickerWakeAsync(
+        LlmGoalPolicy policy, WorldStateProjection world, EventStream events,
+        Goal currentGoal, uint guid, string name)
+    {
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = guid, Name = name, Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, currentGoal); // busy-path wake → records the key
+        await policy.WaitForInFlightAsync();
+        policy.ProposeGoal(world, events, null);        // consume the result
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_NewPickerTarget_WhileAimless_CallsLlm()
+    {
+        // reduce-aimless-establishment-churn (rubber-duck/gemini blocking
+        // finding): a genuinely NEW picker target while aimless must NOT be
+        // swallowed by a free sticky re-emit — the LLM has to get a chance
+        // to weigh the discovery. pickerStartWake is true for a new target,
+        // which breaks the sticky gate and forces a fresh call. (Mirrors the
+        // current-goal path, where a new picker target also wakes.)
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // Brand-new target (never woke the LLM before).
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_SameTargetFlutter_WhileAimless_ReEmitsFree()
+    {
+        // reduce-aimless-establishment-churn core saving: a picker-start for
+        // the SAME target that last woke the LLM, within the coalesce window
+        // (pickerStartWake == false → flutter), is ignored while aimless and
+        // the unfinished objective is re-driven for FREE.
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        var goal = await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // Prime target A as the last picker-start that woke the LLM.
+        await PrimePickerWakeAsync(policy, world, events, goal, 0xAAAA0001u, "A");
+        Assert.Equal(2, httpCalls());
+
+        // Same target A re-fires while aimless → flutter → free re-emit.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+
+        var reEmitted = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(reEmitted);
+        Assert.Equal(GoalKind.Give, reEmitted!.Kind);
+        Assert.Equal("Jonathan", reEmitted.Target?.Name);
+        Assert.Equal(2, httpCalls()); // no fresh call
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_PickerArrived_WhileAimless_CallsLlm()
+    {
+        // reduce-aimless-establishment-churn safety valve: a picker ARRIVAL
+        // (parked next to a target with no opcode sent) is where naming a
+        // verb matters, so it MUST break the sticky gate and defer to a
+        // fresh LLM call — only same-target picker flutter is ignored.
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            ItemGuid = 0xBBBB0001u, Name = "B", Text = "parked",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_Flutter_AdvancesFloor_NoLaterCall()
+    {
+        // reduce-aimless-establishment-churn regression guard (rubber-duck
+        // blocking finding): a flutter sticky re-emit MUST advance the event
+        // floor past the consumed picker-start. Otherwise the re-emitted goal
+        // makes currentGoal non-null next tick and the lingering picker-start
+        // would be re-evaluated and could start a real call.
+        var (policy, httpCalls) = MakeStickyPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        var goal = await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        await PrimePickerWakeAsync(policy, world, events, goal, 0xAAAA0001u, "A");
+        Assert.Equal(2, httpCalls());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+
+        // Aimless flutter tick: free re-emit, floor advanced.
+        var reEmitted = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(reEmitted);
+        Assert.Equal(2, httpCalls());
+
+        // Next tick: re-emitted goal current, no NEW event. The consumed
+        // flutter picker-start must not wake a fresh call.
+        var held = policy.ProposeGoal(world, events, reEmitted);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_Flutter_BudgetStillBounds()
+    {
+        // reduce-aimless-establishment-churn: ignoring same-target flutter
+        // does not remove the MaxStickyReEmits bound. After the budget is
+        // spent the bot still falls through to a fresh LLM call, so an
+        // unreachable objective cannot spin forever on free re-emits.
+        var (policy, httpCalls) = MakeStickyPolicy(maxStickyReEmits: 2);
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        var goal = await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        await PrimePickerWakeAsync(policy, world, events, goal, 0xAAAA0001u, "A");
+        Assert.Equal(2, httpCalls());
+
+        for (var i = 0; i < 2; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.PickerActivityStarted,
+                ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+            });
+            var r = policy.ProposeGoal(world, events, null);
+            Assert.NotNull(r);
+            Assert.Equal(2, httpCalls()); // free re-emit
+        }
+
+        // Budget exhausted: the next flutter tick forces a fresh LLM call.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        var r3 = policy.ProposeGoal(world, events, null);
+        Assert.Null(r3);
+        Assert.Equal(3, httpCalls());
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_Sticky_ClearedAfterFailedDeliberation()
     {
