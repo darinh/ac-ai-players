@@ -571,6 +571,12 @@ internal sealed class HandshakeDriver : IDisposable
         // Give. Consumed by the action-send block (replaces USE with
         // GiveObjectRequest). Cleared by the cooldown-reset block.
         uint? pendingGiveItemGuid = null;
+        // Set by the LLM-driven pre-emptor when CurrentGoal.Kind == Use
+        // AND the goal carries an inventory Item (e.g. a key). Consumed
+        // by the action-send block (sends UseWithTarget instead of plain
+        // Use). Cleared together with pendingGiveItemGuid by the
+        // cooldown-reset block.
+        uint? pendingUseWithItemGuid = null;
         // M1.6 — snapshot of the Goal.Kind at the moment the
         // pre-emptor locked motion. Used by the action-send block
         // (combat / use / give branch selection) so we don't read a
@@ -2127,6 +2133,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionIndoorPathCells = null;
                     motionIndoorPathAttempted = false;
                     pendingGiveItemGuid = null;
+                    pendingUseWithItemGuid = null;
                     lockedGoalKind = null;
 
                     if (actionsCompleted >= MaxActionsPerSession)
@@ -2842,12 +2849,18 @@ internal sealed class HandshakeDriver : IDisposable
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
                         WorldObjectSnapshot? itemSnap = null;
-                        if (goal.Kind == GoalKind.Give)
+                        // Give always carries an item; Use carries one only
+                        // for a two-object "use item on target" (e.g. a key
+                        // on a locked chest). In both cases the item must be
+                        // in our inventory.
+                        var goalCarriesItem =
+                            goal.Kind == GoalKind.Give ||
+                            (goal.Kind == GoalKind.Use && goal.Item is not null && !goal.Item.IsEmpty);
+                        if (goalCarriesItem)
                         {
                             itemSnap = tactics.ResolveItem(worldState);
-                            // Give requires the item to be in our
-                            // inventory. Resolver does not filter on
-                            // container; do that here.
+                            // The item must be in our inventory. Resolver does
+                            // not filter on container; do that here.
                             if (itemSnap is not null &&
                                 !(itemSnap.ContainerGuid is uint icg && icg == tacticsSelf.Guid))
                             {
@@ -2914,7 +2927,15 @@ internal sealed class HandshakeDriver : IDisposable
                         {
                             var actionable =
                                 targetSnap is not null &&
-                                (goal.Kind != GoalKind.Give || itemSnap is not null) &&
+                                // A goal that carries an inventory item (Give
+                                // always; Use only for a two-object use-item-
+                                // on-target) requires that item to have
+                                // resolved to our inventory. If it did not,
+                                // this is NOT actionable — fail rather than
+                                // silently degrade (e.g. a Use{chest,key}
+                                // must not fall back to a plain Use{chest},
+                                // which would re-open the same loop).
+                                (!goalCarriesItem || itemSnap is not null) &&
                                 // Spatial actions require the target
                                 // to actually have a CellId. An NPC /
                                 // creature without a position cannot
@@ -3009,7 +3030,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     Console.WriteLine(
                                         $"[strategy] goal {goal.Kind} unresolved -- " +
                                         $"target={(targetSnap is null ? "MISS" : "ok")} " +
-                                        $"item={(goal.Kind == GoalKind.Give ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
+                                        $"item={(goalCarriesItem ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
                                         $"selector target={goal.Target} item={goal.Item}; " +
                                         $"clearing and falling through to picker");
                                     tactics.Fail("selector resolved to no live object", eventStream);
@@ -3034,6 +3055,12 @@ internal sealed class HandshakeDriver : IDisposable
                                 motionLockedGoalId = goal.Id;
                                 if (goal.Kind == GoalKind.Give)
                                     pendingGiveItemGuid = itemSnap!.Guid;
+                                else if (goal.Kind == GoalKind.Use && itemSnap is not null)
+                                    // Two-object use: a resolved inventory item
+                                    // to be applied to the world target (e.g. a
+                                    // key on a locked chest). Dispatched as
+                                    // UseWithTarget at the action-send branch.
+                                    pendingUseWithItemGuid = itemSnap.Guid;
                                 if (WorldDistance.TrySquaredDistance(tacticsSelf, targetSnap!, out var d2lock))
                                     motionInitialDistance = (float)Math.Sqrt(d2lock);
 
@@ -3882,7 +3909,7 @@ internal sealed class HandshakeDriver : IDisposable
                             fragSeqC = nextOutboundFragmentSequence++;
                         }
                     }
-                    else if (pendingGiveItemGuid is uint giveItemGuid)
+                    else if (lockedGoalKind == GoalKind.Give && pendingGiveItemGuid is uint giveItemGuid)
                     {
                         // Phase 7h — GIVE branch. The pre-emptor set
                         // motionTarget=NPC and pendingGiveItemGuid=item
@@ -3913,6 +3940,28 @@ internal sealed class HandshakeDriver : IDisposable
                             itemGuid: motionTarget.Guid,
                             containerGuid: chosenCharacterGuid,
                             placement: 0);
+                        fragSeq    = nextOutboundFragmentSequence++;
+                    }
+                    else if (lockedGoalKind == GoalKind.Use && pendingUseWithItemGuid is uint useWithSrc)
+                    {
+                        // Two-object "use item on target": apply a held
+                        // inventory item (source, e.g. a key) to the world
+                        // target (e.g. a locked chest). The pre-emptor set
+                        // motionTarget=chest and pendingUseWithItemGuid=key
+                        // earlier; the walk-and-stop is now complete.
+                        // Server-side: Player.HandleActionUseWithTarget(
+                        //   source, target). For a locked chest + matching
+                        //   key this UNLOCKS the chest (Locked=false). It
+                        //   does NOT open it — opening requires a follow-up
+                        //   plain Use, which the LLM must emit (the motor
+                        //   never auto-acts on a target the LLM did not ask
+                        //   for).
+                        actionName = "USEWITHTARGET";
+                        actionBuf  = new byte[GameActionUseWithTargetMessage.PackedSize];
+                        payloadLen = GameActionUseWithTargetMessage.Pack(
+                            actionBuf,
+                            sourceGuid: useWithSrc,
+                            targetGuid: motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
                     }
                     else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
