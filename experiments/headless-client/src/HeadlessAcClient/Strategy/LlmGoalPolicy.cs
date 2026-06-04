@@ -71,6 +71,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private long _lastEventConsideredSequence = -1;
     private DateTimeOffset _lastCalledAtUtc = DateTimeOffset.MinValue;
 
+    // Sticky LLM-objective (call-volume reduction). _lastLlmGoal holds
+    // the most-recent LLM-authored goal so the policy can RE-DRIVE it
+    // when the tactical goal clears with no external world change,
+    // instead of burning an LLM round-trip on every goal completion.
+    // _stickyReEmitCount bounds consecutive re-drives of the SAME
+    // objective (reset to 0 when a fresh LLM goal is consumed). See the
+    // sticky gate in ProposeGoal and HasNewExternalSalientEvent.
+    private Goal? _lastLlmGoal;
+    private int _stickyReEmitCount;
+
+    /// <summary>
+    /// Max consecutive sticky re-emits of the last LLM objective before
+    /// forcing a fresh LLM call. Counts re-CLEARS of the goal (not
+    /// ticks), so it bounds spin on an unreachable target while still
+    /// letting a reachable one be driven to completion. Reset to 0
+    /// whenever a new LLM goal is consumed.
+    /// </summary>
+    public int MaxStickyReEmits { get; init; } = 3;
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -264,6 +283,47 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (currentGoal is not null && !hasNewSalient && !stuck) return currentGoal;
         if (coalesce && currentGoal is not null && !pickerSteering) return currentGoal;
 
+        // STICKY LLM-OBJECTIVE (call-volume reduction). The tactical
+        // goal has cleared (currentGoal == null), so without this gate
+        // every goal completion would burn a multi-second LLM round
+        // trip. But if the last LLM-authored objective is still
+        // unfinished and NOTHING happened in the world except our own
+        // goal-lifecycle churn, re-drive that objective for free.
+        //
+        // Discriminator: a genuinely completed Talk/Pickup/Use emits an
+        // EXTERNAL salient event (NpcDialog / InventoryItemAdded /
+        // PopupString / ServerMessage / ActionRejected /
+        // LandblockChanged / picker arrival) — that trips
+        // HasNewExternalSalientEvent and lets the LLM decide fresh. A
+        // directed pursuit that cleared WITHOUT arriving (e.g. a
+        // walk-to-unseen-target whose motion lock timed out) emits ONLY
+        // Goal* lifecycle events, so we keep pursuing the same target.
+        // Returning the goal re-installs it as currentGoal, so the
+        // Motor drives it normally (via the line-264 early-return) until
+        // it clears again; the retry budget counts re-CLEARS so an
+        // unreachable target cannot spin forever — after MaxStickyReEmits
+        // re-clears we fall through to a real LLM re-think. !stuck keeps
+        // the 30s stuck-timeout able to force a fresh call. Establishment
+        // is unaffected: _lastLlmGoal is null until the first successful
+        // LLM goal. The budget resets when a new LLM goal is consumed
+        // (see ConsumeResult). This carries NO game knowledge — it is
+        // pure event-kind + goal-provenance bookkeeping.
+        if (currentGoal is null
+            && _lastLlmGoal is not null
+            && !stuck
+            && _stickyReEmitCount < MaxStickyReEmits
+            && !HasNewExternalSalientEvent(events))
+        {
+            _stickyReEmitCount++;
+            var sticky = _lastLlmGoal with { Id = Guid.NewGuid(), CreatedAtUtc = nowUtc };
+            Console.WriteLine(
+                $"[strategy] sticky-objective re-emit #{_stickyReEmitCount}/{MaxStickyReEmits} " +
+                $"kind={sticky.Kind} target={sticky.Target}" +
+                (sticky.Item is null ? "" : $" item={sticky.Item}") +
+                " (no external salient event since last LLM look; skipping LLM call)");
+            return sticky;
+        }
+
         _lastCalledAtUtc = nowUtc;
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
@@ -323,6 +383,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         DateTimeOffset nowUtc)
     {
         var (result, decisionId, userPrompt, projJson, eventSeqAtCallStart, hadCurrentGoalAtCallStart) = finishedTask.GetAwaiter().GetResult();
+
+        // Sticky-objective invalidation: a deliberation has now resolved.
+        // Clear the remembered LLM objective up-front so that EVERY exit
+        // below other than a freshly-parsed success leaves it null. This
+        // stops a stale objective from being re-driven after a failed /
+        // discarded / dedup-dropped fresh deliberation (the triggering
+        // external event is already behind _lastEventConsideredSequence,
+        // so sticky could otherwise re-emit the OLD goal). The success
+        // path re-sets it below.
+        _lastLlmGoal = null;
 
         // Stale-result detection (narrow). If a plan-INVALIDATING
         // event arrived after we kicked off the LLM call, the world
@@ -547,6 +617,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         _training?.RecordEmittedGoal(decisionId, goal);
+        // Sticky-objective bookkeeping: remember this LLM-authored goal
+        // so ProposeGoal can re-drive it without another LLM call while
+        // it remains unfinished, and give the new objective a fresh
+        // re-emit budget.
+        _lastLlmGoal = goal;
+        _stickyReEmitCount = 0;
         Console.WriteLine(
             $"[llm-call] success id={decisionId} latency={result.LatencyMs}ms " +
             $"goal=kind={goal.Kind} target={goal.Target}" +
@@ -1015,6 +1091,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
             .Any(e => IsSalientKind(e.Kind));
     }
+
+    // True iff a salient event that is NOT a Goal* lifecycle event has
+    // arrived since our last LLM look. The sticky-objective gate uses
+    // this so that a goal clearing on its own (GoalCompleted/Failed/
+    // Expired — our own bookkeeping churn) does NOT count as the world
+    // having changed, while a real EXTERNAL signal does. The external
+    // set is the salient-non-lifecycle kinds UNION InventoryItemRemoved:
+    // a completed Give removes an item (and may emit no NpcDialog), so
+    // without InventoryItemRemoved the bot would re-drive a Give whose
+    // item is already gone. This mirrors the world-moved kinds in
+    // IsPlanInvalidatingKind (LandblockChanged / InventoryItemRemoved /
+    // ActionRejected), plus the chatty "wake the LLM" kinds. Compared
+    // against the same _lastEventConsideredSequence floor as
+    // HasNewSalientEvent, which is only advanced on a real LLM kickoff —
+    // so sticky re-emits keep measuring "anything external since the LLM
+    // last looked".
+    private bool HasNewExternalSalientEvent(EventStream events)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Any(e => IsExternalChangeKind(e.Kind));
+    }
+
+    internal static bool IsExternalChangeKind(EventKind kind) =>
+        (IsSalientKind(kind) && !IsGoalLifecycleKind(kind))
+        || kind is EventKind.InventoryItemRemoved;
+
+    internal static bool IsGoalLifecycleKind(EventKind kind) =>
+        kind is EventKind.GoalCompleted
+             or EventKind.GoalFailed
+             or EventKind.GoalExpired;
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
