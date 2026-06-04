@@ -370,6 +370,21 @@ internal sealed class HandshakeDriver : IDisposable
         // CharacterCreateResponse - decoded in GameMessageDecoder.
         var characterCreateSent = false;
         CharacterCreateResponseMessage? createResponse = null;
+        // smoke-charlist-quirk: when CharacterList reports zero
+        // characters but the account already owns the desired name, the
+        // server rejects CharacterCreate with NameInUse and the old flow
+        // wedged (no guid to enter the world with). On a name-retryable
+        // rejection we pick a deterministic alternate name and re-issue
+        // CharacterCreate. createName holds the name for the NEXT attempt;
+        // createNameAttempt counts rename retries (capped).
+        var createName = _characterName;
+        var createNameAttempt = 0;
+        const int MaxCreateNameAttempts = 5;
+        // Sequence of the last packet whose CharacterCreateResponse we
+        // acted on. A retransmitted packet reuses its original sequence,
+        // so this dedups duplicates: without it a retransmit would
+        // re-enter the retry branch and burn an extra rename attempt.
+        var lastHandledCreateRespSeq = 0u;
 
         // Phase 3.3: two-step world-entry handshake.
         //   1. Send CharacterEnterWorldRequest (0xF7C8, payload-less)
@@ -977,11 +992,38 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine($"[observe]   -> DDDInterrogation: region={di.ServersRegion} lang={di.NameRuleLanguage} product={di.ProductId} supportedLangs=[{string.Join(",", di.SupportedLanguages)}]");
                             break;
                         case CharacterCreateResponseMessage ccr:
+                            // Dedup retransmits: a retransmitted packet
+                            // reuses its original sequence, so a duplicate
+                            // CharacterCreateResponse must not re-enter the
+                            // retry branch and consume an extra attempt.
+                            if (pkt.Header.Sequence != 0 && pkt.Header.Sequence <= lastHandledCreateRespSeq)
+                            {
+                                Console.WriteLine($"[observe]   -> CharacterCreateResponse (duplicate seq={pkt.Header.Sequence}); ignored");
+                                break;
+                            }
+                            lastHandledCreateRespSeq = pkt.Header.Sequence;
                             createResponse = ccr;
                             if (ccr.Response == CharacterCreateResponse.Ok)
                                 Console.WriteLine($"[observe]   -> CharacterCreateResponse: Ok guid=0x{ccr.CharacterGuid:X8} name=\"{ccr.Name}\"");
                             else
                                 Console.WriteLine($"[observe]   -> CharacterCreateResponse: {ccr.Response} (code={(uint)ccr.Response})");
+
+                            // smoke-charlist-quirk recovery: a name-specific
+                            // rejection (NameInUse / NameBanned) with no
+                            // reusable character in the list is fixable by
+                            // retrying under a fresh deterministic name.
+                            // Re-arm the Phase 3.2 create gate so it fires
+                            // again with createName on the next iteration.
+                            if (CharacterNameFallback.IsNameRetryable(ccr.Response)
+                                && (charList is null || charList.Characters.Count == 0)
+                                && createNameAttempt < MaxCreateNameAttempts)
+                            {
+                                createNameAttempt++;
+                                createName = CharacterNameFallback.NextName(_characterName, createNameAttempt);
+                                characterCreateSent = false;
+                                createResponse = null;
+                                Console.WriteLine($"[observe]   -> CharacterCreate name rejected ({ccr.Response}); retry {createNameAttempt}/{MaxCreateNameAttempts} as name=\"{createName}\"");
+                            }
                             break;
                         case CharacterEnterWorldServerReadyMessage ready:
                             enterWorldServerReady = ready;
@@ -1590,7 +1632,7 @@ internal sealed class HandshakeDriver : IDisposable
                     // first contact with a Sparring Golem.
                     var opt = new CharacterCreateMessage.Options(
                         Account: charList.Account,
-                        Name:    _characterName,
+                        Name:    createName,
                         TrainedSkillIds: CharacterCreateMessage.DefaultTrainedSkillIds);
 
                     var packedSize = CharacterCreateMessage.MeasurePackedSize(opt);
