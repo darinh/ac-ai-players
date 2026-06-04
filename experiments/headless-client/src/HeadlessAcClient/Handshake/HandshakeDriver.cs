@@ -2944,6 +2944,52 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
+                        // Autonomous OUTDOOR frontier exploration — the
+                        // surface analogue of the indoor frontier branch
+                        // above. The LLM emitted Explore with no resolvable
+                        // target and the bot is OUTDOORS (the indoor branch
+                        // no-oped). Steer toward the least-explored compass
+                        // direction, derived from the bot's OWN recorded
+                        // visited positions + pure geometry, and rasterize the
+                        // straight segment into motionIndoorPathCells so the
+                        // motor traverses every cell it crosses (and at most a
+                        // landblock seam or two) instead of HALTING at the
+                        // first cell boundary like the naive farthest-visible
+                        // fallback below — that halt is why a town-bound bot
+                        // only ever reached the nearest civilian NPC and never
+                        // open country. Domain-general spatial search: reads no
+                        // object names/wcids/types/landblock-ids/quest state,
+                        // and decides nothing about INTERACTION — only WHERE to
+                        // move so new ground (and whatever lives there) becomes
+                        // perceivable. motionIndoorPath stays null, so the
+                        // indoor-only waypoint machinery (followingIndoorPath,
+                        // door-USE pre-emptor, terminal cell-claim, AP
+                        // cell-advance) is all inert; only the outdoor
+                        // cell-slide consumes motionIndoorPathCells.
+                        if (exploreTarget is null)
+                        {
+                            var outdoorFrontier = TryChooseOutdoorFrontierDest(
+                                tacticsSelfCell, tacticsSelf.Position, navGraph,
+                                frontierCellCooldownUntil, out var outdoorPathCells);
+                            if (outdoorFrontier is not null)
+                            {
+                                exploreTarget = outdoorFrontier;
+                                motionRememberedDest = outdoorFrontier;
+                                motionIndoorPathCells = outdoorPathCells;
+                                motionIndoorPathAttempted = true;
+                                var (sgx, sgy) = Strategy.AcCoords.ToGlobalXY(tacticsSelfCell, tacticsSelf.Position);
+                                var (dgx, dgy) = Strategy.AcCoords.ToGlobalXY(
+                                    outdoorFrontier.CellId ?? tacticsSelfCell, outdoorFrontier.Position);
+                                bestDist = MathF.Sqrt((dgx - sgx) * (dgx - sgx) + (dgy - sgy) * (dgy - sgy));
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Explore -> autonomous OUTDOOR frontier " +
+                                    $"(no resolvable target); stepping toward unexplored cell " +
+                                    $"0x{(outdoorFrontier.CellId ?? 0):X8} " +
+                                    $"pos=({outdoorFrontier.Position.X:F1},{outdoorFrontier.Position.Y:F1}) " +
+                                    $"dist={bestDist:F1}u via {outdoorPathCells?.Count ?? 0} cells");
+                            }
+                        }
+
                         if (exploreTarget is null)
                         {
                             // Original Explore{anywhere} behaviour:
@@ -5357,6 +5403,123 @@ internal sealed class HandshakeDriver : IDisposable
     /// it can be re-selected. Prevents tight re-target loops; coverage is
     /// otherwise bounded because entered cells join the seen set.</summary>
     private readonly TimeSpan _frontierRevisitCooldown = TimeSpan.FromSeconds(45);
+
+    /// <summary>How far out (meters) each outdoor frontier pick probes.
+    /// ~3 surface cells (24 m each): far enough to clear the current cell
+    /// and reach fresh ground, short enough that one straight blind walk
+    /// over unvalidated terrain stays bounded (the motor re-deliberates at
+    /// the 30 s motion cap / on a block).</summary>
+    private const float OutdoorFrontierStepMeters = 72f;
+
+    /// <summary>Only the bot's visited samples within this radius inform an
+    /// outdoor frontier pick, so the "away from where I've been" pull stays
+    /// local to the current area instead of averaging the whole world.</summary>
+    private const float OutdoorFrontierLocalityMeters = 250f;
+
+    /// <summary>Prefer visited samples seen within this window when choosing
+    /// an outdoor frontier; older local samples are used only if none are
+    /// recent.</summary>
+    private static readonly TimeSpan OutdoorFrontierRecency = TimeSpan.FromMinutes(20);
+
+    /// <summary>
+    /// Autonomous OUTDOOR frontier exploration — the surface analogue of
+    /// <see cref="TryChooseFrontierDest"/>. When the active Explore goal has
+    /// no resolvable target and the bot is OUTDOORS, choose the least-explored
+    /// compass direction from the bot's OWN recorded visited positions + pure
+    /// geometry (<see cref="Strategy.OutdoorFrontierExplorer"/>), and return a
+    /// synthetic destination one step out, in the destination cell's
+    /// landblock-local frame. Also emits, via <paramref name="pathCells"/>,
+    /// the set of outdoor cells the straight segment crosses so the motor
+    /// slides its cell-crossing lock across them (and any landblock seam)
+    /// instead of halting at the first boundary.
+    ///
+    /// Returns null when the bot is indoors or every candidate cell is on
+    /// cooldown. Domain-general spatial search: reads only the bot's visited
+    /// geometry; never object names/wcids/types/landblock-ids/quest state, and
+    /// decides nothing about interaction. <paramref name="frontierCooldownUntil"/>
+    /// is the shared per-cell revisit throttle (pruned in place; the chosen
+    /// cell is cooled so a blocked bearing naturally rotates next pick).
+    /// </summary>
+    private WorldObjectSnapshot? TryChooseOutdoorFrontierDest(
+        uint currentCellId,
+        Vector3 currentPos,
+        NavGraph navGraph,
+        Dictionary<uint, DateTime> frontierCooldownUntil,
+        out IReadOnlySet<uint>? pathCells)
+    {
+        pathCells = null;
+        if (Strategy.AcCoords.IsIndoor(currentCellId))
+            return null;
+
+        var now = DateTime.UtcNow;
+        var cooled = new HashSet<uint>();
+        if (frontierCooldownUntil.Count > 0)
+        {
+            var expired = new List<uint>();
+            foreach (var kv in frontierCooldownUntil)
+            {
+                if (kv.Value > now) cooled.Add(kv.Key);
+                else expired.Add(kv.Key);
+            }
+            foreach (var k in expired) frontierCooldownUntil.Remove(k);
+        }
+
+        // Project the bot's own visited OUTDOOR nodes to global samples.
+        var nodes = navGraph.SnapshotNodes();
+        var samples = new List<Strategy.OutdoorFrontierExplorer.VisitedSample>(nodes.Count);
+        foreach (var n in nodes)
+        {
+            if (Strategy.AcCoords.IsIndoor(n.CellId)) continue;
+            samples.Add(new Strategy.OutdoorFrontierExplorer.VisitedSample(
+                n.WorldX, n.WorldY, n.LastSeenUtc));
+        }
+
+        var (selfGX, selfGY) = Strategy.AcCoords.ToGlobalXY(currentCellId, currentPos);
+        var choice = Strategy.OutdoorFrontierExplorer.ChooseFrontier(
+            selfGX, selfGY, samples, cooled, DateTimeOffset.UtcNow,
+            OutdoorFrontierStepMeters, OutdoorFrontierLocalityMeters, OutdoorFrontierRecency);
+        if (choice is not Strategy.OutdoorFrontierExplorer.FrontierResult ft)
+            return null;
+
+        // Cool the chosen cell so the next pick rotates away if this bearing
+        // turns out to be blocked (the bot's position won't have advanced, so
+        // the same candidates recompute and this one is now skipped).
+        frontierCooldownUntil[ft.DestCellId] = now + _frontierRevisitCooldown;
+
+        // Convert the global destination back into the destination cell's
+        // landblock-local frame. Preserve current Z — outdoor walks step in
+        // XY and the server owns terrain height.
+        var dlbx = (int)((ft.DestCellId >> 24) & 0xFFu);
+        var dlby = (int)((ft.DestCellId >> 16) & 0xFFu);
+        var destLocal = new Vector3(
+            ft.GlobalX - dlbx * Strategy.AcCoords.BlockLength,
+            ft.GlobalY - dlby * Strategy.AcCoords.BlockLength,
+            currentPos.Z);
+
+        // Rasterize the straight global segment into the motor's cell-slide
+        // set (sample every ~4 m, mirroring NavGraph.AddOutdoorSegmentCells)
+        // so the walk traverses every cell it crosses, including a landblock
+        // seam, rather than stopping at the first cell boundary.
+        var cells = new HashSet<uint>();
+        var dx = ft.GlobalX - selfGX;
+        var dy = ft.GlobalY - selfGY;
+        var dist = MathF.Sqrt(dx * dx + dy * dy);
+        var steps = Math.Max(1, (int)Math.Ceiling(dist / 4f));
+        for (int s = 0; s <= steps; s++)
+        {
+            var t = (float)s / steps;
+            var c = Strategy.AcCoords.OutdoorCellIdFromGlobal(selfGX + dx * t, selfGY + dy * t);
+            if (c != 0u) cells.Add(c);
+        }
+        pathCells = cells;
+
+        return new WorldObjectSnapshot(0u)
+        {
+            Name = "(unexplored area)",
+            CellId = ft.DestCellId,
+            Position = destLocal,
+        };
+    }
 
     /// <summary>
     /// Decides whether a teleport (one that leaves the server-side
