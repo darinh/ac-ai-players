@@ -555,6 +555,17 @@ internal sealed class HandshakeDriver : IDisposable
         uint lastObservedSelfCellId = 0u;
         System.Numerics.Vector3 lastObservedSelfPos = default;
         bool loginCompleteResendNeeded = false;
+        // Phase 7g (intra-landblock teleport) — the teleport sequence the
+        // self object carried the last time we (re)sent LoginComplete. A
+        // strictly-newer value means a teleport happened AFTER our last
+        // LoginComplete, leaving the server-side Teleporting flag set (the
+        // server then rejects every client position update until we re-send
+        // LoginComplete). Null until the first LoginComplete is sent.
+        // Paired with the instance sequence below: a new instance epoch
+        // resets the per-epoch teleport counter, so the comparison MUST be
+        // instance-aware to avoid wrap-aware false negatives.
+        ushort? loginCompleteAckedTeleportSeq = null;
+        ushort? loginCompleteAckedInstanceSeq = null;
         // Commit B — track the last NavGraph node id the bot stood on.
         // Updated on every RecordVisit so RecordObservation can anchor
         // entity sightings to a real node, and RecordEdge can join the
@@ -1834,6 +1845,39 @@ internal sealed class HandshakeDriver : IDisposable
                             landblockChanged = true;
                         }
                     }
+
+                    // Phase 7g (intra-landblock teleport) — the landblock-
+                    // change detector above misses a teleport that lands in
+                    // the SAME landblock (enter-world placement, recall, or a
+                    // portal/spell that stays on the current map). Such a
+                    // teleport still leaves the server-side Teleporting flag
+                    // set, so the server rejects EVERY client position update
+                    // until we re-send LoginComplete. Detect it from the
+                    // per-object instance + teleport sequences: the teleport
+                    // counter advances only on an actual teleport (never on
+                    // ordinary movement, which advances SeqPosition), and a
+                    // new instance epoch (which resets the per-epoch teleport
+                    // counter) also implies a server-side re-placement. An
+                    // on-foot landblock-seam crossing uses a different server
+                    // opcode and advances neither, so it is naturally
+                    // excluded. The compare is instance-aware and wrap-aware;
+                    // the resend below re-captures the acked values, so this
+                    // fires at most once per teleport.
+                    if (loginCompleteSent &&
+                        TeleportOccurredSinceLoginComplete(
+                            lcTeleSelf.SeqInstance, lcTeleSelf.SeqTeleport,
+                            loginCompleteAckedInstanceSeq,
+                            loginCompleteAckedTeleportSeq))
+                    {
+                        Console.WriteLine(
+                            $"[teleport] tp-advance inst {loginCompleteAckedInstanceSeq?.ToString() ?? "null"}" +
+                            $"->{lcTeleSelf.SeqInstance?.ToString() ?? "null"} " +
+                            $"tele {loginCompleteAckedTeleportSeq?.ToString() ?? "null"}" +
+                            $"->{lcTeleSelf.SeqTeleport?.ToString() ?? "null"} " +
+                            $"(landblock 0x{lb:X8}); queueing LoginComplete " +
+                            $"resend to clear Teleporting.");
+                        loginCompleteResendNeeded = true;
+                    }
                     var prevNodeId = lastVisitNodeId;
                     var lcTeleSelfPos = lcTeleSelfPos2;
                     if (landblockChanged)
@@ -1923,6 +1967,14 @@ internal sealed class HandshakeDriver : IDisposable
                     var isResend = loginCompleteSent && loginCompleteResendNeeded;
                     loginCompleteSent = true;
                     loginCompleteResendNeeded = false;
+                    // Phase 7g — capture the instance + teleport sequences we
+                    // are acknowledging with THIS LoginComplete so a later
+                    // teleport (which advances the teleport counter, or the
+                    // instance epoch) is detected as newer and triggers a
+                    // resend. Captured for both the initial send and every
+                    // resend, so each teleport is answered exactly once.
+                    loginCompleteAckedTeleportSeq = worldState.Self?.SeqTeleport;
+                    loginCompleteAckedInstanceSeq = worldState.Self?.SeqInstance;
                     loginCompletePacketIndex = count;
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
@@ -5305,6 +5357,58 @@ internal sealed class HandshakeDriver : IDisposable
     /// it can be re-selected. Prevents tight re-target loops; coverage is
     /// otherwise bounded because entered cells join the seen set.</summary>
     private readonly TimeSpan _frontierRevisitCooldown = TimeSpan.FromSeconds(45);
+
+    /// <summary>
+    /// Decides whether a teleport (one that leaves the server-side
+    /// Teleporting flag set) has occurred since the LoginComplete whose
+    /// acked sequences are <paramref name="ackInstance"/> /
+    /// <paramref name="ackTeleport"/>. The server clears Teleporting only
+    /// when the client (re)sends LoginComplete, so detecting this is what
+    /// keeps a teleported bot from being frozen (every client position
+    /// update is rejected while the flag is set).
+    ///
+    /// Instance epoch dominates: a strictly-newer instance sequence means
+    /// the server re-created our object in a new epoch, which resets the
+    /// per-epoch teleport counter to a low value — so a naive teleport-only
+    /// compare would wrongly see the new low value as "older" and miss the
+    /// resend. Within the same epoch, a strictly-newer teleport sequence
+    /// means an intra-epoch teleport. A null acked value (we sent
+    /// LoginComplete before observing any self sequence) means any later
+    /// non-null observation is treated as new. Ordinary movement advances
+    /// only the position sequence, so a normally moving or parked bot never
+    /// trips this. All comparisons are wrap-aware.
+    /// </summary>
+    internal static bool TeleportOccurredSinceLoginComplete(
+        ushort? currentInstance, ushort? currentTeleport,
+        ushort? ackInstance, ushort? ackTeleport)
+    {
+        if (currentInstance is ushort ci)
+        {
+            if (ackInstance is ushort ai)
+            {
+                if (SequenceCompare.IsStrictlyNewer(ci, ai))
+                    return true;   // new instance epoch → object re-created
+                if (ci != ai)
+                    return false;  // stale / out-of-order older epoch → ignore
+                // same epoch → fall through to the teleport-counter compare
+            }
+            else
+            {
+                // Acked with no instance info; the epoch is now known, so a
+                // teleport we did not account for has happened → resend.
+                return true;
+            }
+        }
+
+        if (currentTeleport is ushort ct)
+        {
+            if (ackTeleport is ushort at)
+                return SequenceCompare.IsStrictlyNewer(ct, at);
+            return true;           // teleport sequence appeared since the ack
+        }
+
+        return false;
+    }
 
     public void Dispose() => _socket?.Dispose();
 
