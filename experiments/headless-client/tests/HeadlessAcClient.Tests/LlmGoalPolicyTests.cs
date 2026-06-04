@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -4197,5 +4198,76 @@ public class LlmGoalPolicyTests
         // was cleared by the failed deliberation) → a real LLM call.
         policy.ProposeGoal(world, events, null);
         Assert.Equal(3, count);
+    }
+
+    // Prompt-size cap: in object-dense areas the `## Visible nearby` body
+    // must stay bounded. Every TAGGED object (carries an affordance/state
+    // tag) is preserved; only PLAIN rows (name/wcid/distance only) are
+    // truncated, nearest-first, with an explicit omitted-count summary.
+    [Fact]
+    public void AppendVisibleNearby_PreservesAllTagged_AndCapsPlainByDistance()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>();
+        // Three tagged objects, deliberately far away so a naive distance
+        // cap would drop them.
+        list.Add(new VisibleObjectProjection { Guid = 0x1001u, Name = "FarGolem", Wcid = 1u, ItemType = 0x10u, Distance = 95f, IsCreature = true, IsMonster = true });
+        list.Add(new VisibleObjectProjection { Guid = 0x1002u, Name = "FarDoor", Wcid = 2u, ItemType = 0x10u, Distance = 90f, IsDoor = true });
+        list.Add(new VisibleObjectProjection { Guid = 0x1003u, Name = "FarGreeter", Wcid = 3u, ItemType = 0x10u, Distance = 85f, IsCreature = true });
+        // 120 plain (untagged) objects at increasing distance.
+        for (int i = 0; i < 120; i++)
+            list.Add(new VisibleObjectProjection { Guid = (uint)(0x2000 + i), Name = $"Plain{i:D3}", Wcid = (uint)(1000 + i), ItemType = 0x4u, Distance = i + 1f });
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list);
+        var text = sb.ToString();
+
+        // All tagged rows survive truncation regardless of distance.
+        Assert.Contains("FarGolem", text);
+        Assert.Contains("FarDoor", text);
+        Assert.Contains("FarGreeter", text);
+        // Nearest plain rows present; far plain rows truncated (cap=50).
+        Assert.Contains("Plain000", text);
+        Assert.DoesNotContain("Plain119", text);
+        // Omitted plain count is summarized (120 - 50 = 70).
+        Assert.Contains("+70 more distant plain objects not shown", text);
+    }
+
+    // Backstop: even if TAGGED objects alone are numerous, the section must
+    // stay within budget by truncating tagged rows too, summarized by kind.
+    [Fact]
+    public void AppendVisibleNearby_TaggedBackstop_BoundsSectionAndSummarizesKinds()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>();
+        for (int i = 0; i < 600; i++)
+            list.Add(new VisibleObjectProjection { Guid = (uint)(0x3000 + i), Name = $"Monster{i:D3}", Wcid = (uint)(5000 + i), ItemType = 0x10u, Distance = i + 1f, IsCreature = true, IsMonster = true });
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list);
+        var text = sb.ToString();
+
+        // Section is strictly bounded: rows fit within budget minus summary
+        // headroom, so even with the summary line the total stays under the
+        // 10000-char budget (600 uncapped rows would be ~18KB+).
+        Assert.True(text.Length <= 10000, $"section was {text.Length} chars");
+        Assert.Contains("more tagged objects not shown due to prompt budget: monster=", text);
+    }
+
+    // A single pathologically long row (e.g. a huge object name) must not
+    // blow the budget: the always-emit-first-tagged-row guarantee clamps the
+    // row so the section stays bounded.
+    [Fact]
+    public void AppendVisibleNearby_PathologicalRow_IsClampedAndBounded()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>
+        {
+            new VisibleObjectProjection { Guid = 0x4001u, Name = new string('X', 50000), Wcid = 1u, ItemType = 0x10u, Distance = 1f, IsCreature = true, IsMonster = true },
+        };
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list);
+        var text = sb.ToString();
+
+        Assert.True(text.Length <= 10000, $"section was {text.Length} chars");
+        Assert.Contains("\u2026", text); // ellipsis marks the clamp
     }
 }

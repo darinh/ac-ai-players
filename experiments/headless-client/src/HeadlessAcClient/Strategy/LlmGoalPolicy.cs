@@ -1676,37 +1676,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         sb.AppendLine("## Visible nearby");
-        if (world.Visible.Count == 0) sb.AppendLine("- (nothing)");
-        else foreach (var v in world.Visible)
-        {
-            sb.Append($"- {v.Name}");
-            if (v.Wcid is uint vw) sb.Append($" (wcid={vw}");
-            else sb.Append(" (");
-            if (v.IsCreature)
-            {
-                // Slice H — discriminate combat targets from civilians.
-                // `monster` = server-flagged Attackable AND no custom
-                // radar blip color AND not Vendor/Healer. `npc` = any
-                // other creature (civilians, shopkeepers, healers).
-                // Both signals come from the wire; we never hardcode
-                // wcid lists or English-name matches.
-                if (v.IsMonster) sb.Append(" monster");
-                else             sb.Append(" npc");
-            }
-            if (v.IsPortal)   sb.Append(" portal");
-            if (v.IsDoor)     sb.Append(" door");
-            if (v.IsCorpse)   sb.Append(" corpse");
-            if (v.IsChest)    sb.Append(" chest");
-            if (v.IsBook)     sb.Append(" book");
-            if (v.IsSign)     sb.Append(" sign");
-            if (v.IsLifestone) sb.Append(" lifestone");
-            if (v.IsVendor)   sb.Append(" vendor");
-            if (v.IsHealer)   sb.Append(" healer");
-            if (v.IsOpenable) sb.Append(" openable");
-            if (v.ObservedHostile) sb.Append(" HOSTILE");
-            if (v.Distance is float d) sb.Append($" d={d:F1}");
-            sb.AppendLine(")");
-        }
+        AppendVisibleNearby(sb, world.Visible);
         sb.AppendLine();
 
         // Slice H — Combat readiness summary. Surfaces the three
@@ -2002,6 +1972,147 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Select(g => g.First())
             .OrderBy(e => e.Sequence)
             .ToList();
+    }
+
+    // Renders the `## Visible nearby` body. In object-dense areas (towns
+    // with 100+ visible objects) an uncapped listing pushes the whole
+    // prompt past some models' request-size limit (HTTP 413). To stay
+    // within budget we keep every higher-information row — any object whose
+    // wire-derived projection carries an affordance/state tag (creature/
+    // portal/door/corpse/chest/book/sign/lifestone/vendor/healer/openable/
+    // hostile) — and truncate only "plain" rows that expose nothing but
+    // name/wcid/distance, taking the NEAREST plain rows first (distance is
+    // geometric, not game knowledge). This is an information-budget
+    // decision, NOT a strategy decision: no per-type priority is assigned
+    // beyond "has any tag" vs "plain". The authoritative monster-presence
+    // signal the rules rely on lives in `## Combat readiness` (computed
+    // directly from world.Visible), not in this rendered text.
+    private const int VisiblePlainSoftCap = 50;
+    private const int VisibleSectionCharBudget = 10000;
+    // Headroom reserved (out of the budget) for the two omission-summary
+    // lines so the whole section stays <= VisibleSectionCharBudget even after
+    // those lines are appended. Generous: at most ~12 "kind=NNNNNNN" pairs.
+    private const int VisibleSummaryReserve = 400;
+    // Hard clamp on a single rendered row so one pathological object name can
+    // never blow the budget (the always-emit-first-tagged-row guarantee).
+    private const int VisibleRowMaxChars = 400;
+
+    private static string ClampRow(string row) =>
+        row.Length <= VisibleRowMaxChars
+            ? row
+            : row.Substring(0, VisibleRowMaxChars - 1) + "\u2026";
+
+    private static bool IsTaggedVisible(VisibleObjectProjection v) =>
+        v.IsCreature || v.IsPortal || v.IsDoor || v.IsCorpse || v.IsChest
+        || v.IsBook || v.IsSign || v.IsLifestone || v.IsVendor || v.IsHealer
+        || v.IsOpenable || v.ObservedHostile;
+
+    private static string RenderVisibleRow(VisibleObjectProjection v)
+    {
+        var sb = new StringBuilder();
+        sb.Append($"- {v.Name}");
+        if (v.Wcid is uint vw) sb.Append($" (wcid={vw}");
+        else sb.Append(" (");
+        if (v.IsCreature)
+        {
+            // Slice H — discriminate combat targets from civilians.
+            // `monster` = server-flagged Attackable AND no custom radar
+            // blip color AND not Vendor/Healer. `npc` = any other
+            // creature. Both signals come from the wire; we never
+            // hardcode wcid lists or English-name matches.
+            if (v.IsMonster) sb.Append(" monster");
+            else             sb.Append(" npc");
+        }
+        if (v.IsPortal)   sb.Append(" portal");
+        if (v.IsDoor)     sb.Append(" door");
+        if (v.IsCorpse)   sb.Append(" corpse");
+        if (v.IsChest)    sb.Append(" chest");
+        if (v.IsBook)     sb.Append(" book");
+        if (v.IsSign)     sb.Append(" sign");
+        if (v.IsLifestone) sb.Append(" lifestone");
+        if (v.IsVendor)   sb.Append(" vendor");
+        if (v.IsHealer)   sb.Append(" healer");
+        if (v.IsOpenable) sb.Append(" openable");
+        if (v.ObservedHostile) sb.Append(" HOSTILE");
+        if (v.Distance is float d) sb.Append($" d={d:F1}");
+        sb.Append(')');
+        return sb.ToString();
+    }
+
+    private static string SummarizeOmittedTags(IReadOnlyList<VisibleObjectProjection> omitted)
+    {
+        int monster = 0, npc = 0, portal = 0, door = 0, corpse = 0, chest = 0,
+            book = 0, sign = 0, lifestone = 0, vendor = 0, healer = 0, openable = 0;
+        foreach (var v in omitted)
+        {
+            if (v.IsCreature) { if (v.IsMonster) monster++; else npc++; }
+            if (v.IsPortal) portal++;
+            if (v.IsDoor) door++;
+            if (v.IsCorpse) corpse++;
+            if (v.IsChest) chest++;
+            if (v.IsBook) book++;
+            if (v.IsSign) sign++;
+            if (v.IsLifestone) lifestone++;
+            if (v.IsVendor) vendor++;
+            if (v.IsHealer) healer++;
+            if (v.IsOpenable) openable++;
+        }
+        var parts = new List<string>();
+        void Add(string k, int n) { if (n > 0) parts.Add($"{k}={n}"); }
+        Add("monster", monster); Add("npc", npc); Add("portal", portal);
+        Add("door", door); Add("corpse", corpse); Add("chest", chest);
+        Add("book", book); Add("sign", sign); Add("lifestone", lifestone);
+        Add("vendor", vendor); Add("healer", healer); Add("openable", openable);
+        return parts.Count == 0 ? "(none)" : string.Join(", ", parts);
+    }
+
+    internal static void AppendVisibleNearby(StringBuilder sb, IReadOnlyList<VisibleObjectProjection> visible)
+    {
+        if (visible.Count == 0) { sb.AppendLine("- (nothing)"); return; }
+
+        var tagged = visible.Where(IsTaggedVisible)
+            .OrderBy(v => v.Distance ?? float.MaxValue).ToList();
+        var plain = visible.Where(v => !IsTaggedVisible(v))
+            .OrderBy(v => v.Distance ?? float.MaxValue).ToList();
+
+        // Rows must fit within the budget minus the summary headroom so the
+        // closing omission-summary lines never push the section over budget.
+        int rowBudget = VisibleSectionCharBudget - VisibleSummaryReserve;
+        int chars = 0;
+        int taggedShown = 0;
+        foreach (var v in tagged)
+        {
+            var row = ClampRow(RenderVisibleRow(v));
+            int cost = row.Length + 1; // include the newline AppendLine adds
+            // Always render at least one tagged row (clamped); otherwise stop
+            // once the next row would exceed the row budget so the section
+            // stays bounded even when tagged objects alone are numerous.
+            if (taggedShown > 0 && chars + cost > rowBudget) break;
+            sb.AppendLine(row);
+            chars += cost;
+            taggedShown++;
+        }
+        if (taggedShown < tagged.Count)
+        {
+            var omitted = tagged.Skip(taggedShown).ToList();
+            sb.AppendLine($"- (+{omitted.Count} more tagged objects not shown due to prompt budget: {SummarizeOmittedTags(omitted)})");
+        }
+
+        int plainShown = 0;
+        foreach (var v in plain)
+        {
+            if (plainShown >= VisiblePlainSoftCap) break;
+            var row = ClampRow(RenderVisibleRow(v));
+            int cost = row.Length + 1;
+            if (chars + cost > rowBudget) break;
+            sb.AppendLine(row);
+            chars += cost;
+            plainShown++;
+        }
+        if (plainShown < plain.Count)
+        {
+            sb.AppendLine($"- (+{plain.Count - plainShown} more distant plain objects not shown)");
+        }
     }
 
     internal static bool TryParseGoal(string json, out Goal? goal, out string? error)
