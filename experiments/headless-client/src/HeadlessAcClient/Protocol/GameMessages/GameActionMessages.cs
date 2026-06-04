@@ -37,6 +37,7 @@ internal enum GameActionType : uint
 {
     LoginComplete       = 0x00A1,
     PutItemInContainer  = 0x0019,
+    UseWithTarget       = 0x0035,
     Use                 = 0x0036,
     MoveToState         = 0xF61C,
     AutonomousPosition  = 0xF753,
@@ -208,6 +209,49 @@ internal static class GameActionUseMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.Use, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);
         cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// UseWithTarget (0x0035). The two-object "use item on target"
+/// interact opcode: sent by the real client when the user uses an
+/// inventory item ON a world object (e.g. a key on a locked chest, a
+/// lockpick on a lock, an ust on a salvageable item). Server handler
+/// is <c>Source/ACE.Server/Network/GameAction/Actions/GameActionUseWithTarget.cs</c>:
+/// <code>
+///   uint sourceObjectGuid = message.Payload.ReadUInt32();
+///   uint targetObjectGuid = message.Payload.ReadUInt32();
+///   session.Player.HandleActionUseWithTarget(sourceObjectGuid, targetObjectGuid);
+/// </code>
+///
+/// Payload after the 12-byte GameAction header, in strict order:
+///   u32 sourceObjectGuid   (the item being applied — e.g. the key,
+///                           from our inventory)
+///   u32 targetObjectGuid   (the world object it is applied to —
+///                           e.g. the locked chest)
+/// = 20 bytes total.
+///
+/// NOTE: for a locked container this UNLOCKS the target (sets
+/// IsLocked=false / broadcasts Locked=false) but does NOT open it; a
+/// follow-up plain <see cref="GameActionUseMessage"/> on the now-unlocked
+/// container is what opens it and reveals loot. The motor only
+/// mechanically dispatches this opcode when the LLM emits a Use goal
+/// carrying an inventory Item; it makes no decision about WHICH item or
+/// target — that is the LLM's job.
+/// </summary>
+internal static class GameActionUseWithTargetMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, uint sourceGuid, uint targetGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.UseWithTarget, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), sourceGuid); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
         return cursor;
     }
 }
