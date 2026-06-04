@@ -1798,6 +1798,112 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_DwellEntry_RendersNumberWithoutLandblockChangedEvent()
+    {
+        // Regression for the town-stuck dwell bug: a bot that entered its
+        // landblock via login/enter-world emits NO LandblockChanged event,
+        // so the OLD event-window-only logic rendered the un-gateable
+        // string "(no LandblockChanged event in retained window)" and the
+        // town-stuck loop-break rule could never evaluate its `> 5` gate.
+        // With a durable entry timestamp the prompt must render a NUMBER
+        // even when the event stream holds NO LandblockChanged event.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "noise" });
+
+        var entry = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(7);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), es, null, stack: null, pickerActivity: null,
+            explorationCandidates: null, dwellEntryUtc: entry);
+
+        Assert.DoesNotContain("no LandblockChanged event in retained window", prompt);
+        var m = System.Text.RegularExpressions.Regex.Match(
+            prompt, @"minutes in current landblock: (\d+\.\d)");
+        Assert.True(m.Success, "dwell must render a numeric value");
+        var dwell = double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+        Assert.InRange(dwell, 6.5, 7.5);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DwellEntry_NullFallsBackToEventWindow()
+    {
+        // When no durable entry is supplied (e.g. unknown self-landblock),
+        // the builder must preserve the prior event-window behaviour: with
+        // no LandblockChanged event it renders the explicit "(no ...)"
+        // string rather than fabricating a number.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "noise" });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), es, null, stack: null, pickerActivity: null,
+            explorationCandidates: null, dwellEntryUtc: null);
+
+        Assert.Contains("minutes in current landblock: (no LandblockChanged event in retained window)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DwellEntry_ClampsNegativeToZero()
+    {
+        // A backward clock adjustment could put the entry stamp in the
+        // future; the LLM must never see a negative dwell.
+        var es = new EventStream();
+        var futureEntry = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(5);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), es, null, stack: null, pickerActivity: null,
+            explorationCandidates: null, dwellEntryUtc: futureEntry);
+
+        Assert.Contains("minutes in current landblock: 0.0", prompt);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_DwellTracking_RendersNumberWhenNoLandblockChangedEvent()
+    {
+        // End-to-end through ProposeGoal: with a known self-landblock and
+        // NO LandblockChanged event in the stream, the durable tracker
+        // stamps an entry on first observation so the prompt renders a
+        // numeric dwell (the town-stuck gate becomes evaluable) instead of
+        // the old un-gateable "(no ...)" string.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "item":   null,
+          "priority": 4,
+          "rationale": "exploring"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld(); // self landblock 0x8602
+        var events = new EventStream();     // deliberately NO LandblockChanged
+        events.Append(new StreamEvent { Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "noise" });
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        using var doc = JsonDocument.Parse(requestBodies[0]);
+        var prompt = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        Assert.DoesNotContain("no LandblockChanged event in retained window", prompt);
+        Assert.Matches(@"minutes in current landblock: \d+\.\d", prompt);
+    }
+
+    [Fact]
     public void IsGoalRecentlyRejected_RejectionWithin30Events_StillMatches()
     {
         // Verify Slice O's widened window (was 15). Push 25 unrelated
@@ -2401,14 +2507,16 @@ public class LlmGoalPolicyTests
 
         var world = BuildExitTokenWorld();
         var events = new EventStream();
-        // Seed: LandblockChanged 8 minutes ago.
+        // Seed: LandblockChanged 8 minutes ago INTO the bot's current
+        // landblock (0x8602 — matches BuildExitTokenWorld's self), so the
+        // durable dwell tracker anchors entry to this observed transition.
         events.Append(new StreamEvent
         {
             Sequence = 0,
             Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(8),
             Kind = EventKind.LandblockChanged,
-            LandblockFrom = 0x8602u,
-            LandblockTo = 0xA9B4u,
+            LandblockFrom = 0xA9B4u,
+            LandblockTo = 0x8602u,
         });
         // Seed: 4 Talk goals to "Buckminster", 1 to "Alcott".
         for (var i = 0; i < 4; i++)
