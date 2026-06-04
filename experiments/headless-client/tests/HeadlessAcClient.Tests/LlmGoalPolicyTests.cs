@@ -2003,7 +2003,7 @@ public class LlmGoalPolicyTests
 
         Assert.Contains("Looting:", prompt);
         Assert.Contains("corpse", prompt);
-        Assert.Contains("Use{target: name=\"<corpse name>\"}", prompt);
+        Assert.Contains("Use{target: name=\"<corpse>\"}", prompt);
         Assert.Contains("Pickup{target: name=\"<item>\"}", prompt);
     }
 
@@ -2044,7 +2044,7 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
 
         Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", prompt);
-        Assert.Contains("you can never return", prompt);
+        Assert.Contains("irreversible", prompt);
     }
 
     [Fact]
@@ -2411,7 +2411,7 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("monster", jonathanLine);
 
         // Slice H RULES line is present (so the LLM knows what `monster` means).
-        Assert.Contains("Combat: creatures tagged `monster`", prompt);
+        Assert.Contains("`monster`-tagged creatures", prompt);
     }
 
     [Fact]
@@ -2706,7 +2706,7 @@ public class LlmGoalPolicyTests
         Assert.Contains("Lever", lrBlock);
 
         // The world-object USE loop-break rule must be present.
-        Assert.Contains("LOOP-BREAK (world-object USE loop)", prompt);
+        Assert.Contains("(c) world-object USE", prompt);
 
         // The passage-opened-is-not-progress rule must be present so the
         // model does not treat "door opened" as a qualifying state change
@@ -3769,7 +3769,7 @@ public class LlmGoalPolicyTests
     {
         var es = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
-        Assert.Contains("LOOP-BREAK (inventory-USE loop)", prompt);
+        Assert.Contains("(b) inventory-USE", prompt);
     }
 
     // ---- Sticky LLM-objective (call-volume reduction) ----
@@ -4269,5 +4269,66 @@ public class LlmGoalPolicyTests
 
         Assert.True(text.Length <= 10000, $"section was {text.Length} chars");
         Assert.Contains("\u2026", text); // ellipsis marks the clamp
+    }
+
+    // Prompt-floor compaction: the static RULES + schema text dominates the
+    // user prompt and drives gpt-4.1-mini's http-413 in dense areas. Lock the
+    // floor in with a near-empty world so it cannot silently regrow.
+    [Fact]
+    public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.True(prompt.Length <= 13000,
+            $"static prompt floor grew to {prompt.Length} chars (budget 13000)");
+    }
+
+    // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
+    // the concrete trigger->action clauses or forbidden-action guidance that
+    // each RULES bullet encodes (every one was added to fix an observed bot
+    // failure). Assert distinctive clauses, not just section headings, so a
+    // trim that drops the actual instruction fails the build.
+    [Fact]
+    public void BuildUserPrompt_RulesRetainCriticalBehaviorClauses()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+
+        // anti-hallucination + selector preference
+        Assert.Contains("Reason ONLY from the observed world", p);
+        Assert.Contains("NAME selectors over wcid", p);
+        // short_desc clue + Give arity
+        Assert.Contains("short_desc", p);
+        // rejection handling + blocked-combo prerequisite + self-use unlock
+        Assert.Contains("Do NOT", p);
+        Assert.Contains("double-click", p);
+        // combat target discrimination + proactive leveling
+        Assert.Contains("LEVELING is core progress", p);
+        Assert.Contains("monster", p);
+        // combat safety: disengage + avoid the killer kind
+        Assert.Contains("COMBAT SAFETY", p);
+        Assert.Contains("DISENGAGE", p);
+        Assert.Contains("AVOID re-attacking the same KIND", p);
+        // looting: never skip a fresh corpse
+        Assert.Contains("NEVER skip a fresh corpse", p);
+        // door / passage traversal
+        Assert.Contains("PASSAGE-OPENED is not progress", p);
+        // loop-break + town-stuck + hunt excursion
+        Assert.Contains("LOOP-BREAK", p);
+        // (b) inventory-USE must keep its post-break fallback action ladder
+        Assert.Contains("not-yet-talked visible NPC", p);
+        // (c) world-object USE must keep the concrete "what changed" exceptions
+        Assert.Contains("an `ActionRejected` told you to retry", p);
+        Assert.Contains("town-stuck", p);
+        Assert.Contains("HUNT EXCURSION", p);
+        Assert.Contains("KEEP emitting it", p);
+        // blocked targets, transitions, pursue-unseen, server precedence
+        Assert.Contains("BLOCKED targets", p);
+        Assert.Contains("PURSUE UNSEEN OBJECTIVES", p);
+        Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", p);
+        Assert.Contains("FINISH MULTI-STEP DIRECTIVES", p);
+        Assert.Contains("AUTONOMOUS PICKER", p);
     }
 }
