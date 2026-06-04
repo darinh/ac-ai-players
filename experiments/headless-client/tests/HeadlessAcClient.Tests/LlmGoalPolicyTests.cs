@@ -3637,6 +3637,181 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
     }
 
+    // ---- 2026-06-04 Stationary world-object USE loop-break ----
+    //
+    // Holtburg door-loop: a fresh L1 bot looped Use{Door} 8x against an
+    // indoor door the motor OPENS (UseDone ok) but cannot path the bot
+    // THROUGH to the adjacent cell (indoor-nav 0 waypoints across the
+    // cell boundary). The Use succeeds (no ActionRejected) and is not an
+    // inventory item, so the rejection + inventory-USE guards both miss
+    // it; the recency prompt section surfaces the repeat but a weak model
+    // loops anyway. IsStationaryWorldUseRepeat tracks the bot's OWN Use
+    // identity + self cell/position and drops a STATIONARY repeat so the
+    // bot defers to the fallback instead of re-locking the dead target.
+
+    private static LlmGoalPolicy MakeStationaryUsePolicy()
+    {
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("unused") }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        return new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
+    }
+
+    private static WorldStateProjection WorldAt(uint landblock, uint cell, float x, float y) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = landblock, CellId = cell,
+            PositionX = x, PositionY = y, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = Array.Empty<VisibleObjectProjection>(),
+    };
+
+    private static StreamEvent InvAdded(string name) => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow,
+        Kind = EventKind.InventoryItemAdded, Name = name,
+    };
+
+    [Fact]
+    public void StationaryWorldUseRepeat_DropsThirdSameDoorUse_WhenBotHasNotMoved()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 106.5f, 31.4f);
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es)); // 1st seen
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es)); // 2nd seen
+        Assert.True(policy.IsStationaryWorldUseRepeat(goal, world, es));  // 3rd -> stuck
+        Assert.True(policy.IsStationaryWorldUseRepeat(goal, world, es));  // stays stuck until movement
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_ResetsWhenBotChangesCell()
+    {
+        // Legit indoor corridor of doors all named "Door" (intra-landblock,
+        // no LandblockChanged): the bot WALKS between them so its cell
+        // changes each time -> never treated as stuck.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // moved cell
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es)); // moved cell
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_ResetsWhenBotMovesPastEpsilon()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0f, 0f), es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 5f, 0f), es)); // moved > epsilon
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 10f, 0f), es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_JitterWithinEpsilon_StillTrips()
+    {
+        // Sub-epsilon position jitter from server broadcasts must NOT
+        // reset the count — the bot is effectively stationary.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0.0f, 0.0f), es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0.3f, 0.2f), es)); // <0.75u
+        Assert.True(policy.IsStationaryWorldUseRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0.1f, 0.4f), es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_ExemptsWhenInventoryChanges()
+    {
+        // Looting a corpse/chest in place: the Use yields InventoryItemAdded
+        // each time, so the bot IS making progress even though it has not
+        // moved -> must never be suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Corpse" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        es.Append(InvAdded("Loot 1"));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        es.Append(InvAdded("Loot 2"));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_IgnoresInventoryUseGoals()
+    {
+        // goal.Item set => inventory / use-with-target; owned by
+        // IsInventoryUseRecentlyDispatched, not this guard.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Chest" },
+            Item = new Selector { Name = "Key" },
+        };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_IgnoresNonUseGoals()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "NPC" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(talk, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(talk, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(talk, world, es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_DistinctGuidTargets_DoNotCollapse()
+    {
+        // When the LLM emits guids, two distinct doors keep distinct keys
+        // and alternating between them never trips either.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        var doorA = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x7A9B4019u } };
+        var doorB = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x7A9B401Au } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(doorA, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(doorB, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(doorA, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(doorB, world, es));
+    }
+
+    [Fact]
+    public void StationaryWorldUseRepeat_UnderspecifiedSelector_NotGuarded()
+    {
+        // name_contains / wcid / mask only -> no stable per-object identity
+        // -> never guarded (returns false even when repeated in place).
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector { NameContains = "oor" } };
+
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+        Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
+    }
+
     [Fact]
     public void InventoryItemUsed_IsNotPlanInvalidating()
     {

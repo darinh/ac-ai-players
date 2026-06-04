@@ -141,6 +141,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private string? _lastPickerStartWakeKey;
     private DateTimeOffset _lastPickerStartWakeAtUtc = DateTimeOffset.MinValue;
 
+    // World-object USE loop-break state (2026-06-04). A weak model can
+    // loop Use{same world object} when the Use SUCCEEDS (e.g. a door
+    // opens) but yields no progress the bot can act on — classically an
+    // indoor door the motor opens but cannot path the bot THROUGH to the
+    // adjacent cell. Such a Use is neither ActionRejected (it succeeded)
+    // nor an inventory item, so IsGoalRecentlyRejected and
+    // IsInventoryUseRecentlyDispatched both miss it. This holds the
+    // identity + self position of the last accepted world-object Use so a
+    // STATIONARY repeat (same target, bot has not moved, nothing entered
+    // or left inventory) can be detected and dropped. Pure mechanical
+    // bookkeeping over the bot's OWN emission key + its OWN self cell/
+    // position + inventory-change events — no object-type knowledge.
+    private WorldUseRepeat? _lastWorldUseRepeat;
+
+    private sealed record WorldUseRepeat(
+        string Key, uint? Landblock, uint? Cell, float X, float Y, long SequenceFloor, int Count);
+
+    // Tunables for the stationary world-object USE loop-break.
+    private const float StationaryUseEpsilon = 0.75f;
+    private const float StationaryUseEpsilonSq = StationaryUseEpsilon * StationaryUseEpsilon;
+    private const int StationaryUseRepeatThreshold = 3;
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -778,6 +800,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // World-object USE loop-break (2026-06-04): a Use that SUCCEEDS
+        // but makes no progress (the bot cannot path through the opened
+        // door, no loot, no movement) is re-emitted forever by a weak
+        // model even though "## Location & recency" already surfaces the
+        // repeat. Drop the STATIONARY repeat (same target, bot has not
+        // moved, no inventory change) and defer to the fallback so the bot
+        // does something else. Complements the inventory-USE dedup above
+        // (which owns goal.Item Uses); this owns bare world-object Uses.
+        if (IsStationaryWorldUseRepeat(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Use target={goal.Target}" +
+                " — stationary world-object Use repeated with no progress; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: stationary no-op world-object Use loop");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -1020,8 +1060,93 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
-    /// Returns true if any event newer than <paramref name="sequenceFloor"/>
-    /// is plan-invalidating: it makes the in-flight LLM response
+    /// True iff this Use goal is a STATIONARY repeat of the last accepted
+    /// world-object Use: same canonical target, the bot has not changed
+    /// landblock/cell and has not moved more than
+    /// <see cref="StationaryUseEpsilon"/> units, and nothing entered or
+    /// left inventory since that Use. Such a loop is a no-op (e.g. a door
+    /// the motor opens but cannot path the bot THROUGH to the next cell) —
+    /// the caller drops it and defers to the fallback so the bot tries a
+    /// different action instead of re-locking the dead target every tick.
+    /// Returns true once the same stationary Use is seen
+    /// <see cref="StationaryUseRepeatThreshold"/> times in a row.
+    ///
+    /// <para>Stateful: each call updates the tracked Use identity/position.
+    /// Only world-object Uses (<c>goal.Item is null</c>) are considered —
+    /// inventory Uses are owned by
+    /// <see cref="IsInventoryUseRecentlyDispatched"/>. The state stays
+    /// active across drops so the bot remains unstuck until it actually
+    /// moves (cell/position change) or inventory changes.</para>
+    ///
+    /// <para>Audit note: mechanical bookkeeping over the bot's OWN emission
+    /// key + its OWN self cell/position + inventory-change events. Encodes
+    /// no object-type knowledge (no door/chest/portal special-casing) and
+    /// parses no server text.</para>
+    /// </summary>
+    internal bool IsStationaryWorldUseRepeat(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Use) return false;
+        if (goal.Item is not null) return false;
+
+        var key = CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+
+        var self = world.Self;
+        var prev = _lastWorldUseRepeat;
+
+        bool sameTarget = prev is not null &&
+            string.Equals(prev.Key, key, StringComparison.OrdinalIgnoreCase);
+
+        bool moved = prev is null
+            || prev.Landblock != self.Landblock
+            || prev.Cell != self.CellId
+            || SquaredXyDistance(prev.X, prev.Y, self.PositionX, self.PositionY) > StationaryUseEpsilonSq;
+
+        bool inventoryChanged = prev is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, prev.SequenceFloor)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, prev.SequenceFloor));
+
+        if (!sameTarget || moved || inventoryChanged)
+        {
+            _lastWorldUseRepeat = new WorldUseRepeat(
+                key, self.Landblock, self.CellId, self.PositionX, self.PositionY,
+                events.NextSequence, 1);
+            return false;
+        }
+
+        int count = prev!.Count + 1;
+        _lastWorldUseRepeat = prev with
+        {
+            X = self.PositionX,
+            Y = self.PositionY,
+            SequenceFloor = events.NextSequence,
+            Count = count,
+        };
+        return count >= StationaryUseRepeatThreshold;
+    }
+
+    private static float SquaredXyDistance(float ax, float ay, float bx, float by)
+    {
+        var dx = ax - bx;
+        var dy = ay - by;
+        return dx * dx + dy * dy;
+    }
+
+    /// <summary>
+    /// Canonical identity for a world-object Use target: the guid token if
+    /// present, else the exact-name token, else null (an under-specified
+    /// selector — name_contains / wcid / mask only — has no stable
+    /// per-object identity to loop-break on, so it is not guarded). Built
+    /// from the same fields <see cref="Selector.ToString"/> renders so it
+    /// agrees with the "Location &amp; recency" Use-emission key.
+    /// </summary>
+    private static string? CanonicalUseTargetKey(Selector? sel)
+    {
+        if (sel is null) return null;
+        if (sel.Guid is { } g) return $"guid=0x{g:X8}";
+        if (!string.IsNullOrEmpty(sel.Name)) return $"name=\"{sel.Name}\"";
+        return null;
+    }
     /// (which was generated against an older world snapshot) unsafe
     /// to act on. INTENTIONALLY narrower than the "wake the LLM"
     /// trigger set — chatty events (ServerMessage, NpcDialog,
