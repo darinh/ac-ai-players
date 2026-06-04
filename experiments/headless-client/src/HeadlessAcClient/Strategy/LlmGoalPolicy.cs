@@ -1133,6 +1133,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Reading vs taking writables: a `sign` (writable AND stuck — bolted to a wall) must be read in place with `Use{target: name=\"<sign>\"}`. A `book` (writable, NOT stuck — sitting on a table or floor) is pickup-able like any other item; prefer `Pickup{target: name=\"<book>\"}` so you can read it later and free up the spot for other observations. The `Visible nearby` tag is `sign` vs `book`.");
         sb.AppendLine("- LOOP-BREAK (Talk loop): If you have emitted `Talk{X}` 3 or more times in the last 10 goal emissions (see the Location & recency section below) AND no new inventory item has been added since AND no new unique server hint has appeared, STOP talking to X. Talk to a different visible NPC, or Use/Give an inventory item to a different target, or emit `Explore`.");
         sb.AppendLine("- LOOP-BREAK (inventory-USE loop): If `## Recently used inventory items` lists an item as `still in inventory (not consumed)`, the policy WILL drop any Use goal you emit against that item. Do not emit Use{<that item>} again unless a new event (ActionRejected with a recovery hint, new NPC dialog, new server hint, or inventory change) gives concrete reason to retry. When the loop is broken pick a different action: if `Combat readiness` shows a wielded weapon and a `monster` in view, prefer `Attack`; if a visible NPC has not yet been talked to recently, prefer `Talk`; if a `pickup`-eligible item is visible, prefer `Pickup`; otherwise `Explore`.");
+        sb.AppendLine("- LOOP-BREAK (world-object USE loop): The `Location & recency` section below lists `recent Use emissions` per target. If it shows you have Used the SAME target 3 or more times AND your situation has not changed since (still in the same landblock — see `minutes in current landblock` — with no new server hint and no inventory change), STOP re-Using that object. Using it again will repeat the same no-op result. An object you have Used repeatedly that produced no new event or state change (no move to a new area, no new hint, no inventory change) is a dead end for now: emit `Explore{target: {name: \"anywhere\"}}` to discover a different route, or pick a different visible target. Re-Use the object ONLY if something concrete changed (you crossed into a new landblock, a new hint or item appeared, or an ActionRejected told you to retry).");
         sb.AppendLine("- LOOP-BREAK (town-stuck): If `minutes in current landblock` is greater than 5 AND `Combat readiness` shows `nearest monster: (none in view)` AND every visible creature is tagged `npc` (no `monster` tag anywhere in Visible nearby), you are STUCK INDOORS in a town. Stop cycling through NPCs — they have no more quests for you here. Emit `Explore{target: {name: \"anywhere\"}}` immediately. The schema picker will walk you through visible Doors and portals to discover new NPCs, monsters, and items. Combat XP, loot, and contracts happen OUTDOORS, not in town interiors. This rule OVERRIDES `Talk` and `Give` even when a new NPC is visible — talk-to-every-NPC is not progress when there are no monsters in view.");
         sb.AppendLine("- BLOCKED targets: an `ActionRejected` with label `Blocked` or `Unreachable` means the bot tried to walk to that target and server physics held it in place against geometry (a wall, a closed door, a barrier). Do NOT re-emit the same target — you will hit the same wall. Prefer a different visible target: if a Door is in the visible-nearby list, walk to or use the door first (it likely leads to the room your previous target is in). If no door is visible, emit `Explore` to discover a route around the obstacle. NEVER assume the bot can clip through obstacles.");
         if (stack is not null)
@@ -1407,6 +1408,47 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         else
         {
             sb.AppendLine("- recent Talk emissions: (none)");
+        }
+        // Per-target recent Use emissions (last 10 GoalEmitted events
+        // of kind Use). Mirrors the Talk-count surface so the LLM can
+        // see when it is re-Using the SAME world object (e.g. a door
+        // that opens but never transports it). The key is the verbatim
+        // target-selector substring the bot itself emitted (guid and/or
+        // name), so two Uses of the same object collapse to one count
+        // and two distinct objects stay separate. No server text is
+        // parsed and no object-type knowledge is used — this is the
+        // bot's own emission history, counted by structure only.
+        var useCountByTarget = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Use ", StringComparison.Ordinal)) continue;
+            var m = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!m.Success) continue;
+            var sel = m.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            // Canonicalize to a stable identity so the same object
+            // collapses to one count even when emitted with different
+            // selector detail (guid+name one tick, name-only the next).
+            // Prefer the guid token, else the name token, else the whole
+            // selector. Mechanical structural parse of the bot's own
+            // emission — no object-type knowledge.
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"[^\"]*\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Value : sel);
+            useCountByTarget[key] = useCountByTarget.TryGetValue(key, out var c) ? c + 1 : 1;
+        }
+        if (useCountByTarget.Count > 0)
+        {
+            sb.AppendLine("- recent Use emissions (last 10 goals):");
+            foreach (var kv in useCountByTarget.OrderByDescending(p => p.Value))
+            {
+                sb.AppendLine($"    - {kv.Key}: x{kv.Value}");
+            }
+        }
+        else
+        {
+            sb.AppendLine("- recent Use emissions: (none)");
         }
         sb.AppendLine();
 
