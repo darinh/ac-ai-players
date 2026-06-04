@@ -2686,6 +2686,315 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCallCount);
     }
 
+    // ---- reduce-llm-call-volume — picker-start coalesce + dedupe ----
+
+    private static (LlmGoalClient llm, Func<int> count) CannedExploreLlm()
+    {
+        var httpCallCount = 0;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        content = JsonSerializer.Serialize(new
+                        {
+                            goal_id = "11111111-2222-3333-4444-555555555555",
+                            kind = "Explore",
+                            target = new { name = "anywhere" },
+                            priority = 5,
+                            expires_in_seconds = 60,
+                        }),
+                    },
+                },
+            },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        return (llm, () => Volatile.Read(ref httpCallCount));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_PickerStart_SameTargetWithinWindow_Suppressed()
+    {
+        // reduce-llm-call-volume: a NEW picker-start target wakes the LLM,
+        // but a REPEAT start for the SAME target inside PickerStartCoalesce
+        // must NOT burn another call — the autonomous picker churning on
+        // one target should not keep waking the strategy layer.
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+            PickerStartCoalesce = TimeSpan.FromHours(1), // same-target never elapses in this test
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(1, count());
+
+        // First start for target A → wakes (new target).
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal);
+        await policy.WaitForInFlightAsync();
+        var goal2 = policy.ProposeGoal(world, events, goal); // consume the 2nd result
+        Assert.Equal(2, count());
+
+        // Second start for the SAME target A within the window → suppressed.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        var stayed = policy.ProposeGoal(world, events, goal2);
+        Assert.Equal(2, count());        // no new call
+        Assert.Equal(goal2, stayed);     // keeps driving the current goal
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_PickerStart_DifferentTarget_Wakes()
+    {
+        // reduce-llm-call-volume: a start for a DIFFERENT target than the
+        // last picker-start wake still wakes immediately — the LLM never
+        // loses the chance to override a genuinely new autonomous pick.
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+            PickerStartCoalesce = TimeSpan.FromHours(1),
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.Equal(1, count());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal);
+        await policy.WaitForInFlightAsync();
+        var goal2 = policy.ProposeGoal(world, events, goal);
+        Assert.Equal(2, count());
+
+        // Different target B → wakes despite the coalesce window.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xBBBB0002u, Name = "B", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal2);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(3, count());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_PickerStart_SameTargetAfterWindow_Wakes()
+    {
+        // reduce-llm-call-volume: once PickerStartCoalesce elapses, a
+        // repeat start for the same target is allowed to wake again (the
+        // suppression is a rate limit, not a permanent block).
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+            PickerStartCoalesce = TimeSpan.FromMilliseconds(100),
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.Equal(1, count());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal);
+        await policy.WaitForInFlightAsync();
+        var goal2 = policy.ProposeGoal(world, events, goal);
+        Assert.Equal(2, count());
+
+        await Task.Delay(300); // exceed the 100ms coalesce window
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal2);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(3, count());
+    }
+
+    [Fact]
+    public void NewestPickerStartTargetKeySince_PrefersGuidThenNameThenSeq()
+    {
+        var events = new EventStream();
+        // No picker-start → null.
+        Assert.Null(LlmGoalPolicy.NewestPickerStartTargetKeySince(events, -1));
+
+        var guidEv = events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0x1234ABCDu, Name = "Ignored",
+        });
+        Assert.Equal("0x1234ABCD", LlmGoalPolicy.NewestPickerStartTargetKeySince(events, -1));
+
+        // Zero guid falls back to name.
+        var nameEv = events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0u, Name = "OnlyName",
+        });
+        Assert.Equal("name:OnlyName", LlmGoalPolicy.NewestPickerStartTargetKeySince(events, -1));
+
+        // Neither guid nor name falls back to the event's own sequence.
+        var seqEv = events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0u, Name = null,
+        });
+        Assert.Equal($"seq:{seqEv.Sequence}", LlmGoalPolicy.NewestPickerStartTargetKeySince(events, -1));
+
+        // Arrived events are not picker-START — ignored by this helper.
+        var floorAfter = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerArrivedNoAction,
+            ItemGuid = 0x9999u, Name = "Arrived",
+        });
+        Assert.Null(LlmGoalPolicy.NewestPickerStartTargetKeySince(events, floorAfter));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_SuppressedPickerStart_GoalClears_StickyReEmitsWithoutCall()
+    {
+        // reduce-llm-call-volume regression guard (rubber-duck finding):
+        // a suppressed picker-start advances the event floor past itself,
+        // so when the goal later clears the sticky-objective gate is NOT
+        // tripped by the stale picker-start and re-emits the objective for
+        // FREE (no LLM round trip).
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+            PickerStartCoalesce = TimeSpan.FromHours(1),
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        // Establish an LLM goal (sets _lastLlmGoal for the sticky path).
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(1, count());
+
+        // Target A wakes once.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal);
+        await policy.WaitForInFlightAsync();
+        var goal2 = policy.ProposeGoal(world, events, goal);
+        Assert.Equal(2, count());
+
+        // SAME target A within the window → suppressed (advances the floor).
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal2);
+        Assert.Equal(2, count());
+
+        // Goal clears → sticky re-emit, no LLM call (the stale picker-start
+        // was consumed by the suppression, so the gate is not tripped).
+        var sticky = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(sticky);
+        Assert.Equal(2, count());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_SuppressedPickerStart_DoesNotHideInventoryRemoved()
+    {
+        // reduce-llm-call-volume regression guard (rubber-duck finding):
+        // InventoryItemRemoved is EXTERNAL but not salient. A picker-start
+        // sharing its window must NOT let the suppression advance the floor
+        // past the removal — otherwise a completed Give would be hidden
+        // from the sticky gate and the bot would wrongly re-drive it. When
+        // the goal clears, the LLM MUST be consulted (no free sticky).
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+            PickerStartCoalesce = TimeSpan.FromHours(1),
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+        Assert.Equal(1, count());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        policy.ProposeGoal(world, events, goal);
+        await policy.WaitForInFlightAsync();
+        var goal2 = policy.ProposeGoal(world, events, goal);
+        Assert.Equal(2, count());
+
+        // An external InventoryItemRemoved arrives alongside a same-target
+        // picker-start. The picker-start alone would be suppressed, but the
+        // removal must block the floor-advance.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InventoryItemRemoved,
+            ItemGuid = 0xCAFE0001u, Name = "Calling Stone",
+        });
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0xAAAA0001u, Name = "A", Text = "in-range",
+        });
+        // InventoryItemRemoved does not wake while a goal is active.
+        policy.ProposeGoal(world, events, goal2);
+        Assert.Equal(2, count());
+
+        // Goal clears → the removal is still visible to the sticky gate →
+        // NO free sticky re-emit → a real LLM call fires.
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(3, count());
+    }
+
     // ---- Slice W.3 (#88) — arrived-no-action prompt + salience ----
 
     [Fact]

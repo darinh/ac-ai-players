@@ -90,6 +90,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     public int MaxStickyReEmits { get; init; } = 3;
 
+    /// <summary>
+    /// Call-volume reduction: separate, longer coalesce window for the
+    /// picker-START wakeup path. The autonomous fallback picker keeps
+    /// switching targets in an object-rich area, and each
+    /// PickerActivityStarted previously punched through MinCallInterval
+    /// and woke the LLM. That bursts calls (and burns daily quota) when
+    /// there is a lot to look at. A picker-start for the SAME target
+    /// inside this window is suppressed; a NEW target still wakes
+    /// immediately. PickerArrivedNoAction is NOT subject to this — it is
+    /// the safety valve that lets the LLM name a verb before the parked
+    /// bot moves on, so it must still punch through (see the gate in
+    /// ProposeGoal). Pure timing/identity bookkeeping — no game knowledge.
+    /// </summary>
+    public TimeSpan PickerStartCoalesce { get; init; } = TimeSpan.FromSeconds(8);
+
+    // Call-volume reduction: separate state for the picker-START coalesce
+    // + same-target dedupe. Keyed on the picker event's own target
+    // (guid hex when non-zero, else name token) so it is robust to the
+    // SetCurrentPickerActivity timing and works without the driver. This
+    // is DELIBERATELY independent of _lastEventConsideredSequence: a
+    // suppressed picker-start must NOT advance the sticky/external-event
+    // floor, or it would hide real external salient events from the
+    // sticky-objective gate. _lastPickerStartWakeKey holds the target of
+    // the most-recent picker-start that DID wake the LLM; the timestamp
+    // bounds same-target suppression to PickerStartCoalesce.
+    private string? _lastPickerStartWakeKey;
+    private DateTimeOffset _lastPickerStartWakeAtUtc = DateTimeOffset.MinValue;
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -269,19 +297,65 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return currentGoal;
         }
 
-        var hasNewSalient = HasNewSalientEvent(events);
+        var hasNonPickerSalient = HasNewNonPickerSalientEvent(events);
+        var hasNonPickerExternal = HasNewNonPickerExternalEvent(events);
         var stuck = nowUtc - _lastCalledAtUtc > StuckTimeout;
         var coalesce = nowUtc - _lastCalledAtUtc < MinCallInterval;
-        // Slice W.1 (#86) — picker activity bypasses coalesce. The
-        // picker is autonomous in the gap between LLM decisions and
-        // its choices need an LLM check before the bot commits to
-        // them (walks to + dispatches an action against the new
-        // target). Other salient events (rejections, dialog, etc.)
-        // still respect coalesce.
-        var pickerSteering = HasPickerActivityStartedSince(events, _lastEventConsideredSequence);
+        // Picker wakeups are split (call-volume reduction).
+        //
+        // - PickerArrivedNoAction: the picker parked the bot next to a
+        //   target and sent NO opcode; the LLM has a narrow window to
+        //   name a verb before the picker moves on. This is the safety
+        //   valve against the bot looking dumb near a discovered target,
+        //   so it MUST still punch through coalesce on every occurrence.
+        // - PickerActivityStarted: the picker merely switched its
+        //   auto-driven target. In an object-rich area this fires
+        //   constantly and used to wake the LLM every time, bursting
+        //   calls. Now a start for the SAME target within
+        //   PickerStartCoalesce is suppressed; a NEW target still wakes
+        //   immediately (so the LLM never loses the chance to override a
+        //   genuinely new autonomous pick before the bot commits).
+        var pickerArrived = HasPickerArrivedSince(events, _lastEventConsideredSequence);
+        var pickerStartKey = NewestPickerStartTargetKeySince(events, _lastEventConsideredSequence);
+        var pickerStartWake = pickerStartKey is not null && ShouldWakeForPickerStart(pickerStartKey, nowUtc);
 
-        if (currentGoal is not null && !hasNewSalient && !stuck) return currentGoal;
-        if (coalesce && currentGoal is not null && !pickerSteering) return currentGoal;
+        // Suppressed picker-start: a same-target (or in-window) start was
+        // the ONLY thing that would have woken the LLM. Skip the call and
+        // keep driving the current goal.
+        //
+        // We ADVANCE _lastEventConsideredSequence past the consumed
+        // picker-start(s) here. This is safe — and necessary — because the
+        // guard proves the window since the floor contains NO genuinely
+        // external event: !hasNonPickerSalient rules out every salient
+        // non-picker kind, and !hasNonPickerExternal additionally rules out
+        // InventoryItemRemoved (external but not salient — e.g. a completed
+        // Give). So the only thing being consumed is picker-start noise we
+        // are deliberately ignoring. Without advancing, the single
+        // per-switch picker-start would linger in the stream and (a) re-log
+        // this suppression every tick, and (b) later trip the
+        // sticky-objective gate's HasNewExternalSalientEvent once the goal
+        // clears, defeating the free sticky re-emit. The picker-start
+        // dedupe window itself is tracked by SEPARATE state
+        // (_lastPickerStartWakeKey/_lastPickerStartWakeAtUtc), so advancing
+        // the floor does not disturb it.
+        if (pickerStartKey is not null && !pickerStartWake
+            && currentGoal is not null
+            && !hasNonPickerSalient && !hasNonPickerExternal
+            && !pickerArrived && !stuck)
+        {
+            var sameTarget = string.Equals(pickerStartKey, _lastPickerStartWakeKey, StringComparison.Ordinal);
+            Console.WriteLine(
+                $"[llm-call] suppressed reason=picker-start-{(sameTarget ? "same-target" : "coalesce")} " +
+                $"target={pickerStartKey} window={PickerStartCoalesce.TotalSeconds:F0}s");
+            _lastEventConsideredSequence = events.NextSequence;
+            return currentGoal;
+        }
+
+        var anyWake = hasNonPickerSalient || pickerArrived || pickerStartWake;
+        if (currentGoal is not null && !anyWake && !stuck) return currentGoal;
+        // Non-picker salient events still respect the 2s coalesce; the
+        // picker arrival + new-target picker-start paths bypass it.
+        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake) return currentGoal;
 
         // STICKY LLM-OBJECTIVE (call-volume reduction). The tactical
         // goal has cleared (currentGoal == null), so without this gate
@@ -328,6 +402,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
 
+        // Record the picker-start wake (separate from the event floor) so
+        // a repeat start for the SAME target is coalesced for the next
+        // PickerStartCoalesce window. Only record when a picker-start was
+        // the (or a) reason we are waking — never infer sanction from a
+        // call triggered by something else.
+        if (pickerStartWake && pickerStartKey is not null)
+        {
+            _lastPickerStartWakeKey = pickerStartKey;
+            _lastPickerStartWakeAtUtc = nowUtc;
+        }
+
         var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
@@ -337,12 +422,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // and how often. Without this the bot parks at "PICKER
         // ARRIVED no-action" silently and the operator cannot
         // distinguish "LLM never called" from "LLM called and
-        // failed silently into the fallback path".
+        // failed silently into the fallback path". Trigger categories
+        // are mutually exclusive and measurable (the old classification
+        // could never report picker-steering because the picker kinds
+        // were folded into the wider salient check first).
         var trigger = currentGoal is null
             ? "no-current-goal"
-            : (hasNewSalient ? "new-salient-event"
-                : (pickerSteering ? "picker-steering"
-                    : (stuck ? "stuck-timeout" : "unknown")));
+            : (hasNonPickerSalient ? "non-picker-salient"
+                : (pickerArrived ? "picker-arrived"
+                    : (pickerStartWake ? "picker-start"
+                        : (stuck ? "stuck-timeout" : "unknown"))));
         Console.WriteLine(
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
             $"prompt-bytes={userPrompt.Length} model={_client.Model}");
@@ -1084,12 +1173,86 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                               or EventKind.PickerArrivedNoAction);
     }
 
+    internal static bool IsPickerKind(EventKind kind) =>
+        kind is EventKind.PickerActivityStarted
+             or EventKind.PickerArrivedNoAction;
+
+    // Call-volume reduction: PickerArrivedNoAction since the floor. This
+    // is the safety valve (the bot is parked next to a target with no
+    // verb), so it always wakes the LLM — it is NOT subject to the
+    // picker-start coalesce. Split out from the picker-start path so the
+    // two wakeups can be gated independently.
+    internal static bool HasPickerArrivedSince(EventStream events, long sequenceFloor)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.PickerArrivedNoAction);
+    }
+
+    // Call-volume reduction: target key of the NEWEST PickerActivityStarted
+    // since the floor, or null if there is none. The key identifies the
+    // picker's auto-driven target so a rapid sequence of starts toward the
+    // SAME target can be coalesced. GUID-first (the stable identity); name
+    // is a fallback; a start with neither falls back to its own sequence
+    // number so it is always treated as a distinct (new) target and never
+    // wrongly suppressed. No game knowledge — the key is an opaque identity
+    // token, never interpreted as what the target IS in-game.
+    internal static string? NewestPickerStartTargetKeySince(EventStream events, long sequenceFloor)
+    {
+        foreach (var e in events.Recent().TakeWhile(ev => ev.Sequence >= sequenceFloor))
+        {
+            if (e.Kind != EventKind.PickerActivityStarted) continue;
+            if (e.ItemGuid is uint g && g != 0) return $"0x{g:X8}";
+            if (!string.IsNullOrWhiteSpace(e.Name)) return $"name:{e.Name}";
+            return $"seq:{e.Sequence}";
+        }
+        return null;
+    }
+
+    // Wake the LLM for a picker-start iff it is a NEW target (different
+    // from the last picker-start that woke us) OR enough time has elapsed
+    // since that wake (PickerStartCoalesce). Same target within the window
+    // is suppressed. Keyed on separate state so it never disturbs the
+    // sticky/external-event floor.
+    private bool ShouldWakeForPickerStart(string key, DateTimeOffset nowUtc)
+        => !string.Equals(key, _lastPickerStartWakeKey, StringComparison.Ordinal)
+           || nowUtc - _lastPickerStartWakeAtUtc >= PickerStartCoalesce;
+
     private bool HasNewSalientEvent(EventStream events)
     {
         // Anything since our last look that's of a salient kind.
         return events.Recent()
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
             .Any(e => IsSalientKind(e.Kind));
+    }
+
+    // Call-volume reduction: salient events EXCLUDING the two picker
+    // kinds. The picker wakeups are gated separately (arrival always
+    // wakes; start is coalesced/deduped), so the generic salient check
+    // must not double-count them — otherwise a suppressed picker-start
+    // would still wake the LLM via the wider salient path.
+    private bool HasNewNonPickerSalientEvent(EventStream events)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Any(e => IsSalientKind(e.Kind) && !IsPickerKind(e.Kind));
+    }
+
+    // Call-volume reduction: EXTERNAL change events EXCLUDING the two
+    // picker kinds. Used by the picker-start suppression guard to prove it
+    // is safe to advance the event floor past a consumed picker-start.
+    // IsExternalChangeKind is a SUPERSET of (salient && !goal-lifecycle) —
+    // critically it also includes InventoryItemRemoved, which is external
+    // but NOT salient (a completed Give removes an item, often with no
+    // accompanying NpcDialog). Guarding on this prevents advancing the
+    // floor past — and thereby hiding from the later sticky-objective
+    // gate — a real InventoryItemRemoved that merely happens to share the
+    // window with picker-start noise.
+    private bool HasNewNonPickerExternalEvent(EventStream events)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Any(e => IsExternalChangeKind(e.Kind) && !IsPickerKind(e.Kind));
     }
 
     // True iff a salient event that is NOT a Goal* lifecycle event has
@@ -1104,9 +1267,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // IsPlanInvalidatingKind (LandblockChanged / InventoryItemRemoved /
     // ActionRejected), plus the chatty "wake the LLM" kinds. Compared
     // against the same _lastEventConsideredSequence floor as
-    // HasNewSalientEvent, which is only advanced on a real LLM kickoff —
-    // so sticky re-emits keep measuring "anything external since the LLM
-    // last looked".
+    // HasNewSalientEvent. That floor advances on a real LLM kickoff and
+    // ALSO when a pure picker-start is suppressed (the suppression branch
+    // consumes the picker-start noise only after proving no non-picker
+    // external event shares the window) — so sticky re-emits keep
+    // measuring "anything external since the LLM last looked".
     private bool HasNewExternalSalientEvent(EventStream events)
     {
         return events.Recent()
