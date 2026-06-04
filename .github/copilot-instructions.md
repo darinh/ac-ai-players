@@ -24,14 +24,57 @@ delegated. Until ALL success criteria in
 
 ### The ONLY acceptable reasons to stop
 
-- **Context exhaustion**: remaining context is low (< ~25%). Checkpoint
-  thoroughly so the next session resumes, then stop. The scheduled
-  `pilot-loop` kick (or the user) starts a fresh session.
+- **Context exhaustion — ONLY when the RUNTIME says so.** You may stop
+  for context ONLY after the system emits an explicit low-context or
+  compaction notice (e.g. a `<system_notification>` about compaction, or
+  a summarized-history banner). You may NOT stop on a self-estimate.
+  Your own felt sense of "I've done a lot" / "five runs consumed
+  context" / "this is getting long" is NOT evidence and is FORBIDDEN as
+  a stop reason. If no runtime signal has fired, you have budget — keep
+  working.
 - **A true external blocker** as enumerated in the loop doc (server
   won't build pending upstream schema, NSSM/credentials only the user
   can fix, hardware/OS failure).
 - **All success criteria met** — then run the loop doc's "When the loop
   is done" steps.
+
+### Anti-rationalization (these are NOT stops — banned excuses)
+
+You have a documented habit of stopping ~11 times in a row by dressing
+up a non-reason as a terminal condition. Every item below is BANNED as a
+`task_complete` justification. If your summary contains any of these
+phrasings, you are violating this directive:
+
+- "context-bounded pause" / "this slice deserves fresh budget" /
+  "the next slice should be done fresh" / "good place to checkpoint".
+- "a good stopping point" / "clean handoff" / "let the scheduled kick
+  resume".
+- "I shipped/verified the slice" / "I finished what was asked" /
+  "the task is complete" (a single slice is never the task).
+- "the LLM is rate-limited / 429 / quota-walled" — **especially** if you
+  found ANY model that works. You found `openai/gpt-4.1-mini` working
+  and stopped anyway. That is the exact failure. If one capable model
+  responds, you are NOT blocked.
+- "I characterized the gap; the build deserves a fresh session" —
+  characterization without the build is half a loop iteration. Do the
+  build.
+
+### Forcing function before ANY `task_complete`
+
+You may call `task_complete` ONLY after ALL of these hold, and you must
+state which one fired:
+
+1. A runtime context/compaction notice has actually appeared in THIS
+   session, OR a true external blocker from the loop doc is real and
+   you have shown the failing evidence, OR all 9 success criteria are
+   met.
+2. You have written the next concrete action into the `todos` table AND
+   attempted to start it in this same session.
+3. For any quota claim: you have probed at least THREE distinct models
+   this session and shown all three returned 429 in the ledger.
+
+If you cannot satisfy all three, do NOT call `task_complete`. Pick the
+next gap (Phase 1–2) and keep going.
 
 Anything else — "I don't know this subsystem", "the LLM is rate
 limited", "I finished the thing I was asked" — is NOT a stop. Keep
