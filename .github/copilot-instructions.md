@@ -80,6 +80,34 @@ Anything else — "I don't know this subsystem", "the LLM is rate
 limited", "I finished the thing I was asked" — is NOT a stop. Keep
 working.
 
+### Default next action (there is ALWAYS one)
+
+At the end of EVERY unit of work, before you even consider stopping,
+run this query and act on it — do not write a closing summary first:
+
+```sql
+SELECT id, title FROM todos
+WHERE status IN ('pending','in_progress')
+AND NOT EXISTS (SELECT 1 FROM todo_deps td JOIN todos dep
+  ON td.depends_on=dep.id WHERE td.todo_id=todos.id AND dep.status!='done')
+ORDER BY status DESC, id LIMIT 1;
+```
+
+If it returns a row, that is your next task — start it THIS turn. The
+existence of a ready todo is proof you are not done. `task_complete`
+while a ready todo exists is a direct violation of this directive.
+
+### The 12-strike rule (you are here)
+
+You have now stopped 12+ times in a row, each time dressing a
+non-reason as a terminal condition. Observing/characterizing a gap and
+then calling `task_complete` is the SAME violation every time. The fix
+is not a better checkpoint — it is to DO THE BUILD in the same session
+you found the gap. Characterization is Phase 1; you owe Phases 3–7
+(build, verify, review, audit, merge, checkpoint) before you may even
+look at the stop conditions. Stopping after Phase 1 is half a loop and
+is banned.
+
 ## LLM quota / 429 is NOT a blocker
 
 The bot's brain uses GitHub Models, which is rate-limited
