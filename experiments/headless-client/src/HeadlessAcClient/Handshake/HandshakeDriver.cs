@@ -3810,6 +3810,23 @@ internal sealed class HandshakeDriver : IDisposable
                         $"posSource={(lastSentWaypointPos is null ? "self-snap" : "last-waypoint")} " +
                         $"trigger={trigger} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
+
+                    // Arrival-by-distance completes the motion. stopByDistance
+                    // means Self is already within MotorStopRadius.For(target),
+                    // i.e. we are adjacent. Once moveToStateStopSent is set the
+                    // walk-tick body (gated on !moveToStateStopSent) can no
+                    // longer run, so it will never set motionDone via its own
+                    // within-stop-radius branch. Without marking motionDone
+                    // here the motion wedges: the interact (Use/Pickup/Talk)
+                    // block below requires motionDone, so nothing fires, and the
+                    // lock only clears at the 30s wall-clock timeout — which
+                    // also mis-reports the (already-adjacent) target as
+                    // Unreachable. Mark it done so the interact fires this tick.
+                    // (motionDone || stopByTimeout already set/handle motionDone
+                    // for their own paths; only the pure stopByDistance arrival
+                    // needs this.)
+                    if (stopByDistance && !motionDone)
+                        motionDone = true;
                 }
 
                 // Phase 6e/6f — After STOP fires for a walk-done finish (i.e. we
