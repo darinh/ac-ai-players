@@ -178,6 +178,16 @@ restart it to deploy bot changes; you only need it up
 - **Stopping at a "good place to break."** Stop only when out of
   context, blocked by a true external dependency, or the success
   criteria are met.
+- **Calling `task_complete` after one slice.** `task_complete` is a
+  hand-off to the user and is ONLY valid at the three stop conditions
+  above. Shipping a fix, "a clean stopping point", or wanting the user
+  to restart the session are NOT stop conditions — loop back to Phase 1
+  and pick the next gap. See `.github/copilot-instructions.md`.
+- **Treating an LLM 429 / daily-quota wall as a blocker.** It is an
+  expected operating condition. Switch `AC_BOTS_LLM_MODEL` to a
+  quota-fresh model, or do non-LLM loop work (tests, call-volume
+  reduction, Motor/Tactics fallback, diagnostics). Never stop mid-slice
+  for quota.
 
 ## True blockers (acceptable reasons to stop and notify)
 
