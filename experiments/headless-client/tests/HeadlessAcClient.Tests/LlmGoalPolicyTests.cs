@@ -2463,6 +2463,94 @@ public class LlmGoalPolicyTests
         Assert.Contains("Explore", prompt);
     }
 
+    [Fact]
+    public async Task LlmGoalPolicy_LocationRecency_WorldUseCounts()
+    {
+        // Open-world door-fixation guard — the Location & recency
+        // section must surface per-target Use emission counts so the
+        // LLM can see when it is re-Using the SAME world object (e.g. a
+        // building door that opens but never transports it). The count
+        // collapses repeated Uses of one target and keeps distinct
+        // targets separate; the world-object USE loop-break rule
+        // references it. Purely the bot's own emission history, counted
+        // by structure — no server text or object-type knowledge.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "item":   null,
+          "priority": 4,
+          "rationale": "stuck on a door"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        // Seed: 4 Use goals against the SAME door — three carry guid+name,
+        // one carries guid only — to prove canonical collapse across
+        // selector variants. Plus 1 Use against a different object.
+        for (var i = 0; i < 4; i++)
+        {
+            var sel = i == 3 ? "guid=0x7A9B4017" : "guid=0x7A9B4017 name=\"Door\"";
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(7 - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Use target={sel} item= source=llm:openai/gpt-4o-mini",
+            });
+        }
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(1),
+            Kind = EventKind.GoalEmitted,
+            GoalId = Guid.NewGuid(),
+            Text = "Use target=name=\"Lever\" item= source=llm:openai/gpt-4o-mini",
+        });
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        using var doc = JsonDocument.Parse(body);
+        var prompt = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+
+        var lrIdx = prompt.IndexOf("## Location & recency", StringComparison.Ordinal);
+        Assert.True(lrIdx >= 0, "Location & recency section missing");
+        var afterLr = prompt.IndexOf("##", lrIdx + 1, StringComparison.Ordinal);
+        var lrBlock = afterLr > lrIdx ? prompt.Substring(lrIdx, afterLr - lrIdx) : prompt.Substring(lrIdx);
+
+        // Per-target Use counts: the repeated door collapses to x4 keyed
+        // by its emitted selector; the distinct Lever stays x1.
+        Assert.Contains("recent Use emissions", lrBlock);
+        Assert.Contains("x4", lrBlock);
+        Assert.Contains("guid=0x7A9B4017", lrBlock);
+        Assert.Contains("Lever", lrBlock);
+
+        // The world-object USE loop-break rule must be present.
+        Assert.Contains("LOOP-BREAK (world-object USE loop)", prompt);
+    }
+
     private sealed class ToggleablePolicy : IGoalPolicy
     {
         public bool InflightFlag;
