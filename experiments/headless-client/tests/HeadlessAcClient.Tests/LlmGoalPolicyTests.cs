@@ -2549,6 +2549,11 @@ public class LlmGoalPolicyTests
 
         // The world-object USE loop-break rule must be present.
         Assert.Contains("LOOP-BREAK (world-object USE loop)", prompt);
+
+        // The passage-opened-is-not-progress rule must be present so the
+        // model does not treat "door opened" as a qualifying state change
+        // that justifies re-Using the same door instead of moving through.
+        Assert.Contains("PASSAGE-OPENED is not progress", prompt);
     }
 
     private sealed class ToggleablePolicy : IGoalPolicy
