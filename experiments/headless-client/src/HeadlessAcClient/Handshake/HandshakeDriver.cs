@@ -4578,6 +4578,103 @@ internal sealed class HandshakeDriver : IDisposable
                             // MotorStopRadius for the audit framing).
                             var terminalStopRadius = MotorStopRadius.For(motionTarget);
 
+                            // Indoor terminal cell-claim (off-by-one fix).
+                            //
+                            // The per-tick AP cell-claim below advances
+                            // motionLockedCellId to motionIndoorPath[index-1]'s
+                            // cell. But the motor only AIMS at (and advances
+                            // past) waypoints with index < Count-1 — the LAST
+                            // waypoint is the terminal target, governed by the
+                            // stop-radius branches below, so motionIndoorPathIndex
+                            // caps at Count-1 and the claim caps at the
+                            // SECOND-TO-LAST waypoint's cell. For a path whose
+                            // final waypoint lives in the DESTINATION cell, that
+                            // cell is therefore NEVER claimed: the bot's position
+                            // dead-reckons into the destination cell but its
+                            // server cell stays frozen at the prior cell, so the
+                            // next room never streams (live: 45 waypoint-advances,
+                            // 0 cell-advances, self frozen the whole run).
+                            //
+                            // Additionally the terminal stop-radius branches set
+                            // motionDone and BREAK without sending an AP, so even
+                            // setting the cell on that tick would never reach the
+                            // wire.
+                            //
+                            // Fix: on the terminal-arrival tick of a MULTI-CELL
+                            // indoor path whose final waypoint is in an
+                            // as-yet-unclaimed destination cell, claim that cell
+                            // and send ONE AP at the current position BEFORE the
+                            // stop-radius branch sets motionDone. The bot has
+                            // dead-reckoned to within the stop radius of the
+                            // destination-cell waypoint, so it has demonstrably
+                            // reached that cell; the landblock-shared coordinate
+                            // frame means only the cellId field changes (no coord
+                            // conversion). Strictly gated on followingIndoorPath +
+                            // >1 distinct cell + the destination cell being indoor
+                            // AND on the planned path, so same-cell indoor walks
+                            // and the OUTDOOR cross-landblock route (which reuses
+                            // motionIndoorPath) are untouched. Self-limiting: once
+                            // motionLockedCellId == the destination cell the guard
+                            // is false, so it fires at most once per arrival.
+                            bool terminalArrivalThisTick =
+                                !aimingAtWaypoint && lenXY < terminalStopRadius + 0.1f;
+                            if (terminalArrivalThisTick &&
+                                followingIndoorPath &&
+                                motionIndoorPath is not null &&
+                                motionIndoorPath.Count > 0)
+                            {
+                                var finalWp = motionIndoorPath[^1];
+                                if (finalWp.CellId != motionLockedCellId &&
+                                    Strategy.IndoorNavService.IsIndoorCell(finalWp.CellId) &&
+                                    motionIndoorPathCells is not null &&
+                                    motionIndoorPathCells.Contains(finalWp.CellId))
+                                {
+                                    Console.WriteLine(
+                                        $"[motion] walk-tick: indoor terminal cell-claim " +
+                                        $"0x{motionLockedCellId:X8} -> 0x{finalWp.CellId:X8} " +
+                                        $"(reached destination-cell waypoint {motionIndoorPath.Count}/{motionIndoorPath.Count}; " +
+                                        $"sending final AP before stop)");
+                                    motionLockedCellId = finalWp.CellId;
+
+                                    var claimBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                    var claimLen = GameActionAutonomousPositionMessage.Pack(
+                                        claimBuf,
+                                        cellId: motionLockedCellId,
+                                        pos:    walkSelf.Position,
+                                        rot:    lockedRot,
+                                        instanceSequence:      walkSelf.SeqInstance      ?? 0,
+                                        serverControlSequence: walkSelf.SeqServerControl ?? 0,
+                                        teleportSequence:      walkSelf.SeqTeleport      ?? 0,
+                                        forcePositionSequence: walkSelf.SeqForcePosition ?? 0,
+                                        contact: true);
+                                    var claimMsg = new OutboundPacket();
+                                    if (lastReceivedSeq != 0)
+                                        claimMsg.AddAckSequence(lastReceivedSeq);
+                                    claimMsg.AddBlobFragment(
+                                        fragSequence: nextOutboundFragmentSequence++,
+                                        fragId: OutboundFragmentId,
+                                        queue: (ushort)GameMessageGroup.UIQueue,
+                                        gameMessagePayload: claimBuf.AsSpan(0, claimLen));
+                                    var claimSent = claimMsg.Pack(sendBuf, myClientId,
+                                                                  sequence: nextOutboundPacketSequence++, iteration: 1,
+                                                                  encrypt: true, cryptoSend: cryptoSend);
+                                    try
+                                    {
+                                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, claimSent),
+                                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                    }
+                                    catch (OperationCanceledException)
+                                    {
+                                        throw;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine(
+                                            $"[motion] walk-tick: terminal cell-claim SendToAsync FAILED ({ex.GetType().Name}: {ex.Message})");
+                                    }
+                                }
+                            }
+
                             // Phase 3.1 — intermediate-waypoint advance.
                             // When chasing a waypoint (not the final
                             // target), use a looser 1.5u XY threshold;
