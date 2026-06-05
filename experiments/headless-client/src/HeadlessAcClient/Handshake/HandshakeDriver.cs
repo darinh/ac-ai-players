@@ -5390,18 +5390,26 @@ internal sealed class HandshakeDriver : IDisposable
                                 // uncorrupted. Same-landblock outdoor walks (derived
                                 // cell shares motionLockedCellId's landblock) and
                                 // indoor walks (gated out) are byte-identical.
+                                // Default: claim the locked cell at the
+                                // dead-reckoned local position. The seam
+                                // helper returns a non-null SeamCell ONLY when
+                                // the step crosses into a different outdoor
+                                // landblock — there is no out-parameter to
+                                // clobber, so a non-seam tick can never
+                                // collapse apPos to the cell origin (0,0,0).
                                 uint apCellId = motionLockedCellId;
                                 var apPos = newPos;
-                                if (Strategy.OutdoorSeamCell.TryDeriveSeamCell(
-                                        followingIndoorPath: followingIndoorPath,
-                                        selfCellIsOutdoor:   !Strategy.AcCoords.IsIndoor(walkCell),
-                                        lockedCellId:        motionLockedCellId,
-                                        stepGlobalX:         selfGX + stepX,
-                                        stepGlobalY:         selfGY + stepY,
-                                        stepZ:               newPos.Z,
-                                        apCellId:            out apCellId,
-                                        apLocalPos:          out apPos))
+                                var seam = Strategy.OutdoorSeamCell.TryDeriveSeamCell(
+                                    followingIndoorPath: followingIndoorPath,
+                                    selfCellIsOutdoor:   !Strategy.AcCoords.IsIndoor(walkCell),
+                                    lockedCellId:        motionLockedCellId,
+                                    stepGlobalX:         selfGX + stepX,
+                                    stepGlobalY:         selfGY + stepY,
+                                    stepZ:               newPos.Z);
+                                if (seam is { } seamCell)
                                 {
+                                    apCellId = seamCell.CellId;
+                                    apPos = seamCell.LocalPos;
                                     motionOutdoorApCells.Add(apCellId);
                                     Console.WriteLine(
                                         $"[motion] walk-tick: outdoor seam-cell override " +

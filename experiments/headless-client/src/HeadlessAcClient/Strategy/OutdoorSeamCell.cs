@@ -37,9 +37,19 @@ namespace HeadlessAcClient.Strategy;
 /// </summary>
 internal static class OutdoorSeamCell
 {
+    /// <summary>The neighbor-landblock cell + local position to claim at a seam crossing.</summary>
+    internal readonly record struct SeamCell(uint CellId, Vector3 LocalPos);
+
     /// <summary>
     /// Try to derive a neighbor-landblock AP cell + local position for an
     /// outdoor walk step that crosses a landblock seam.
+    ///
+    /// Returns a <see cref="SeamCell"/> only when the step crosses into a
+    /// DIFFERENT outdoor landblock; returns null otherwise. A null result
+    /// means the caller must keep its own (locked cell, dead-reckoned local
+    /// position) unchanged — there is deliberately no out-parameter to
+    /// clobber, so a non-seam tick can never collapse the AP position to
+    /// the cell origin.
     /// </summary>
     /// <param name="followingIndoorPath">True when the indoor multi-cell cell-advance owns the AP cell (do nothing here).</param>
     /// <param name="selfCellIsOutdoor">True when the bot's current cell is outdoor.</param>
@@ -47,46 +57,39 @@ internal static class OutdoorSeamCell
     /// <param name="stepGlobalX">Global X of the step's destination position.</param>
     /// <param name="stepGlobalY">Global Y of the step's destination position.</param>
     /// <param name="stepZ">Z to carry into the neighbor-local position (unchanged).</param>
-    /// <param name="apCellId">On success, the neighbor landblock cell to claim; otherwise <paramref name="lockedCellId"/>.</param>
-    /// <param name="apLocalPos">On success, the neighbor-landblock-local position; otherwise default.</param>
-    /// <returns>True when an override was derived; false to keep the source cell + local position.</returns>
-    public static bool TryDeriveSeamCell(
+    /// <returns>The neighbor (cell, local pos) on a seam crossing; otherwise null.</returns>
+    public static SeamCell? TryDeriveSeamCell(
         bool followingIndoorPath,
         bool selfCellIsOutdoor,
         uint lockedCellId,
         float stepGlobalX,
         float stepGlobalY,
-        float stepZ,
-        out uint apCellId,
-        out Vector3 apLocalPos)
+        float stepZ)
     {
-        apCellId = lockedCellId;
-        apLocalPos = default;
-
         // The indoor cell-advance owns the AP cell while following a
         // planned multi-cell indoor path; and an indoor self cell is
         // client-authoritative (no coordinate re-derivation), so the
         // outdoor seam logic never applies there.
         if (followingIndoorPath || !selfCellIsOutdoor)
-            return false;
+            return null;
 
         var derivedCell = AcCoords.OutdoorCellIdFromGlobal(stepGlobalX, stepGlobalY);
         if (derivedCell == 0u)
-            return false;
+            return null;
 
         // Only override on an actual landblock seam crossing; same-landblock
         // outdoor steps keep the source cell so they are byte-identical (the
         // server re-derives the intra-landblock cell from the AP coords).
         if ((derivedCell & 0xFFFF0000u) == (lockedCellId & 0xFFFF0000u))
-            return false;
+            return null;
 
         var lbx = (int)((derivedCell >> 24) & 0xFFu);
         var lby = (int)((derivedCell >> 16) & 0xFFu);
-        apCellId = derivedCell;
-        apLocalPos = new Vector3(
-            stepGlobalX - lbx * AcCoords.BlockLength,
-            stepGlobalY - lby * AcCoords.BlockLength,
-            stepZ);
-        return true;
+        return new SeamCell(
+            derivedCell,
+            new Vector3(
+                stepGlobalX - lbx * AcCoords.BlockLength,
+                stepGlobalY - lby * AcCoords.BlockLength,
+                stepZ));
     }
 }

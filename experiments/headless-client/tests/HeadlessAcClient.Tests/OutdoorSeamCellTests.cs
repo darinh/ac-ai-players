@@ -11,6 +11,13 @@
 // ANY outdoor self-cell step that crosses a landblock seam (no
 // frontier-probe / path-cell gating), declines on same-landblock steps,
 // and is gated out indoors / while an indoor path owns the AP cell.
+//
+// The helper returns a nullable SeamCell (NOT out-parameters): a null
+// result means "no seam crossing — keep your own cell + position". This
+// makes the original out-parameter footgun structurally impossible (an
+// always-assigned `out apLocalPos = default` clobbered the caller's
+// dead-reckoned position to (0,0,0) on every non-seam tick, freezing the
+// bot at the cell origin — caught in live-verify).
 
 using System.Numerics;
 
@@ -38,21 +45,19 @@ public class OutdoorSeamCellTests
     [Fact]
     public void Override_OutdoorSeamCross_DerivesNeighborCell()
     {
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   true,
             lockedCellId:        SourceCell,
             stepGlobalX:         StepGX,
             stepGlobalY:         StepGY,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out var apLocalPos);
+            stepZ:               StepZ);
 
-        Assert.True(ok);
-        Assert.Equal(ExpectedNeighborCell, apCellId);
-        Assert.Equal(ExpectedLocalX, apLocalPos.X, 3);
-        Assert.Equal(ExpectedLocalY, apLocalPos.Y, 3);
-        Assert.Equal(StepZ, apLocalPos.Z, 3);
+        Assert.NotNull(seam);
+        Assert.Equal(ExpectedNeighborCell, seam!.Value.CellId);
+        Assert.Equal(ExpectedLocalX, seam.Value.LocalPos.X, 3);
+        Assert.Equal(ExpectedLocalY, seam.Value.LocalPos.Y, 3);
+        Assert.Equal(StepZ, seam.Value.LocalPos.Z, 3);
     }
 
     [Fact]
@@ -62,73 +67,65 @@ public class OutdoorSeamCellTests
         // probe, no rasterized path-cell set) crossing a seam STILL derives
         // the neighbor cell. This is the case the frontier-only predecessor
         // declined, which froze Attack/Pickup approaches at the seam.
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   true,
             lockedCellId:        SourceCell,
             stepGlobalX:         StepGX,
             stepGlobalY:         StepGY,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out _);
+            stepZ:               StepZ);
 
-        Assert.True(ok);
-        Assert.Equal(ExpectedNeighborCell, apCellId);
+        Assert.NotNull(seam);
+        Assert.Equal(ExpectedNeighborCell, seam!.Value.CellId);
     }
 
     [Fact]
-    public void Override_IndoorWaypointPathActive_KeepsSourceCell()
+    public void Override_IndoorWaypointPathActive_ReturnsNull()
     {
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: true,
             selfCellIsOutdoor:   true,
             lockedCellId:        SourceCell,
             stepGlobalX:         StepGX,
             stepGlobalY:         StepGY,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out _);
+            stepZ:               StepZ);
 
-        Assert.False(ok);
-        Assert.Equal(SourceCell, apCellId);
+        Assert.Null(seam);
     }
 
     [Fact]
-    public void Override_SelfCellIndoor_KeepsSourceCell()
+    public void Override_SelfCellIndoor_ReturnsNull()
     {
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   false,
             lockedCellId:        SourceCell,
             stepGlobalX:         StepGX,
             stepGlobalY:         StepGY,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out _);
+            stepZ:               StepZ);
 
-        Assert.False(ok);
-        Assert.Equal(SourceCell, apCellId);
+        Assert.Null(seam);
     }
 
     [Fact]
-    public void Override_SameLandblockStep_KeepsSourceCell()
+    public void Override_SameLandblockStep_ReturnsNull()
     {
         // Step to global (32500, 34600): lby = 34600/192 = 180 -> landblock
         // 0xA9B4, SAME as the source. The override must NOT fire — same-
         // landblock walks stay byte-identical (the server re-derives the
-        // intra-landblock cell from the AP coords).
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        // intra-landblock cell from the AP coords). A null result tells the
+        // caller to keep its own dead-reckoned local position (NOT collapse
+        // it to the cell origin) — this is the regression guard for the
+        // live-caught out-parameter clobber bug.
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   true,
             lockedCellId:        SourceCell,
             stepGlobalX:         32500f,
             stepGlobalY:         34600f,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out _);
+            stepZ:               StepZ);
 
-        Assert.False(ok);
-        Assert.Equal(SourceCell, apCellId);
+        Assert.Null(seam);
     }
 
     [Fact]
@@ -139,20 +136,18 @@ public class OutdoorSeamCellTests
         // lbx=168 with local X near the high end of that landblock.
         const float gx = 32447f;          // 168*192 = 32256; lx = 191
         const float gy = 34600f;          // lby = 180 -> 0xB4; ly = 40
-        var ok = OutdoorSeamCell.TryDeriveSeamCell(
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   true,
             lockedCellId:        SourceCell,
             stepGlobalX:         gx,
             stepGlobalY:         gy,
-            stepZ:               StepZ,
-            apCellId:            out var apCellId,
-            apLocalPos:          out var apLocalPos);
+            stepZ:               StepZ);
 
-        Assert.True(ok);
-        Assert.Equal(0xA8u, (apCellId >> 24) & 0xFFu); // lbx = 168
-        Assert.Equal(0xB4u, (apCellId >> 16) & 0xFFu); // lby = 180
-        Assert.Equal(191f, apLocalPos.X, 3);           // 32447 - 168*192
-        Assert.Equal(40f, apLocalPos.Y, 3);            // 34600 - 180*192
+        Assert.NotNull(seam);
+        Assert.Equal(0xA8u, (seam!.Value.CellId >> 24) & 0xFFu); // lbx = 168
+        Assert.Equal(0xB4u, (seam.Value.CellId >> 16) & 0xFFu);  // lby = 180
+        Assert.Equal(191f, seam.Value.LocalPos.X, 3);            // 32447 - 168*192
+        Assert.Equal(40f, seam.Value.LocalPos.Y, 3);             // 34600 - 180*192
     }
 }
