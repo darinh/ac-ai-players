@@ -113,7 +113,7 @@ internal static class PickerSelection
             .Where(s => !IsRespawnOfPickedItem(s, pickupCountByName, pickupItemTypeMask))
             .Select(s =>
             {
-                WorldDistance.TrySquaredDistance(self, s, out var d2);
+                WorldDistance.TrySelectionSquaredDistance(self, s, out var d2);
                 return (snap: s, d2);
             })
             .OrderBy(t => t.d2)
@@ -229,7 +229,7 @@ internal static class PickerSelection
             .Where(s => s.CellId is uint sc && sc != 0u && (sc & 0xFFFF0000u) == (selfLandblock & 0xFFFF0000u))
             .Select(s =>
             {
-                WorldDistance.TrySquaredDistance(self, s, out var d2);
+                WorldDistance.TrySelectionSquaredDistance(self, s, out var d2);
                 return (snap: s, d2);
             })
             .OrderBy(t => t.d2)
