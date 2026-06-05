@@ -540,6 +540,12 @@ internal sealed class HandshakeDriver : IDisposable
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
         var                  combatAvoidUntil = new Dictionary<uint, DateTime>();
+        // Set by the low-health attack-suppression dispatch guard so the
+        // post-action reset cascade does NOT permanently add a suppressed
+        // hostile to visitedTargetGuids (suppression is TEMPORARY — the
+        // combatAvoidUntil cooldown + re-engage health hysteresis own
+        // re-engagement, not a permanent visited blacklist).
+        var                  suppressVisitedAddOnReset = false;
         uint?                combatTargetGuid = null;
         DateTime?            combatStartedAt = null;
         DateTime?            lastCombatAttackAt = null;
@@ -2596,9 +2602,13 @@ internal sealed class HandshakeDriver : IDisposable
                     // Only flag visited for non-combat targets. The
                     // combat-state machine owns the visited add for
                     // golems (on death or timeout) so we re-target
-                    // the same guid until it dies.
-                    if (motionTarget is not null && motionTarget.Guid != combatTargetGuid)
+                    // the same guid until it dies. A low-health-suppressed
+                    // hostile must NOT be permanently blacklisted here —
+                    // its avoid is the temporary combatAvoidUntil cooldown.
+                    if (motionTarget is not null && motionTarget.Guid != combatTargetGuid &&
+                        !suppressVisitedAddOnReset)
                         visitedTargetGuids.Add(motionTarget.Guid);
+                    suppressVisitedAddOnReset = false;
 
                     // Notify Tactics that the current goal completed.
                     // Used by LlmGoalPolicy to surface a GoalCompleted
@@ -3887,6 +3897,10 @@ internal sealed class HandshakeDriver : IDisposable
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                        // Phase 7f.D — skip a threat still on the low-health
+                        // disengage avoid cooldown so the picker does not
+                        // re-walk the bot back into the mob it just fled.
+                        .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cau) && DateTime.UtcNow < cau))
                         .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                         // Phase 6n — anti-starvation: skip duplicate
                         // quest reward respawns. If we've already
@@ -4020,6 +4034,9 @@ internal sealed class HandshakeDriver : IDisposable
                         var fallbackPool = worldState.Objects.Values
                             .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                             .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                            // Phase 7f.D — honor the low-health disengage
+                            // avoid cooldown in the fallback pool too.
+                            .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cauF) && DateTime.UtcNow < cauF))
                             .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
                             .ToList();
 
@@ -4664,6 +4681,11 @@ internal sealed class HandshakeDriver : IDisposable
                             $"[combat] SUPPRESS attack on 0x{motionTarget.Guid:X8} '{motionTarget.Name}' — " +
                             $"self-health below re-engage threshold or threat on avoid cooldown; " +
                             $"parking (reset cascade re-deliberates)");
+                        // TEMPORARY suppression — do NOT let the reset
+                        // cascade permanently blacklist this hostile via
+                        // visitedTargetGuids; re-engagement is owned by the
+                        // avoid cooldown + re-engage health hysteresis.
+                        suppressVisitedAddOnReset = true;
                         eventStream.Append(new StreamEvent
                         {
                             Sequence = 0,
