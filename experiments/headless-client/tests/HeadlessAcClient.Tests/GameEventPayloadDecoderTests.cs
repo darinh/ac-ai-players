@@ -198,4 +198,72 @@ public class GameEventPayloadDecoderTests
         var p = GameEventPayloadDecoder.Decode(body, GameEventType.FriendsListUpdate);
         Assert.Null(p);
     }
+
+    [Fact]
+    public void Decode_EvasionAttackerNotification_ReadsDefenderName()
+    {
+        // string16L "Drudge Skulker" (14B) → 2B len + 14B = 16, already
+        // 4-aligned only if 16%4==0 (yes), no pad.
+        var name = Encoding.UTF8.GetBytes("Drudge Skulker");
+        var body = new byte[2 + name.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.EvasionAttackerNotification);
+
+        Assert.NotNull(p?.EvasionAttackerNotification);
+        Assert.Equal("Drudge Skulker", p!.EvasionAttackerNotification!.DefenderName);
+    }
+
+    [Fact]
+    public void Decode_EvasionAttackerNotification_PadsNameToFourBytes()
+    {
+        // "Cow" = 3B → 2B len + 3B = 5, pad 3 → cursor 8. Decoder must
+        // not throw on the trailing padding bytes.
+        var name = Encoding.UTF8.GetBytes("Cow");
+        var body = new byte[8];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.EvasionAttackerNotification);
+
+        Assert.NotNull(p?.EvasionAttackerNotification);
+        Assert.Equal("Cow", p!.EvasionAttackerNotification!.DefenderName);
+    }
+
+    [Fact]
+    public void Decode_AttackerNotification_ReadsNameAndDamage()
+    {
+        // string16L "Chicken" (7B) → 2B len + 7B + 3B pad = 12 (4-aligned),
+        // then u32 damageType, f64 percent, u32 damage.
+        var name = Encoding.UTF8.GetBytes("Chicken");
+        var body = new byte[12 + 4 + 8 + 4];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+        // bytes [9..11] are name padding (zero)
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(12, 4), 0x4); // damageType
+        BinaryPrimitives.WriteDoubleLittleEndian(body.AsSpan(16, 8), 0.25); // percent
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(24, 4), 17);   // damage
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.AttackerNotification);
+
+        Assert.NotNull(p?.AttackerNotification);
+        Assert.Equal("Chicken", p!.AttackerNotification!.DefenderName);
+        Assert.Equal(17u, p.AttackerNotification.Damage);
+    }
+
+    [Fact]
+    public void Decode_AttackerNotification_TooShort_ReturnsNull()
+    {
+        // Name present but truncated before the damage fields → decoder
+        // throws internally and Decode returns null (graceful fallback).
+        var name = Encoding.UTF8.GetBytes("Cow");
+        var body = new byte[8]; // just the padded name, no damage fields
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.AttackerNotification);
+
+        Assert.Null(p);
+    }
 }

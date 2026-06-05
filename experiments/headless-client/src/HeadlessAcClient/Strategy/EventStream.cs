@@ -99,6 +99,20 @@ internal enum EventKind
     // self-emitted echo that exists solely for dedup + prompt
     // rendering.
     InventoryItemUsed       = 17,
+    // combat-damage-output: a per-fight combat OUTCOME observation
+    // surfaced to the LLM. Decoded from the server's attacker-side
+    // notifications (AttackerNotification 0x01B1 = a swing landed;
+    // EvasionAttackerNotification 0x01B3 = a swing was evaded). The
+    // Motor counts landed vs evaded swings against the active combat
+    // target and, once a fight first produces swing-outcome telemetry,
+    // emits ONE deduped event (per target) carrying the RAW
+    // landed/evaded/damage counts. Structural wake only — no in-source
+    // tactical judgment. Salient (wakes the LLM) but NOT a rejection:
+    // it must never poison the ActionRejected dedup or auto-drop the
+    // Attack goal — disengage and target choice stay the LLM's call.
+    // Name = the defender's
+    // display name, Text = the raw "landed N / evaded M" summary.
+    CombatFeedback          = 18,
 }
 
 /// <summary>
@@ -174,6 +188,7 @@ internal sealed record StreamEvent
         EventKind.BookText             => $"#{Sequence} BookText name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8} \"{Truncate(Text, 120)}\"",
         EventKind.PickerArrivedNoAction => $"#{Sequence} PickerArrivedNoAction guid=0x{ItemGuid ?? 0:X8} name=\"{Name}\" \"{Truncate(Text, 80)}\"",
         EventKind.InventoryItemUsed    => $"#{Sequence} InventoryUsed wcid={Wcid} name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8}",
+        EventKind.CombatFeedback       => $"#{Sequence} CombatFeedback target=\"{Name}\" \"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 

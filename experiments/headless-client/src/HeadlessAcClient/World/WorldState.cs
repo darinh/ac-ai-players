@@ -36,6 +36,23 @@ using HeadlessAcClient.Protocol.GameMessages;
 
 namespace HeadlessAcClient.World;
 
+/// <summary>
+/// combat-damage-output: a snapshot of the current melee fight's
+/// outcome counters, surfaced to the LLM as raw perception. The Motor
+/// (HandshakeDriver) owns and updates this; the policy only reads it.
+/// </summary>
+/// <param name="TargetGuid">Guid of the locked combat target.</param>
+/// <param name="TargetName">Best-known display name of the target (may be null early).</param>
+/// <param name="SwingsLanded">Count of swings that LANDED (AttackerNotification) this fight.</param>
+/// <param name="SwingsEvaded">Count of swings the target EVADED (EvasionAttackerNotification) this fight.</param>
+/// <param name="DamageDealt">Cumulative damage dealt to the target this fight.</param>
+internal sealed record CombatFightStatus(
+    uint TargetGuid,
+    string? TargetName,
+    int SwingsLanded,
+    int SwingsEvaded,
+    uint DamageDealt);
+
 internal sealed class WorldState
 {
     private readonly Dictionary<uint, WorldObjectSnapshot> _objects = new();
@@ -92,6 +109,17 @@ internal sealed class WorldState
         => SelfGuid is uint g && _objects.TryGetValue(g, out var s) ? s : null;
 
     public int ObjectCount => _objects.Count;
+
+    /// <summary>
+    /// combat-damage-output: the Motor's live view of the current melee
+    /// fight, set/cleared by HandshakeDriver as it tracks the active
+    /// combat lock. Null when not in combat. Surfaced verbatim to the
+    /// LLM in the "## Combat readiness" prompt section as RAW perception
+    /// (swings landed vs evaded, damage dealt) so the LLM can judge
+    /// whether it is actually hurting the target and decide to disengage
+    /// — source never makes that decision itself.
+    /// </summary>
+    public CombatFightStatus? CurrentFight { get; set; }
 
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;

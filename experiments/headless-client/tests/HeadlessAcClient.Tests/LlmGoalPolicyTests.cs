@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.Strategy.Intent;
+using HeadlessAcClient.World;
 using Xunit;
 
 namespace HeadlessAcClient.Tests;
@@ -2700,7 +2701,75 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("Pickup it to arm", prompt);
     }
 
-    // ---- Recently sighted (out of view) recall block ----
+    [Fact]
+    public void CombatReadiness_CurrentFight_RendersLandedEvadedCounts()
+    {
+        // combat-damage-output: the live fight outcome (all swings evaded,
+        // 0 landed, 0 damage) is surfaced verbatim so the LLM can judge it
+        // is dealing no damage and disengage.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 0.4f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = new CombatFightStatus(0xABCDu, "Drudge Skulker", 0, 6, 0),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains(
+            "current fight vs \"Drudge Skulker\": swings landed 0, evaded 6, damage dealt 0",
+            prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_NoCurrentFight_OmitsFightLine()
+    {
+        // No active fight → no current-fight line.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("current fight vs", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_CurrentFight_ZeroSwings_OmitsFightLine()
+    {
+        // A locked target with no swings yet (0 landed, 0 evaded) is not
+        // informative — suppress the line until at least one swing resolves.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = new CombatFightStatus(0xABCDu, "Rabbit", 0, 0, 0),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("current fight vs", prompt);
+    }
+
+    [Fact]
+    public void IsSalientKind_IncludesCombatFeedback()
+    {
+        // The CombatFeedback "all swings evaded" event must wake the LLM so
+        // it can disengage promptly instead of waiting for the 60s timeout.
+        Assert.True(LlmGoalPolicy.IsSalientKind(EventKind.CombatFeedback));
+    }
 
     private static WorldStateProjection RecallSelfWorld(
         uint landblock = 0xA9B3u,
