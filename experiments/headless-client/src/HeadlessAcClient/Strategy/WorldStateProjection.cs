@@ -215,7 +215,7 @@ internal sealed record WorldStateProjection
             .Select(o =>
             {
                 float? dist = null;
-                if (WorldDistance.TrySquaredDistance(self, o, out var d2))
+                if (WorldDistance.TrySelectionSquaredDistance(self, o, out var d2))
                     dist = (float)Math.Sqrt(d2);
 
                 var itemType = o.ItemType ?? 0u;

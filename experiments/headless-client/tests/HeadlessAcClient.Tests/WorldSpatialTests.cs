@@ -199,6 +199,91 @@ public class WorldSpatialTests
             () => WorldDistance.TrySquaredDistance(ws.TryGet(SelfGuid)!, null!, out _));
     }
 
+    // ---- WorldDistance.SquaredHorizontalDistanceBetween ----
+
+    [Fact]
+    public void Horizontal_SameCell_DropsZ()
+    {
+        var a = new Vector3(10, 20, 30);
+        var b = new Vector3(13, 24, 90); // dz=60, must be ignored
+        // dx=3, dy=4 -> 9+16 = 25 (no dz term)
+        var d2 = WorldDistance.SquaredHorizontalDistanceBetween(
+            CellLB1234_Cell1, a, CellLB1234_Cell1, b);
+        Assert.Equal(25f, d2);
+    }
+
+    [Fact]
+    public void Horizontal_CrossLandblock_DropsZ()
+    {
+        var a = new Vector3(0, 0, 100);
+        var b = new Vector3(0, 0, 0); // one east, dz=100 ignored
+        // dx = (0x12-0x13)*192 = -192; d2 = 192^2 = 36864
+        var d2 = WorldDistance.SquaredHorizontalDistanceBetween(
+            CellLB1234_Cell1, a, CellLB1334_Cell1, b);
+        Assert.Equal(36864f, d2);
+    }
+
+    // ---- WorldDistance.IsOutdoor ----
+
+    [Theory]
+    [InlineData(0x12340001u, true)]   // outdoor surface cell 1
+    [InlineData(0x12340040u, true)]   // outdoor surface cell 0x40
+    [InlineData(0x123400FFu, true)]   // last value below the indoor range
+    [InlineData(0x12340100u, false)]  // first indoor (EnvCell) cell
+    [InlineData(0x12340200u, false)]  // indoor
+    public void IsOutdoor_BoundaryAt0x100(uint cellId, bool expected)
+        => Assert.Equal(expected, WorldDistance.IsOutdoor(cellId));
+
+    // ---- WorldDistance.TrySelectionSquaredDistance ----
+
+    [Fact]
+    public void Selection_BothOutdoor_IgnoresZ()
+    {
+        // Self frozen ~60u above the monster's true surface Z; in XY
+        // they are 3-4-5 apart. 3D would read 25+3600; 2D reads 25.
+        var ws = new WorldState();
+        ws.Apply(BuildOC(SelfGuid, CellLB1234_Cell1, new Vector3(0, 0, 94)));
+        ws.Apply(BuildOC(TargetA,  CellLB1234_Cell1, new Vector3(3, 4, 34)));
+        Assert.True(WorldDistance.TrySelectionSquaredDistance(
+            ws.TryGet(SelfGuid)!, ws.TryGet(TargetA)!, out var d2));
+        Assert.Equal(25f, d2);
+    }
+
+    [Fact]
+    public void Selection_BothIndoor_KeepsZ()
+    {
+        const uint indoorA = 0x12340100u;
+        var ws = new WorldState();
+        ws.Apply(BuildOC(SelfGuid, indoorA, new Vector3(0, 0, 30)));
+        ws.Apply(BuildOC(TargetA,  indoorA, new Vector3(3, 4, 40))); // dz=10
+        Assert.True(WorldDistance.TrySelectionSquaredDistance(
+            ws.TryGet(SelfGuid)!, ws.TryGet(TargetA)!, out var d2));
+        // 3D: 9+16+100 = 125
+        Assert.Equal(125f, d2);
+    }
+
+    [Fact]
+    public void Selection_MixedIndoorOutdoor_KeepsZ()
+    {
+        var ws = new WorldState();
+        ws.Apply(BuildOC(SelfGuid, 0x12340100u, new Vector3(0, 0, 30))); // indoor self
+        ws.Apply(BuildOC(TargetA,  CellLB1234_Cell1, new Vector3(3, 4, 40))); // outdoor target
+        Assert.True(WorldDistance.TrySelectionSquaredDistance(
+            ws.TryGet(SelfGuid)!, ws.TryGet(TargetA)!, out var d2));
+        Assert.Equal(125f, d2); // 3D retained when either endpoint is indoor
+    }
+
+    [Fact]
+    public void Selection_NoCellId_ReturnsFalse()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid); // no CellId
+        ws.Apply(BuildOC(TargetA, CellLB1234_Cell1, Vector3.Zero));
+        Assert.False(WorldDistance.TrySelectionSquaredDistance(
+            ws.TryGet(SelfGuid)!, ws.TryGet(TargetA)!, out var d2));
+        Assert.True(float.IsNaN(d2));
+    }
+
     // ---- WorldState.EnumerateNearby ----
 
     [Fact]

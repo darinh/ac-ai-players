@@ -66,6 +66,54 @@ internal static class WorldDistance
     }
 
     /// <summary>
+    /// Squared HORIZONTAL (XY-plane) distance, in game units, between
+    /// two AC world points — identical to <see cref="SquaredDistanceBetween"/>
+    /// but with the Z (elevation) term dropped.
+    ///
+    /// Used for outdoor SELECTION/PERCEPTION distance. Outdoors the
+    /// headless client never samples terrain height, so it floats the
+    /// bot at its frozen spawn Z while the server tolerates the
+    /// client-claimed outdoor Z (outdoor position is effectively
+    /// client-authoritative). Monsters, by contrast, sit at their true
+    /// surface Z — often tens of units below the bot's stale Z. A 3D
+    /// distance therefore carries a SPURIOUS dz term that makes a
+    /// monster standing right next to the bot (in XY) read as far away.
+    /// For deciding WHICH object is near (LLM perception + autonomous
+    /// picker ranking) the physically meaningful measure outdoors is
+    /// horizontal distance; the motor APPROACH still uses full 3D so the
+    /// in-approach Z-convergence (see MeleeApproachZ) can descend the bot
+    /// onto the target's surface before a swing.
+    /// </summary>
+    public static float SquaredHorizontalDistanceBetween(
+        uint cellA, Vector3 posA,
+        uint cellB, Vector3 posB)
+    {
+        if (cellA == cellB)
+        {
+            var dxLocal = posA.X - posB.X;
+            var dyLocal = posA.Y - posB.Y;
+            return dxLocal * dxLocal + dyLocal * dyLocal;
+        }
+
+        // CAST TO INT BEFORE SUBTRACTING — see file header rationale.
+        var lxA = (int)((cellA >> 24) & 0xFF);
+        var lyA = (int)((cellA >> 16) & 0xFF);
+        var lxB = (int)((cellB >> 24) & 0xFF);
+        var lyB = (int)((cellB >> 16) & 0xFF);
+
+        var dx = (lxA - lxB) * 192f + posA.X - posB.X;
+        var dy = (lyA - lyB) * 192f + posA.Y - posB.Y;
+        return dx * dx + dy * dy;
+    }
+
+    /// <summary>
+    /// A cell is OUTDOOR when its low-16-bit cell index is below the
+    /// indoor (EnvCell) range that starts at 0x0100. Outdoor surface
+    /// cells are 0x0001-0x0040.
+    /// </summary>
+    public static bool IsOutdoor(uint cellId) => (cellId & 0xFFFFu) < 0x100u;
+
+    /// <summary>
     /// Try to compute squared distance between two snapshots. Returns
     /// false (and sets distance to NaN) if either snapshot lacks a
     /// CellId (no spatial state yet — pre-ObjectCreate observation).
@@ -86,6 +134,38 @@ internal static class WorldDistance
         }
 
         squaredDistance = SquaredDistanceBetween(cellA, a.Position, cellB, b.Position);
+        return true;
+    }
+
+    /// <summary>
+    /// Try to compute the squared SELECTION distance between two
+    /// snapshots: HORIZONTAL (2D) when BOTH endpoints are outdoor,
+    /// full 3D otherwise. This is the distance used to decide which
+    /// object is "near" for LLM perception and autonomous picker
+    /// ranking — see <see cref="SquaredHorizontalDistanceBetween"/> for
+    /// why outdoor selection must ignore the (frozen, client-authoritative)
+    /// self Z. Indoor cells have flat per-cell floors and a real Z that
+    /// the server owns, so indoor (or mixed indoor/outdoor) selection
+    /// stays 3D. Returns false (distance NaN) if either snapshot lacks a
+    /// CellId, matching <see cref="TrySquaredDistance"/>.
+    /// </summary>
+    public static bool TrySelectionSquaredDistance(
+        WorldObjectSnapshot a,
+        WorldObjectSnapshot b,
+        out float squaredDistance)
+    {
+        if (a is null) throw new ArgumentNullException(nameof(a));
+        if (b is null) throw new ArgumentNullException(nameof(b));
+
+        if (a.CellId is not uint cellA || b.CellId is not uint cellB)
+        {
+            squaredDistance = float.NaN;
+            return false;
+        }
+
+        squaredDistance = IsOutdoor(cellA) && IsOutdoor(cellB)
+            ? SquaredHorizontalDistanceBetween(cellA, a.Position, cellB, b.Position)
+            : SquaredDistanceBetween(cellA, a.Position, cellB, b.Position);
         return true;
     }
 }
