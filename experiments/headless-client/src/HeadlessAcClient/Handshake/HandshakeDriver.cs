@@ -5338,10 +5338,58 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
 
                                 var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                // Outdoor frontier seam-cell override.
+                                //
+                                // A first-time outdoor frontier probe rasterizes
+                                // its straight segment into motionIndoorPathCells
+                                // but (unlike the indoor/route paths) leaves
+                                // motionIndoorPath null, so followingIndoorPath is
+                                // false and the AP cell above never advances. When
+                                // the straight line crosses an outdoor LANDBLOCK
+                                // seam, the packet keeps claiming the SOURCE cell
+                                // (motionLockedCellId) while newPos overshoots into
+                                // the neighbor landblock's coordinate range — the
+                                // server rejects the inconsistent (cell, pos) pair
+                                // and FREEZES the bot at the seam (actualMoveXY=0).
+                                //
+                                // Fix (mirrors the Slice 7 / outdoor route-executor
+                                // overshoot pattern, packet-only): derive the AP
+                                // cell from newPos's GLOBAL coordinates and, when
+                                // that cell is in a DIFFERENT outdoor landblock that
+                                // belongs to this probe's OWN rasterized PathCells,
+                                // send the (neighbor cell, neighbor-local pos) pair
+                                // so the server's update_object_server re-derives a
+                                // consistent destination cell and accepts the move.
+                                // motionLockedCellId is NOT advanced here — once the
+                                // server reports the new walkCell the existing
+                                // reactive slide advances the lock; if the server
+                                // rejects, the local lock stays uncorrupted.
+                                // Same-landblock outdoor walks (derivedCell shares
+                                // motionLockedCellId's landblock) are byte-identical.
+                                uint apCellId = motionLockedCellId;
+                                var apPos = newPos;
+                                if (Strategy.OutdoorFrontierSeamCell.TryDeriveSeamCell(
+                                        isOutdoorFrontierProbe: motionIsOutdoorFrontierProbe,
+                                        hasIndoorWaypointPath:  motionIndoorPath is not null,
+                                        selfCellIsIndoor:       Strategy.AcCoords.IsIndoor(walkCell),
+                                        pathCells:              motionIndoorPathCells,
+                                        lockedCellId:           motionLockedCellId,
+                                        stepGlobalX:            selfGX + stepX,
+                                        stepGlobalY:            selfGY + stepY,
+                                        stepZ:                  newPos.Z,
+                                        apCellId:               out apCellId,
+                                        apLocalPos:             out apPos))
+                                {
+                                    Console.WriteLine(
+                                        $"[motion] walk-tick: outdoor frontier seam-cell override " +
+                                        $"0x{motionLockedCellId:X8} -> 0x{apCellId:X8} " +
+                                        $"global=({selfGX + stepX:F1},{selfGY + stepY:F1}) " +
+                                        $"local=({apPos.X:F1},{apPos.Y:F1})");
+                                }
                                 var apLen = GameActionAutonomousPositionMessage.Pack(
                                     apBuf,
-                                    cellId: motionLockedCellId,
-                                    pos:    newPos,
+                                    cellId: apCellId,
+                                    pos:    apPos,
                                     rot:    lockedRot,
                                     instanceSequence:      walkSelf.SeqInstance      ?? 0,
                                     serverControlSequence: walkSelf.SeqServerControl ?? 0,
