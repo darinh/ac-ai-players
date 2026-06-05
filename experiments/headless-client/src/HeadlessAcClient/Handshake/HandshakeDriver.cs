@@ -517,10 +517,19 @@ internal sealed class HandshakeDriver : IDisposable
         // does NOT contain wcid literals (anti-hardcoding rule,
         // EPIC #67/#68).
         const double         CombatRetryIntervalSec = 5.0;
+        // Anti-spam floor for cancel-driven fast re-sends (Phase 7f.2).
+        // When the server reports the auto-repeat loop dropped
+        // (AttackDone ActionCancelled) we re-send well before the 5s
+        // safety net, but never faster than this.
+        const double         CombatFastRetryMinIntervalSec = 0.35;
         const double         AbandonOnNoDamageSec   = 60.0;
         uint?                combatTargetGuid = null;
         DateTime?            combatStartedAt = null;
         DateTime?            lastCombatAttackAt = null;
+        // Set when an AttackDone(ActionCancelled) is observed for the
+        // active combat target; consumed by the Phase 7f.2 loop-keeper to
+        // re-send the melee attack early. Cleared on send + combat reset.
+        var                  combatFastRetryRequested = false;
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
         var ownPlayerSeen = false;
@@ -1476,6 +1485,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastCombatAttackAt = null;
                                         lastDamageAt = null;
                                         lastObservedTargetHealthFraction = null;
+                                        combatFastRetryRequested = false;
                                     }
                                     else
                                     {
@@ -1505,6 +1515,22 @@ internal sealed class HandshakeDriver : IDisposable
                                     Console.WriteLine(
                                         $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
                                         $"({attackLabel})");
+
+                                    // ActionCancelled (0x0036) means the
+                                    // server's auto-repeat swing loop
+                                    // dropped (the non-FastTick bot drifted
+                                    // out of sticky range, etc.). Request a
+                                    // fast re-send of the bare melee attack
+                                    // so the loop restarts well before the
+                                    // 5s safety net — but only while a
+                                    // combat target is active. This is
+                                    // mechanical loop-keeping, NOT target
+                                    // choice. Other non-zero codes are
+                                    // semantic refusals surfaced below for
+                                    // the LLM to pivot on, not retried here.
+                                    if (atkDone.ErrorCode == 0x0036u && combatTargetGuid is not null)
+                                        combatFastRetryRequested = true;
+
                                     eventStream.Append(new StreamEvent
                                     {
                                         Sequence = 0,
@@ -2153,6 +2179,7 @@ internal sealed class HandshakeDriver : IDisposable
                         lastCombatAttackAt = null;
                         lastDamageAt = null;
                         lastObservedTargetHealthFraction = null;
+                        combatFastRetryRequested = false;
                     }
                 }
 
@@ -2171,12 +2198,19 @@ internal sealed class HandshakeDriver : IDisposable
                 // NextUseTime gate.)
                 if (combatTargetGuid is uint ffCtg &&
                     lastCombatAttackAt is DateTime ffLast &&
-                    (DateTime.UtcNow - ffLast).TotalSeconds >= CombatRetryIntervalSec &&
+                    CombatRetry.ShouldReattack(
+                        (DateTime.UtcNow - ffLast).TotalSeconds,
+                        combatFastRetryRequested,
+                        CombatRetryIntervalSec,
+                        CombatFastRetryMinIntervalSec) &&
                     worldState.Self is WorldObjectSnapshot ffSelf &&
                     worldState.TryGet(ffCtg) is WorldObjectSnapshot ffTarget &&
                     WorldDistance.TrySquaredDistance(ffSelf, ffTarget, out var ffD2) &&
                     ffD2 <= 16.0f /* StickyDistance^2 = 16 */)
                 {
+                    var ffFastRetry = combatFastRetryRequested;
+                    combatFastRetryRequested = false;
+
                     var ffPacketSeq = nextOutboundPacketSequence++;
                     var ffFragSeq   = nextOutboundFragmentSequence++;
 
@@ -2203,7 +2237,8 @@ internal sealed class HandshakeDriver : IDisposable
                                                 SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     lastCombatAttackAt = DateTime.UtcNow;
                     Console.WriteLine(
-                        $"[observe]   -> PHASE7F.2 RE-ATTACK: target=0x{ffCtg:X8} dist={Math.Sqrt(ffD2):F2}u " +
+                        $"[observe]   -> PHASE7F.2 {(ffFastRetry ? "FAST-RETRY (AttackDone ActionCancelled)" : "RE-ATTACK")}: " +
+                        $"target=0x{ffCtg:X8} dist={Math.Sqrt(ffD2):F2}u " +
                         $"pktSeq={ffPacketSeq} fragSeq={ffFragSeq} totalBytes={ffSent} " +
                         $"(loop-keeper; server no-ops if Attacking==true)");
                 }
@@ -4664,6 +4699,9 @@ internal sealed class HandshakeDriver : IDisposable
                             combatStartedAt  = DateTime.UtcNow;
                             lastDamageAt     = DateTime.UtcNow;
                             lastObservedTargetHealthFraction = null;
+                            // Fresh target — drop any stale cancel request
+                            // carried over from a previous engagement.
+                            combatFastRetryRequested = false;
                         }
                         lastCombatAttackAt = DateTime.UtcNow;
                     }
