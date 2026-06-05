@@ -5060,6 +5060,51 @@ internal sealed class HandshakeDriver : IDisposable
                             // MotorStopRadius for the audit framing).
                             var terminalStopRadius = MotorStopRadius.For(motionTarget);
 
+                            // Outdoor melee-approach Z convergence.
+                            //
+                            // Outdoor self Z is effectively client-
+                            // authoritative: the walk-tick below steps in XY
+                            // and PRESERVES the bot's Z (it samples no terrain
+                            // height), and the server adopts whatever Z the
+                            // AutonomousPosition claims outdoors (a full live
+                            // run showed self Z frozen at its spawn value across
+                            // 2 landblocks / 353 samples with 0 ForcePosition
+                            // corrections). On flat indoor cells self and target
+                            // share a Z so this never mattered (the proven
+                            // academy combat). Outdoors, a target on elevated
+                            // terrain reports its TRUE surface Z while the bot
+                            // stays ~20u below. The melee approach stops on a 2D
+                            // XY radius, so the bot "arrives" ~1u away in XY yet
+                            // ~20u away in 3D: every swing whiffs and the
+                            // 3D-gated re-attack loop (StickyDistance^2 = 16,
+                            // i.e. 4u) never fires — the bot deals 0 damage and
+                            // dies without a kill.
+                            //
+                            // Fix (mechanical locomotion only): while walking to
+                            // a live Attack target with BOTH self and target in
+                            // outdoor cells, converge the claimed Z toward the
+                            // target's reported surface Z at walk speed. This is
+                            // the 3D form of "reach the coordinate the LLM's
+                            // Attack goal already selected" — it encodes no game
+                            // knowledge (no names / wcids / landblocks / per-type
+                            // rules); the target and its Z are whatever Strategy
+                            // chose. Convergence is clamped to <= walk speed per
+                            // tick so it never trips the server z-jump anti-cheat
+                            // that the XY-only stepping guards against. Scoped to
+                            // Attack so flat-indoor academy traversal and the
+                            // outdoor frontier/seam probes (which legitimately
+                            // preserve Z) stay byte-identical.
+                            const float MeleeZConvergeToleranceUnits = 1.0f;
+                            bool outdoorMeleeZConverge =
+                                Strategy.MeleeApproachZ.ShouldConverge(
+                                    aimingAtWaypoint,
+                                    lockedGoalKind == GoalKind.Attack,
+                                    walkCell,
+                                    stepTargetCell,
+                                    walkSelf.Position.Z,
+                                    stepTargetPos.Z,
+                                    MeleeZConvergeToleranceUnits);
+
                             // Indoor terminal cell-claim (off-by-one fix).
                             //
                             // The per-tick AP cell-claim below advances
@@ -5180,17 +5225,17 @@ internal sealed class HandshakeDriver : IDisposable
                                 // NoIndoorPath case already handled
                                 // above; skip the rest.
                             }
-                            else if (!aimingAtWaypoint && lenXY <= terminalStopRadius)
+                            else if (!aimingAtWaypoint && !outdoorMeleeZConverge && lenXY <= terminalStopRadius)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: within stop radius (distXY={lenXY:F2}u <= {terminalStopRadius:F2}u) — stopping");
                             }
-                            else if (!aimingAtWaypoint && lenXY < 1e-4f)
+                            else if (!aimingAtWaypoint && !outdoorMeleeZConverge && lenXY < 1e-4f)
                             {
                                 motionDone = true;
                                 Console.WriteLine($"[motion] walk-tick: target overlaps self in XY (lenXY={lenXY:F4}) — stopping");
                             }
-                            else if (!aimingAtWaypoint && lenXY - terminalStopRadius < 0.1f)
+                            else if (!aimingAtWaypoint && !outdoorMeleeZConverge && lenXY - terminalStopRadius < 0.1f)
                             {
                                 // Phase 6n — asymptote failsafe: when
                                 // the remaining gap is < 0.1u, server
@@ -5218,13 +5263,33 @@ internal sealed class HandshakeDriver : IDisposable
                                 var maxStep = aimingAtWaypoint
                                     ? lenXY
                                     : lenXY - terminalStopRadius;
-                                var stepLen = MathF.Min(WalkSpeedUnitsPerSec * dt, maxStep);
-                                var stepX = dx / lenXY * stepLen;
-                                var stepY = dy / lenXY * stepLen;
+                                // Clamp >= 0: when outdoorMeleeZConverge holds,
+                                // the bot can reach this branch already inside
+                                // the XY stop radius (maxStep <= 0) to keep
+                                // correcting Z — never step backward in XY, and
+                                // guard the dx/lenXY direction against a zero-
+                                // length XY vector.
+                                var stepLen = MathF.Max(0f, MathF.Min(WalkSpeedUnitsPerSec * dt, maxStep));
+                                var stepX = lenXY > 1e-4f ? dx / lenXY * stepLen : 0f;
+                                var stepY = lenXY > 1e-4f ? dy / lenXY * stepLen : 0f;
+
+                                // Outdoor melee Z convergence: step the claimed
+                                // Z toward the target's surface Z by at most one
+                                // walk-speed step (same cap as XY) so the bot
+                                // arrives at the target's elevation and 3D melee
+                                // range closes. Preserves Z otherwise.
+                                var newZ = walkSelf.Position.Z;
+                                if (outdoorMeleeZConverge)
+                                {
+                                    newZ = Strategy.MeleeApproachZ.StepToward(
+                                        walkSelf.Position.Z,
+                                        stepTargetPos.Z,
+                                        WalkSpeedUnitsPerSec * dt);
+                                }
                                 var newPos = new Vector3(
                                     walkSelf.Position.X + stepX,
                                     walkSelf.Position.Y + stepY,
-                                    walkSelf.Position.Z);
+                                    newZ);
 
                                 var packetSeq = nextOutboundPacketSequence++;
                                 var fragSeq   = nextOutboundFragmentSequence++;
@@ -5335,7 +5400,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2},{walkSelf.Position.Z:F2}) " +
                                     $"intent=({newPos.X:F2},{newPos.Y:F2},{newPos.Z:F2}) " +
                                     $"step=({stepX:F2},{stepY:F2}) stepLen={stepLen:F2}u " +
-                                    $"distToTargetXY={lenXY:F2}u pktSeq={packetSeq} fragSeq={fragSeq}");
+                                    $"distToTargetXY={lenXY:F2}u distToTargetZ={(stepTargetPos.Z - walkSelf.Position.Z):F2}u pktSeq={packetSeq} fragSeq={fragSeq}");
                             }
                         }
                     }
