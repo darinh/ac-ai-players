@@ -2219,11 +2219,10 @@ internal sealed class HandshakeDriver : IDisposable
 
                     // 2) Avoid cooldown for this specific threat so the
                     //    picker doesn't immediately re-walk to the mob that
-                    //    nearly killed us. Prune expired entries first.
-                    foreach (var expired in combatAvoidUntil
-                                 .Where(kv => kv.Value <= DateTime.UtcNow)
-                                 .Select(kv => kv.Key).ToList())
-                        combatAvoidUntil.Remove(expired);
+                    //    nearly killed us. (Pruning of expired entries is
+                    //    health-aware and happens after this block — while
+                    //    still suppressed we KEEP entries so the threat stays
+                    //    filtered even past the time window.)
                     combatAvoidUntil[dgTarget] = DateTime.UtcNow + combatAvoidCooldown;
 
                     // 3) ChangeCombatMode(NonCombat) — stop the server-side
@@ -2354,6 +2353,26 @@ internal sealed class HandshakeDriver : IDisposable
                         ErrorLabel = "DisengageLowHealth",
                     });
                     tactics.Fail("combat disengage: self-health critical", eventStream);
+                }
+
+                // Phase 7f.D — per-tick self-suppression flag + health-aware
+                // avoid-cooldown prune. While our health is below the
+                // re-engage threshold, a recently-fled threat stays AVOIDED by
+                // every target-selection path even after its 30s time window
+                // lapses (passive healing usually outlasts 30s) — this stops
+                // the autonomous picker walking the still-wounded bot back into
+                // melee. Once health recovers we prune time-expired entries so
+                // the threat becomes engageable again (no permanent blacklist).
+                var selfCombatSuppressed =
+                    worldState.Self is WorldObjectSnapshot scSelf &&
+                    scSelf.HealthCurrent is uint scHc && scSelf.HealthMax is uint scHm &&
+                    CombatDisengage.IsCombatSuppressed(scHc, scHm, CombatReengageHealthFraction);
+                if (!selfCombatSuppressed && combatAvoidUntil.Count > 0)
+                {
+                    foreach (var expired in combatAvoidUntil
+                                 .Where(kv => kv.Value <= DateTime.UtcNow)
+                                 .Select(kv => kv.Key).ToList())
+                        combatAvoidUntil.Remove(expired);
                 }
 
                 // Phase 7f — combat watchdog. Switched from absolute
@@ -3377,8 +3396,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (snap.CellId is not uint sc || sc == 0u) continue;
                                 if (visitedTargetGuids.Contains(snap.Guid)) continue;
                                 // Phase 7f.D — don't pick a just-fled threat as
-                                // an exploration landmark during its avoid cooldown.
-                                if (combatAvoidUntil.TryGetValue(snap.Guid, out var cauE) && DateTime.UtcNow < cauE) continue;
+                                // an exploration landmark during its avoid cooldown
+                                // (or for as long as we remain too hurt to engage).
+                                if (combatAvoidUntil.TryGetValue(snap.Guid, out var cauE) &&
+                                    (DateTime.UtcNow < cauE || selfCombatSuppressed)) continue;
                                 if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
                                 var d = (float)Math.Sqrt(dsq);
                                 if (d > bestDist)
@@ -3459,6 +3480,7 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Pickup))
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
+                        var combatDeferredAttack = false;
                         // Phase 7f.D — refuse to LOCK a walk toward a hostile
                         // while we're too hurt to safely engage (self-health
                         // below the re-engage hysteresis threshold) OR the
@@ -3481,6 +3503,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"self-health below re-engage threshold or threat on avoid cooldown; " +
                                 $"treating as unresolved (wander away, do not walk into melee while recovering)");
                             targetSnap = null;
+                            combatDeferredAttack = true;
                         }
                         WorldObjectSnapshot? itemSnap = null;
                         // Give always carries an item; Use carries one only
@@ -3738,7 +3761,11 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"item={(goalCarriesItem ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
                                         $"selector target={goal.Target} item={goal.Item}; " +
                                         $"clearing and falling through to picker");
-                                    tactics.Fail("selector resolved to no live object", eventStream);
+                                    tactics.Fail(
+                                        combatDeferredAttack
+                                            ? "combat deferred: self-health too low to re-engage — recover before attacking"
+                                            : "selector resolved to no live object",
+                                        eventStream);
                                 }
                             }
                             else
@@ -3924,9 +3951,11 @@ internal sealed class HandshakeDriver : IDisposable
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
                         // Phase 7f.D — skip a threat still on the low-health
-                        // disengage avoid cooldown so the picker does not
-                        // re-walk the bot back into the mob it just fled.
-                        .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cau) && DateTime.UtcNow < cau))
+                        // disengage avoid cooldown (or for as long as we remain
+                        // too hurt to engage) so the picker does not re-walk the
+                        // bot back into the mob it just fled.
+                        .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cau) &&
+                                      (DateTime.UtcNow < cau || selfCombatSuppressed)))
                         .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                         // Phase 6n — anti-starvation: skip duplicate
                         // quest reward respawns. If we've already
@@ -4061,8 +4090,10 @@ internal sealed class HandshakeDriver : IDisposable
                             .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                             .Where(s => !visitedTargetGuids.Contains(s.Guid))
                             // Phase 7f.D — honor the low-health disengage
-                            // avoid cooldown in the fallback pool too.
-                            .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cauF) && DateTime.UtcNow < cauF))
+                            // avoid cooldown in the fallback pool too (and keep
+                            // avoiding the fled threat while still suppressed).
+                            .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cauF) &&
+                                          (DateTime.UtcNow < cauF || selfCombatSuppressed)))
                             .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
                             .ToList();
 
