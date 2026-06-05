@@ -5071,6 +5071,47 @@ public class LlmGoalPolicyTests
             $"static prompt floor grew to {prompt.Length} chars (budget 13000)");
     }
 
+    // combat-feel: the "## Combat readiness" combat-history block renders
+    // RAW per-kind counts only — NO danger/safe label, NO avoidance advice
+    // baked in by source (the LLM owns the avoidance decision via the
+    // COMBAT SAFETY rule). It renders nothing when there is no history.
+    [Fact]
+    public void BuildUserPrompt_CombatHistory_RendersRawCountsNoLabel()
+    {
+        var world = BuildExitTokenWorld() with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 12345u, Kills: 0, Deaths: 2,
+                    NearDeaths: 1, Fights: 3, LastOutcome: "death"),
+                new CombatHistoryEntry("Chicken", 24937u, Kills: 4, Deaths: 0,
+                    NearDeaths: 0, Fights: 4, LastOutcome: "kill"),
+            },
+        };
+        var events = new EventStream();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+
+        Assert.Contains("combat history (your own outcomes", p);
+        Assert.Contains("Drudge Skulker", p);
+        Assert.Contains("deaths 2", p);
+        Assert.Contains("near-deaths 1", p);
+        Assert.Contains("Chicken", p);
+        Assert.Contains("kills 4", p);
+        // No source-side danger/safety LABEL leaked into the render.
+        Assert.DoesNotContain("DANGEROUS", p);
+        Assert.DoesNotContain("dangerous", p);
+        Assert.DoesNotContain("SAFE to", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoCombatHistory_RendersNothing()
+    {
+        var world = BuildExitTokenWorld() with { CombatHistory = null };
+        var events = new EventStream();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.DoesNotContain("combat history (your own outcomes", p);
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
