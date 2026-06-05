@@ -40,3 +40,7 @@ experiments/world-nav/data/
 
 # Local-only: agent worktrees (see .github/skills/create-new-branch)
 .worktrees/
+
+# Local-only: stray review/diff artifacts and live-run logs
+*.diff
+session-state-logs/
