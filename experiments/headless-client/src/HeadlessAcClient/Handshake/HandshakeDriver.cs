@@ -3562,9 +3562,24 @@ internal sealed class HandshakeDriver : IDisposable
                         // cell-slide consumes motionIndoorPathCells.
                         if (exploreTarget is null)
                         {
+                            // Hunt authorization for the optional frontier
+                            // Mob-bias: the bot only steers toward remembered
+                            // monster sightings when the LLM/operator has an
+                            // active HUNT commitment on the IntentStack — the
+                            // operator-root "Hunt" intent, or an LLM-authored
+                            // hunt excursion (its own "hunt-excursion" label or
+                            // a typed `visible_tag:monster` completion the LLM
+                            // chose as the excursion's goalpost). Typed/intent
+                            // signals only — no English rationale parsing.
+                            var huntBiasAuthorized =
+                                intentStack.Top is { } huntTop &&
+                                (string.Equals(huntTop.Kind, "Hunt", StringComparison.Ordinal) ||
+                                 string.Equals(huntTop.Kind, "hunt-excursion", StringComparison.Ordinal) ||
+                                 (huntTop.Completion is Strategy.Intent.VisibleTagPredicate huntVtp &&
+                                  string.Equals(huntVtp.Tag, "monster", StringComparison.OrdinalIgnoreCase)));
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
-                                frontierCellCooldownUntil, out var outdoorPathCells);
+                                frontierCellCooldownUntil, huntBiasAuthorized, out var outdoorPathCells);
                             if (outdoorFrontier is not null)
                             {
                                 exploreTarget = outdoorFrontier;
@@ -6536,6 +6551,23 @@ internal sealed class HandshakeDriver : IDisposable
     /// recent.</summary>
     private static readonly TimeSpan OutdoorFrontierRecency = TimeSpan.FromMinutes(20);
 
+    /// <summary>Only remembered Mob sightings seen within this window bias an
+    /// outdoor frontier pick. Aligned to the LLM prompt's sighting-recall TTL
+    /// (180 s) so motor memory never outlives what the LLM can also see.</summary>
+    private static readonly TimeSpan OutdoorFrontierMobBiasTtl = TimeSpan.FromSeconds(180);
+
+    /// <summary>Half-width (m) of the geometric-score band within which a
+    /// remembered-Mob bearing breaks a near-tie. Half an outdoor frontier
+    /// step (72 m): monster memory can nudge a toss-up toward a known hunt
+    /// zone but can NEVER pull the bot to a sector that is meaningfully more
+    /// town-ward (more explored) or cooled.</summary>
+    private const float OutdoorFrontierMobBiasTieWindowMeters = 36f;
+
+    /// <summary>A remembered Mob sighting closer than this to the bot is
+    /// ignored for biasing — the bot is effectively there already, so the
+    /// stale coord would only cause an orbit. One frontier step (72 m).</summary>
+    private const float OutdoorFrontierMobBiasMinDistanceMeters = 72f;
+
     /// <summary>
     /// Autonomous OUTDOOR frontier exploration — the surface analogue of
     /// <see cref="TryChooseFrontierDest"/>. When the active Explore goal has
@@ -6554,12 +6586,22 @@ internal sealed class HandshakeDriver : IDisposable
     /// decides nothing about interaction. <paramref name="frontierCooldownUntil"/>
     /// is the shared per-cell revisit throttle (pruned in place; the chosen
     /// cell is cooled so a blocked bearing naturally rotates next pick).
+    ///
+    /// When <paramref name="huntBiasAuthorized"/> is true (the active Explore
+    /// belongs to an LLM/operator-authorized HUNT excursion — see the call
+    /// site), the bot's OWN remembered recent Mob sightings break a near-tie
+    /// in the geometric direction score toward a known hunt bearing. This is
+    /// mechanical execution of an already-authorized hunt (the LLM still owns
+    /// WHETHER to hunt and emits the Attack when a Mob enters view); it never
+    /// fires for a non-hunt Explore, and it cannot override a clearly-more-
+    /// unexplored or cooled direction.
     /// </summary>
     private WorldObjectSnapshot? TryChooseOutdoorFrontierDest(
         uint currentCellId,
         Vector3 currentPos,
         NavGraph navGraph,
         Dictionary<uint, DateTime> frontierCooldownUntil,
+        bool huntBiasAuthorized,
         out IReadOnlySet<uint>? pathCells)
     {
         pathCells = null;
@@ -6590,9 +6632,31 @@ internal sealed class HandshakeDriver : IDisposable
         }
 
         var (selfGX, selfGY) = Strategy.AcCoords.ToGlobalXY(currentCellId, currentPos);
+
+        // Hunt-bias input: the bot's OWN remembered recent Mob sightings, in
+        // global meters (same frame as the visited samples). Only built for a
+        // hunt-authorized Explore; Mob-kind + TTL filtered. Wire-derived Kind
+        // is perception, not a hardcoded identity; this only refines WHERE an
+        // authorized hunt walks, never WHETHER to hunt or WHAT to attack.
+        List<Strategy.OutdoorFrontierExplorer.MonsterSighting>? mobSightings = null;
+        if (huntBiasAuthorized)
+        {
+            var ttlCutoff = DateTimeOffset.UtcNow - OutdoorFrontierMobBiasTtl;
+            foreach (var s in navGraph.SnapshotSighted())
+            {
+                if (s.Kind != EntityKind.Mob) continue;
+                if (s.LastSeenUtc < ttlCutoff) continue;
+                (mobSightings ??= new()).Add(
+                    new Strategy.OutdoorFrontierExplorer.MonsterSighting(s.WorldX, s.WorldY));
+            }
+        }
+
         var choice = Strategy.OutdoorFrontierExplorer.ChooseFrontier(
             selfGX, selfGY, samples, cooled, DateTimeOffset.UtcNow,
-            OutdoorFrontierStepMeters, OutdoorFrontierLocalityMeters, OutdoorFrontierRecency);
+            OutdoorFrontierStepMeters, OutdoorFrontierLocalityMeters, OutdoorFrontierRecency,
+            mobSightings,
+            mobSightings is { Count: > 0 } ? OutdoorFrontierMobBiasTieWindowMeters : 0f,
+            OutdoorFrontierMobBiasMinDistanceMeters);
         if (choice is not Strategy.OutdoorFrontierExplorer.FrontierResult ft)
             return null;
 

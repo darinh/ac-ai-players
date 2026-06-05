@@ -49,6 +49,20 @@ internal static class OutdoorFrontierExplorer
 
     internal const int SectorCount = 8;
 
+    /// <summary>One remembered MONSTER sighting in global meters. The caller
+    /// pre-filters these to Mob-kind, recent (TTL) sightings from the bot's
+    /// OWN sighting memory and supplies them ONLY when the active Explore is
+    /// hunt-authorized — so this helper never decides WHETHER to hunt, only
+    /// refines WHERE an already-authorized hunt walk should head when the
+    /// geometric least-explored score is a near-tie. Pure coordinates: no
+    /// name, wcid, item type, or landblock id.</summary>
+    internal readonly record struct MonsterSighting(float GlobalX, float GlobalY);
+
+    // cos(half a compass sector) = cos(180/SectorCount deg) = cos(22.5 deg).
+    // A sighting counts as lying "in" a sector when the unit bearing
+    // self->sighting is within that half-angle of the sector's center bearing.
+    private const float MobBiasCosHalfSector = 0.92387953f;
+
     /// <summary>
     /// Pick the least-explored outward direction from <paramref
     /// name="selfGlobalX"/>/<paramref name="selfGlobalY"/>.
@@ -75,6 +89,19 @@ internal static class OutdoorFrontierExplorer
     /// <param name="recencyWindow">Prefer samples seen within this window;
     /// if none qualify, fall back to any in-locality sample regardless of
     /// age.</param>
+    /// <param name="monsterSightings">OPTIONAL: the bot's own remembered
+    /// Mob-kind sightings (global meters), pre-filtered to recent ones by the
+    /// caller and supplied ONLY for a hunt-authorized Explore. When present,
+    /// a near-tie among geometric candidates is broken toward a sector whose
+    /// bearing points at one. Null/empty => no effect.</param>
+    /// <param name="mobBiasTieWindowMeters">Half-width (m) of the score band
+    /// around the best geometric candidate inside which a monster-bearing
+    /// sector may win. 0 disables the bias entirely. Bounded so monster
+    /// memory can NEVER override a clearly-more-unexplored direction or a
+    /// cooled cell.</param>
+    /// <param name="mobBiasMinDistanceMeters">A sighting closer than this to
+    /// the bot is ignored for biasing (you are already there — biasing toward
+    /// it would orbit).</param>
     internal static FrontierResult? ChooseFrontier(
         float selfGlobalX,
         float selfGlobalY,
@@ -83,7 +110,10 @@ internal static class OutdoorFrontierExplorer
         DateTimeOffset nowUtc,
         float stepMeters,
         float localityRadius,
-        TimeSpan recencyWindow)
+        TimeSpan recencyWindow,
+        IReadOnlyList<MonsterSighting>? monsterSightings = null,
+        float mobBiasTieWindowMeters = 0f,
+        float mobBiasMinDistanceMeters = 0f)
     {
         // Build the reference set: visited samples that are both LOCAL
         // (near the bot) and RECENT. Relax to any-age local samples if
@@ -119,6 +149,12 @@ internal static class OutdoorFrontierExplorer
         FrontierResult? best = null;
         float bestScore = float.NegativeInfinity;
         float bestTie = float.NegativeInfinity;
+
+        // Candidates retained ONLY for the optional hunt-bias post-pass; not
+        // allocated on the common (no-bias) path so that path is unchanged.
+        var candidates = (mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 })
+            ? new List<(float Gx, float Gy, uint DestCell, int Sector, float Score, float DirX, float DirY, float Tie)>(SectorCount)
+            : null;
 
         for (int k = 0; k < SectorCount; k++)
         {
@@ -161,6 +197,8 @@ internal static class OutdoorFrontierExplorer
             // for full determinism.
             var tie = haveAway ? (dirX * awayDx + dirY * awayDy) : (-k);
 
+            candidates?.Add((gx, gy, destCell, k, score, dirX, dirY, tie));
+
             if (score > bestScore + 1e-3f ||
                 (MathF.Abs(score - bestScore) <= 1e-3f && tie > bestTie))
             {
@@ -170,6 +208,60 @@ internal static class OutdoorFrontierExplorer
             }
         }
 
+        // Optional hunt-bias post-pass. When the caller authorized a hunt
+        // excursion and supplied remembered Mob sightings, prefer a sector
+        // whose bearing points at one — but ONLY among candidates within
+        // mobBiasTieWindowMeters of the best geometric score, so monster
+        // memory resolves NEAR-TIES and can never override a clearly more
+        // unexplored direction or a cooled cell. Empty list / zero window =>
+        // candidates is null and this is skipped (geometry result stands).
+        if (candidates is not null && best is FrontierResult)
+        {
+            FrontierResult? mobBest = null;
+            float mobBestScore = float.NegativeInfinity;
+            float mobBestTie = float.NegativeInfinity;
+            foreach (var c in candidates)
+            {
+                if (c.Score < bestScore - mobBiasTieWindowMeters) continue;
+                if (!SectorPointsAtMonster(
+                        selfGlobalX, selfGlobalY, c.DirX, c.DirY,
+                        monsterSightings!, mobBiasMinDistanceMeters))
+                    continue;
+                if (mobBest is null ||
+                    c.Score > mobBestScore + 1e-3f ||
+                    (MathF.Abs(c.Score - mobBestScore) <= 1e-3f && c.Tie > mobBestTie))
+                {
+                    mobBest = new FrontierResult(c.Gx, c.Gy, c.DestCell, c.Sector);
+                    mobBestScore = c.Score;
+                    mobBestTie = c.Tie;
+                }
+            }
+            if (mobBest is not null) return mobBest;
+        }
+
         return best;
+    }
+
+    /// <summary>True if any supplied sighting lies beyond <paramref
+    /// name="minDistanceMeters"/> of the bot AND within a half-sector cone of
+    /// the candidate bearing (<paramref name="dirX"/>/<paramref name="dirY"/>,
+    /// a unit vector). Pure geometry over the bot's own remembered
+    /// coordinates — no name/wcid/type inspection.</summary>
+    private static bool SectorPointsAtMonster(
+        float selfX, float selfY, float dirX, float dirY,
+        IReadOnlyList<MonsterSighting> sightings, float minDistanceMeters)
+    {
+        var minSq = minDistanceMeters * minDistanceMeters;
+        foreach (var s in sightings)
+        {
+            var vx = s.GlobalX - selfX;
+            var vy = s.GlobalY - selfY;
+            var distSq = vx * vx + vy * vy;
+            if (distSq < minSq || distSq <= 1e-6f) continue;
+            var inv = 1f / MathF.Sqrt(distSq);
+            var dot = (vx * inv) * dirX + (vy * inv) * dirY;
+            if (dot >= MobBiasCosHalfSector) return true;
+        }
+        return false;
     }
 }
