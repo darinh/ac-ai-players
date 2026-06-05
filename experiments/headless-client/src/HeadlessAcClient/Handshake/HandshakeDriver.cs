@@ -524,6 +524,11 @@ internal sealed class HandshakeDriver : IDisposable
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
         var ownPlayerSeen = false;
+        // One-time guard: enable the AutoRepeatAttacks character option
+        // right after the first LoginComplete so the server runs its
+        // native continuous melee swing loop (see the SetSingleCharacterOption
+        // send below and Player_Melee.cs:375).
+        var autoRepeatOptionSent = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
         // more inbound packets after LC" so the server has time to
@@ -2026,6 +2031,45 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]      Expect: server clears Teleporting flag; character becomes solid (no purple portal haze).");
                 }
 
+                // Phase 7f.0 — enable AutoRepeatAttacks once, right after
+                // we're in the world. A real AC client sets this option so
+                // that a single TargetedMeleeAttack starts a server-side
+                // swing loop that auto-repeats at weapon cadence until the
+                // target dies or leaves range (Player_Melee.cs:375 gates the
+                // next swing on GetCharacterOption(AutoRepeatAttacks)).
+                // New characters have it OFF (PlayerFactory leaves the
+                // SetCharacterOption(AutoRepeatAttacks,true) line commented),
+                // so without this the server does ONE swing then OnAttackDone
+                // and the bot only re-swings every CombatRetryIntervalSec —
+                // far too slow to win a fight. This is mechanical client
+                // configuration, not game knowledge.
+                if (loginCompleteSent && !autoRepeatOptionSent)
+                {
+                    autoRepeatOptionSent = true;
+                    var optPacketSeq = nextOutboundPacketSequence++;
+                    var optFragSeq   = nextOutboundFragmentSequence++;
+
+                    var optBuf = new byte[GameActionSetSingleCharacterOptionMessage.PackedSize];
+                    var optLen = GameActionSetSingleCharacterOptionMessage.Pack(
+                        optBuf, CharacterOption.AutoRepeatAttacks, value: true);
+
+                    var optMsg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        optMsg.AddAckSequence(lastReceivedSeq);
+                    optMsg.AddBlobFragment(
+                        fragSequence: optFragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: optBuf.AsSpan(0, optLen));
+
+                    var optSent = optMsg.Pack(sendBuf, myClientId,
+                                              sequence: optPacketSeq, iteration: 1,
+                                              encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, optSent),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE7F.0 SEND: SetSingleCharacterOption(AutoRepeatAttacks=on) pktSeq={optPacketSeq} fragSeq={optFragSeq} totalBytes={optSent}");
+                }
+
                 // Phase 7f — combat watchdog. Switched from absolute
                 // 30s wall-clock to "no damage progress for N sec".
                 // The bot may take 30+ seconds to land its first hit
@@ -2055,20 +2099,19 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
-                // Phase 7f.2 — RE-ENGAGE attack. AC1's melee is a
-                // server-side loop: one TargetedMeleeAttack starts
-                // the swing loop, server auto-repeats Attack() until
-                // target dies, AutoRepeatAttacks character option
-                // turns off, we leave range, or the loop is
-                // cancelled by our motion. We send a fresh
-                // TargetedMeleeAttack every CombatRetryIntervalSec
-                // (NOT ChangeCombatMode — re-sending CombatMode
-                // triggers ActionCancelled via NextUseTime gate).
-                // If the swing loop is still running server-side,
-                // this attack is silently no-op'd by the
+                // Phase 7f.2 — RE-ENGAGE safety net. With AutoRepeatAttacks
+                // enabled (sent once at Phase 7f.0 after LoginComplete), AC1's
+                // melee is a server-side loop: one TargetedMeleeAttack starts
+                // the swing loop and the server auto-repeats Attack() at weapon
+                // cadence until the target dies, we leave range, or the loop is
+                // cancelled by our motion. This re-send every
+                // CombatRetryIntervalSec only matters if that loop dropped
+                // (e.g. a brief out-of-range step); if the loop is still
+                // running server-side this is silently no-op'd by the
                 // `if (Attacking || MeleeTarget != null && MeleeTarget.IsAlive) return;`
-                // guard in Player_Melee.cs:99 — harmless. If the
-                // loop has stopped, this re-engages it.
+                // guard in Player_Melee.cs:99 — harmless. (NOT ChangeCombatMode
+                // — re-sending CombatMode triggers ActionCancelled via the
+                // NextUseTime gate.)
                 if (combatTargetGuid is uint ffCtg &&
                     lastCombatAttackAt is DateTime ffLast &&
                     (DateTime.UtcNow - ffLast).TotalSeconds >= CombatRetryIntervalSec &&
