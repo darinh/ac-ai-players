@@ -109,10 +109,20 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Select(e => e.ItemGuid!.Value)
             .ToHashSet();
 
-        // 1) Health-critical: drop everything if frac < 0.3.
-        if (world.Self.HealthFraction is float hf && hf < 0.3f)
-            return MakeGoal(GoalKind.Wait, new Selector { Name = "self" }, null,
-                priority: 9, rationale: "low health (<30%) - wait/heal");
+        // NOTE: this fallback deliberately does NOT gate on a
+        // hardcoded self-health threshold. A "flee/rest when wounded
+        // below X%" rule is a rule-of-thumb the LLM must own, not
+        // source: the threshold value belongs in an LLM-authored
+        // Intent predicate (HealthFractionAtMostPredicate /
+        // HealthFractionAtLeastPredicate), which the Strategy layer
+        // pushes and the Motor evaluates mechanically. Hardcoding a
+        // magic "< 0.3" here is forbidden game knowledge (audited),
+        // and the old `Wait` it returned was also a no-op fiction —
+        // this fallback has no heal or flee action, so freezing a
+        // wounded bot in place only stopped it defending itself while
+        // a mob finished it off. Without the gate the bot falls
+        // through to "fight the visible hostile", which at least has a
+        // chance of surviving.
 
         // 2) Combat — nearest observed-hostile creature.
         var hostile = world.Visible
@@ -146,7 +156,12 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .Where(i => !_recentProposedGuids.Contains(i.Guid))
-            .OrderByDescending(i => i.ValidLocations) // weapons/armor first roughly
+            // No source-side gear-class ordering: ranking inventory by
+            // "weapons/armor first" is a game-knowledge rule-of-thumb the
+            // LLM owns, not the mechanical fallback. The fallback wields
+            // every equippable item across successive ticks regardless of
+            // order, so the end state is identical; we just take whatever
+            // the server's inventory iteration yields first.
             .FirstOrDefault();
         if (unwielded is not null)
         {

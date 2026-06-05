@@ -548,6 +548,43 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void NoQuestKnowledgePolicy_LowHealth_StillFightsHostile_NoHardcodedFloor()
+    {
+        // Regression for relocate-noquest-health-floor: the fallback
+        // used to short-circuit to a `Wait` goal whenever self-health
+        // dropped below a hardcoded 0.3 fraction. That magic threshold
+        // was forbidden game knowledge (a rule-of-thumb the LLM must
+        // own via an Intent predicate), AND a no-op fiction — this
+        // fallback has no heal/flee action, so freezing a wounded bot
+        // only stopped it defending itself. With the gate removed, a
+        // wounded bot facing a hostile still proposes Attack.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 0.05f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = MobGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 5f, IsCreature = true, ObservedHostile = true,
+                },
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.NotEqual(GoalKind.Wait, goal.Kind);
+        Assert.Equal(MobGuid, goal.Target.Guid);
+    }
+
+    [Fact]
     public void NoQuestKnowledgePolicy_DoesNotGiveItem_BecauseThatRequiresQuestKnowledge()
     {
         // The whole point of this policy: even though the bot is holding
