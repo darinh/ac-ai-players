@@ -2734,11 +2734,46 @@ public class LlmGoalPolicyTests
     [Fact]
     public void RecentSightings_RendersMobOutOfView()
     {
+        // Self at landblock 0xA9B3, local (0,0) → absolute origin
+        // (0xA9*192, 0xB3*192). Place the sighting 100m due north of self in
+        // ABSOLUTE coords (the frame NavGraph stores) so the row renders the
+        // true relative bearing/distance.
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
         var world = RecallSelfWorld();
         var prompt = BuildPromptWithRecall(world,
-            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 90, worldX: 0f, worldY: 100f));
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 90,
+                worldX: selfGX, worldY: selfGY + 100f));
         Assert.Contains("## Recently sighted (out of view)", prompt);
         Assert.Contains("The Chicken (kind=monster, last seen 90s ago, approx N ~100m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_DistanceUsesAbsoluteFrame_NotWorldOrigin()
+    {
+        // Regression for the live frame-mismatch bug: self Position* is
+        // landblock-LOCAL (0..192) but sightings are stored in ABSOLUTE
+        // coords. The row must lift self into the absolute frame before
+        // differencing; otherwise a nearby monster renders as tens of
+        // thousands of metres (distance-from-world-origin, e.g. ~47525m).
+        // Self sits at local (50,50) in 0xA9B3; a monster 30m due east must
+        // read ~30m E, not the origin-relative magnitude.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 50f, PositionY = 50f, PositionZ = 0f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        const float selfGX = 0xA9 * AcCoords.BlockLength + 50f;
+        const float selfGY = 0xB3 * AcCoords.BlockLength + 50f;
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Drudge Slinker", 19258u, EntityKind.Mob, ageSeconds: 25,
+                worldX: selfGX + 30f, worldY: selfGY));
+        Assert.Contains("Drudge Slinker (kind=monster, last seen 25s ago, approx E ~30m)", prompt);
     }
 
     [Fact]
