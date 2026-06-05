@@ -292,6 +292,13 @@ internal sealed record WorldStateProjection
         int? numDeaths = null;
         int? coinValue = null;
         float? hfrac = null;
+        if (self.HealthCurrent is uint hcur && self.HealthMax is uint hmax && hmax > 0)
+        {
+            // Clamp to [0,1] — Current should never exceed the
+            // peak-observed max, but guard against transient buff/vitae
+            // edge cases so the fraction stays a clean ratio.
+            hfrac = Math.Clamp((float)hcur / hmax, 0f, 1f);
+        }
         if (self.PropertyInts is { } props)
         {
             // PropertyInt ids: see ACE-bots Source/ACE.Entity/Enum/Properties/PropertyInt.cs

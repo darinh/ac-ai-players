@@ -54,6 +54,8 @@ internal static class GameMessageDecoder
             GameMessageOpcode.SetState => DecodeSetState(payload),
             GameMessageOpcode.HearSpeech => DecodeHearSpeech(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
+            GameMessageOpcode.PrivateUpdateVital => DecodePrivateUpdateVital(payload),
+            GameMessageOpcode.PrivateUpdateAttribute2ndLevel => DecodePrivateUpdateAttribute2ndLevel(payload),
             _ => null,
         };
     }
@@ -215,6 +217,43 @@ internal static class GameMessageDecoder
             var prop = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
             var val  = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(cursor));
             return new PrivateUpdatePropertyIntMessage(seq, prop, val);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static PrivateUpdateVitalMessage? DecodePrivateUpdateVital(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < PrivateUpdateVitalMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var seq   = p[cursor]; cursor += 1;
+            var vital = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var ranks = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var start = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var exp   = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var curr  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor));
+            return new PrivateUpdateVitalMessage(seq, vital, ranks, start, exp, curr);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static PrivateUpdateAttribute2ndLevelMessage? DecodePrivateUpdateAttribute2ndLevel(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < PrivateUpdateAttribute2ndLevelMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var seq   = p[cursor]; cursor += 1;
+            var vital = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var curr  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor));
+            return new PrivateUpdateAttribute2ndLevelMessage(seq, vital, curr);
         }
         catch
         {

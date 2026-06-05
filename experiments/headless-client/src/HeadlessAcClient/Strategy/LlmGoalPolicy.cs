@@ -1969,12 +1969,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         AppendVisibleNearby(sb, world.Visible);
         sb.AppendLine();
 
-        // Slice H — Combat readiness summary. Surfaces the three
-        // pieces of state the LLM needs to decide whether to engage:
-        // weapon, monster proximity, hostile incoming. Health is
-        // intentionally omitted until WorldStateProjection actually
-        // populates HealthFraction reliably (currently null in most
-        // ticks — rubber-duck flagged this).
+        // Slice H — Combat readiness summary. Surfaces the state the
+        // LLM needs to decide whether to engage: weapon, monster
+        // proximity, hostile incoming, and (since self-health
+        // perception) the bot's own health fraction when known.
+        // Self-health now arrives via PrivateUpdateVital (0x02E7) and
+        // is populated on damage/regen ticks; it is still null before
+        // the first vital update of a session, so the line is gated.
         //
         // "weapon" means a MELEE WEAPON is wielded — NOT just any
         // equipped item. Counting armor/clothing as "weapon: wielded"
@@ -2010,6 +2011,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var observedHostile = world.Visible.FirstOrDefault(v => v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
         sb.AppendLine($"- weapon: {(meleeWeaponWielded ? "melee weapon wielded" : "NONE wielded - UNARMED")}");
+        if (world.Self.HealthFraction is float crHf)
+            sb.AppendLine($"- health: {crHf:P0}");
         if (bagWeapon is not null)
             sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
         if (groundWeapon is not null)

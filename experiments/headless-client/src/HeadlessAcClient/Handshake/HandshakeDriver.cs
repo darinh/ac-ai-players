@@ -1572,6 +1572,46 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt: {pup.PropertyName} = {pup.Value} (seq={pup.Sequence})");
                             break;
+                        case PrivateUpdateVitalMessage puv:
+                            // Surface the bot's own health changes. Only
+                            // the health vital feeds self-health state;
+                            // stamina/mana are logged at low value too.
+                            var vitName = puv.IsHealth ? "Health"
+                                : puv.Vital == (uint)VitalKind.MaxStamina ? "Stamina"
+                                : puv.Vital == (uint)VitalKind.MaxMana ? "Mana"
+                                : $"0x{puv.Vital:X}";
+                            if (puv.IsHealth &&
+                                worldState.Self is { HealthCurrent: uint hc, HealthMax: uint hm } &&
+                                hm > 0)
+                            {
+                                Console.WriteLine(
+                                    $"[vital]   -> self Health current={hc} max={hm} " +
+                                    $"frac={(float)hc / hm:F3} (seq={puv.Sequence})");
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[vital]   -> PrivateUpdateVital: {vitName} current={puv.Current} (seq={puv.Sequence})");
+                            }
+                            break;
+                        case PrivateUpdateAttribute2ndLevelMessage pal:
+                            // Per-tick current-level vital (the combat-
+                            // critical self-health source). Surface the
+                            // health fraction from the just-applied state.
+                            if (pal.IsHealth &&
+                                worldState.Self is { HealthCurrent: uint phc, HealthMax: uint phm } &&
+                                phm > 0)
+                            {
+                                Console.WriteLine(
+                                    $"[vital]   -> self Health current={phc} max={phm} " +
+                                    $"frac={(float)phc / phm:F3} (seq={pal.Sequence})");
+                            }
+                            else if (pal.IsHealth)
+                            {
+                                Console.WriteLine(
+                                    $"[vital]   -> self Health current={pal.Current} (seq={pal.Sequence})");
+                            }
+                            break;
                         case UpdatePositionMessage upm:
                             var vel = upm.Velocity is { } v ? $" vel=({v.X:F2},{v.Y:F2},{v.Z:F2})" : "";
                             var plc = upm.PlacementId is { } pid ? $" placement=0x{pid:X}" : "";
