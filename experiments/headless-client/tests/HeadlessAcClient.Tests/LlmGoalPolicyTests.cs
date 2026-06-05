@@ -4179,6 +4179,126 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
     }
 
+    // ---- Hunt-egress enforcement (town-stuck LLM-COMPLIANCE backstop) ----
+    //
+    // Pure decision behind the mechanical backstop: when the bot is
+    // demonstrably stuck in a tapped-out, monster-free safe zone the policy
+    // substitutes a targetless Explore for a social Talk/Give the LLM keeps
+    // emitting against the existing prompt rules. dwell threshold = 5min,
+    // no-progress grace = 2min. ComputeEgressActive is a sticky latch (stays
+    // engaged across landblock seams so the bot leaves the town cluster
+    // instead of ping-ponging); IsEgressOverridableVerb gates which goal
+    // kinds get substituted while the latch is engaged.
+
+    private static readonly TimeSpan StuckGrace = TimeSpan.FromMinutes(3);
+
+    [Fact]
+    public void HuntEgress_EngagesWhenStuckPastThreshold()
+    {
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Theory]
+    [InlineData((int)GoalKind.Talk, true)]
+    [InlineData((int)GoalKind.Give, true)]
+    [InlineData((int)GoalKind.Use, false)]
+    [InlineData((int)GoalKind.Pickup, false)]
+    [InlineData((int)GoalKind.Wield, false)]
+    [InlineData((int)GoalKind.Attack, false)]
+    [InlineData((int)GoalKind.Explore, false)]
+    public void HuntEgress_OnlyOverridesSocialVerbs(int kind, bool expected)
+    {
+        // Use can be a door/portal transition (the egress action itself);
+        // Pickup can be self-arming; Attack/Explore are already progress.
+        Assert.Equal(expected, LlmGoalPolicy.IsEgressOverridableVerb((GoalKind)kind));
+    }
+
+    [Fact]
+    public void HuntEgress_SuppressedWhenUnarmed()
+    {
+        // A weaponless bot keeps its full town grace (not ready to hunt).
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: false, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Fact]
+    public void HuntEgress_SuppressedWhenMonsterInView()
+    {
+        // A monster is engageable here — do not flee the hunt.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: true,
+            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Fact]
+    public void HuntEgress_SuppressedBeforeDwellThreshold()
+    {
+        // Just arrived / brief visit — let the bot work the area first.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 4.9, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Fact]
+    public void HuntEgress_SuppressedWhileMaterialProgressRecent()
+    {
+        // A quest actively handing over items keeps its grace.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 9.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void HuntEgress_EngagesExactlyAtThresholdBoundaries()
+    {
+        // dwell == 5min and sinceProgress == 2min are both "stuck enough".
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 5.0, sinceMaterialProgress: TimeSpan.FromMinutes(2)));
+    }
+
+    [Fact]
+    public void HuntEgress_StaysEngagedAcrossSeamDespiteDwellReset()
+    {
+        // Already egressing; bot just crossed a seam so dwell reset to 0.
+        // The sticky latch must keep egress engaged so it keeps leaving the
+        // town cluster instead of reverting to Talk and pathing back.
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: true, combatReady: true, monsterInView: false,
+            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Fact]
+    public void HuntEgress_StickyCancelledByMonster()
+    {
+        // Reached the hunt zone — disengage egress so the bot can fight.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: true, combatReady: true, monsterInView: true,
+            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
+    }
+
+    [Fact]
+    public void HuntEgress_StickyCancelledByRecentProgress()
+    {
+        // Inventory changed mid-egress (looted / received item) — yield to
+        // whatever the LLM wants to do next.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: true, combatReady: true, monsterInView: false,
+            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void HuntEgress_StickyCancelledByDisarm()
+    {
+        // Lost the weapon mid-egress — no longer hunt-ready.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: true, combatReady: false, monsterInView: false,
+            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
+    }
+
     [Fact]
     public void InventoryItemUsed_IsNotPlanInvalidating()
     {
