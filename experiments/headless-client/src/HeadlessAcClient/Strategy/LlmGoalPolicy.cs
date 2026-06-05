@@ -93,6 +93,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // stale, falsely-large dwell.
     private static readonly TimeSpan DwellSessionGap = TimeSpan.FromSeconds(60);
 
+    // Town-stuck hunt-egress enforcement (mechanical LLM-COMPLIANCE
+    // backstop). The LOOP-BREAK(town-stuck) + HUNT EXCURSION + PERSIST
+    // prompt rules (BuildUserPrompt RULES block) tell the LLM to leave a
+    // tapped-out, monster-free safe zone once dwell exceeds a few minutes,
+    // but the model observably IGNORES them and keeps Talking town NPCs
+    // forever (live Diseng62715: stayed in 0xA9B4 the whole ~19min run,
+    // 291 positions all in one landblock, 0 Explore, dwell well past 5min).
+    // When the bot is demonstrably stuck we MECHANICALLY substitute a
+    // targetless Explore so the existing OutdoorFrontierExplorer drives
+    // egress. This is enforcement of an existing prompt directive, NOT new
+    // strategy: a targetless Explore interacts with no LLM-unrequested
+    // object, and every gate is a typed wire affordance or a timer (no NPC
+    // names, wcids, landblock ids, or English-dialog parsing). Mirrors the
+    // accepted server-side recovery-tick pattern (ac-ai-players#110).
+    private const double EgressDwellMinutes = 5.0;
+    private static readonly TimeSpan EgressNoProgressGrace = TimeSpan.FromMinutes(2);
+    // Wielded weapon bits that count as "combat-ready" for egress: Melee
+    // (0x1) | Missile (0x100) | Caster (0x8000). A bot with no weapon is
+    // not yet ready to hunt, so it keeps its full town grace.
+    private const uint EgressWieldedWeaponMask =
+        ItemTypeMasks.MeleeWeapon | 0x100u | 0x8000u;
+    private int _egressLastInventoryCount = -1;
+    private DateTimeOffset _egressLastInventoryChangeUtc = DateTimeOffset.MinValue;
+    // Sticky egress latch. Once egress triggers we keep it engaged across
+    // landblock seams until a monster appears, the bot disarms, or it makes
+    // material progress. Without this latch the override would drop the tick
+    // after the bot crosses a seam (dwell resets to 0), reverting to Talk and
+    // pathing back — an infinite ping-pong between two adjacent safe zones.
+    private bool _isEgressing;
+
     // Sticky LLM-objective (call-volume reduction). _lastLlmGoal holds
     // the most-recent LLM-authored goal so the policy can RE-DRIVE it
     // when the tactical goal clears with no external world change,
@@ -314,6 +344,112 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public string Source => $"llm:{_client.Model}";
 
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
+        => ApplyHuntEgressOverride(ProposeGoalCore(world, events, currentGoal), world, events);
+
+    // Mechanical hunt-egress enforcement. Applied to EVERY goal this policy
+    // would return (LLM-accepted, fallback, held, or re-driven) so it also
+    // covers the 429/backoff/parse-fail paths that defer to the fallback —
+    // which itself Talks town NPCs before its Explore default
+    // (NoQuestKnowledgePolicy step 6 vs step 7). See the field-doc above for
+    // the architecture rationale. Counter-free + time-based so it is
+    // idempotent per tick: a held social goal that stays stuck is overridden
+    // every tick (driving continuous egress) with no double-counting.
+    private Goal? ApplyHuntEgressOverride(Goal? goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal is null) return goal;
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var lb = world.Self.Landblock;
+
+        // Track MATERIAL progress: an inventory delta (received/spent a
+        // quest item, looted) stamps a fresh "last progress" time. Repeated
+        // identical NPC dialog is NOT progress (that is the loop we break) —
+        // so we deliberately do NOT look at dialog/hint events here. A
+        // landblock change is deliberately NOT treated as progress: crossing
+        // an invisible spatial seam into another safe zone must NOT reset the
+        // clock, or the bot ping-pongs between adjacent town landblocks
+        // (each crossing granting a fresh grace). The sticky _isEgressing
+        // latch (below) carries egress through seams instead.
+        var invCount = world.Inventory.Count;
+        if (_egressLastInventoryCount >= 0 && invCount != _egressLastInventoryCount)
+            _egressLastInventoryChangeUtc = nowUtc;
+        _egressLastInventoryCount = invCount;
+
+        var dwellEntry = DwellEntryForPrompt(lb);
+        var dwellMin = dwellEntry is DateTimeOffset de
+            ? Math.Max(0.0, (nowUtc - de).TotalMinutes)
+            : 0.0;
+
+        var combatReady = world.Inventory.Any(i =>
+            i.WieldedAt is uint w && w != 0 &&
+            i.ItemType is uint it && (it & EgressWieldedWeaponMask) != 0);
+        var monsterInView = world.Visible.Any(v => v.IsMonster && !v.IsCorpse);
+
+        var sinceProgress = nowUtc - _egressLastInventoryChangeUtc;
+        // Update the sticky latch every tick (idempotent). It engages once
+        // dwell passes the threshold and DIS-engages the moment a cancel
+        // condition holds, regardless of the current landblock.
+        _isEgressing = ComputeEgressActive(
+            _isEgressing, combatReady, monsterInView, dwellMin, sinceProgress);
+        if (!_isEgressing)
+            return goal;
+
+        // Egress is engaged. Only substitute the social, dwell-extending
+        // verbs the LLM keeps emitting; let any other goal (including an
+        // Explore/Use the LLM itself produced, or the door/portal transition)
+        // pass through untouched.
+        if (!IsEgressOverridableVerb(goal.Kind))
+            return goal;
+
+        Console.WriteLine(
+            $"[llm-override] town-stuck hunt-egress: dwell={dwellMin:F1}min, combat-ready, " +
+            $"no monster in view, no inventory progress for {sinceProgress.TotalMinutes:F1}min — " +
+            $"substituting {goal.Kind} target={goal.Target} with Explore{{anywhere}} to leave the safe zone.");
+
+        return new Goal
+        {
+            Kind = GoalKind.Explore,
+            Target = new Selector { Name = "anywhere" },
+            Source = "override:hunt-egress",
+            CreatedAtUtc = nowUtc,
+            Id = Guid.NewGuid(),
+            Priority = 1,
+            Rationale = "mechanical hunt-egress: tapped-out monster-free safe zone, dwell past threshold " +
+                        "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)",
+        };
+    }
+
+    // Pure sticky-latch transition for hunt-egress. Engages once the bot has
+    // dwelled past the threshold in a tapped-out monster-free safe zone, and
+    // STAYS engaged across landblock seams (so the bot actually leaves the
+    // town cluster instead of nudging one seam and reverting) until a cancel
+    // condition holds. All inputs are typed affordances / timers — no game
+    // content. Extracted for deterministic unit testing.
+    internal static bool ComputeEgressActive(
+        bool currentlyEgressing, bool combatReady, bool monsterInView,
+        double dwellMinutes, TimeSpan sinceMaterialProgress)
+    {
+        // Cancel conditions take priority — they end an egress in progress:
+        //  - a monster is now engageable here (we reached the hunt);
+        //  - the bot is no longer combat-ready (disarmed);
+        //  - material (inventory) progress happened recently (real quest).
+        if (monsterInView || !combatReady || sinceMaterialProgress < EgressNoProgressGrace)
+            return false;
+        // Sticky: stay engaged once started, regardless of dwell reset at seams.
+        if (currentlyEgressing) return true;
+        // Otherwise trigger only after dwelling in this safe zone past the
+        // threshold.
+        return dwellMinutes >= EgressDwellMinutes;
+    }
+
+    // Only social, dwell-extending verbs are substituted while egressing.
+    // Use/Pickup/Wield/Attack/Explore are never overridden (Use may be the
+    // door/portal transition itself; Pickup may be self-arming; the rest are
+    // already progress).
+    internal static bool IsEgressOverridableVerb(GoalKind kind)
+        => kind == GoalKind.Talk || kind == GoalKind.Give;
+
+    private Goal? ProposeGoalCore(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var nowUtc = DateTimeOffset.UtcNow;
 
@@ -358,7 +494,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
             .Any(e => e.Kind is EventKind.InventoryItemAdded or EventKind.InventoryItemRemoved);
 
-        if (currentGoal is not null && landblockChangedSinceLook)
+        if (currentGoal is not null && landblockChangedSinceLook
+            && currentGoal.Source != "override:hunt-egress")
         {
             Console.WriteLine(
                 $"[strategy] LlmGoalPolicy: landblock change detected → " +
