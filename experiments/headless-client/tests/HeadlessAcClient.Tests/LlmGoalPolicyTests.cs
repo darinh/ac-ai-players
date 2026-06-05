@@ -4725,4 +4725,377 @@ public class LlmGoalPolicyTests
 
         Assert.DoesNotContain("PERSIST A HUNT EXCURSION", prompt);
     }
+
+    // ---- Source re-drive of an LLM-authored hunt excursion ----
+    //
+    // When the LLM emits an inert Explore goal AND pushes a new TOP
+    // intent that carries a liveness deadline, the policy captures that
+    // (intent-id, Explore-goal) pair and RE-DRIVES the Explore on later
+    // ticks WITHOUT a fresh LLM call, until a MECHANICAL break condition
+    // fires (top intent left, landblock change, semantic rejection,
+    // stuck, or the reinstall budget). Ambient salient chatter (NpcDialog
+    // etc.) must NOT break the commitment — that is the whole point.
+    //
+    // Discriminator: the re-drive gate sits BEFORE the wake/kickoff
+    // logic, so when it is armed it SUPPRESSES an ambient salient event
+    // (NpcDialog) that the normal sticky/wake path would otherwise turn
+    // into a fresh LLM call. So "armed" ⇒ no new HTTP request on a
+    // NpcDialog tick; "not armed / broken" ⇒ a new request fires.
+
+    private const string RedrivePushExploreDeadlineJson = """
+    {
+      "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "kind": "Explore",
+      "target": { "name": "open country" },
+      "rationale": "begin hunt excursion",
+      "stack_ops": [ { "op": "push", "intent": {
+        "kind": "hunt-excursion", "rationale": "leave town to hunt",
+        "deadline_seconds": 600,
+        "completion": { "type": "visible_tag", "tag": "monster" } } } ]
+    }
+    """;
+
+    private static (LlmGoalPolicy policy, WorldStateProjection world, EventStream events,
+        System.Collections.Generic.List<string> reqs, IntentStack stack)
+        SetupRedrive(string cannedContent, int maxRedrive = 12, bool seedRoot = true)
+    {
+        var reqs = new System.Collections.Generic.List<string>();
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = cannedContent } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            reqs.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var stack = new IntentStack();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        // Seed a root intent so the LLM-pushed hunt-excursion lands at
+        // depth 2 (poppable) — mirrors production where the operator pushes
+        // an initial Hunt intent before the LLM ever runs. A push onto an
+        // EMPTY stack would become the sacred root and never auto-pop, which
+        // is exactly why capture refuses unless Depth > 1.
+        if (seedRoot)
+        {
+            stack.TryPush(new Intent
+            {
+                Id = "root-operator",
+                Kind = "Hunt",
+                Completion = new AlwaysFalsePredicate(),
+                Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+            });
+        }
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo(), stack: stack)
+        {
+            MinCallInterval = TimeSpan.Zero,
+            MaxRedriveReinstalls = maxRedrive,
+        };
+        return (policy, world, events, reqs, stack);
+    }
+
+    /// <summary>Run call-1 kickoff + drain + consume so the stack op is
+    /// applied and re-drive provenance (if eligible) is captured.</summary>
+    private static async Task<Goal?> ConsumeFirstAsync(
+        LlmGoalPolicy policy, WorldStateProjection world, EventStream events)
+    {
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        return policy.ProposeGoal(world, events, null);
+    }
+
+    private static StreamEvent NpcDialog(string text = "hello") => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = text,
+    };
+
+    [Fact]
+    public async Task Redrive_PushExploreWithDeadline_Captures_SuppressesAmbientNpcDialog()
+    {
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+
+        var g = await ConsumeFirstAsync(policy, world, events);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+        Assert.Single(reqs);            // only the kickoff call
+        Assert.Equal(2, stack.Depth);   // root + the pushed hunt-excursion
+
+        // Ambient NpcDialog would normally wake a fresh LLM call; re-drive
+        // suppresses it and re-emits the SAME Explore for free.
+        events.Append(NpcDialog());
+        var g2 = policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Single(reqs);            // NO new call — re-drive suppressed it
+        Assert.Equal(GoalKind.Explore, g2!.Kind);
+    }
+
+    [Fact]
+    public async Task Redrive_PushTalk_DoesNotCapture_NpcDialogWakesLlm()
+    {
+        // Same push, but the goal is Talk (interactive) — must NOT capture.
+        var json = """
+        {
+          "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "kind": "Talk",
+          "target": { "name": "Greeter" },
+          "rationale": "x",
+          "stack_ops": [ { "op": "push", "intent": {
+            "kind": "hunt-excursion", "rationale": "x",
+            "deadline_seconds": 600,
+            "completion": { "type": "visible_tag", "tag": "monster" } } } ]
+        }
+        """;
+        var (policy, world, events, reqs, stack) = SetupRedrive(json);
+
+        var g = await ConsumeFirstAsync(policy, world, events);
+        Assert.Equal(GoalKind.Talk, g!.Kind);
+        Assert.Single(reqs);
+
+        events.Append(NpcDialog());
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // not armed → NpcDialog woke a fresh call
+    }
+
+    [Fact]
+    public async Task Redrive_PushExploreNoDeadline_DoesNotCapture()
+    {
+        // Explore + push but the intent has NO deadline (no liveness
+        // guarantee) — refuse to capture.
+        var json = """
+        {
+          "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "kind": "Explore",
+          "target": { "name": "open country" },
+          "rationale": "x",
+          "stack_ops": [ { "op": "push", "intent": {
+            "kind": "hunt-excursion", "rationale": "x",
+            "completion": { "type": "visible_tag", "tag": "monster" } } } ]
+        }
+        """;
+        var (policy, world, events, reqs, _) = SetupRedrive(json);
+
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        events.Append(NpcDialog());
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // no deadline → not armed → call fired
+    }
+
+    [Fact]
+    public async Task Redrive_ExploreWithoutPush_DoesNotCapture()
+    {
+        var json = """
+        { "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "kind": "Explore", "target": { "name": "open country" }, "rationale": "x" }
+        """;
+        var (policy, world, events, reqs, stack) = SetupRedrive(json);
+
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+        Assert.Equal(1, stack.Depth);   // only the seeded root; nothing pushed
+
+        events.Append(NpcDialog());
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // no push → not armed → call fired
+    }
+
+    [Fact]
+    public async Task Redrive_PreservesActiveCurrentGoal_DoesNotClobber()
+    {
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        // An active (in-flight) goal must be preserved verbatim, not
+        // replaced by a fresh re-drive copy.
+        var active = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" }, Source = "motor" };
+        events.Append(NpcDialog());
+        var result = policy.ProposeGoal(world, events, active);
+        await policy.WaitForInFlightAsync();
+        Assert.Single(reqs);                 // still suppressed
+        Assert.Same(active, result);         // exact same instance returned
+    }
+
+    [Fact]
+    public async Task Redrive_LandblockChange_EndsRedrive()
+    {
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.LandblockChanged, Text = "lb=0xA9B3",
+        });
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // landblock change broke the commitment
+    }
+
+    [Fact]
+    public async Task Redrive_SemanticRejection_EndsRedrive()
+    {
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant", Text = "Greeter",
+        });
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // semantic rejection broke the commitment
+    }
+
+    [Fact]
+    public async Task Redrive_TransportRejection_DoesNotEndRedrive()
+    {
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        // A synthetic motor transport-failure (could-not-walk) must NOT
+        // break the commitment — the route failed, the objective did not.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Text = "monster",
+        });
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Single(reqs);            // still suppressed — transport ignored
+    }
+
+    [Fact]
+    public async Task Redrive_TopIntentPopped_EndsRedrive()
+    {
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+        Assert.Equal(2, stack.Depth);   // root + hunt-excursion
+
+        // Simulate the intent completing (auto-pop). The re-drive intent
+        // is no longer TOP, so the gate must not fire.
+        stack.PopTop(IntentLifecycle.Completed);
+        Assert.Equal(1, stack.Depth);   // back to just the root
+
+        events.Append(NpcDialog());
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // top changed → re-drive inert → call
+    }
+
+    [Fact]
+    public async Task Redrive_ReinstallBudgetExhausted_ForcesRealLlmCall()
+    {
+        // The reinstall budget is a TRUE "force a fresh LLM re-think"
+        // backstop: once exhausted it must NOT leak into the sticky-objective
+        // path (which would re-emit the same Explore for free). Prove it with
+        // NO external event at all — only the budget ends re-drive.
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson, maxRedrive: 1);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        // Reinstall #1 (count 0 -> 1): suppressed, no call.
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Single(reqs);
+
+        // Budget (1 >= 1) exhausted, no external event: must fire a real call
+        // rather than sticky-re-emitting.
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);
+    }
+
+    [Fact]
+    public async Task Redrive_PushOntoEmptyStack_DoesNotArm()
+    {
+        // A push onto an empty stack becomes the sacred un-poppable ROOT,
+        // which CheckTopForCompletion can never auto-pop. Capture must refuse
+        // (Depth > 1 guard) so re-drive cannot outlive the intent's
+        // completion. Falls back to prompt-only persistence.
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson, seedRoot: false);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+        Assert.Equal(1, stack.Depth);   // the push IS the root
+
+        events.Append(NpcDialog());
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // not armed → NpcDialog woke a call
+    }
+
+    [Fact]
+    public async Task Redrive_InventoryChange_EndsRedrive()
+    {
+        var (policy, world, events, reqs, _) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        // A durable inventory change is a mechanical state change (unlike
+        // ambient dialog) — it must end the commitment and not be hidden by
+        // the floor-advance.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.InventoryItemAdded, Text = "picked up something",
+        });
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);
+    }
+
+    [Fact]
+    public async Task Redrive_TopMarkedBlockedInPlace_ForcesRealLlmCall()
+    {
+        // If the top intent is marked Blocked in place (same id, still TOP),
+        // the gate's Status-Active check must end re-drive AND force a real
+        // LLM call — NOT let the sticky path re-emit the same Explore for
+        // free. No external event is appended, so the redriveEndedMustCallLlm
+        // flag is the ONLY thing that can produce the call.
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+
+        stack.MarkTopBlocked("simulated block");
+
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // top inactive → ended → real call (not sticky)
+    }
+
+    [Fact]
+    public async Task Redrive_CapturedIntentLeavesTop_ForcesRealLlmCall()
+    {
+        // The captured intent auto-pops (LLM-authored completion / deadline)
+        // BEFORE the next ProposeGoal, so Top.Id no longer matches. Re-drive
+        // must notice it left TOP, clear provenance, and force a real LLM
+        // re-deliberation — NOT skip the gate, leave stale provenance, and let
+        // the sticky path re-emit the old Explore for free (which would ignore
+        // the intent's own completion). No external event is appended, so the
+        // forced call proves the left-top handling, not an ambient wake.
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+        await ConsumeFirstAsync(policy, world, events);
+        Assert.Single(reqs);
+        Assert.Equal(2, stack.Depth);   // armed at nested depth 2
+
+        stack.PopTop(IntentLifecycle.Completed, "simulated completion");
+        Assert.Equal(1, stack.Depth);   // captured intent left TOP
+
+        policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // intent-left-top → ended → real call
+    }
 }
