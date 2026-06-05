@@ -523,6 +523,29 @@ internal sealed class HandshakeDriver : IDisposable
         // safety net, but never faster than this.
         const double         CombatFastRetryMinIntervalSec = 0.35;
         const double         AbandonOnNoDamageSec   = 60.0;
+        // Phase 7f.D — reactive low-health disengage (self-preservation
+        // reflex). Break off combat when our OWN health is at or below
+        // EITHER a fraction of max OR an absolute HP floor (a low-level
+        // char has so few max HP that a fraction alone rounds below one
+        // hit). Refuse to re-engage until health recovers past the higher
+        // re-engage fraction (hysteresis → no oscillation). On disengage,
+        // flee this many units directly away from the threat and avoid
+        // re-walking that specific threat for the cooldown window. These
+        // are mechanical safety rails over the bot's OWN health only — no
+        // game knowledge, no target choice (the LLM still owns WHAT to
+        // fight; this only prevents dying mid-swing).
+        const double         CombatDisengageHealthFraction = 0.35;
+        const uint           CombatDisengageCriticalHpFloor = 2u;
+        const double         CombatReengageHealthFraction = 0.70;
+        const float          CombatFleeDistanceUnits = 15f;
+        var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
+        var                  combatAvoidUntil = new Dictionary<uint, DateTime>();
+        // Set by the low-health attack-suppression dispatch guard so the
+        // post-action reset cascade does NOT permanently add a suppressed
+        // hostile to visitedTargetGuids (suppression is TEMPORARY — the
+        // combatAvoidUntil cooldown + re-engage health hysteresis own
+        // re-engagement, not a permanent visited blacklist).
+        var                  suppressVisitedAddOnReset = false;
         uint?                combatTargetGuid = null;
         DateTime?            combatStartedAt = null;
         DateTime?            lastCombatAttackAt = null;
@@ -2153,6 +2176,205 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> PHASE7F.0 SEND: SetSingleCharacterOption(AutoRepeatAttacks=on) pktSeq={optPacketSeq} fragSeq={optFragSeq} totalBytes={optSent}");
                 }
 
+                // Phase 7f.D — REACTIVE DISENGAGE (self-preservation
+                // reflex). When the bot's OWN health drops critically low
+                // mid-combat, break off atomically: reset combat state,
+                // drop to NonCombat, and actively flee directly away from
+                // the threat. A ~3s LLM round-trip cannot save a ~5-HP
+                // bot, so this is a mechanical motor reflex (only the
+                // bot's own health vs a threshold; NO game knowledge, NO
+                // target choice). It runs BEFORE the watchdog + re-attack
+                // so it pre-empts a swing re-send in the same tick. The
+                // LLM is told via an ActionRejected event so it
+                // re-deliberates rather than re-issuing the dead Attack.
+                if (combatTargetGuid is uint dgTarget &&
+                    worldState.Self is WorldObjectSnapshot dgSelf &&
+                    dgSelf.HealthCurrent is uint dgHc &&
+                    dgSelf.HealthMax is uint dgHm &&
+                    dgSelf.CellId is uint dgCell && dgCell != 0u &&
+                    CombatDisengage.ShouldDisengage(
+                        dgHc, dgHm, inCombat: true,
+                        CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor))
+                {
+                    // Capture the threat position BEFORE clearing combat
+                    // state. If the threat already left view, flee from our
+                    // own position (degenerate → +X fallback in the helper).
+                    var dgThreatPos = worldState.TryGet(dgTarget) is WorldObjectSnapshot dgThreat
+                        ? dgThreat.Position
+                        : dgSelf.Position;
+
+                    Console.WriteLine(
+                        $"[combat] DISENGAGE low-health reflex: self HP {dgHc}/{dgHm} " +
+                        $"(frac={(double)dgHc / dgHm:F2}); breaking off 0x{dgTarget:X8}, " +
+                        $"NonCombat + flee {CombatFleeDistanceUnits:F0}u");
+
+                    // 1) Reset ALL combat state (incl. fast-retry) so the
+                    //    Phase 7f.2 loop-keeper can't re-swing during flee.
+                    combatTargetGuid = null;
+                    combatStartedAt = null;
+                    lastCombatAttackAt = null;
+                    lastDamageAt = null;
+                    lastObservedTargetHealthFraction = null;
+                    combatFastRetryRequested = false;
+
+                    // 2) Avoid cooldown for this specific threat so the
+                    //    picker doesn't immediately re-walk to the mob that
+                    //    nearly killed us. (Pruning of expired entries is
+                    //    health-aware and happens after this block — while
+                    //    still suppressed we KEEP entries so the threat stays
+                    //    filtered even past the time window.)
+                    combatAvoidUntil[dgTarget] = DateTime.UtcNow + combatAvoidCooldown;
+
+                    // 3) ChangeCombatMode(NonCombat) — stop the server-side
+                    //    swing loop. NonCombat = 1 (CombatMode enum).
+                    {
+                        var ncPacketSeq = nextOutboundPacketSequence++;
+                        var ncFragSeq   = nextOutboundFragmentSequence++;
+                        var ncBuf = new byte[GameActionChangeCombatModeMessage.PackedSize];
+                        var ncLen = GameActionChangeCombatModeMessage.Pack(
+                            ncBuf, newCombatMode: 1u /* NonCombat */);
+                        var ncMsg = new OutboundPacket();
+                        if (lastReceivedSeq != 0) ncMsg.AddAckSequence(lastReceivedSeq);
+                        ncMsg.AddBlobFragment(
+                            fragSequence: ncFragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: ncBuf.AsSpan(0, ncLen));
+                        var ncSent = ncMsg.Pack(sendBuf, myClientId,
+                                                sequence: ncPacketSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ncSent),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    }
+
+                    // 4) RESET motion state to a clean slate (mirror the
+                    //    post-action reset cascade) so the flee lock starts
+                    //    fresh and Phase 5b START re-fires cleanly.
+                    autonomousPositionSent = false;
+                    moveToStateStartSent = false;
+                    moveToStateStopSent = false;
+                    motionTarget = null;
+                    motionRememberedDest = null;
+                    motionRememberedSightingId = null;
+                    motionIsFrontierProbe = false;
+                    motionLockedGoalId = null;
+                    motionRotation = null;
+                    motionInitialDistance = null;
+                    motionStartedAt = null;
+                    motionStoppedAt = null;
+                    motionLockedCellId = 0;
+                    motionDone = false;
+                    useSent = false;
+                    useSentAt = null;
+                    lastSentWaypointPos = null;
+                    lastSentWaypointGlobalXY = null;
+                    walkTickAps = 0;
+                    prevSelfBeforeAp = null;
+                    prevSelfCellBeforeAp = null;
+                    prevExpectedStepLen = 0f;
+                    consecutiveBlockedTicks = 0;
+                    motionIndoorPath = null;
+                    motionIndoorPathIndex = 0;
+                    motionIndoorPathCells = null;
+                    motionIndoorPathAttempted = false;
+                    outdoorAvoidanceAttempt = 0;
+                    motionIsOutdoorFrontierProbe = false;
+                    motionOutdoorApCells.Clear();
+                    pendingGiveItemGuid = null;
+                    pendingUseWithItemGuid = null;
+                    lockedGoalKind = null;
+
+                    // 5) Build the synthetic flee destination + an
+                    //    Explore-style motion lock so the existing walk-tick
+                    //    steers the bot away. Setting motionRememberedDest
+                    //    (not just motionTarget) makes the walk-tick treat
+                    //    the guid=0 snapshot as a live destination instead
+                    //    of stopping immediately (no world object has guid 0).
+                    var dgFleePos = CombatDisengage.ComputeFleeDestination(
+                        dgSelf.Position, dgThreatPos, CombatFleeDistanceUnits);
+                    var dgFleeDest = new WorldObjectSnapshot(0u)
+                    {
+                        Name = "<flee>",
+                        CellId = dgCell,
+                        Position = dgFleePos,
+                    };
+
+                    Quaternion dgRot =
+                        WorldHeading.TryYawToTarget(dgSelf, dgFleeDest, out var dgYaw)
+                            ? WorldHeading.RotationFromYaw(dgYaw)
+                            : dgSelf.Rotation;
+
+                    motionTarget = dgFleeDest;
+                    motionRememberedDest = dgFleeDest;
+                    motionRotation = dgRot;
+                    lockedGoalKind = GoalKind.Explore;
+                    motionLockedGoalId = null; // synthetic reflex — no LLM goal owns it
+                    motionInitialDistance = CombatFleeDistanceUnits;
+                    autonomousPositionSent = true;
+                    autonomousPositionPacketIndex = count;
+
+                    var dgApPacketSeq = nextOutboundPacketSequence++;
+                    var dgApFragSeq   = nextOutboundFragmentSequence++;
+                    var dgApBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                    var dgApLen = GameActionAutonomousPositionMessage.Pack(
+                        dgApBuf,
+                        cellId: dgCell,
+                        pos:    dgSelf.Position,
+                        rot:    dgRot,
+                        instanceSequence:      dgSelf.SeqInstance      ?? 0,
+                        serverControlSequence: dgSelf.SeqServerControl ?? 0,
+                        teleportSequence:      dgSelf.SeqTeleport      ?? 0,
+                        forcePositionSequence: dgSelf.SeqForcePosition ?? 0,
+                        contact: true);
+                    var dgApMsg = new OutboundPacket();
+                    if (lastReceivedSeq != 0) dgApMsg.AddAckSequence(lastReceivedSeq);
+                    dgApMsg.AddBlobFragment(
+                        fragSequence: dgApFragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: dgApBuf.AsSpan(0, dgApLen));
+                    var dgApSent = dgApMsg.Pack(sendBuf, myClientId,
+                                                sequence: dgApPacketSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, dgApSent),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+
+                    // 6) Tell Strategy the Attack goal is dead so it
+                    //    re-deliberates (don't silently blackhole). Distinct
+                    //    label so dedup/anti-fixation can reason about it.
+                    eventStream.Append(new StreamEvent
+                    {
+                        Sequence = 0,
+                        Utc = DateTimeOffset.UtcNow,
+                        Kind = EventKind.ActionRejected,
+                        Text = $"DisengageLowHealth: broke off combat at HP {dgHc}/{dgHm} and fled",
+                        ItemGuid = dgTarget,
+                        ErrorCode = 0xFFFB,
+                        ErrorLabel = "DisengageLowHealth",
+                    });
+                    tactics.Fail("combat disengage: self-health critical", eventStream);
+                }
+
+                // Phase 7f.D — per-tick self-suppression flag + health-aware
+                // avoid-cooldown prune. While our health is below the
+                // re-engage threshold, a recently-fled threat stays AVOIDED by
+                // every target-selection path even after its 30s time window
+                // lapses (passive healing usually outlasts 30s) — this stops
+                // the autonomous picker walking the still-wounded bot back into
+                // melee. Once health recovers we prune time-expired entries so
+                // the threat becomes engageable again (no permanent blacklist).
+                var selfCombatSuppressed =
+                    worldState.Self is WorldObjectSnapshot scSelf &&
+                    scSelf.HealthCurrent is uint scHc && scSelf.HealthMax is uint scHm &&
+                    CombatDisengage.IsCombatSuppressed(scHc, scHm, CombatReengageHealthFraction);
+                if (!selfCombatSuppressed && combatAvoidUntil.Count > 0)
+                {
+                    foreach (var expired in combatAvoidUntil
+                                 .Where(kv => kv.Value <= DateTime.UtcNow)
+                                 .Select(kv => kv.Key).ToList())
+                        combatAvoidUntil.Remove(expired);
+                }
+
                 // Phase 7f — combat watchdog. Switched from absolute
                 // 30s wall-clock to "no damage progress for N sec".
                 // The bot may take 30+ seconds to land its first hit
@@ -2399,9 +2621,13 @@ internal sealed class HandshakeDriver : IDisposable
                     // Only flag visited for non-combat targets. The
                     // combat-state machine owns the visited add for
                     // golems (on death or timeout) so we re-target
-                    // the same guid until it dies.
-                    if (motionTarget is not null && motionTarget.Guid != combatTargetGuid)
+                    // the same guid until it dies. A low-health-suppressed
+                    // hostile must NOT be permanently blacklisted here —
+                    // its avoid is the temporary combatAvoidUntil cooldown.
+                    if (motionTarget is not null && motionTarget.Guid != combatTargetGuid &&
+                        !suppressVisitedAddOnReset)
                         visitedTargetGuids.Add(motionTarget.Guid);
+                    suppressVisitedAddOnReset = false;
 
                     // Notify Tactics that the current goal completed.
                     // Used by LlmGoalPolicy to surface a GoalCompleted
@@ -3169,6 +3395,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (snap.Guid == tacticsSelf.Guid) continue;
                                 if (snap.CellId is not uint sc || sc == 0u) continue;
                                 if (visitedTargetGuids.Contains(snap.Guid)) continue;
+                                // Phase 7f.D — don't pick a just-fled threat as
+                                // an exploration landmark during its avoid cooldown
+                                // (or for as long as we remain too hurt to engage).
+                                if (combatAvoidUntil.TryGetValue(snap.Guid, out var cauE) &&
+                                    (DateTime.UtcNow < cauE || selfCombatSuppressed)) continue;
                                 if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
                                 var d = (float)Math.Sqrt(dsq);
                                 if (d > bestDist)
@@ -3249,6 +3480,31 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Pickup))
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
+                        var combatDeferredAttack = false;
+                        // Phase 7f.D — refuse to LOCK a walk toward a hostile
+                        // while we're too hurt to safely engage (self-health
+                        // below the re-engage hysteresis threshold) OR the
+                        // threat is still on the post-disengage avoid cooldown.
+                        // Treat the target as unresolved so the bot wanders a
+                        // frontier away instead of walking back into melee. The
+                        // dispatch-layer suppression guard remains the secondary
+                        // net for health that drops DURING an already-accepted
+                        // approach. Self-state + own bookkeeping only — no game
+                        // knowledge, no target choice (the LLM still picked WHAT
+                        // to fight; this only defers it while recovering).
+                        if (goal.Kind == GoalKind.Attack && targetSnap is not null &&
+                            ((worldState.Self is WorldObjectSnapshot accSelf &&
+                              accSelf.HealthCurrent is uint accHc && accSelf.HealthMax is uint accHm &&
+                              CombatDisengage.IsCombatSuppressed(accHc, accHm, CombatReengageHealthFraction)) ||
+                             (combatAvoidUntil.TryGetValue(targetSnap.Guid, out var accAvoid) && DateTime.UtcNow < accAvoid)))
+                        {
+                            Console.WriteLine(
+                                $"[combat] REFUSE Attack approach on 0x{targetSnap.Guid:X8} '{targetSnap.Name}' — " +
+                                $"self-health below re-engage threshold or threat on avoid cooldown; " +
+                                $"treating as unresolved (wander away, do not walk into melee while recovering)");
+                            targetSnap = null;
+                            combatDeferredAttack = true;
+                        }
                         WorldObjectSnapshot? itemSnap = null;
                         // Give always carries an item; Use carries one only
                         // for a two-object "use item on target" (e.g. a key
@@ -3505,7 +3761,11 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"item={(goalCarriesItem ? (itemSnap is null ? "MISS" : "ok") : "n/a")}; " +
                                         $"selector target={goal.Target} item={goal.Item}; " +
                                         $"clearing and falling through to picker");
-                                    tactics.Fail("selector resolved to no live object", eventStream);
+                                    tactics.Fail(
+                                        combatDeferredAttack
+                                            ? "combat deferred: self-health too low to re-engage — recover before attacking"
+                                            : "selector resolved to no live object",
+                                        eventStream);
                                 }
                             }
                             else
@@ -3690,6 +3950,12 @@ internal sealed class HandshakeDriver : IDisposable
                     var inRange = worldState.WithinRadius(self, MotionSearchRadius)
                         .Where(s => s.Guid != self.Guid && !string.IsNullOrEmpty(s.Name))
                         .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                        // Phase 7f.D — skip a threat still on the low-health
+                        // disengage avoid cooldown (or for as long as we remain
+                        // too hurt to engage) so the picker does not re-walk the
+                        // bot back into the mob it just fled.
+                        .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cau) &&
+                                      (DateTime.UtcNow < cau || selfCombatSuppressed)))
                         .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                         // Phase 6n — anti-starvation: skip duplicate
                         // quest reward respawns. If we've already
@@ -3823,6 +4089,11 @@ internal sealed class HandshakeDriver : IDisposable
                         var fallbackPool = worldState.Objects.Values
                             .Where(s => (s.Guid & 0xFF000000u) != 0x50000000u)
                             .Where(s => !visitedTargetGuids.Contains(s.Guid))
+                            // Phase 7f.D — honor the low-health disengage
+                            // avoid cooldown in the fallback pool too (and keep
+                            // avoiding the fled threat while still suppressed).
+                            .Where(s => !(combatAvoidUntil.TryGetValue(s.Guid, out var cauF) &&
+                                          (DateTime.UtcNow < cauF || selfCombatSuppressed)))
                             .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
                             .ToList();
 
@@ -4446,6 +4717,46 @@ internal sealed class HandshakeDriver : IDisposable
                     // moved to the LLM.
                     var isHostile = lockedGoalKind == GoalKind.Attack;
                     var isPickup  = lockedGoalKind == GoalKind.Pickup;
+
+                    // Self-preservation gate (paired with the Phase 7f.D
+                    // disengage reflex): refuse to dispatch a melee Attack
+                    // while our own health is below the re-engage threshold,
+                    // or while this specific threat is still on the
+                    // post-disengage avoid cooldown. Pure self-state + our
+                    // own bookkeeping — no target choice, no game knowledge.
+                    // useSent is already true above, so falling through to
+                    // the reset cascade parks the bot and re-deliberates.
+                    if (isHostile &&
+                        ((worldState.Self is WorldObjectSnapshot suSelf &&
+                          suSelf.HealthCurrent is uint suHc &&
+                          suSelf.HealthMax is uint suHm &&
+                          CombatDisengage.IsCombatSuppressed(suHc, suHm, CombatReengageHealthFraction)) ||
+                         (combatAvoidUntil.TryGetValue(motionTarget.Guid, out var suAvoidUntil) &&
+                          DateTime.UtcNow < suAvoidUntil)))
+                    {
+                        Console.WriteLine(
+                            $"[combat] SUPPRESS attack on 0x{motionTarget.Guid:X8} '{motionTarget.Name}' — " +
+                            $"self-health below re-engage threshold or threat on avoid cooldown; " +
+                            $"parking (reset cascade re-deliberates)");
+                        // TEMPORARY suppression — do NOT let the reset
+                        // cascade permanently blacklist this hostile via
+                        // visitedTargetGuids; re-engagement is owned by the
+                        // avoid cooldown + re-engage health hysteresis.
+                        suppressVisitedAddOnReset = true;
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc = DateTimeOffset.UtcNow,
+                            Kind = EventKind.ActionRejected,
+                            Text = $"DisengageLowHealth: refused to engage '{motionTarget.Name}' while recovering",
+                            ItemGuid = motionTarget.Guid,
+                            Name = motionTarget.Name,
+                            ErrorCode = 0xFFFB,
+                            ErrorLabel = "DisengageLowHealth",
+                        });
+                        goto _slice_l_explore_done;
+                    }
+
                     var packetSeq = nextOutboundPacketSequence++;
 
                     int payloadLen;
