@@ -1149,10 +1149,10 @@ internal sealed class HandshakeDriver : IDisposable
                             // current node. Lets the LLM later answer
                             // "where was Jonathan?" from cached graph
                             // data instead of needing to re-observe.
-                            // EntityKind is left Unknown for now —
-                            // wcid + name is enough for FindRouteToEntity
-                            // lookup; future work can infer the kind
-                            // from the weenie ObjectType bits.
+                            // The wire-derived EntityKind (Mob / NPC /
+                            // Unknown) is computed below from the weenie
+                            // header bits so remembered creatures carry
+                            // the monster/npc label the recall prompt uses.
                             //
                             // Landblock-match gate (rubber-duck finding):
                             // ObjectCreate packets for the destination
@@ -1171,12 +1171,22 @@ internal sealed class HandshakeDriver : IDisposable
                                 (lmPos.LandblockId & 0xFFFF0000u) == selfLb)
                             {
                                 var sightedPos = new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z);
+                                // Wire-derived coarse kind (Mob / NPC / Unknown)
+                                // from the ObjectCreate weenie header — same
+                                // composite the visible projection uses, so
+                                // remembered creatures carry the monster/npc
+                                // label the recall prompt section surfaces.
+                                // Pure perception; assigns no priority.
+                                var sightedKind = EntityClassifier.ClassifySighting(
+                                    oc.Weenie.ItemType,
+                                    (uint)oc.Weenie.DescriptionFlags,
+                                    (uint)oc.Weenie.Flags);
                                 navGraph.RecordObservation(
                                     lastVisitNodeId,
                                     oc.Weenie.WeenieClassId,
                                     oc.Weenie.Name!,
                                     sightedPos,
-                                    EntityKind.Unknown,
+                                    sightedKind,
                                     DateTimeOffset.UtcNow);
                                 // FOV discovery: remember WHERE the entity is
                                 // (its own cell + absolute coords) as a sighted
@@ -1188,7 +1198,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     sightedPos,
                                     oc.Weenie.WeenieClassId,
                                     oc.Weenie.Name!,
-                                    EntityKind.Unknown,
+                                    sightedKind,
                                     lastVisitNodeId,
                                     DateTimeOffset.UtcNow);
                             }
@@ -3827,6 +3837,38 @@ internal sealed class HandshakeDriver : IDisposable
                     // because the LLM may emit Explore{target} for
                     // a candidate that no longer applies.
                     llmPolicyForPickerSurface?.SetCurrentExplorationCandidates(explorationCandidatesForLlm);
+
+                    // Publish the bot's own remembered MONSTER sightings
+                    // (out-of-view recall) so the LLM can choose to return
+                    // to a monster that left its field of view. Project the
+                    // Mob-kind SightedLocation memory into the small recall
+                    // DTO, bounded to the most-recent ones; the prompt
+                    // builder does visible-exclusion, dedup, TTL and cap.
+                    // Mob-only here (not Mob+NPC): the builder renders only
+                    // Mob, so including NPCs would let an NPC-dense town fill
+                    // the bounded projection and starve out the monsters the
+                    // recall is for. Pure perception.
+                    if (llmPolicyForPickerSurface is not null)
+                    {
+                        const int MaxRecallSightings = 40;
+                        var nowRecall = DateTimeOffset.UtcNow;
+                        var recall = navGraph.SnapshotSighted()
+                            .Where(s => s.Kind == EntityKind.Mob)
+                            .OrderByDescending(s => s.LastSeenUtc)
+                            .Take(MaxRecallSightings)
+                            .Select(s => new SightedRecallProjection
+                            {
+                                Name       = s.Name,
+                                Wcid       = s.Wcid,
+                                Kind       = s.Kind,
+                                Landblock  = s.Landblock,
+                                WorldX     = s.WorldX,
+                                WorldY     = s.WorldY,
+                                AgeSeconds = Math.Max(0.0, (nowRecall - s.LastSeenUtc).TotalSeconds),
+                            })
+                            .ToList();
+                        llmPolicyForPickerSurface.SetRecentSightings(recall);
+                    }
 
                     // Slice V (#86) — publish autonomous picker
                     // activity to the LLM prompt. The picker still
