@@ -174,8 +174,8 @@ internal sealed record WorldStateProjection
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
-        float visibleRadius = 60f,
-        int maxVisible = 32)
+        float visibleRadius = 120f,
+        int maxVisible = 48)
     {
         if (world.Self is not WorldObjectSnapshot self) return null;
         var selfGuid = self.Guid;

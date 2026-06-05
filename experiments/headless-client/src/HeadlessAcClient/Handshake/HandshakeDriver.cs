@@ -2938,7 +2938,7 @@ internal sealed class HandshakeDriver : IDisposable
                     tacticsSelfCell != 0)
                 {
                     var projection = WorldStateProjection.FromWorldState(
-                        worldState, weenies, visibleRadius: 60f, maxVisible: 32);
+                        worldState, weenies, visibleRadius: 120f, maxVisible: 48);
                     // Slice R wiring — pump lifetime stat counters and
                     // check the top of the intent stack for completion
                     // BEFORE the policy deliberates. If the predicate
