@@ -756,6 +756,13 @@ internal sealed class HandshakeDriver : IDisposable
         DateTime?            motionStoppedAt = null;
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
+        // The last walk-tick waypoint's GLOBAL (frame-free) XY, captured
+        // atomically with lastSentWaypointPos. STOP derives the canonical
+        // outdoor cell from these so it never has to guess which landblock
+        // frame the local pos was generated in (motionLockedCellId can slide
+        // between the final walk-tick and STOP, and a wrong frame mis-projects
+        // the stop ~192 m and derives a distant cell — caught in review).
+        (float X, float Y)?  lastSentWaypointGlobalXY = null;
         int                  walkTickAps = 0;
         // Slice S — blocked-motion detection state. Tracked across
         // walk ticks within a single motion lock; reset whenever the
@@ -2373,6 +2380,7 @@ internal sealed class HandshakeDriver : IDisposable
                     useSent = false;
                     useSentAt = null;
                     lastSentWaypointPos = null;
+                    lastSentWaypointGlobalXY = null;
                     walkTickAps = 0;
                     // Slice S — clear blocked-motion bookkeeping so
                     // a fresh lock starts with a clean slate (the
@@ -3942,8 +3950,38 @@ internal sealed class HandshakeDriver : IDisposable
                     // loop iteration (no extra grace window — we already
                     // waited for AP-grace, which is enough for the
                     // server to consume the initial AP).
+                    //
+                    // Outdoor cell-consistency: the server-reported moveCell
+                    // can be a stale cell that no longer matches the bot's
+                    // current coordinates (e.g. it froze during a prior
+                    // motion). Re-derive the cell from moveSelf.Position's
+                    // GLOBAL coordinates so the START (cell, pos) — and the
+                    // motion lock seeded from it — are internally consistent.
+                    // Indoor cells are client-authoritative (gated out).
+                    var startCell = moveCell;
+                    var startPos = moveSelf.Position;
+                    if (!Strategy.AcCoords.IsIndoor(moveCell))
+                    {
+                        var (startGX, startGY) = Strategy.AcCoords.ToGlobalXY(moveCell, moveSelf.Position);
+                        var startSeam = Strategy.OutdoorSeamCell.TryDeriveSeamCell(
+                            followingIndoorPath: false,
+                            selfCellIsOutdoor:   true,
+                            lockedCellId:        moveCell,
+                            stepGlobalX:         startGX,
+                            stepGlobalY:         startGY,
+                            stepZ:               moveSelf.Position.Z);
+                        if (startSeam is { } startSc)
+                        {
+                            Console.WriteLine(
+                                $"[motion] PHASE5B START: outdoor cell-consistency override " +
+                                $"0x{moveCell:X8} -> 0x{startSc.CellId:X8} " +
+                                $"global=({startGX:F1},{startGY:F1}) local=({startSc.LocalPos.X:F1},{startSc.LocalPos.Y:F1})");
+                            startCell = startSc.CellId;
+                            startPos = startSc.LocalPos;
+                        }
+                    }
                     motionStartedAt = DateTime.UtcNow;
-                    motionLockedCellId = moveCell;
+                    motionLockedCellId = startCell;
                     nextWalkTickAt = DateTime.UtcNow.AddMilliseconds(WalkTickIntervalMs);
                     var packetSeq = nextOutboundPacketSequence++;
                     var fragSeq   = nextOutboundFragmentSequence++;
@@ -3966,8 +4004,8 @@ internal sealed class HandshakeDriver : IDisposable
                     var msLen = GameActionMoveToStateMessage.Pack(
                         msBuf,
                         motion,
-                        cellId: moveCell,
-                        pos:    moveSelf.Position,
+                        cellId: startCell,
+                        pos:    startPos,
                         rot:    moveRot,
                         instanceSequence:      moveSelf.SeqInstance      ?? 0,
                         serverControlSequence: moveSelf.SeqServerControl ?? 0,
@@ -3993,7 +4031,7 @@ internal sealed class HandshakeDriver : IDisposable
                         $"[observe]   -> PHASE5B START: GameActionMoveToState " +
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand|ForwardSpeed) " +
                         $"holdKey=Run stance=NonCombat cmd=RunForward speed=1.0 " +
-                        $"cell=0x{moveCell:X8} xyz=({moveSelf.Position.X:F2},{moveSelf.Position.Y:F2},{moveSelf.Position.Z:F2}) " +
+                        $"cell=0x{startCell:X8} xyz=({startPos.X:F2},{startPos.Y:F2},{startPos.Z:F2}) " +
                         $"rot=({moveRot.X:F3},{moveRot.Y:F3},{moveRot.Z:F3},{moveRot.W:F3}) " +
                         $"rotSource={(motionRotation is null ? "self" : "target-lock")} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
@@ -4058,12 +4096,56 @@ internal sealed class HandshakeDriver : IDisposable
                     // (possibly stale) self snapshot for STOP's pos.
                     var stopPos = lastSentWaypointPos ?? stopSelf.Position;
 
+                    // Outdoor cell-consistency: the (cell, pos) pair STOP
+                    // asserts must be internally consistent, or the server's
+                    // in-combat StickToObject move errors out and cancels every
+                    // melee swing (0 damage, death). Two independent hazards:
+                    //   1. the server-reported stopCell can lag the cell our
+                    //      walked-to coordinates fall in (the cell-claim froze
+                    //      during the approach); and
+                    //   2. our cached stop LOCAL pos (lastSentWaypointPos =
+                    //      newPos) is expressed in the walk-tick's landblock
+                    //      frame, which the server may have since slid away from
+                    //      after a seam crossing — pairing it with stopCell
+                    //      mis-projects by a full landblock (~192 m).
+                    // Both are eliminated by deriving the canonical (cell, pos)
+                    // from the position's TRUE GLOBAL coordinates and emitting
+                    // THAT pair UNCONDITIONALLY (not only when the cell changed).
+                    // Indoor cells are client-authoritative and handled by the
+                    // indoor path logic, so this only applies outdoors.
+                    //
+                    // GLOBAL source: when the stop pos came from a walk-tick
+                    // waypoint we use its frame-free captured global XY
+                    // (lastSentWaypointGlobalXY), which is correct regardless of
+                    // any seam frame slide; otherwise the pos is the stopSelf
+                    // snapshot, atomically consistent with stopCell, so
+                    // ToGlobalXY(stopCell, stopPos) is the right frame.
+                    uint stopSendCell = stopCell;
+                    var stopSendPos = stopPos;
+                    if (!Strategy.AcCoords.IsIndoor(stopCell))
+                    {
+                        var (stopGX, stopGY) = lastSentWaypointGlobalXY is { } wg
+                            ? (wg.X, wg.Y)
+                            : Strategy.AcCoords.ToGlobalXY(stopCell, stopPos);
+                        var stopCanon = Strategy.OutdoorSeamCell.Canonicalize(stopGX, stopGY, stopPos.Z);
+                        if (stopCanon is { } stopSc)
+                        {
+                            stopSendCell = stopSc.CellId;
+                            stopSendPos = stopSc.LocalPos;
+                            if (stopSc.CellId != stopCell)
+                                Console.WriteLine(
+                                    $"[motion] PHASE5B STOP: outdoor cell-consistency override " +
+                                    $"0x{stopCell:X8} -> 0x{stopSc.CellId:X8} " +
+                                    $"global=({stopGX:F1},{stopGY:F1}) local=({stopSc.LocalPos.X:F1},{stopSc.LocalPos.Y:F1})");
+                        }
+                    }
+
                     var msBuf = new byte[GameActionMoveToStateMessage.CalcPackedSize(motion.Flags)];
                     var msLen = GameActionMoveToStateMessage.Pack(
                         msBuf,
                         motion,
-                        cellId: stopCell,
-                        pos:    stopPos,
+                        cellId: stopSendCell,
+                        pos:    stopSendPos,
                         rot:    stopSelf.Rotation,
                         instanceSequence:      stopSelf.SeqInstance      ?? 0,
                         serverControlSequence: stopSelf.SeqServerControl ?? 0,
@@ -4092,7 +4174,7 @@ internal sealed class HandshakeDriver : IDisposable
                         $"[observe]   -> PHASE5B STOP: GameActionMoveToState " +
                         $"flags=0x{(uint)motion.Flags:X3} (CurrentHoldKey|CurrentStyle|ForwardCommand) " +
                         $"cmd=Invalid (stop) " +
-                        $"cell=0x{stopCell:X8} stopPos=({stopPos.X:F2},{stopPos.Y:F2},{stopPos.Z:F2}) " +
+                        $"cell=0x{stopSendCell:X8} stopPos=({stopSendPos.X:F2},{stopSendPos.Y:F2},{stopSendPos.Z:F2}) " +
                         $"posSource={(lastSentWaypointPos is null ? "self-snap" : "last-waypoint")} " +
                         $"trigger={trigger} " +
                         $"payload={msLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
@@ -5509,6 +5591,13 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
                                 walkTickAps++;
                                 lastSentWaypointPos = newPos;
+                                // Capture the waypoint's TRUE global coords
+                                // (frame-free) so STOP can derive the canonical
+                                // cell without depending on a possibly-slid
+                                // motionLockedCellId frame. selfGX/selfGY are
+                                // ToGlobalXY(walkCell, walkSelf.Position), so
+                                // selfG + step is newPos in global coords.
+                                lastSentWaypointGlobalXY = (selfGX + stepX, selfGY + stepY);
                                 // Slice S — remember what we were BEFORE
                                 // this AP, and how big a step we asked
                                 // for. Next tick's blocked-detector
