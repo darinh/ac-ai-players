@@ -3376,6 +3376,9 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (snap.Guid == tacticsSelf.Guid) continue;
                                 if (snap.CellId is not uint sc || sc == 0u) continue;
                                 if (visitedTargetGuids.Contains(snap.Guid)) continue;
+                                // Phase 7f.D — don't pick a just-fled threat as
+                                // an exploration landmark during its avoid cooldown.
+                                if (combatAvoidUntil.TryGetValue(snap.Guid, out var cauE) && DateTime.UtcNow < cauE) continue;
                                 if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
                                 var d = (float)Math.Sqrt(dsq);
                                 if (d > bestDist)
@@ -3456,6 +3459,29 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Pickup))
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
+                        // Phase 7f.D — refuse to LOCK a walk toward a hostile
+                        // while we're too hurt to safely engage (self-health
+                        // below the re-engage hysteresis threshold) OR the
+                        // threat is still on the post-disengage avoid cooldown.
+                        // Treat the target as unresolved so the bot wanders a
+                        // frontier away instead of walking back into melee. The
+                        // dispatch-layer suppression guard remains the secondary
+                        // net for health that drops DURING an already-accepted
+                        // approach. Self-state + own bookkeeping only — no game
+                        // knowledge, no target choice (the LLM still picked WHAT
+                        // to fight; this only defers it while recovering).
+                        if (goal.Kind == GoalKind.Attack && targetSnap is not null &&
+                            ((worldState.Self is WorldObjectSnapshot accSelf &&
+                              accSelf.HealthCurrent is uint accHc && accSelf.HealthMax is uint accHm &&
+                              CombatDisengage.IsCombatSuppressed(accHc, accHm, CombatReengageHealthFraction)) ||
+                             (combatAvoidUntil.TryGetValue(targetSnap.Guid, out var accAvoid) && DateTime.UtcNow < accAvoid)))
+                        {
+                            Console.WriteLine(
+                                $"[combat] REFUSE Attack approach on 0x{targetSnap.Guid:X8} '{targetSnap.Name}' — " +
+                                $"self-health below re-engage threshold or threat on avoid cooldown; " +
+                                $"treating as unresolved (wander away, do not walk into melee while recovering)");
+                            targetSnap = null;
+                        }
                         WorldObjectSnapshot? itemSnap = null;
                         // Give always carries an item; Use carries one only
                         // for a two-object "use item on target" (e.g. a key
