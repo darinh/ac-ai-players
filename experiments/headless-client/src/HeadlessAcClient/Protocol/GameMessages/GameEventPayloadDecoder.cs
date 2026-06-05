@@ -358,6 +358,33 @@ internal sealed record AttackDonePayload(uint ErrorCode)
 }
 
 /// <summary>
+/// GameEventAttackerNotification (0x01B1) — sent to the ATTACKER when
+/// one of their swings LANDS on a defender. Carries the defender's
+/// display name plus the damage dealt. Decoded so the Motor can count
+/// landing hits and surface combat outcomes to the LLM (raw perception:
+/// "you hit X for N"). The bot deals 0 damage when it NEVER receives
+/// this event (every swing instead produces an EvasionAttackerNotification).
+/// </summary>
+internal sealed record AttackerNotificationPayload(string DefenderName, uint Damage)
+{
+    public override string ToString() =>
+        $"AttackerNotification(defender=\"{DefenderName}\" damage={Damage})";
+}
+
+/// <summary>
+/// GameEventEvasionAttackerNotification (0x01B3) — sent to the ATTACKER
+/// when their swing is EVADED by the defender (a miss). Carries only the
+/// defender's display name. Decoded so the Motor can count evaded swings
+/// and surface the raw outcome to the LLM (the LLM owns the disengage /
+/// target-choice decision — source never auto-disengages on evasion).
+/// </summary>
+internal sealed record EvasionAttackerNotificationPayload(string DefenderName)
+{
+    public override string ToString() =>
+        $"EvasionAttackerNotification(defender=\"{DefenderName}\")";
+}
+
+/// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
 /// implemented here, all variants are null and the caller should
@@ -379,7 +406,9 @@ internal sealed record GameEventPayload(
     BookDataResponsePayload?             BookDataResponse,
     BookPageDataResponsePayload?         BookPageDataResponse,
     UpdateHealthPayload?                 UpdateHealth,
-    AttackDonePayload?                   AttackDone)
+    AttackDonePayload?                   AttackDone,
+    AttackerNotificationPayload?         AttackerNotification,
+    EvasionAttackerNotificationPayload?  EvasionAttackerNotification)
 {
     public override string ToString() => EventType switch
     {
@@ -398,6 +427,8 @@ internal sealed record GameEventPayload(
         GameEventType.BookPageDataResponse         when BookPageDataResponse       is { } x => x.ToString(),
         GameEventType.UpdateHealth                 when UpdateHealth               is { } x => x.ToString(),
         GameEventType.AttackDone                   when AttackDone                 is { } x => x.ToString(),
+        GameEventType.AttackerNotification         when AttackerNotification       is { } x => x.ToString(),
+        GameEventType.EvasionAttackerNotification  when EvasionAttackerNotification is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -442,6 +473,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { UpdateHealth = DecodeUpdateHealth(body) },
                 GameEventType.AttackDone =>
                     Empty(eventType) with { AttackDone = DecodeAttackDone(body) },
+                GameEventType.AttackerNotification =>
+                    Empty(eventType) with { AttackerNotification = DecodeAttackerNotification(body) },
+                GameEventType.EvasionAttackerNotification =>
+                    Empty(eventType) with { EvasionAttackerNotification = DecodeEvasionAttackerNotification(body) },
                 _ => null,
             };
         }
@@ -469,7 +504,9 @@ internal static class GameEventPayloadDecoder
             BookDataResponse: null,
             BookPageDataResponse: null,
             UpdateHealth: null,
-            AttackDone: null);
+            AttackDone: null,
+            AttackerNotification: null,
+            EvasionAttackerNotification: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -735,6 +772,39 @@ internal static class GameEventPayloadDecoder
         if (body.Length < 4)
             throw new InvalidOperationException("body too short for AttackDone");
         return new AttackDonePayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
+    }
+
+    private static AttackerNotificationPayload DecodeAttackerNotification(ReadOnlySpan<byte> body)
+    {
+        // GameEventAttackerNotification (0x01B1) — sent to the attacker
+        // when a swing LANDS. Mirrors GameEventAttackerNotification.cs:
+        //   string16L defenderName  (DWORD-aligned)
+        //   u32       damageType
+        //   f64       percent
+        //   u32       damage
+        //   u32       criticalHit
+        //   u64       attackConditions
+        // We only need the name + damage; the rest is read past for
+        // bounds safety but otherwise ignored.
+        var cursor = 0;
+        var defenderName = ReadString16L(body, ref cursor);
+        if (body.Length - cursor < 4 + 8 + 4) // damageType + percent + damage
+            throw new InvalidOperationException("body too short for AttackerNotification");
+        cursor += 4;                                  // skip damageType
+        cursor += 8;                                  // skip percent (f64)
+        var damage = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        return new AttackerNotificationPayload(defenderName, damage);
+    }
+
+    private static EvasionAttackerNotificationPayload DecodeEvasionAttackerNotification(ReadOnlySpan<byte> body)
+    {
+        // GameEventEvasionAttackerNotification (0x01B3) — sent to the
+        // attacker when a swing is EVADED. Mirrors
+        // GameEventEvasionAttackerNotification.cs: a single string16L
+        // with the defender's name.
+        var cursor = 0;
+        var defenderName = ReadString16L(body, ref cursor);
+        return new EvasionAttackerNotificationPayload(defenderName);
     }
 
     /// <summary>

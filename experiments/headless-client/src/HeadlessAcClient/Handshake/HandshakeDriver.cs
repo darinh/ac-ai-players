@@ -567,6 +567,18 @@ internal sealed class HandshakeDriver : IDisposable
         var                  combatFastRetryRequested = false;
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
+        // combat-damage-output: per-fight swing-outcome counters surfaced
+        // to the LLM as raw perception (it never auto-disengages — the LLM
+        // owns that). Counters belong to combatStatsForGuid; a notification
+        // for a DIFFERENT locked target lazily resets them. combatTargetName
+        // is the defender's display name pulled from the notifications (the
+        // wire is the only place it appears at swing time).
+        int                  combatSwingsLanded = 0;
+        int                  combatSwingsEvaded = 0;
+        uint                 combatDamageDealt = 0;
+        bool                 combatFeedbackSent = false;
+        string?              combatTargetName = null;
+        uint?                combatStatsForGuid = null;
         var ownPlayerSeen = false;
         // One-time guard: enable the AutoRepeatAttacks character option
         // right after the first LoginComplete so the server runs its
@@ -975,6 +987,22 @@ internal sealed class HandshakeDriver : IDisposable
         // I?" / "what's nearby?" / "what's my health?" without
         // re-parsing the firehose.
         var worldState = new WorldState();
+
+        // combat-damage-output: resets the per-fight swing-outcome counters
+        // and clears the surfaced CurrentFight status. Called at every
+        // combat-lock clear site so a stale fight line never lingers in the
+        // prompt after a fight ends, and lazily when a notification arrives
+        // for a newly-locked target.
+        void ClearCombatFightStats()
+        {
+            combatSwingsLanded = 0;
+            combatSwingsEvaded = 0;
+            combatDamageDealt = 0;
+            combatFeedbackSent = false;
+            combatTargetName = null;
+            combatStatsForGuid = null;
+            worldState.CurrentFight = null;
+        }
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
@@ -1521,6 +1549,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastDamageAt = null;
                                         lastObservedTargetHealthFraction = null;
                                         combatFastRetryRequested = false;
+                                        ClearCombatFightStats();
                                     }
                                     else
                                     {
@@ -1588,6 +1617,90 @@ internal sealed class HandshakeDriver : IDisposable
                                         ErrorCode = atkDone.ErrorCode,
                                         ErrorLabel = attackLabel,
                                     });
+                                }
+                            }
+                            // combat-damage-output — swing-outcome tracking.
+                            // AttackerNotification (0x01B1) = a swing LANDED
+                            // (carries damage); EvasionAttackerNotification
+                            // (0x01B3) = a swing was EVADED (target avoided
+                            // it). The server only sends these to the
+                            // attacker, and the bot swings one locked target
+                            // at a time, so any such event during an active
+                            // combat lock is attributable to combatTargetGuid.
+                            // We count landed vs evaded and surface the RAW
+                            // outcome to the LLM. Source NEVER decides to stop
+                            // attacking on these — disengage + target choice
+                            // stay the LLM's call (the existing 60s no-damage
+                            // timeout remains the mechanical liveness net).
+                            if ((ge.Payload?.AttackerNotification is not null ||
+                                 ge.Payload?.EvasionAttackerNotification is not null) &&
+                                combatTargetGuid is uint cnTarget)
+                            {
+                                // Lazily reset counters when the locked target
+                                // changed (handles a target switch without
+                                // touching every clear site).
+                                if (combatStatsForGuid != cnTarget)
+                                {
+                                    combatSwingsLanded = 0;
+                                    combatSwingsEvaded = 0;
+                                    combatDamageDealt = 0;
+                                    combatFeedbackSent = false;
+                                    combatTargetName = null;
+                                    combatStatsForGuid = cnTarget;
+                                }
+
+                                if (ge.Payload?.AttackerNotification is { } atkHit)
+                                {
+                                    combatSwingsLanded++;
+                                    combatDamageDealt += atkHit.Damage;
+                                    if (!string.IsNullOrEmpty(atkHit.DefenderName))
+                                        combatTargetName = atkHit.DefenderName;
+                                    Console.WriteLine(
+                                        $"[combat] hit \"{atkHit.DefenderName}\" for {atkHit.Damage} " +
+                                        $"(landed={combatSwingsLanded} evaded={combatSwingsEvaded} dmg={combatDamageDealt})");
+                                }
+                                else if (ge.Payload?.EvasionAttackerNotification is { } atkEvade)
+                                {
+                                    combatSwingsEvaded++;
+                                    if (!string.IsNullOrEmpty(atkEvade.DefenderName))
+                                        combatTargetName = atkEvade.DefenderName;
+                                    Console.WriteLine(
+                                        $"[combat] swing EVADED by \"{atkEvade.DefenderName}\" " +
+                                        $"(landed={combatSwingsLanded} evaded={combatSwingsEvaded})");
+                                }
+
+                                // Surface the live fight outcome to the LLM
+                                // prompt (## Combat readiness reads this).
+                                worldState.CurrentFight = new CombatFightStatus(
+                                    cnTarget, combatTargetName,
+                                    combatSwingsLanded, combatSwingsEvaded, combatDamageDealt);
+
+                                // Wake the LLM ONCE per fight when this target
+                                // first produces swing-outcome telemetry, so it
+                                // re-reads the current-fight line early enough to
+                                // assess the engagement. Structural one-shot
+                                // (deduped per target), NOT a win/lose judgment:
+                                // source surfaces RAW landed/evaded/damage and the
+                                // LLM decides whether to keep fighting or disengage
+                                // (COMBAT SAFETY rule + the persistent prompt line).
+                                if (!combatFeedbackSent)
+                                {
+                                    combatFeedbackSent = true;
+                                    var feedbackName = string.IsNullOrEmpty(combatTargetName)
+                                        ? "this target" : combatTargetName;
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.CombatFeedback,
+                                        Name = combatTargetName,
+                                        Text = $"Fight with \"{feedbackName}\": " +
+                                               $"{combatSwingsLanded} swings landed, {combatSwingsEvaded} evaded, " +
+                                               $"{combatDamageDealt} damage dealt so far.",
+                                    });
+                                    Console.WriteLine(
+                                        $"[combat] CombatFeedback: fight underway vs \"{feedbackName}\" " +
+                                        $"(landed={combatSwingsLanded} evaded={combatSwingsEvaded} dmg={combatDamageDealt}) — waking LLM.");
                                 }
                             }
                             // M1.5 — surface WeenieErrorWithString
@@ -2258,6 +2371,7 @@ internal sealed class HandshakeDriver : IDisposable
                     lastDamageAt = null;
                     lastObservedTargetHealthFraction = null;
                     combatFastRetryRequested = false;
+                    ClearCombatFightStats();
 
                     // 2) Avoid cooldown for this specific threat so the
                     //    picker doesn't immediately re-walk to the mob that
@@ -2444,6 +2558,7 @@ internal sealed class HandshakeDriver : IDisposable
                         lastDamageAt = null;
                         lastObservedTargetHealthFraction = null;
                         combatFastRetryRequested = false;
+                        ClearCombatFightStats();
                     }
                 }
 
@@ -5059,6 +5174,10 @@ internal sealed class HandshakeDriver : IDisposable
                             // Fresh target — drop any stale cancel request
                             // carried over from a previous engagement.
                             combatFastRetryRequested = false;
+                            // Fresh target — clear the surfaced fight telemetry
+                            // immediately so the LLM never reads the previous
+                            // target's landed/evaded counts during a switch.
+                            ClearCombatFightStats();
                         }
                         lastCombatAttackAt = DateTime.UtcNow;
                     }

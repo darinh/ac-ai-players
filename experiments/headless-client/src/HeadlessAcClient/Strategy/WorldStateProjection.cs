@@ -171,6 +171,17 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("visible")]
     public required IReadOnlyList<VisibleObjectProjection> Visible { get; init; }
 
+    /// <summary>
+    /// combat-damage-output: the live outcome of the current melee
+    /// fight (swings landed vs evaded, damage dealt), or null when not
+    /// in combat. Copied straight from <see cref="WorldState.CurrentFight"/>.
+    /// Surfaced to the LLM as raw perception so it can judge whether its
+    /// attacks are connecting and decide to disengage; source never makes
+    /// that decision.
+    /// </summary>
+    [JsonPropertyName("current_fight")]
+    public CombatFightStatus? CurrentFight { get; init; }
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -326,6 +337,7 @@ internal sealed record WorldStateProjection
             },
             Inventory = inv,
             Visible = visible,
+            CurrentFight = world.CurrentFight,
         };
     }
 }
