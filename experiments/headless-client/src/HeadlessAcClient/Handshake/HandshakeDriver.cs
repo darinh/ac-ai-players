@@ -789,6 +789,15 @@ internal sealed class HandshakeDriver : IDisposable
         // carry interaction semantics (e.g. a recalled sighted location the
         // LLM means to Use/Talk/Attack on arrival).
         bool                    motionIsOutdoorFrontierProbe = false;
+        // Outdoor seam-cell AP override bookkeeping. Every cell this
+        // motion has claimed via OutdoorSeamCell (a cross-landblock AP
+        // cell derived from the bot's own stepped global coords) is
+        // recorded here so the cell-reconciliation below recognises the
+        // server's subsequent walkCell report as an EXPECTED on-foot seam
+        // crossing and SLIDES the motion lock forward instead of stopping
+        // the motion (outdoor approach motions have no rasterized
+        // motionIndoorPathCells to vouch for the crossing).
+        var                     motionOutdoorApCells = new HashSet<uint>();
         // Door-USE dispatch tracking: per-door cooldown so we don't
         // spam USE on the same door every walk-tick while waiting for
         // it to open. Keyed by door object guid; value is the wall-
@@ -2339,6 +2348,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionIndoorPathAttempted = false;
                     outdoorAvoidanceAttempt = 0;
                     motionIsOutdoorFrontierProbe = false;
+                    motionOutdoorApCells.Clear();
                     pendingGiveItemGuid = null;
                     pendingUseWithItemGuid = null;
                     lockedGoalKind = null;
@@ -3430,6 +3440,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         ? $"item='{itemSnap!.Name}' itemGuid=0x{itemSnap.Guid:X8} "
                                         : "") +
                                     $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                    $"SENT(cell=0x{tacticsSelfCell:X8} pos=({tacticsSelf.Position.X:F2},{tacticsSelf.Position.Y:F2},{tacticsSelf.Position.Z:F2})) " +
                                     $"sent AP yaw={yaw:F3}rad pktSeq={apPacketSeq} fragSeq={apFragSeq} bytes={apSent}");
                             }
                         }
@@ -4612,13 +4623,21 @@ internal sealed class HandshakeDriver : IDisposable
                         // motion-lock forward instead of stopping.
                         // The bot is exactly where we wanted it; the
                         // remaining waypoints + the final approach
-                        // logic stay valid.
-                        if (motionIndoorPathCells is not null &&
-                            motionIndoorPathCells.Contains(walkCell))
+                        // logic stay valid. The same slide applies to an
+                        // OUTDOOR on-foot seam crossing: motionOutdoorApCells
+                        // records every cross-landblock cell this motion
+                        // claimed via the OutdoorSeamCell AP override, so a
+                        // server walkCell report matching one of them is the
+                        // expected result of our own dead-reckoned step (an
+                        // outdoor approach has no rasterized path-cell set to
+                        // vouch for it) — slide, don't stop.
+                        if ((motionIndoorPathCells is not null &&
+                             motionIndoorPathCells.Contains(walkCell)) ||
+                            motionOutdoorApCells.Contains(walkCell))
                         {
                             Console.WriteLine(
-                                $"[motion] walk-tick: indoor-path cell crossing " +
-                                $"0x{motionLockedCellId:X8} -> 0x{walkCell:X8} (expected by planner; continuing)");
+                                $"[motion] walk-tick: seam cell crossing " +
+                                $"0x{motionLockedCellId:X8} -> 0x{walkCell:X8} (expected; continuing)");
                             motionLockedCellId = walkCell;
                         }
                         else
@@ -5338,50 +5357,62 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
 
                                 var apBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
-                                // Outdoor frontier seam-cell override.
+                                // Outdoor seam-cell AP override.
                                 //
-                                // A first-time outdoor frontier probe rasterizes
-                                // its straight segment into motionIndoorPathCells
-                                // but (unlike the indoor/route paths) leaves
-                                // motionIndoorPath null, so followingIndoorPath is
-                                // false and the AP cell above never advances. When
-                                // the straight line crosses an outdoor LANDBLOCK
-                                // seam, the packet keeps claiming the SOURCE cell
-                                // (motionLockedCellId) while newPos overshoots into
-                                // the neighbor landblock's coordinate range — the
-                                // server rejects the inconsistent (cell, pos) pair
-                                // and FREEZES the bot at the seam (actualMoveXY=0).
+                                // Outdoor self positions are LANDBLOCK-relative.
+                                // An outdoor walk motion (frontier probe OR an
+                                // Attack/Pickup interaction approach) packs a fixed
+                                // source cell (motionLockedCellId) while newPos
+                                // dead-reckons across the locked landblock's frame.
+                                // When the step crosses an outdoor LANDBLOCK seam the
+                                // packet keeps claiming the SOURCE cell while newPos
+                                // overshoots into the neighbor landblock's coordinate
+                                // range — the (cell, pos) pair is inconsistent, the
+                                // server's PhysicsObj transition to the coords' real
+                                // (often 2-landblock-distant) cell FAILS, and the
+                                // server broadcasts the bot at cell origin (0,0,0),
+                                // which the client adopts + re-sends in a
+                                // self-reinforcing collapse — the bot freezes at the
+                                // seam (actualMoveXY=0) and can never close on an
+                                // outdoor target.
                                 //
-                                // Fix (mirrors the Slice 7 / outdoor route-executor
-                                // overshoot pattern, packet-only): derive the AP
-                                // cell from newPos's GLOBAL coordinates and, when
-                                // that cell is in a DIFFERENT outdoor landblock that
-                                // belongs to this probe's OWN rasterized PathCells,
-                                // send the (neighbor cell, neighbor-local pos) pair
-                                // so the server's update_object_server re-derives a
-                                // consistent destination cell and accepts the move.
-                                // motionLockedCellId is NOT advanced here — once the
-                                // server reports the new walkCell the existing
-                                // reactive slide advances the lock; if the server
-                                // rejects, the local lock stays uncorrupted.
-                                // Same-landblock outdoor walks (derivedCell shares
-                                // motionLockedCellId's landblock) are byte-identical.
+                                // Fix (packet-only, pure geometry): derive the AP
+                                // cell from newPos's GLOBAL coordinates and, when that
+                                // cell is in a DIFFERENT outdoor landblock, send the
+                                // (neighbor cell, neighbor-local pos) pair so the
+                                // packet is internally consistent and each per-tick
+                                // transition is at most one adjacent cell. The derived
+                                // cell is recorded in motionOutdoorApCells so the
+                                // cell-reconciliation above slides the motion lock
+                                // forward (instead of stopping) when the server then
+                                // reports it. motionLockedCellId is NOT advanced here;
+                                // if the server rejects, the local lock stays
+                                // uncorrupted. Same-landblock outdoor walks (derived
+                                // cell shares motionLockedCellId's landblock) and
+                                // indoor walks (gated out) are byte-identical.
+                                // Default: claim the locked cell at the
+                                // dead-reckoned local position. The seam
+                                // helper returns a non-null SeamCell ONLY when
+                                // the step crosses into a different outdoor
+                                // landblock — there is no out-parameter to
+                                // clobber, so a non-seam tick can never
+                                // collapse apPos to the cell origin (0,0,0).
                                 uint apCellId = motionLockedCellId;
                                 var apPos = newPos;
-                                if (Strategy.OutdoorFrontierSeamCell.TryDeriveSeamCell(
-                                        isOutdoorFrontierProbe: motionIsOutdoorFrontierProbe,
-                                        hasIndoorWaypointPath:  motionIndoorPath is not null,
-                                        selfCellIsIndoor:       Strategy.AcCoords.IsIndoor(walkCell),
-                                        pathCells:              motionIndoorPathCells,
-                                        lockedCellId:           motionLockedCellId,
-                                        stepGlobalX:            selfGX + stepX,
-                                        stepGlobalY:            selfGY + stepY,
-                                        stepZ:                  newPos.Z,
-                                        apCellId:               out apCellId,
-                                        apLocalPos:             out apPos))
+                                var seam = Strategy.OutdoorSeamCell.TryDeriveSeamCell(
+                                    followingIndoorPath: followingIndoorPath,
+                                    selfCellIsOutdoor:   !Strategy.AcCoords.IsIndoor(walkCell),
+                                    lockedCellId:        motionLockedCellId,
+                                    stepGlobalX:         selfGX + stepX,
+                                    stepGlobalY:         selfGY + stepY,
+                                    stepZ:               newPos.Z);
+                                if (seam is { } seamCell)
                                 {
+                                    apCellId = seamCell.CellId;
+                                    apPos = seamCell.LocalPos;
+                                    motionOutdoorApCells.Add(apCellId);
                                     Console.WriteLine(
-                                        $"[motion] walk-tick: outdoor frontier seam-cell override " +
+                                        $"[motion] walk-tick: outdoor seam-cell override " +
                                         $"0x{motionLockedCellId:X8} -> 0x{apCellId:X8} " +
                                         $"global=({selfGX + stepX:F1},{selfGY + stepY:F1}) " +
                                         $"local=({apPos.X:F1},{apPos.Y:F1})");
@@ -5448,7 +5479,9 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"self=({walkSelf.Position.X:F2},{walkSelf.Position.Y:F2},{walkSelf.Position.Z:F2}) " +
                                     $"intent=({newPos.X:F2},{newPos.Y:F2},{newPos.Z:F2}) " +
                                     $"step=({stepX:F2},{stepY:F2}) stepLen={stepLen:F2}u " +
-                                    $"distToTargetXY={lenXY:F2}u distToTargetZ={(stepTargetPos.Z - walkSelf.Position.Z):F2}u pktSeq={packetSeq} fragSeq={fragSeq}");
+                                    $"distToTargetXY={lenXY:F2}u distToTargetZ={(stepTargetPos.Z - walkSelf.Position.Z):F2}u " +
+                                    $"SENT(cell=0x{apCellId:X8} pos=({apPos.X:F2},{apPos.Y:F2},{apPos.Z:F2})) " +
+                                    $"pktSeq={packetSeq} fragSeq={fragSeq}");
                             }
                         }
                     }
