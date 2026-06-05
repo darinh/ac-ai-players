@@ -2475,9 +2475,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (candidates.Count == 0) return;
 
+        // Self position must be lifted into the SAME absolute world frame as
+        // the stored sightings (which NavGraph keeps in absolute coords).
+        // world.Self.Position* is landblock-LOCAL (0..192), so convert via
+        // the cell's landblock origin. Without this the distance/bearing are
+        // computed against the world origin, not the bot (live bug: a monster
+        // ~20m away rendered as "~47525m").
         var selfLb = world.Self.Landblock;
-        float? selfX = world.Self.PositionX;
-        float? selfY = world.Self.PositionY;
+        (float X, float Y)? selfGlobal = world.Self.CellId is uint selfCell
+            ? AcCoords.ToGlobalXY(selfCell, world.Self.PositionX, world.Self.PositionY)
+            : null;
 
         sb.AppendLine("## Recently sighted (out of view)");
         sb.AppendLine(
@@ -2490,7 +2497,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var s in candidates)
         {
             if (rows >= RecentSightingMaxRows) break;
-            var row = RenderRecentSightingRow(s, selfLb, selfX, selfY);
+            var row = RenderRecentSightingRow(s, selfLb, selfGlobal);
             int cost = row.Length + 1; // newline AppendLine adds
             if (rows > 0 && chars + cost > RecentSightingCharBudget) break;
             sb.AppendLine(row);
@@ -2503,11 +2510,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     private static string RenderRecentSightingRow(
-        SightedRecallProjection s, uint? selfLb, float? selfX, float? selfY)
+        SightedRecallProjection s, uint? selfLb, (float X, float Y)? selfGlobal)
     {
         var age = $"last seen {s.AgeSeconds:F0}s ago";
         string where;
-        if (selfX is float sx && selfY is float sy)
+        if (selfGlobal is (float sx, float sy))
         {
             var dx = s.WorldX - sx;
             var dy = s.WorldY - sy;

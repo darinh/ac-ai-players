@@ -1890,12 +1890,15 @@ internal static class AcCoords
 
     public static bool IsIndoor(uint cellId) => (cellId & 0xFFFFu) >= 0x100u;
 
-    public static (float WorldX, float WorldY) ToGlobalXY(uint cellId, Vector3 pos)
+    public static (float WorldX, float WorldY) ToGlobalXY(uint cellId, float x, float y)
     {
         var lbx = (int)((cellId >> 24) & 0xFFu);
         var lby = (int)((cellId >> 16) & 0xFFu);
-        return (lbx * BlockLength + pos.X, lby * BlockLength + pos.Y);
+        return (lbx * BlockLength + x, lby * BlockLength + y);
     }
+
+    public static (float WorldX, float WorldY) ToGlobalXY(uint cellId, Vector3 pos)
+        => ToGlobalXY(cellId, pos.X, pos.Y);
 
     /// <summary>
     /// The OUTDOOR surface cell id for a landblock-local position. AC
