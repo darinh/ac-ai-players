@@ -463,6 +463,50 @@ public class StrategyFoundationTests
         Assert.False(byGuid[NonCreatureGuid].IsCreature);
     }
 
+    [Fact]
+    public void WorldStateProjection_FromWorldState_WidenedRadius_SurfacesMonsterBeyond60u()
+    {
+        // Regression for the perception-radius widening: an object at d=70
+        // (just outside the old 60u projection clip) was excluded from
+        // `Visible`, so prompt sections that scan `Visible` (e.g.
+        // nearest-monster) reported nothing even when the bot stood near it.
+        // The widened default radius (120u) must surface a monster at d=70 and
+        // d=110, and still exclude one beyond the radius (d=130). Synthetic
+        // fixtures only — the assertions exercise wire-bit + geometry, not any
+        // specific game entity.
+        const uint NearMonsterGuid = 0x80000011;
+        const uint MidMonsterGuid  = 0x80000012;
+        const uint FarMonsterGuid  = 0x80000013;
+        const uint OutdoorCell = 0x00010001u; // low16 < 0x100 → outdoor
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Self", wcid: 1u, itemType: 0u, cellId: OutdoorCell,
+            position: new Vector3(0, 0, 0));
+
+        // d=70 — was clipped by the old 60u radius, now must surface.
+        SeedSnapshot(ws, NearMonsterGuid, "MonsterA", wcid: 1001u, itemType: 0x10u, cellId: OutdoorCell,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable, weenieFlags: 0x00800036u,
+            position: new Vector3(70, 0, 0));
+        // d=110 — inside the widened 120u radius.
+        SeedSnapshot(ws, MidMonsterGuid, "MonsterB", wcid: 1002u, itemType: 0x10u, cellId: OutdoorCell,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable, weenieFlags: 0x00800036u,
+            position: new Vector3(110, 0, 0));
+        // d=130 — still beyond the radius, must remain excluded.
+        SeedSnapshot(ws, FarMonsterGuid, "MonsterC", wcid: 1003u, itemType: 0x10u, cellId: OutdoorCell,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable, weenieFlags: 0x00800036u,
+            position: new Vector3(130, 0, 0));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid.ContainsKey(NearMonsterGuid), "monster at d=70 must surface under the widened radius");
+        Assert.True(byGuid[NearMonsterGuid].IsMonster);
+        Assert.True(byGuid.ContainsKey(MidMonsterGuid), "monster at d=110 must surface under the widened radius");
+        Assert.False(byGuid.ContainsKey(FarMonsterGuid), "monster at d=130 stays beyond the 120u radius");
+    }
+
     // Helper: build a tiny WorldState with three objects whose attributes
     // exercise every Selector field. We use Apply via a synthetic ObjectCreate
     // when feasible; otherwise we stand up snapshots through the snapshot
@@ -490,7 +534,8 @@ public class StrategyFoundationTests
         uint cellId,
         uint? containerGuid = null,
         uint? objectDescriptionFlags = null,
-        uint? weenieFlags = null)
+        uint? weenieFlags = null,
+        Vector3? position = null)
     {
         // WorldState lacks a public seed helper. The most direct path
         // without reflection is to mutate via internal setters on a
@@ -499,7 +544,7 @@ public class StrategyFoundationTests
         // mimic an ObjectCreate using the public API: a minimal
         // ObjectCreateMessage would require a fixture file. Instead,
         // we use the SnapshotSeeding test seam (defined below).
-        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags, weenieFlags);
+        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags, weenieFlags, position);
     }
 
     private sealed class FakeWeenieRepo : IWeenieRepository
@@ -1922,7 +1967,8 @@ internal static class SnapshotSeeding
         uint cellId,
         uint? containerGuid,
         uint? objectDescriptionFlags = null,
-        uint? weenieFlags = null)
+        uint? weenieFlags = null,
+        Vector3? position = null)
     {
         var snap = new WorldObjectSnapshot(guid)
         {
@@ -1933,7 +1979,7 @@ internal static class SnapshotSeeding
             ContainerGuid = containerGuid,
             ObjectDescriptionFlags = objectDescriptionFlags,
             WeenieFlags = weenieFlags,
-            Position = new Vector3(0, 0, 0),
+            Position = position ?? new Vector3(0, 0, 0),
         };
         // Reach the underlying dictionary via reflection. The field
         // is named `_objects` (LinkedList-style private backing).
