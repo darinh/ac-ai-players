@@ -46,6 +46,29 @@ internal enum GameActionType : uint
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
     GiveObjectRequest   = 0x00CD,
+    SetSingleCharacterOption = 0x0005,
+}
+
+/// <summary>
+/// Subset of ACE's <c>CharacterOption</c> enum
+/// (Source/ACE.Entity/Enum/CharacterOption.cs) that the headless
+/// client toggles over the wire. The numeric value is the option id
+/// the server reads from the SetSingleCharacterOption payload — NOT
+/// the underlying CharacterOptions1/2 bit (the server maps id → bit
+/// internally via SetCharacterOption).
+/// </summary>
+internal enum CharacterOption : uint
+{
+    /// <summary>
+    /// When enabled, the server's melee loop auto-repeats swings
+    /// (Player_Melee.cs:375 gates the next swing on
+    /// GetCharacterOption(AutoRepeatAttacks)). A real AC client sets
+    /// this so a single TargetedMeleeAttack keeps swinging at weapon
+    /// cadence until the target dies or leaves range; without it the
+    /// server does ONE swing then OnAttackDone(), forcing the client
+    /// to re-issue every swing.
+    /// </summary>
+    AutoRepeatAttacks = 0x00,
 }
 
 /// <summary>
@@ -369,6 +392,38 @@ internal static class GameActionChangeCombatModeMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.ChangeCombatMode, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), newCombatMode); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// SetSingleCharacterOption (0x0005). Toggles one boolean character
+/// option. A real AC client sends this when the user ticks an option
+/// checkbox (e.g. "Auto Repeat Attacks").
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionSetSingleCharacterOption.cs</c>
+///   reads u32 option + u32 value and (default case) calls
+///   <c>session.Player.SetCharacterOption((CharacterOption)option, value != 0)</c>,
+///   which maps the option id to its CharacterOptions1/2 bit.
+///
+/// Payload after the 12B GameAction header:
+///   u32 option   (<see cref="CharacterOption"/>)
+///   u32 value    (0 = off, non-zero = on)
+/// = 20 bytes total.
+/// </summary>
+internal static class GameActionSetSingleCharacterOptionMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, CharacterOption option, bool value, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.SetSingleCharacterOption, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), (uint)option); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), value ? 1u : 0u); cursor += 4;
         return cursor;
     }
 }
