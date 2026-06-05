@@ -104,6 +104,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private Goal? _lastLlmGoal;
     private int _stickyReEmitCount;
 
+    // SOURCE RE-DRIVE of an LLM-authored exploration commitment
+    // (execution persistence — NOT game knowledge). When a single LLM
+    // response BOTH pushes a new strategic intent that becomes TOP AND
+    // returns an inert `Explore` tactical goal, we record the pushed
+    // intent's id + that exact Explore goal. While that EXACT LLM-authored
+    // intent remains TOP and uncompleted, the policy re-drives that EXACT
+    // LLM-authored Explore each tick WITHOUT re-consulting the LLM — so an
+    // LLM that commits to (e.g.) a hunt excursion is not pulled off it by
+    // every tick's re-deliberation. The intent's OWN typed completion
+    // predicate (LLM-authored: e.g. a monster comes into view) and/or its
+    // deadline end the commitment; source adds only bookkeeping. Source
+    // NEVER inspects the intent's kind/name, nor any NPC/monster/town/wcid
+    // knowledge. Cleared on ANY other LLM response (a fresh decision
+    // supersedes), on a mechanical plan-invalidating break, or on the
+    // liveness budget. Gated to Explore because an "anywhere" Explore is
+    // motor-owned and non-interactive — re-driving an interactive verb
+    // (Talk/Pickup/...) through changing events could repeat-interact a
+    // stale/unasked target.
+    private string? _redriveIntentId;
+    private Goal? _redriveGoal;
+    private int _redriveReinstalls;
+
+    /// <summary>
+    /// Liveness backstop for source re-drive: max times the stored Explore
+    /// is reinstalled (each reinstall == the prior Explore cleared) before
+    /// forcing a real LLM re-think, even if the intent has not completed.
+    /// Game-agnostic bookkeeping. The LLM-authored deadline is the primary
+    /// terminator; this bounds a wedged/very-long-deadline excursion.
+    /// </summary>
+    public int MaxRedriveReinstalls { get; init; } = 12;
+
     /// <summary>
     /// Max consecutive sticky re-emits of the last LLM objective before
     /// forcing a fresh LLM call. Counts re-CLEARS of the goal (not
@@ -296,7 +327,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // to Holtburg. The SelectorResolver landblock filter is the
         // belt; this is the suspenders that stop the LLM from
         // burning tokens re-proposing the same dead goal.
-        if (currentGoal is not null && HasLandblockChangeSince(events, _lastEventConsideredSequence))
+        // Mechanical plan-invalidation signals since our last LLM look,
+        // computed once (also used by the source re-drive gate below).
+        // Transport-failure ("could not walk") rejections are excluded by
+        // HasRejectionSince — only SEMANTIC rejections invalidate.
+        var landblockChangedSinceLook = HasLandblockChangeSince(events, _lastEventConsideredSequence);
+        var semanticRejectSinceLook = HasRejectionSince(events, _lastEventConsideredSequence);
+        // A durable inventory change (item picked up, used, given, sold) is
+        // a mechanical plan-invalidating state change — unlike ambient
+        // dialog/chatter — so it must END a source re-drive (and must never
+        // be silently consumed by the re-drive floor-advance below).
+        var inventoryChangedSinceLook = events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Any(e => e.Kind is EventKind.InventoryItemAdded or EventKind.InventoryItemRemoved);
+
+        if (currentGoal is not null && landblockChangedSinceLook)
         {
             Console.WriteLine(
                 $"[strategy] LlmGoalPolicy: landblock change detected → " +
@@ -315,7 +360,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // re-emitting Give(Society Greeter, Calling Stone) forever.
         // Transport-failure rejections (could-not-walk) are excluded
         // by HasRejectionSince — they don't invalidate the goal.
-        if (currentGoal is not null && HasRejectionSince(events, _lastEventConsideredSequence))
+        if (currentGoal is not null && semanticRejectSinceLook)
         {
             Console.WriteLine(
                 $"[strategy] LlmGoalPolicy: ActionRejected since last look → " +
@@ -369,6 +414,84 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var pickerArrived = HasPickerArrivedSince(events, _lastEventConsideredSequence);
         var pickerStartKey = NewestPickerStartTargetKeySince(events, _lastEventConsideredSequence);
         var pickerStartWake = pickerStartKey is not null && ShouldWakeForPickerStart(pickerStartKey, nowUtc);
+
+        // SOURCE RE-DRIVE of an LLM-authored exploration commitment.
+        // While the EXACT intent the LLM pushed alongside an Explore goal
+        // remains TOP and uncompleted, re-drive that EXACT Explore WITHOUT
+        // re-consulting the LLM, so the model is not pulled off its own
+        // committed excursion by every tick's re-deliberation. This takes
+        // precedence over the picker-start / sticky paths below.
+        //
+        // The commitment ends — provenance cleared, the sticky-objective free
+        // re-emit BELOW is suppressed so a REAL LLM re-deliberation fires — on
+        // MECHANICAL conditions only: the intent left TOP (auto-popped on its
+        // LLM-authored completion e.g. monster-visible, on its deadline, or the
+        // LLM popped/replaced it), is still TOP but no longer Active (e.g.
+        // MarkTopBlocked in place) or past its deadline, a landblock change
+        // (egress progress / a new area to re-deliberate in), a SEMANTIC
+        // ActionRejected, a durable inventory change, the wall-clock stuck
+        // timeout, or the liveness reinstall budget. Ambient salient events
+        // (town NPC dialog, server chatter, picker churn) deliberately do NOT
+        // end it — ignoring those re-deliberation triggers is the entire point.
+        // Source never inspects the intent kind or any object/quest knowledge.
+        //
+        // Whenever a commitment ends, redriveEndedMustCallLlm forces a fresh
+        // LLM decision: several break reasons (top-left/blocked/deadline,
+        // budget) are NOT otherwise sticky-gate guards, so without this flag
+        // the sticky path could re-emit the same inert Explore for free and
+        // silently ignore the LLM-authored completion.
+        var redriveEndedMustCallLlm = false;
+        if (_redriveIntentId is not null && _redriveGoal is not null)
+        {
+            var redriveTop = _stack?.Top;
+            var stillTop = redriveTop is not null
+                && string.Equals(redriveTop.Id, _redriveIntentId, StringComparison.Ordinal);
+            var leftTop = !stillTop;
+            var topInactive = stillTop && redriveTop!.Status != IntentLifecycle.Active;
+            var topDeadlinePassed = stillTop
+                && redriveTop!.DeadlineUtc is DateTime dl && nowUtc.UtcDateTime >= dl;
+            var budgetExhausted = _redriveReinstalls >= MaxRedriveReinstalls;
+            if (stuck || landblockChangedSinceLook || semanticRejectSinceLook
+                || inventoryChangedSinceLook || leftTop || topInactive || topDeadlinePassed
+                || budgetExhausted)
+            {
+                Console.WriteLine(
+                    $"[strategy] re-drive ended: intent={_redriveIntentId} reason=" +
+                    (stuck ? "stuck-timeout"
+                     : landblockChangedSinceLook ? "landblock-changed"
+                     : semanticRejectSinceLook ? "semantic-reject"
+                     : inventoryChangedSinceLook ? "inventory-changed"
+                     : leftTop ? "intent-left-top"
+                     : topInactive ? $"top-{redriveTop!.Status}"
+                     : topDeadlinePassed ? "top-deadline"
+                     : $"budget({_redriveReinstalls}/{MaxRedriveReinstalls})"));
+                _redriveIntentId = null;
+                _redriveGoal = null;
+                _redriveReinstalls = 0;
+                redriveEndedMustCallLlm = true;
+                // fall through to the normal call/coalesce logic; the sticky
+                // path below is gated off this flag so a real LLM call fires.
+            }
+            else
+            {
+                // Suppress the LLM call. Consume ambient events so they do
+                // not accumulate (we have already checked every mechanical
+                // break condition — incl. durable inventory changes — against
+                // the current floor above, so nothing plan-invalidating is
+                // being hidden).
+                _lastEventConsideredSequence = events.NextSequence;
+                // Preserve an in-flight active goal (do not clobber a walk
+                // already executing); only reinstall when the goal cleared.
+                if (currentGoal is not null)
+                    return currentGoal;
+                _redriveReinstalls++;
+                var redriven = _redriveGoal with { Id = Guid.NewGuid(), CreatedAtUtc = nowUtc };
+                Console.WriteLine(
+                    $"[strategy] re-drive #{_redriveReinstalls}/{MaxRedriveReinstalls} " +
+                    $"intent={_redriveIntentId} goal=Explore target={redriven.Target} (LLM call suppressed)");
+                return redriven;
+            }
+        }
 
         // Suppressed picker-start: a same-target (or in-window) start was
         // the ONLY thing that would have woken the LLM. Skip the call and
@@ -441,6 +564,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (currentGoal is null
             && _lastLlmGoal is not null
             && !stuck
+            && !redriveEndedMustCallLlm
             && _stickyReEmitCount < MaxStickyReEmits
             && !hasNonPickerExternal
             && !pickerArrived
@@ -708,6 +832,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // next prompt sees reflects everything the LLM just emitted.
         // Rejected batches are logged into training data. A goal-only
         // response is fine (empty stack_ops or no stack_ops field).
+        var pushedNewTop = false;
         if (_stack is not null && _idAllocator is not null)
         {
             if (TryParseStackOps(result.Content, out var stackRevision, out var stackOps, out var opsErr))
@@ -725,6 +850,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         _training?.RecordParseError(decisionId,
                             $"stack-ops rejected: {outcome.Result} reason={outcome.RejectReason}");
                     }
+                    // Re-drive provenance precondition: the batch applied
+                    // cleanly AND its LAST op is a Push, so the effective
+                    // TOP was created by a push in THIS response (a trailing
+                    // pop/replace/mark would have changed or removed it).
+                    pushedNewTop = outcome.Result == BatchApplyResult.Ok
+                        && stackOps[^1].Op == IntentStackOpKind.Push;
                 }
             }
             else
@@ -825,6 +956,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // re-emit budget.
         _lastLlmGoal = goal;
         _stickyReEmitCount = 0;
+
+        // Source re-drive capture (execution persistence). Every accepted
+        // LLM response either re-captures or CLEARS provenance, so a fresh
+        // LLM decision always supersedes a prior commitment. Capture only
+        // the exact, narrow case: this response pushed a new TOP (trailing
+        // push, applied cleanly) AND emitted an inert Explore AND the new
+        // TOP carries an LLM-authored deadline (liveness guarantee). No
+        // game knowledge: the intent kind is never inspected.
+        if (pushedNewTop
+            && goal.Kind == GoalKind.Explore
+            && _stack is { } st
+            && st.Depth > 1
+            && st.Top is { } newTop
+            && newTop.DeadlineUtc is not null)
+        {
+            _redriveIntentId = newTop.Id;
+            _redriveGoal = goal;
+            _redriveReinstalls = 0;
+            Console.WriteLine(
+                $"[strategy] re-drive armed: intent={newTop.Id} goal=Explore target={goal.Target} " +
+                $"deadline={newTop.DeadlineUtc:HH:mm:ss}Z");
+        }
+        else
+        {
+            _redriveIntentId = null;
+            _redriveGoal = null;
+            _redriveReinstalls = 0;
+        }
         Console.WriteLine(
             $"[llm-call] success id={decisionId} latency={result.LatencyMs}ms " +
             $"goal=kind={goal.Kind} target={goal.Target}" +
