@@ -4692,4 +4692,37 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("\"$type\":\"or\"", prompt);
         Assert.DoesNotContain("inventory_contains_at_least", prompt);
     }
+
+    [Fact]
+    public void StackPrompt_TeachesPersistHuntExcursionPush()
+    {
+        // When a stack is present the prompt must instruct the LLM to
+        // PERSIST a hunt excursion by pushing a "hunt-excursion" intent
+        // (so the decision survives across ticks instead of being
+        // re-decided and abandoned each cycle). Audit-safe: the LLM
+        // authors the push; source never branches on this kind.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, new IntentStack());
+
+        Assert.Contains("PERSIST A HUNT EXCURSION", prompt);
+        Assert.Contains("\"hunt-excursion\"", prompt);
+        // It must couple the push to the monster-sighting completion plus
+        // a liveness deadline (NOT mere landblock change, which can land in
+        // another monster-free town and pop the excursion prematurely).
+        Assert.Contains("visible_tag", prompt);
+        Assert.Contains("deadline_seconds", prompt);
+    }
+
+    [Fact]
+    public void StackPrompt_PersistHuntExcursion_AbsentWhenNoStack()
+    {
+        // The persist directive is stack-gated — it must NOT appear (and
+        // must not bloat the static floor) when no stack is configured.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, currentGoal: null, stack: null);
+
+        Assert.DoesNotContain("PERSIST A HUNT EXCURSION", prompt);
+    }
 }
