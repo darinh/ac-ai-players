@@ -5112,6 +5112,107 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("combat history (your own outcomes", p);
     }
 
+    // combat-record-nearest: the nearest-monster line in "## Combat
+    // readiness" is annotated INLINE with the bot's own raw record for
+    // that monster KIND, matched by exact identity (wcid or normalized
+    // name). Raw counts only — no danger label.
+    [Fact]
+    public void BuildUserPrompt_NearestMonster_AnnotatedWithOwnRecord_ByWcid()
+    {
+        var world = BuildAcademyCombatWorld() with
+        {
+            CombatHistory = new[]
+            {
+                // Same wcid as the visible Sparring Golem (12698).
+                new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 1, Deaths: 2,
+                    NearDeaths: 0, Fights: 3, LastOutcome: "death"),
+            },
+        };
+        var events = new EventStream();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+
+        // The nearest-monster line carries the inline record.
+        Assert.Contains("nearest monster: Sparring Golem", p);
+        Assert.Contains("your record: fights 3, kills 1, deaths 2, near-deaths 0, last death", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NearestMonster_NoMatch_NoAnnotation()
+    {
+        var world = BuildAcademyCombatWorld() with
+        {
+            CombatHistory = new[]
+            {
+                // Different kind — must NOT annotate the Sparring Golem.
+                new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0, Deaths: 1,
+                    NearDeaths: 0, Fights: 1, LastOutcome: "death"),
+            },
+        };
+        var events = new EventStream();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.Contains("nearest monster: Sparring Golem", p);
+        // No record annotation appended to the nearest-monster line.
+        var line = p.Split('\n').First(l => l.Contains("nearest monster: Sparring Golem"));
+        Assert.DoesNotContain("your record", line);
+    }
+
+    // ---- FindCombatRecord pure matcher ----
+
+    [Fact]
+    public void FindCombatRecord_MatchesByWcid()
+    {
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Sparring Golem", 12698u, 1, 2, 0, 3, "death"),
+        };
+        var rec = LlmGoalPolicy.FindCombatRecord(hist, 12698u, "Totally Different Name");
+        Assert.NotNull(rec);
+        Assert.Equal("Sparring Golem", rec!.Name);
+    }
+
+    [Fact]
+    public void FindCombatRecord_MatchesByNormalizedName_WhenNoWcidEitherSide()
+    {
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Skulker", null, 0, 1, 0, 1, "death"),
+        };
+        var rec = LlmGoalPolicy.FindCombatRecord(hist, null, "  drudge   skulker ");
+        Assert.NotNull(rec);
+        Assert.Equal("Drudge Skulker", rec!.Name);
+    }
+
+    [Fact]
+    public void FindCombatRecord_NoMatch_OnWcidVsNameOnlyAsymmetry()
+    {
+        // History keyed by wcid; visible row has name only -> no shared
+        // exact key -> deliberately omitted (not guessed).
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 0, 1, "death"),
+        };
+        Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, "Drudge Skulker"));
+    }
+
+    [Fact]
+    public void FindCombatRecord_NoSubstringMatch()
+    {
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge", null, 1, 0, 0, 1, "kill"),
+        };
+        Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, "Drudge Skulker"));
+    }
+
+    [Fact]
+    public void FindCombatRecord_NullWhenNoHistoryOrNoIdentity()
+    {
+        Assert.Null(LlmGoalPolicy.FindCombatRecord(null, 7u, "X"));
+        var hist = new[] { new CombatHistoryEntry("X", 7u, 1, 0, 0, 1, "kill") };
+        Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, null));
+        Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, "(unknown)"));
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
