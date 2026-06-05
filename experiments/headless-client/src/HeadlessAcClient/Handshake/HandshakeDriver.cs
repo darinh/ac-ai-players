@@ -772,6 +772,23 @@ internal sealed class HandshakeDriver : IDisposable
         int                     motionIndoorPathIndex = 0;
         IReadOnlySet<uint>?     motionIndoorPathCells = null;
         bool                    motionIndoorPathAttempted = false;
+        // Outdoor reactive local avoidance — when a straight-line outdoor
+        // frontier/remembered-coord walk clips an obstacle (sustained
+        // Blocked), try a bounded sequence of short lateral detour
+        // waypoints before giving up, so Strategy re-deliberates a new
+        // DIRECTION rather than another equally-blocked cell from the same
+        // stuck pocket. Counts the detours tried in the current stuck
+        // episode within one motion lock; reset on lock release. Pure
+        // mechanical locomotion (collision response); no game knowledge.
+        int                     outdoorAvoidanceAttempt = 0;
+        // True ONLY while the current motion lock is an anonymous OUTDOOR
+        // frontier probe (Explore with no resolvable target — arrival has
+        // no verb and no target-specific completion, it just re-perceives).
+        // Local avoidance may ONLY redirect motionRememberedDest when this
+        // is set, so it never hijacks a remembered-coord motion that DOES
+        // carry interaction semantics (e.g. a recalled sighted location the
+        // LLM means to Use/Talk/Attack on arrival).
+        bool                    motionIsOutdoorFrontierProbe = false;
         // Door-USE dispatch tracking: per-door cooldown so we don't
         // spam USE on the same door every walk-tick while waiting for
         // it to open. Keyed by door object guid; value is the wall-
@@ -2320,6 +2337,8 @@ internal sealed class HandshakeDriver : IDisposable
                     motionIndoorPathIndex = 0;
                     motionIndoorPathCells = null;
                     motionIndoorPathAttempted = false;
+                    outdoorAvoidanceAttempt = 0;
+                    motionIsOutdoorFrontierProbe = false;
                     pendingGiveItemGuid = null;
                     pendingUseWithItemGuid = null;
                     lockedGoalKind = null;
@@ -2977,6 +2996,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 motionRememberedDest = outdoorFrontier;
                                 motionIndoorPathCells = outdoorPathCells;
                                 motionIndoorPathAttempted = true;
+                                motionIsOutdoorFrontierProbe = true;
                                 var (sgx, sgy) = Strategy.AcCoords.ToGlobalXY(tacticsSelfCell, tacticsSelf.Position);
                                 var (dgx, dgy) = Strategy.AcCoords.ToGlobalXY(
                                     outdoorFrontier.CellId ?? tacticsSelfCell, outdoorFrontier.Position);
@@ -4659,6 +4679,95 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"prevSelf=({prevSelf.X:F2},{prevSelf.Y:F2})");
                                 if (consecutiveBlockedTicks >= BlockedConsecutiveTicks)
                                 {
+                                    // Before fast-failing, try bounded reactive
+                                    // LOCAL AVOIDANCE: a straight outdoor
+                                    // frontier/remembered-coord walk that clips
+                                    // an obstacle can often slip past it with a
+                                    // short lateral detour. Only for OUTDOOR
+                                    // remembered-coord motion (the indoor
+                                    // pathfinder already routes around geometry);
+                                    // this never changes WHAT the LLM asked for,
+                                    // only HOW the motor reaches the same coords.
+                                    bool detoured = false;
+                                    if (motionIsOutdoorFrontierProbe &&
+                                        motionRememberedDest is not null &&
+                                        motionIndoorPath is null &&
+                                        !Strategy.AcCoords.IsIndoor(walkCell) &&
+                                        outdoorAvoidanceAttempt < Strategy.OutdoorLocalAvoidance.MaxAttempts &&
+                                        motionRememberedDest.CellId is uint remDestCell)
+                                    {
+                                        var (avSgx, avSgy) = Strategy.AcCoords.ToGlobalXY(walkCell, walkSelf.Position);
+                                        var (avTgx, avTgy) = Strategy.AcCoords.ToGlobalXY(remDestCell, motionRememberedDest.Position);
+                                        if (Strategy.OutdoorLocalAvoidance.TryChooseDetour(
+                                                avSgx, avSgy, avTgx, avTgy,
+                                                outdoorAvoidanceAttempt,
+                                                Strategy.OutdoorLocalAvoidance.DefaultDetourDistance,
+                                                out var avDgx, out var avDgy) &&
+                                            Strategy.OutdoorLocalAvoidance.IsForwardProgress(
+                                                avSgx, avSgy, avTgx, avTgy, avDgx, avDgy))
+                                        {
+                                            var detourCell = Strategy.AcCoords.OutdoorCellIdFromGlobal(avDgx, avDgy);
+                                            if (detourCell != 0u)
+                                            {
+                                                var ddlbx = (int)((detourCell >> 24) & 0xFFu);
+                                                var ddlby = (int)((detourCell >> 16) & 0xFFu);
+                                                var detourLocal = new Vector3(
+                                                    avDgx - ddlbx * Strategy.AcCoords.BlockLength,
+                                                    avDgy - ddlby * Strategy.AcCoords.BlockLength,
+                                                    walkSelf.Position.Z);
+
+                                                // Augment the cell-slide set with
+                                                // the detour's cells (+ the current
+                                                // cell): a sidestep can enter a cell
+                                                // outside the original rasterized
+                                                // straight-line set, which the
+                                                // cell-slide gate would otherwise
+                                                // refuse, stopping the detour dead.
+                                                var augmented = motionIndoorPathCells is not null
+                                                    ? new HashSet<uint>(motionIndoorPathCells)
+                                                    : new HashSet<uint>();
+                                                var rdx = avDgx - avSgx;
+                                                var rdy = avDgy - avSgy;
+                                                var rdist = MathF.Sqrt(rdx * rdx + rdy * rdy);
+                                                var rsteps = Math.Max(1, (int)Math.Ceiling(rdist / 4f));
+                                                for (int rs = 0; rs <= rsteps; rs++)
+                                                {
+                                                    var rt = (float)rs / rsteps;
+                                                    var rc = Strategy.AcCoords.OutdoorCellIdFromGlobal(
+                                                        avSgx + rdx * rt, avSgy + rdy * rt);
+                                                    if (rc != 0u) augmented.Add(rc);
+                                                }
+                                                augmented.Add(walkCell);
+                                                motionIndoorPathCells = augmented;
+
+                                                // Re-steer toward the short detour
+                                                // waypoint. On arrival the normal
+                                                // Explore-arrival path re-perceives
+                                                // and Strategy re-plans a fresh
+                                                // frontier from the new, past-the-
+                                                // obstacle position — no separate
+                                                // "restore original target" step is
+                                                // needed.
+                                                motionRememberedDest = new WorldObjectSnapshot(0u)
+                                                {
+                                                    Name = motionRememberedDest.Name,
+                                                    CellId = detourCell,
+                                                    Position = detourLocal,
+                                                };
+                                                outdoorAvoidanceAttempt++;
+                                                consecutiveBlockedTicks = 0;
+                                                detoured = true;
+                                                Console.WriteLine(
+                                                    $"[motion] walk-tick: BLOCKED — local-avoidance detour " +
+                                                    $"{outdoorAvoidanceAttempt}/{Strategy.OutdoorLocalAvoidance.MaxAttempts} " +
+                                                    $"to 0x{detourCell:X8}@({detourLocal.X:F1},{detourLocal.Y:F1}) " +
+                                                    $"global=({avDgx:F1},{avDgy:F1})");
+                                            }
+                                        }
+                                    }
+
+                                    if (!detoured)
+                                    {
                                     // Bot is clipping into an obstacle. Stop
                                     // sending APs (the server WILL keep
                                     // clamping and we MUST NOT trust any
@@ -4683,6 +4792,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         ErrorCode = 0xFFFD,
                                         ErrorLabel = "Blocked",
                                     });
+                                    }
                                 }
                             }
                             else
