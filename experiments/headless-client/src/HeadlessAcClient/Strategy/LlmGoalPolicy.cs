@@ -29,6 +29,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using HeadlessAcClient.Strategy.Intent;
+using HeadlessAcClient.World;
 
 namespace HeadlessAcClient.Strategy;
 
@@ -2205,7 +2206,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (nearestMonster is not null)
         {
             var dStr = nearestMonster.Distance is float dm ? $" d={dm:F1}" : "";
-            sb.AppendLine($"- nearest monster: {nearestMonster.Name}{dStr}");
+            var recStr = FormatCombatRecordFor(
+                world.CombatHistory, nearestMonster.Wcid, nearestMonster.Name);
+            sb.AppendLine($"- nearest monster: {nearestMonster.Name}{dStr}{recStr}");
         }
         else
         {
@@ -2213,7 +2216,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         if (observedHostile is not null)
         {
-            sb.AppendLine($"- observed hostile: {observedHostile.Name} (it has attacked you — fight back or flee)");
+            var recStr = FormatCombatRecordFor(
+                world.CombatHistory, observedHostile.Wcid, observedHostile.Name);
+            sb.AppendLine($"- observed hostile: {observedHostile.Name}{recStr} (it has attacked you — fight back or flee)");
         }
         // combat-damage-output: surface the live outcome of the current
         // melee fight so the LLM can judge whether its swings are
@@ -2634,6 +2639,46 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     ///   * Dedup by (name, wcid, landblock); keep the most-recent.
     ///   * Most-recent first; capped by row count and a char budget.
     /// </summary>
+    /// <summary>
+    /// Finds the bot's own recorded combat outcome for a monster KIND by
+    /// EXACT identity match against the surfaced combat-history rows.
+    /// Matching reuses <see cref="CombatFeelLedger.KeyOf"/> so it is
+    /// wcid-preferred then exact normalized-name — NO substring/fuzzy match
+    /// and NO match on the "(unknown)" display fallback. Returns null when
+    /// there is no history or no exact shared key (the asymmetric
+    /// wcid-vs-name-only case is deliberately omitted rather than guessed).
+    /// Pure projection join: surfaces the SAME raw counts already in the
+    /// combat-history block, colocated at the decision point. No priority,
+    /// no danger label, no ordering.
+    /// </summary>
+    internal static CombatHistoryEntry? FindCombatRecord(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name)
+    {
+        if (history is null || history.Count == 0) return null;
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(wcid, name));
+        if (key is null) return null;
+        foreach (var h in history)
+        {
+            var hKey = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(h.Wcid, h.Name));
+            if (hKey is not null && hKey == key) return h;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Renders the inline raw-record annotation for a visible monster (or
+    /// the empty string when there is no matching history). Raw counts
+    /// only — the LLM judges danger from them via the COMBAT SAFETY rule.
+    /// </summary>
+    internal static string FormatCombatRecordFor(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name)
+    {
+        var rec = FindCombatRecord(history, wcid, name);
+        if (rec is null) return "";
+        return $" [your record: fights {rec.Fights}, kills {rec.Kills}, " +
+               $"deaths {rec.Deaths}, near-deaths {rec.NearDeaths}, last {rec.LastOutcome}]";
+    }
+
     internal static void AppendRecentSightings(
         StringBuilder sb,
         IReadOnlyList<SightedRecallProjection>? sightings,
