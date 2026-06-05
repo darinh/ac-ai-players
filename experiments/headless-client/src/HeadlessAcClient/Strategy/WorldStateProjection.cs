@@ -255,7 +255,7 @@ internal sealed record WorldStateProjection
                 // server doesn't strip them on death); without this guard
                 // a Hunt-intent decomposer would target a dead body
                 // already covered by the Step 5b openable-Use path.
-                var isMonster = isCreature && isAttackable && !hasRadarBlipColor && !isVendor && !isHealer && !isCorpse;
+                var isMonster = EntityClassifier.IsMonster(itemType, descFlags, weenieFlags);
 
                 return new VisibleObjectProjection
                 {

@@ -2700,6 +2700,157 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("Pickup it to arm", prompt);
     }
 
+    // ---- Recently sighted (out of view) recall block ----
+
+    private static WorldStateProjection RecallSelfWorld(
+        uint landblock = 0xA9B3u,
+        params VisibleObjectProjection[] visible)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = landblock,
+                CellId = (landblock << 16) | 0x0001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+
+    private static SightedRecallProjection Sighting(
+        string name, uint? wcid, EntityKind kind, double ageSeconds,
+        uint landblock = 0xA9B3u, float worldX = 0f, float worldY = 100f)
+        => new SightedRecallProjection
+        {
+            Name = name, Wcid = wcid, Kind = kind, Landblock = landblock,
+            WorldX = worldX, WorldY = worldY, AgeSeconds = ageSeconds,
+        };
+
+    private static string BuildPromptWithRecall(
+        WorldStateProjection world, params SightedRecallProjection[] recall)
+        => LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, null, recall);
+
+    [Fact]
+    public void RecentSightings_RendersMobOutOfView()
+    {
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 90, worldX: 0f, worldY: 100f));
+        Assert.Contains("## Recently sighted (out of view)", prompt);
+        Assert.Contains("The Chicken (kind=monster, last seen 90s ago, approx N ~100m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_NeutralPhrasing_NoPriorityLanguage()
+    {
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 30));
+        Assert.Contains("Not recommendations", prompt);
+        Assert.Contains("the bot assigns no priority", prompt);
+        // No source-side urgency / hunting directive.
+        Assert.DoesNotContain("go hunt", prompt);
+        Assert.DoesNotContain("best monster", prompt);
+        Assert.DoesNotContain("priority target", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_ExcludesCurrentlyVisibleByWcid()
+    {
+        // The remembered monster is currently visible (same wcid) → it is
+        // already in "## Visible nearby", so the recall section must not
+        // re-advertise it → no header at all when nothing else remains.
+        var world = RecallSelfWorld(visible: new VisibleObjectProjection
+        { Guid = MobGuid, Name = "The Chicken", Wcid = 24937u, Distance = 5f, IsMonster = true });
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 20));
+        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_ExcludesCurrentlyVisibleByName()
+    {
+        // Same identity by name when wcid is unknown on the sighting.
+        var world = RecallSelfWorld(visible: new VisibleObjectProjection
+        { Guid = MobGuid, Name = "Drudge Slinker", Wcid = 99u, Distance = 5f, IsMonster = true });
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Drudge Slinker", null, EntityKind.Mob, ageSeconds: 20));
+        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_OmitsNonMobKinds()
+    {
+        // An NPC-kind remembered creature is not surfaced in the
+        // monster-recall section (mirrors the live "nearest monster").
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Town Crier", 1234u, EntityKind.NPC, ageSeconds: 20));
+        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_DropsStaleBeyondTtl()
+    {
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 600)); // > 180s TTL
+        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_DedupsByIdentity_KeepsMostRecent()
+    {
+        // Two sightings of the same identity (name+wcid+landblock) at
+        // different ages collapse to one row, keeping the freshest.
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 150),
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 20));
+        // Exactly one Chicken row, and it is the freshest (20s).
+        var count = prompt.Split("The Chicken (kind=monster").Length - 1;
+        Assert.Equal(1, count);
+        Assert.Contains("last seen 20s ago", prompt);
+        Assert.DoesNotContain("last seen 150s ago", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_CapsRowCount()
+    {
+        var world = RecallSelfWorld();
+        var many = Enumerable.Range(0, 9)
+            .Select(i => Sighting($"Mob{i}", (uint)(1000 + i), EntityKind.Mob, ageSeconds: i + 1))
+            .ToArray();
+        var prompt = BuildPromptWithRecall(world, many);
+        // Capped at 5 rows + an omission summary line.
+        var rows = prompt.Split('\n').Count(l => l.Contains("(kind=monster"));
+        Assert.Equal(5, rows);
+        Assert.Contains("more remembered, not shown", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_CrossLandblock_ShowsLandblock()
+    {
+        // A monster remembered in a DIFFERENT landblock surfaces its
+        // landblock so the LLM can choose to travel there.
+        var world = RecallSelfWorld(landblock: 0xA9B4u);
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Young Banderling", 22u, EntityKind.Mob, ageSeconds: 40, landblock: 0xA9B3u));
+        Assert.Contains("Young Banderling (kind=monster", prompt);
+        Assert.Contains("landblock 0xA9B3", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_NullList_NoHeader()
+    {
+        var world = RecallSelfWorld();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, null, null);
+        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+    }
+
+
     [Fact]
     public async Task LlmGoalPolicy_LocationRecency_LandblockDwellAndTalkCounts()
     {

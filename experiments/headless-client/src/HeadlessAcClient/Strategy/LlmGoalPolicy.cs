@@ -227,6 +227,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetCurrentExplorationCandidates(IReadOnlyList<ExplorationCandidate>? candidates)
         => _currentExplorationCandidates = candidates;
 
+    // Remembered out-of-view creature sightings surfaced as the
+    // "## Recently sighted (out of view)" prompt block. Projected from
+    // the bot's own SightedLocation memory and pushed by the driver
+    // each tick before ProposeGoal. Null / empty = nothing remembered
+    // to surface (e.g. before the first sighting, or all in view).
+    private IReadOnlyList<SightedRecallProjection>? _currentRecentSightings;
+
+    /// <summary>
+    /// Driver-driven setter for the remembered-sightings recall block.
+    /// Called before ProposeGoal with the bot's own out-of-view
+    /// creature memory so the LLM can choose to navigate back to a
+    /// monster that left its field of view. Null / empty = nothing to
+    /// surface.
+    /// </summary>
+    public void SetRecentSightings(IReadOnlyList<SightedRecallProjection>? sightings)
+        => _currentRecentSightings = sightings;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -629,7 +646,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -1697,7 +1714,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IntentStack? stack,
         PickerActivity? pickerActivity,
         IReadOnlyList<ExplorationCandidate>? explorationCandidates,
-        DateTimeOffset? dwellEntryUtc = null)
+        DateTimeOffset? dwellEntryUtc = null,
+        IReadOnlyList<SightedRecallProjection>? recentSightings = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -2034,6 +2052,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- observed hostile: {observedHostile.Name} (it has attacked you — fight back or flee)");
         }
         sb.AppendLine();
+
+        // Remembered out-of-view creature sightings (the recall analog
+        // of "nearest monster" above). Lets the LLM direct the bot back
+        // to a monster that left its field of view. Renders nothing when
+        // there is nothing remembered to surface.
+        AppendRecentSightings(sb, recentSightings, world);
 
         // Slice I — Location & recency. Surfaces the two signals
         // the LLM needs to break out of town-NPC loops: how long
@@ -2391,6 +2415,127 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Add("book", book); Add("sign", sign); Add("lifestone", lifestone);
         Add("vendor", vendor); Add("healer", healer); Add("openable", openable);
         return parts.Count == 0 ? "(none)" : string.Join(", ", parts);
+    }
+
+    // ── Recently sighted (out of view) recall block ──────────────────
+    // Tunables for the remembered-monster recall section. Small, bounded:
+    // a secondary perception surface, not a strategy.
+    private const double RecentSightingTtlSeconds = 180.0;   // drop sightings older than 3 min
+    private const int    RecentSightingMaxRows    = 5;        // cap rows surfaced
+    private const int    RecentSightingCharBudget = 900;      // hard char ceiling for the block body
+
+    /// <summary>
+    /// Renders the "## Recently sighted (out of view)" block: the bot's
+    /// own remembered MONSTER sightings that are NOT currently visible,
+    /// so the LLM can choose to navigate back to one that left view. This
+    /// is the recall analog of the live "nearest monster" line — pure
+    /// perception, no priority assigned. Renders nothing (no header) when
+    /// there is nothing to surface, to keep the static prompt floor
+    /// unchanged for the common in-town / fresh-bot case.
+    ///
+    /// Filtering (all deterministic given the projected input):
+    ///   * Mob-kind only (the remembered analog of the visible IsMonster
+    ///     surface; NPC/Unknown remembered creatures are not listed).
+    ///   * Exclude any sighting whose creature is CURRENTLY visible
+    ///     (same wcid when both known, else same name) — it is already
+    ///     in "## Visible nearby" / "## Combat readiness".
+    ///   * TTL: drop sightings older than <see cref="RecentSightingTtlSeconds"/>.
+    ///   * Dedup by (name, wcid, landblock); keep the most-recent.
+    ///   * Most-recent first; capped by row count and a char budget.
+    /// </summary>
+    internal static void AppendRecentSightings(
+        StringBuilder sb,
+        IReadOnlyList<SightedRecallProjection>? sightings,
+        WorldStateProjection world)
+    {
+        if (sightings is null || sightings.Count == 0) return;
+
+        // Identity of currently-visible creatures, so we never re-advertise
+        // something the LLM can already see live.
+        var visibleWcids = new HashSet<uint>();
+        var visibleNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var v in world.Visible)
+        {
+            if (v.Wcid is uint vw) visibleWcids.Add(vw);
+            if (!string.IsNullOrEmpty(v.Name)) visibleNames.Add(v.Name);
+        }
+
+        bool CurrentlyVisible(SightedRecallProjection s)
+            => (s.Wcid is uint sw && visibleWcids.Contains(sw))
+               || visibleNames.Contains(s.Name);
+
+        var candidates = sightings
+            .Where(s => s.Kind == EntityKind.Mob)
+            .Where(s => s.AgeSeconds <= RecentSightingTtlSeconds)
+            .Where(s => !CurrentlyVisible(s))
+            .GroupBy(s => (Name: s.Name.ToLowerInvariant(), s.Wcid, s.Landblock))
+            .Select(g => g.OrderBy(s => s.AgeSeconds).First())
+            .OrderBy(s => s.AgeSeconds)
+            .ToList();
+
+        if (candidates.Count == 0) return;
+
+        var selfLb = world.Self.Landblock;
+        float? selfX = world.Self.PositionX;
+        float? selfY = world.Self.PositionY;
+
+        sb.AppendLine("## Recently sighted (out of view)");
+        sb.AppendLine(
+            "Monsters you have seen that are NOT currently in view, from your own " +
+            "memory. Not recommendations — the bot assigns no priority. To return " +
+            "to one, target it by name; the bot will navigate to where it was last seen.");
+
+        int rows = 0;
+        int chars = 0;
+        foreach (var s in candidates)
+        {
+            if (rows >= RecentSightingMaxRows) break;
+            var row = RenderRecentSightingRow(s, selfLb, selfX, selfY);
+            int cost = row.Length + 1; // newline AppendLine adds
+            if (rows > 0 && chars + cost > RecentSightingCharBudget) break;
+            sb.AppendLine(row);
+            chars += cost;
+            rows++;
+        }
+        if (rows < candidates.Count)
+            sb.AppendLine($"- (+{candidates.Count - rows} more remembered, not shown)");
+        sb.AppendLine();
+    }
+
+    private static string RenderRecentSightingRow(
+        SightedRecallProjection s, uint? selfLb, float? selfX, float? selfY)
+    {
+        var age = $"last seen {s.AgeSeconds:F0}s ago";
+        string where;
+        if (selfX is float sx && selfY is float sy)
+        {
+            var dx = s.WorldX - sx;
+            var dy = s.WorldY - sy;
+            var dist = MathF.Sqrt(dx * dx + dy * dy);
+            where = $"approx {Compass8(dx, dy)} ~{dist:F0}m";
+        }
+        else
+        {
+            where = $"at ~({s.WorldX:F0},{s.WorldY:F0})";
+        }
+        // Show the landblock only when it differs from the bot's current
+        // one (a cross-landblock recall the LLM may want to travel to).
+        var lb = (selfLb is uint slb && s.Landblock != slb)
+            ? $", landblock 0x{s.Landblock:X4}"
+            : "";
+        return $"- {s.Name} (kind=monster, {age}, {where}{lb})";
+    }
+
+    // 8-point compass bearing from a world-space (dx,dy) delta. +Y is
+    // north, +X is east in this projection's world frame.
+    private static string Compass8(float dx, float dy)
+    {
+        if (MathF.Abs(dx) < 0.01f && MathF.Abs(dy) < 0.01f) return "here";
+        var ang = MathF.Atan2(dx, dy) * (180f / MathF.PI); // 0 = N, 90 = E
+        if (ang < 0) ang += 360f;
+        string[] dirs = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
+        int idx = (int)MathF.Round(ang / 45f) % 8;
+        return dirs[idx];
     }
 
     internal static void AppendVisibleNearby(StringBuilder sb, IReadOnlyList<VisibleObjectProjection> visible)
