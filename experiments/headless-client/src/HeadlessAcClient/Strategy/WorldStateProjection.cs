@@ -182,6 +182,16 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("current_fight")]
     public CombatFightStatus? CurrentFight { get; init; }
 
+    /// <summary>
+    /// combat-feel: per-mob-identity summary of the bot's own observed
+    /// combat outcomes this session (kills/deaths/near-deaths). Copied
+    /// from <see cref="WorldState.CombatHistory"/>. Surfaced as raw
+    /// recorded facts in the "## Combat history" prompt section; source
+    /// records outcomes only and assigns no danger label.
+    /// </summary>
+    [JsonPropertyName("combat_history")]
+    public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; init; }
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -338,6 +348,7 @@ internal sealed record WorldStateProjection
             Inventory = inv,
             Visible = visible,
             CurrentFight = world.CurrentFight,
+            CombatHistory = world.CombatHistory,
         };
     }
 }

@@ -53,6 +53,32 @@ internal sealed record CombatFightStatus(
     int SwingsEvaded,
     uint DamageDealt);
 
+/// <summary>
+/// combat-feel ledger: a per-mob-identity summary of the bot's OWN
+/// observed combat outcomes against that kind of monster this session
+/// (kills, deaths, near-deaths). Surfaced to the LLM as raw recorded
+/// FACTS in the "## Combat history" prompt section so it can learn,
+/// across ticks, which monsters it can defeat and which keep killing
+/// it — and choose softer targets or flee on its own. Source records
+/// the raw outcomes only; it makes NO avoidance decision and assigns
+/// NO danger label (the COMBAT SAFETY rule owns the interpretation).
+/// </summary>
+/// <param name="Name">Best-known display name of the monster kind.</param>
+/// <param name="Wcid">WeenieClassId of the monster kind, if observed.</param>
+/// <param name="Kills">Times the bot killed this kind this session.</param>
+/// <param name="Deaths">Times this kind killed the bot this session.</param>
+/// <param name="NearDeaths">Times the bot disengaged this kind at critical health.</param>
+/// <param name="Fights">Times the bot engaged this kind this session.</param>
+/// <param name="LastOutcome">"kill" | "death" | "near-death" — the most recent outcome.</param>
+internal sealed record CombatHistoryEntry(
+    string Name,
+    uint? Wcid,
+    int Kills,
+    int Deaths,
+    int NearDeaths,
+    int Fights,
+    string LastOutcome);
+
 internal sealed class WorldState
 {
     private readonly Dictionary<uint, WorldObjectSnapshot> _objects = new();
@@ -120,6 +146,17 @@ internal sealed class WorldState
     /// — source never makes that decision itself.
     /// </summary>
     public CombatFightStatus? CurrentFight { get; set; }
+
+    /// <summary>
+    /// combat-feel ledger: per-mob-identity summary of the bot's own
+    /// observed combat outcomes this session (kills/deaths/near-deaths),
+    /// set by HandshakeDriver from the <c>CombatFeelLedger</c>. Surfaced
+    /// to the LLM in the "## Combat history" prompt section as RAW
+    /// recorded facts so it can learn which monsters it can defeat —
+    /// source records outcomes only and makes no avoidance decision.
+    /// Null until the bot has at least one significant outcome.
+    /// </summary>
+    public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; set; }
 
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;

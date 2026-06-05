@@ -1004,6 +1004,52 @@ internal sealed class HandshakeDriver : IDisposable
         // re-parsing the firehose.
         var worldState = new WorldState();
 
+        // combat-feel ledger: per-mob-kind kill/death/near-death memory
+        // for this session, surfaced to the LLM as raw "## Combat history"
+        // facts. `lastCombatFoe` snapshots the kind we last engaged WITH a
+        // timestamp so a death can be attributed even though the disengage
+        // reflex clears combatTargetGuid/Name before health reaches 0. A
+        // death is only attributed if the foe is fresh (the bot died
+        // shortly after fighting it); stale or unknown foes are skipped so
+        // the ledger is never poisoned with a wrong identity.
+        // `selfDeathAttributed` debounces the multi-tick HealthCurrent==0
+        // window to a single recorded death per life.
+        var                  combatFeel = new CombatFeelLedger();
+        (uint? Wcid, string? Name, DateTime At)? lastCombatFoe = null;
+        var                  selfDeathAttributed = false;
+        void PublishCombatHistory() => worldState.CombatHistory = combatFeel.Snapshot();
+        // combat-feel: attribute the bot's own death to the monster KIND it
+        // was fighting, debounced to once per life. Only attributes when the
+        // engagement is recent (died shortly after fighting it) and the foe
+        // identity resolves — a stale or unidentifiable foe is skipped so the
+        // ledger is never poisoned. Called from the self-health decoders.
+        void MaybeRecordSelfDeath(uint healthCurrent)
+        {
+            if (healthCurrent > 0)
+            {
+                // Alive or respawned — re-arm attribution for the next life.
+                selfDeathAttributed = false;
+                return;
+            }
+            if (selfDeathAttributed) return;
+            selfDeathAttributed = true;
+            if (lastCombatFoe is { } foe &&
+                (DateTime.UtcNow - foe.At) < TimeSpan.FromSeconds(12) &&
+                CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name)) is not null)
+            {
+                combatFeel.RecordDeath(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name));
+                Console.WriteLine(
+                    $"[combat-feel] self DEATH attributed to '{foe.Name ?? "?"}' " +
+                    $"wcid={(foe.Wcid?.ToString() ?? "?")}");
+                PublishCombatHistory();
+            }
+            else
+            {
+                Console.WriteLine("[combat-feel] self DEATH not attributed (no fresh combat foe).");
+            }
+            lastCombatFoe = null;
+        }
+
         // combat-damage-output: resets the per-fight swing-outcome counters
         // and clears the surfaced CurrentFight status. Called at every
         // combat-lock clear site so a stale fight line never lingers in the
@@ -1612,6 +1658,19 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"[combat] target 0x{ctgHealth:X8} DEAD (health={updHealth.HealthFraction:F3}); " +
                                             $"clearing combat lock.");
                                         visitedTargetGuids.Add(ctgHealth);
+                                        // combat-feel: record a KILL against
+                                        // the kind we were fighting. Prefer the
+                                        // live snapshot's identity; fall back to
+                                        // the foe we locked (name/wcid survive a
+                                        // notification-driven name update).
+                                        var killSnap = worldState.TryGet(ctgHealth);
+                                        combatFeel.RecordKill(new CombatFeelLedger.MobIdentity(
+                                            killSnap?.WeenieClassId ?? lastCombatFoe?.Wcid,
+                                            killSnap?.Name ?? combatTargetName ?? lastCombatFoe?.Name));
+                                        PublishCombatHistory();
+                                        // The kill resolves the engagement —
+                                        // a later self-death is NOT this foe.
+                                        lastCombatFoe = null;
                                         // Phase 7f.5 — DO NOT add the wcid to
                                         // satisfiedWeenieClasses. Each Sparring
                                         // Golem is an independent target; killing
@@ -1864,6 +1923,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 Console.WriteLine(
                                     $"[vital]   -> self Health current={hc} max={hm} " +
                                     $"frac={(float)hc / hm:F3} (seq={puv.Sequence})");
+                                MaybeRecordSelfDeath(hc);
                             }
                             else
                             {
@@ -1882,6 +1942,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 Console.WriteLine(
                                     $"[vital]   -> self Health current={phc} max={phm} " +
                                     $"frac={(float)phc / phm:F3} (seq={pal.Sequence})");
+                                MaybeRecordSelfDeath(phc);
                             }
                             else if (pal.IsHealth)
                             {
@@ -2442,6 +2503,15 @@ internal sealed class HandshakeDriver : IDisposable
                         $"[combat] DISENGAGE low-health reflex: self HP {dgHc}/{dgHm} " +
                         $"(frac={(double)dgHc / dgHm:F2}); breaking off 0x{dgTarget:X8}, " +
                         $"NonCombat + flee {CombatFleeDistanceUnits:F0}u");
+
+                    // combat-feel: record a NEAR-DEATH against the kind we
+                    // are breaking off from, using the threat's identity
+                    // BEFORE any combat-state clear below.
+                    var dgFoe = worldState.TryGet(dgTarget);
+                    combatFeel.RecordNearDeath(new CombatFeelLedger.MobIdentity(
+                        dgFoe?.WeenieClassId ?? lastCombatFoe?.Wcid,
+                        dgFoe?.Name ?? combatTargetName ?? lastCombatFoe?.Name));
+                    PublishCombatHistory();
 
                     // 1) Reset ALL combat state (incl. fast-retry) so the
                     //    Phase 7f.2 loop-keeper can't re-swing during flee.
@@ -5420,8 +5490,26 @@ internal sealed class HandshakeDriver : IDisposable
                             // immediately so the LLM never reads the previous
                             // target's landed/evaded counts during a switch.
                             ClearCombatFightStats();
+                            // combat-feel: remember the KIND we are now
+                            // fighting (with a timestamp) for later death
+                            // attribution, and count the engagement.
+                            lastCombatFoe = (motionTarget.WeenieClassId, motionTarget.Name, DateTime.UtcNow);
+                            combatFeel.RecordFightStart(
+                                new CombatFeelLedger.MobIdentity(
+                                    motionTarget.WeenieClassId, motionTarget.Name));
+                            PublishCombatHistory();
                         }
                         lastCombatAttackAt = DateTime.UtcNow;
+                        // combat-feel: slide the death-attribution freshness
+                        // window with ongoing engagement. The TTL is anchored
+                        // to the LAST swing, not the fight's start, so a fight
+                        // lasting longer than the TTL still attributes a death
+                        // that immediately follows it. Refresh only the
+                        // timestamp of the foe we are actively swinging at.
+                        if (lastCombatFoe is { } lcf)
+                        {
+                            lastCombatFoe = (lcf.Wcid, lcf.Name, DateTime.UtcNow);
+                        }
                     }
 
                     var sentLen = msg.Pack(sendBuf, myClientId,

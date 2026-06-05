@@ -1953,7 +1953,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
-        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
+        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
@@ -2225,6 +2225,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 $"- current fight vs \"{cfName}\": swings landed {cf.SwingsLanded}, " +
                 $"evaded {cf.SwingsEvaded}, damage dealt {cf.DamageDealt}");
+        }
+        // combat-feel: surface the bot's own recorded outcomes per monster
+        // KIND this session (kills / deaths / near-deaths). RAW counts
+        // only — no danger label, no advice. The COMBAT SAFETY rule tells
+        // the LLM to avoid a kind that keeps defeating it; this gives it
+        // the cross-tick memory to act on. Match a "Visible nearby" name
+        // against these rows to judge a fight before starting it.
+        if (world.CombatHistory is { Count: > 0 } hist)
+        {
+            sb.AppendLine("- combat history (your own outcomes vs each monster kind this session):");
+            foreach (var h in hist)
+            {
+                sb.AppendLine(
+                    $"  - {h.Name}: fights {h.Fights}, kills {h.Kills}, " +
+                    $"deaths {h.Deaths}, near-deaths {h.NearDeaths} (last: {h.LastOutcome})");
+            }
         }
         sb.AppendLine();
 
