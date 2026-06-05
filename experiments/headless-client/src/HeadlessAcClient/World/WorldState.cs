@@ -56,6 +56,26 @@ internal sealed class WorldState
     private byte? _selfPropertyByteSeq;
 
     /// <summary>
+    /// Highest byte-sequence seen on PrivateUpdateVital for the HEALTH
+    /// vital. This is a SEPARATE counter from _selfPropertyByteSeq: the
+    /// vital update uses a per-(type,vital) UpdateAttribute2ndLevel
+    /// ByteSequence (see GameMessagePrivateUpdateVital), not the
+    /// shared property-update family counter. Nullable because 0 is a
+    /// valid sequence value.
+    /// </summary>
+    private byte? _selfHealthVitalByteSeq;
+
+    /// <summary>
+    /// Highest byte-sequence seen on PrivateUpdateAttribute2ndLevel
+    /// (0x02E9) for the HEALTH vital. ACE keys ByteSequences by
+    /// (type, vital); the current-level health packet keys on Health (2)
+    /// while the 0x02E7 descriptor keys on MaxHealth (1), so these are
+    /// DISTINCT counters and must be gated independently. Nullable
+    /// because 0 is a valid sequence value.
+    /// </summary>
+    private byte? _selfHealthLevelByteSeq;
+
+    /// <summary>
     /// Guid of the bot's own player. Set by SetSelf — typically
     /// pre-seeded from the chosen character guid at EnterWorld
     /// time so private property updates can be routed BEFORE
@@ -118,6 +138,8 @@ internal sealed class WorldState
             MotionMessage mm                  => ApplyMotion(mm),
             SetStateMessage ss                => ApplySetState(ss),
             PrivateUpdatePropertyIntMessage p => ApplyPrivatePropertyInt(p),
+            PrivateUpdateVitalMessage v       => ApplyPrivateVital(v),
+            PrivateUpdateAttribute2ndLevelMessage a => ApplyPrivateVitalLevel(a),
             PlayerCreateMessage pc            => ApplyPlayerCreate(pc),
             _                                 => false,
         };
@@ -352,6 +374,86 @@ internal sealed class WorldState
         snap.PropertyInts[pup.Property] = pup.Value;
         snap.Touch();
         return true;
+    }
+
+    /// <summary>
+    /// Apply a PrivateUpdateVital (0x02E7). Like
+    /// PrivateUpdatePropertyInt it has no guid and is implicitly
+    /// scoped to the receiving session's player. We only track the
+    /// HEALTH vital; Stamina/Mana updates are accepted (to advance the
+    /// shared vital sequence) but otherwise ignored. HealthMax is the
+    /// peak Current observed so the projection can compute a fraction
+    /// without AC's Endurance-derived max-vital formula.
+    /// </summary>
+    private bool ApplyPrivateVital(PrivateUpdateVitalMessage v)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PrivateUpdateVital before SelfGuid known: " +
+                $"vital=0x{v.Vital:X} current={v.Current} (dropped)");
+            return false;
+        }
+
+        // Only the health vital drives self-health state.
+        if (!v.IsHealth)
+            return false;
+
+        // Per-(type,vital) byte-sequence gate — drop stale/reordered
+        // health updates. Separate counter from the property family.
+        if (!SequenceCompare.IsCurrentOrNewer(v.Sequence, _selfHealthVitalByteSeq))
+            return false;
+        _selfHealthVitalByteSeq = v.Sequence;
+
+        WriteSelfHealth(selfGuid, v.Current);
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a PrivateUpdateAttribute2ndLevel (0x02E9) - the per-tick
+    /// CURRENT-LEVEL vital update. This is the timely source for the
+    /// bot's own current HP (damage/regen/death/respawn). Only the HEALTH
+    /// vital is tracked; here health is keyed by Health (2), unlike the
+    /// 0x02E7 descriptor (keyed by MaxHealth (1)), and uses its own
+    /// distinct sequence counter.
+    /// </summary>
+    private bool ApplyPrivateVitalLevel(PrivateUpdateAttribute2ndLevelMessage a)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PrivateUpdateAttribute2ndLevel before SelfGuid known: " +
+                $"vital=0x{a.Vital:X} current={a.Current} (dropped)");
+            return false;
+        }
+
+        if (!a.IsHealth)
+            return false;
+
+        if (!SequenceCompare.IsCurrentOrNewer(a.Sequence, _selfHealthLevelByteSeq))
+            return false;
+        _selfHealthLevelByteSeq = a.Sequence;
+
+        WriteSelfHealth(selfGuid, a.Current);
+        return true;
+    }
+
+    /// <summary>
+    /// Write the bot's current health onto the self snapshot and update
+    /// the peak-observed max. Shared by both health-bearing wire messages
+    /// (0x02E7 descriptor and 0x02E9 current-level). Peak-observed max
+    /// seeds to the true max on a full-health login/respawn, rises on
+    /// level-up at full health, and never shrinks from taking damage -
+    /// avoiding a reimplementation of AC's Endurance-derived max formula.
+    /// </summary>
+    private void WriteSelfHealth(uint selfGuid, uint current)
+    {
+        var snap = GetOrCreateSnapshot(selfGuid);
+        snap.HealthCurrent = current;
+        snap.HealthMax = snap.HealthMax is uint prevMax && prevMax >= current
+            ? prevMax
+            : current;
+        snap.Touch();
     }
 
     private WorldObjectSnapshot GetOrCreateSnapshot(uint guid)

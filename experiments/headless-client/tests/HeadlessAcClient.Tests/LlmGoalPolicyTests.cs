@@ -2521,6 +2521,83 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public async Task LlmGoalPolicy_SelfHealth_SurfacedInPrompt()
+    {
+        // Self-health perception: once HealthFraction is known it must
+        // appear both in `## Self` and `## Combat readiness` so the LLM
+        // can weigh survival (the existing COMBAT SAFETY rule references
+        // health). Pure perception surface — no source-side threshold.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Attack",
+          "target": { "name": "Sparring Golem" },
+          "item":   null,
+          "priority": 6,
+          "rationale": "monster nearby"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildHealthAwareCombatWorld(0.42f);
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        var selfIdx = body.IndexOf("## Self", StringComparison.Ordinal);
+        var crIdx = body.IndexOf("## Combat readiness", StringComparison.Ordinal);
+        Assert.True(selfIdx >= 0 && crIdx >= 0);
+        // 0.42 renders as "42 %" under the invariant P0 format.
+        Assert.Contains("health: 42", body);
+    }
+
+    // Armed bot near a monster with a known health fraction — exercises
+    // the self-health PERCEPTION surface (not any source-side gate).
+    private static WorldStateProjection BuildHealthAwareCombatWorld(float healthFraction) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = healthFraction,
+        },
+        Inventory = new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = WeaponGuid, Name = "Training Spadone", Wcid = 5104u,
+                ItemType = 0x1u, WieldedAt = 0x1u,
+            },
+        },
+        Visible = new[]
+        {
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Sparring Golem", Wcid = 12698u,
+                ItemType = 0x10u, Distance = 7f, IsCreature = true,
+                IsAttackable = true, HasRadarBlipColor = false, IsMonster = true,
+            },
+        },
+    };
+
+    [Fact]
     public void CombatReadiness_ArmorWielded_NotCountedAsWeapon()
     {
         // Load-bearing fix: a wielded ARMOR piece (Leather Cap,

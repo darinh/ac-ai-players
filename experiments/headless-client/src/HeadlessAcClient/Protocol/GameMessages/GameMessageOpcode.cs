@@ -12,6 +12,18 @@ internal enum GameMessageOpcode : uint
 {
     // Phase 2/3 server → client
     PrivateUpdatePropertyInt = 0x02CD,
+    // Self vital FULL DESCRIPTOR update (Ranks/StartingValue/ExpSpent/
+    // Current). "Private" = sent only to the receiving session, so it is
+    // implicitly about the bot's own player (no guid on the wire), like
+    // PrivateUpdatePropertyInt. Sent on rank-raises + full sync; the
+    // health descriptor is keyed by MaxHealth (Vital==1).
+    PrivateUpdateVital       = 0x02E7,
+    // Self vital CURRENT-LEVEL update (per-tick). This is the packet ACE
+    // sends on every damage/regen/death/respawn tick — the timely source
+    // for the bot's own current HP. Layout: u8 seq | u32 vital | u32
+    // current. The health current is keyed by Health (Vital==2), NOT
+    // MaxHealth. See ACE GameMessagePrivateUpdateAttribute2ndLevel.
+    PrivateUpdateAttribute2ndLevel = 0x02E9,
     HearSpeech               = 0x02BB,
     CharacterCreateResponse  = 0xF643,
     CharacterList            = 0xF658,

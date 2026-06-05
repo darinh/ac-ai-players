@@ -94,6 +94,17 @@ internal sealed class WorldObjectSnapshot
     // receiving session). Keyed by PropertyInt enum value.
     public Dictionary<uint, int>? PropertyInts { get; internal set; }
 
+    // Self HEALTH vital — only populated for the bot's own player
+    // (PrivateUpdateVital is implicitly scoped to the receiving
+    // session, like PropertyInts). HealthCurrent is the latest
+    // observed current HP; HealthMax is the peak Current ever
+    // observed (a max proxy that avoids reimplementing AC's
+    // Endurance-derived max-vital formula — on a full-health
+    // login/respawn the first update seeds it to the true max).
+    // Both null until the first PrivateUpdateVital arrives.
+    public uint? HealthCurrent { get; internal set; }
+    public uint? HealthMax { get; internal set; }
+
     // Lifecycle timestamps.
     public DateTimeOffset FirstSeen { get; }
     public DateTimeOffset LastUpdated { get; internal set; }
