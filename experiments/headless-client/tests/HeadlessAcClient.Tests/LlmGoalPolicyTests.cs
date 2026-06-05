@@ -2460,8 +2460,8 @@ public class LlmGoalPolicyTests
         var afterCr = body.IndexOf("##", crIdx + 1, StringComparison.Ordinal);
         var crBlock = afterCr > crIdx ? body.Substring(crIdx, afterCr - crIdx) : body.Substring(crIdx);
 
-        // Weapon line — inventory has a wielded item so should say "wielded".
-        Assert.Contains("weapon: wielded", crBlock);
+        // Weapon line — inventory has a wielded MELEE weapon so should say so.
+        Assert.Contains("weapon: melee weapon wielded", crBlock);
         // Monster line — Sparring Golem is nearest monster in BuildAcademyCombatWorld.
         Assert.Contains("nearest monster: Sparring Golem", crBlock);
     }
@@ -2515,8 +2515,111 @@ public class LlmGoalPolicyTests
         var afterCr = body.IndexOf("##", crIdx + 1, StringComparison.Ordinal);
         var crBlock = afterCr > crIdx ? body.Substring(crIdx, afterCr - crIdx) : body.Substring(crIdx);
 
-        Assert.Contains("weapon: NOT wielded", crBlock);
+        Assert.Contains("weapon: NONE wielded - UNARMED", crBlock);
         Assert.Contains("nearest monster: (none in view)", crBlock);
+    }
+
+    [Fact]
+    public void CombatReadiness_ArmorWielded_NotCountedAsWeapon()
+    {
+        // Load-bearing fix: a wielded ARMOR piece (Leather Cap,
+        // ItemType MeleeWeapon bit CLEAR) must NOT read as a weapon.
+        // The old `Any(WieldedAt != 0)` signal let the bot think it
+        // was armed after equipping a hat.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Leather Cap", Wcid = 13239u, ItemType = 0x2u, WieldedAt = 0x1u },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
+        Assert.DoesNotContain("melee weapon wielded", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_UnwieldedBagWeapon_SurfacesWieldAffordance()
+    {
+        // Unarmed but a melee weapon sits unwielded in the bag →
+        // surface a Wield-to-arm affordance so the LLM can act.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
+        Assert.Contains("melee weapon in your inventory (Wield it to arm): Training Spadone", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_VisibleGroundWeapon_SurfacesPickupAffordance()
+    {
+        // Unarmed, empty bag, but a melee weapon lies on the ground →
+        // surface a Pickup-to-arm affordance (the live failure mode:
+        // a grounded Training Spadone the bot never picked up).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x333u, Name = "Hand Axe", Wcid = 303u, ItemType = 0x1u, Distance = 12f, IsMonster = false },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("melee weapon nearby (Pickup it to arm): Hand Axe", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_MeleeWielded_SuppressesArmAffordances()
+    {
+        // Already armed (melee weapon wielded) → no self-arm
+        // affordances even if other weapons are in bag / on ground.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x333u, Name = "Hand Axe", Wcid = 303u, ItemType = 0x1u, Distance = 12f, IsMonster = false },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: melee weapon wielded", prompt);
+        Assert.DoesNotContain("Wield it to arm", prompt);
+        Assert.DoesNotContain("Pickup it to arm", prompt);
     }
 
     [Fact]
@@ -4482,6 +4585,9 @@ public class LlmGoalPolicyTests
         // combat target discrimination + proactive leveling
         Assert.Contains("LEVELING is core progress", p);
         Assert.Contains("monster", p);
+        // self-arming before optional combat
+        Assert.Contains("SELF-ARM before fighting", p);
+        Assert.Contains("UNARMED", p);
         // combat safety: disengage + avoid the killer kind
         Assert.Contains("COMBAT SAFETY", p);
         Assert.Contains("DISENGAGE", p);
