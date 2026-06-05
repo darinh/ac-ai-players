@@ -3079,6 +3079,7 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Use ||
                          goal.Kind == GoalKind.Talk ||
                          goal.Kind == GoalKind.Attack ||
+                         goal.Kind == GoalKind.Wield ||
                          goal.Kind == GoalKind.Pickup))
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
@@ -3089,7 +3090,8 @@ internal sealed class HandshakeDriver : IDisposable
                         // in our inventory.
                         var goalCarriesItem =
                             goal.Kind == GoalKind.Give ||
-                            (goal.Kind == GoalKind.Use && goal.Item is not null && !goal.Item.IsEmpty);
+                            ((goal.Kind == GoalKind.Use || goal.Kind == GoalKind.Wield) &&
+                             goal.Item is not null && !goal.Item.IsEmpty);
                         if (goalCarriesItem)
                         {
                             itemSnap = tactics.ResolveItem(worldState);
@@ -3102,6 +3104,76 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
+                        // Self-arming — explicit Wield dispatch. The canonical
+                        // Wield shape carries the weapon in goal.Item with
+                        // target=self; tolerate the LLM placing the weapon in
+                        // target instead. Either way the weapon must be an
+                        // equippable item already in our bag (ContainerGuid==self
+                        // and ValidLocations!=0). Purely mechanical: the LLM chose
+                        // WHICH item; we only execute, equipping to the lowest
+                        // valid slot (the canonical default the AC GUI uses,
+                        // mirroring the PHASE7F.4 pickup->auto-equip path). No
+                        // source-side "best item" choice. Previously Wield was
+                        // unhandled — a dead schema verb; the bag weapon only got
+                        // wielded by the combat-gated PHASE7F.4 auto-equip pass,
+                        // so an LLM that correctly chose to arm had no effect.
+                        if (goal.Kind == GoalKind.Wield)
+                        {
+                            // Prefer the resolved inventory item (goal.Item,
+                            // already filtered to in-bag above); fall back to an
+                            // in-bag target selector if the LLM emitted the weapon
+                            // as the target.
+                            var wieldItem = itemSnap ??
+                                (targetSnap is not null &&
+                                 targetSnap.ContainerGuid is uint wtcg && wtcg == tacticsSelf.Guid
+                                    ? targetSnap : null);
+                            if (wieldItem is not null &&
+                                wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
+                            {
+                                var wieldSlot = wieldVl & (~wieldVl + 1);
+                                var wieldPktSeq  = nextOutboundPacketSequence++;
+                                var wieldFragSeq = nextOutboundFragmentSequence++;
+                                var wieldBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                                var wieldLen = GameActionGetAndWieldItemMessage.Pack(
+                                    wieldBuf, itemGuid: wieldItem.Guid, equipLocation: (int)wieldSlot);
+                                var wieldMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    wieldMsg.AddAckSequence(lastReceivedSeq);
+                                wieldMsg.AddBlobFragment(
+                                    fragSequence: wieldFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: wieldBuf.AsSpan(0, wieldLen));
+                                var wieldSent = wieldMsg.Pack(sendBuf, myClientId,
+                                                              sequence: wieldPktSeq, iteration: 1,
+                                                              encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, wieldSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                // Suppress a duplicate auto-equip for the same item
+                                // while we await the WieldObject ack (mirrors PHASE7F.4).
+                                inventoryEquipSent.Add(wieldItem.Guid);
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Wield direct: " +
+                                    $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
+                                    $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                    $"pktSeq={wieldPktSeq} fragSeq={wieldFragSeq} bytes={wieldSent}");
+                                tactics.Clear("wield dispatched", eventStream);
+                            }
+                            else
+                            {
+                                // Cannot arm with this selector (not an equippable
+                                // in-bag weapon). FAIL explicitly so the goal is
+                                // rejected — NOT silently locked-to-self and then
+                                // completed as a no-op by the motor, which has no
+                                // Wield arrival handler.
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Wield unresolved -- " +
+                                    $"item={(itemSnap is null ? "MISS" : "ok")} " +
+                                    $"target={(targetSnap is null ? "MISS" : "ok")}; " +
+                                    $"selector target={goal.Target} item={goal.Item}; failing.");
+                                tactics.Fail("wield: no equippable inventory weapon", eventStream);
+                            }
+                        }
                         // M1.6 — inventory-Use direct dispatch. If
                         // the LLM resolved a Use to an item already
                         // in our bag (e.g. Calling Stone we are
@@ -3111,7 +3183,7 @@ internal sealed class HandshakeDriver : IDisposable
                         // and clear the goal — no motor, no AP, no
                         // motion lock. Pickup is excluded because
                         // an item already in bag cannot be picked up.
-                        if (goal.Kind == GoalKind.Use &&
+                        else if (goal.Kind == GoalKind.Use &&
                             targetSnap is not null &&
                             targetSnap.ContainerGuid is uint useContainer &&
                             useContainer == tacticsSelf.Guid)
