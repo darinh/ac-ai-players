@@ -2702,6 +2702,62 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_MissileWieldedAmmoLoaded_ReadsArmed()
+    {
+        // combat-missile-attack: a wielded missile weapon (atlatl/bow,
+        // ItemType MissileWeapon bit) with ammo loaded in the ammo slot
+        // reads as armed missile, NOT UNARMED, and surfaces no self-arm
+        // affordance.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Dart", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x800000u },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: missile weapon wielded; missile ammo: loaded", prompt);
+        Assert.DoesNotContain("weapon: NONE wielded - UNARMED", prompt);
+        Assert.DoesNotContain("Wield it to arm", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_MissileWieldedAmmoEmpty_SurfacesBagAmmo()
+    {
+        // Atlatl wielded but no ammo in the ammo slot, with a dart sitting
+        // unwielded in the bag (its ValidLocations includes the ammo slot)
+        // → readiness reads EMPTY and surfaces a Wield-ammo affordance.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: missile weapon wielded; missile ammo: EMPTY", prompt);
+        Assert.Contains("missile ammo in your inventory (Wield it to load): Royal Dart", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_CurrentFight_RendersLandedEvadedCounts()
     {
         // combat-damage-output: the live fight outcome (all swings evaded,

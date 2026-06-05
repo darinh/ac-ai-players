@@ -131,10 +131,42 @@ public class GameActionCombatAndEquipMessageTests
     }
 
     [Fact]
-    public void GetAndWieldItem_RejectsTooSmallBuffer()
+    public void TargetedMissileAttack_PackedSize_Is24Bytes()
     {
-        var tooSmall = new byte[19];
+        Assert.Equal(24, GameActionTargetedMissileAttackMessage.PackedSize);
+    }
+
+    [Fact]
+    public void TargetedMissileAttack_Pack_WritesExpectedBytes()
+    {
+        var dest = new byte[GameActionTargetedMissileAttackMessage.PackedSize];
+
+        var written = GameActionTargetedMissileAttackMessage.Pack(
+            dest,
+            targetGuid:    0x800001ABu,
+            attackHeight:  2u /* Medium */,
+            accuracyLevel: 0.5f,
+            actionSequence: 7u);
+
+        Assert.Equal(GameActionTargetedMissileAttackMessage.PackedSize, written);
+
+        var expected = new byte[24];
+        var c = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), GameActionEnvelopeOpcode); c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 7u);                        c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x000Au);                   c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x800001ABu);               c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 2u);                        c += 4;
+        BinaryPrimitives.WriteSingleLittleEndian(expected.AsSpan(c), 0.5f);                      c += 4;
+
+        Assert.Equal(expected, dest);
+    }
+
+    [Fact]
+    public void TargetedMissileAttack_RejectsTooSmallBuffer()
+    {
+        var tooSmall = new byte[23];
         Assert.Throws<ArgumentException>(() =>
-            GameActionGetAndWieldItemMessage.Pack(tooSmall, 0u, 0));
+            GameActionTargetedMissileAttackMessage.Pack(tooSmall, 0u, 2u, 0.5f));
     }
 }

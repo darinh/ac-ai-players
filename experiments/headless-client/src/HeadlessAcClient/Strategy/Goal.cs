@@ -197,6 +197,26 @@ internal static class ItemTypeMasks
     public const uint MeleeWeapon = 0x00000001u;
 
     /// <summary>
+    /// ACE.Entity.Enum.ItemType.MissileWeapon bit (0x100). An inventory
+    /// item whose ItemType has this bit and is wielded (WieldedAt != 0)
+    /// satisfies the wire-schema precondition for the
+    /// GameActionTargetedMissileAttack message (bows, crossbows,
+    /// atlatls). Used to pick the missile attack opcode + Missile combat
+    /// mode instead of melee, mirroring <see cref="MeleeWeapon"/>.
+    /// </summary>
+    public const uint MissileWeapon = 0x00000100u;
+
+    /// <summary>
+    /// EquipMask.MissileAmmo SLOT bit (0x00800000) — NOT an ItemType.
+    /// An item whose CurrentWieldedLocation equals this is loaded ammo
+    /// (arrows/bolts/darts); an unwielded item whose ValidLocations has
+    /// this bit is ammo the bot can wield. Ammo launchers (atlatl, bow)
+    /// require loaded ammo before the server will resolve a missile
+    /// attack; thrown weapons do not. Source only surfaces the fact.
+    /// </summary>
+    public const uint MissileAmmoSlot = 0x00800000u;
+
+    /// <summary>
     /// Mirror of HandshakeDriver.PickupItemTypeMask (0xD96F).
     /// Bits: MeleeWeapon (0x1) | Armor (0x2) | Clothing (0x4) |
     /// Jewelry (0x8) | Food (0x20) | Money (0x40) | MissileWeapon
