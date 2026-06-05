@@ -42,6 +42,7 @@ internal enum GameActionType : uint
     MoveToState         = 0xF61C,
     AutonomousPosition  = 0xF753,
     TargetedMeleeAttack = 0x0008,
+    TargetedMissileAttack = 0x000A,
     GetAndWieldItem     = 0x001A,
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
@@ -465,6 +466,47 @@ internal static class GameActionTargetedMeleeAttackMessage
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);    cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), attackHeight);  cursor += 4;
         BinaryPrimitives.WriteSingleLittleEndian(dest.Slice(cursor), powerLevel);    cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// TargetedMissileAttack (0x000A). Issues a missile strike (bow,
+/// crossbow, atlatl) against a specific creature guid using the
+/// currently wielded missile weapon. Requires the player to already be
+/// in CombatMode.Missile — see <see cref="GameActionChangeCombatModeMessage"/>
+/// — AND, for ammo launchers, to have ammo wielded in the MissileAmmo
+/// slot (the server silently no-ops the attack otherwise; thrown
+/// weapons need no ammo).
+///
+/// Server handler:
+///   <c>Source/ACE.Server/Network/GameAction/Actions/GameActionTargetedMissileAttack.cs</c>
+///   reads u32 targetGuid + u32 attackHeight + f32 accuracyLevel and
+///   calls <c>session.Player.HandleActionTargetedMissileAttack(
+///       targetGuid, attackHeight, accuracyLevel)</c>. That method bails
+///   if <c>CombatMode != CombatMode.Missile</c> or
+///   <c>weapon == null || (weapon.IsAmmoLauncher &amp;&amp; ammo == null)</c>.
+///
+/// Payload after the 12B GameAction header (identical shape to the
+/// melee action, only the opcode + the float's semantic differ):
+///   u32 targetGuid
+///   u32 attackHeight   (AttackHeight enum: High=1, Medium=2, Low=3)
+///   f32 accuracyLevel  ([0.0, 1.0] — clamped server-side)
+/// = 24 bytes total.
+/// </summary>
+internal static class GameActionTargetedMissileAttackMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 12;  // 24 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint attackHeight, float accuracyLevel, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.TargetedMissileAttack, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid);     cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), attackHeight);   cursor += 4;
+        BinaryPrimitives.WriteSingleLittleEndian(dest.Slice(cursor), accuracyLevel);  cursor += 4;
         return cursor;
     }
 }

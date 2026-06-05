@@ -579,6 +579,9 @@ internal sealed class HandshakeDriver : IDisposable
         bool                 combatFeedbackSent = false;
         string?              combatTargetName = null;
         uint?                combatStatsForGuid = null;
+        // combat-missile-attack: the attack opcode family used for the
+        // most recent ATTACK dispatch, for the cmd= log line only.
+        AttackMode           combatAttackMode = AttackMode.Melee;
         var ownPlayerSeen = false;
         // One-time guard: enable the AutoRepeatAttacks character option
         // right after the first LoginComplete so the server runs its
@@ -1002,6 +1005,21 @@ internal sealed class HandshakeDriver : IDisposable
             combatTargetName = null;
             combatStatsForGuid = null;
             worldState.CurrentFight = null;
+        }
+
+        // combat-missile-attack: pick the attack opcode family (melee vs
+        // missile) from the weapon the bot currently has WIELDED. Pure
+        // mechanical projection of the wire-derived ItemType — the LLM
+        // decides whether/whom to attack; this only decides HOW to
+        // dispatch the swing given the weapon in hand, mirroring the
+        // server's own CombatMode/equipped-weapon precondition.
+        AttackMode SelectCurrentAttackMode()
+        {
+            var selfGuid = chosenCharacterGuid;
+            return CombatWeaponSelection.SelectAttackMode(
+                worldState.Objects.Values
+                    .Where(s => s.WielderGuid is uint wg && wg == selfGuid)
+                    .Select(s => (s.ItemType, Wielded: true)));
         }
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
@@ -2597,12 +2615,35 @@ internal sealed class HandshakeDriver : IDisposable
                     var ffPacketSeq = nextOutboundPacketSequence++;
                     var ffFragSeq   = nextOutboundFragmentSequence++;
 
-                    var ffBuf = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
-                    var ffLen = GameActionTargetedMeleeAttackMessage.Pack(
-                        ffBuf,
-                        targetGuid: ffCtg,
-                        attackHeight: 2u /* Medium */,
-                        powerLevel: 1.0f);
+                    // Mirror the mode the server was last put INTO by the
+                    // main PHASE7F dispatch's ChangeCombatMode — this
+                    // branch deliberately does NOT re-send ChangeCombatMode
+                    // (re-sending it cancels the swing loop). Recomputing
+                    // from the wielded weapon could diverge if the loadout
+                    // changed mid-fight, sending a missile opcode while the
+                    // server still believes we are in Melee mode (silent
+                    // no-op). combatAttackMode is set on every ATTACK send.
+                    var ffMode = combatAttackMode;
+                    byte[] ffBuf;
+                    int ffLen;
+                    if (ffMode == AttackMode.Missile)
+                    {
+                        ffBuf = new byte[GameActionTargetedMissileAttackMessage.PackedSize];
+                        ffLen = GameActionTargetedMissileAttackMessage.Pack(
+                            ffBuf,
+                            targetGuid: ffCtg,
+                            attackHeight: 2u /* Medium */,
+                            accuracyLevel: 1.0f);
+                    }
+                    else
+                    {
+                        ffBuf = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
+                        ffLen = GameActionTargetedMeleeAttackMessage.Pack(
+                            ffBuf,
+                            targetGuid: ffCtg,
+                            attackHeight: 2u /* Medium */,
+                            powerLevel: 1.0f);
+                    }
 
                     var ffMsg = new OutboundPacket();
                     if (lastReceivedSeq != 0)
@@ -2621,6 +2662,7 @@ internal sealed class HandshakeDriver : IDisposable
                     lastCombatAttackAt = DateTime.UtcNow;
                     Console.WriteLine(
                         $"[observe]   -> PHASE7F.2 {(ffFastRetry ? "FAST-RETRY (AttackDone ActionCancelled)" : "RE-ATTACK")}: " +
+                        $"cmd={(ffMode == AttackMode.Missile ? "Missile" : "Melee")} " +
                         $"target=0x{ffCtg:X8} dist={Math.Sqrt(ffD2):F2}u " +
                         $"pktSeq={ffPacketSeq} fragSeq={ffFragSeq} totalBytes={ffSent} " +
                         $"(loop-keeper; server no-ops if Attacking==true)");
@@ -4951,17 +4993,31 @@ internal sealed class HandshakeDriver : IDisposable
                     if (isHostile)
                     {
                         actionName = "ATTACK";
+                        var attackMode = SelectCurrentAttackMode();
+                        combatAttackMode = attackMode;
                         actionBuf  = new byte[GameActionChangeCombatModeMessage.PackedSize];
                         payloadLen = GameActionChangeCombatModeMessage.Pack(
                             actionBuf,
-                            newCombatMode: 2u /* Melee */);
+                            newCombatMode: CombatWeaponSelection.CombatModeValue(attackMode));
                         fragSeq    = nextOutboundFragmentSequence++;
-                        combatBufB = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
-                        combatPayloadLenB = GameActionTargetedMeleeAttackMessage.Pack(
-                            combatBufB,
-                            targetGuid: motionTarget.Guid,
-                            attackHeight: 2u /* Medium */,
-                            powerLevel: 1.0f);
+                        if (attackMode == AttackMode.Missile)
+                        {
+                            combatBufB = new byte[GameActionTargetedMissileAttackMessage.PackedSize];
+                            combatPayloadLenB = GameActionTargetedMissileAttackMessage.Pack(
+                                combatBufB,
+                                targetGuid: motionTarget.Guid,
+                                attackHeight: 2u /* Medium */,
+                                accuracyLevel: 1.0f);
+                        }
+                        else
+                        {
+                            combatBufB = new byte[GameActionTargetedMeleeAttackMessage.PackedSize];
+                            combatPayloadLenB = GameActionTargetedMeleeAttackMessage.Pack(
+                                combatBufB,
+                                targetGuid: motionTarget.Guid,
+                                attackHeight: 2u /* Medium */,
+                                powerLevel: 1.0f);
+                        }
                         fragSeqB   = nextOutboundFragmentSequence++;
                         // First swing on this target → also send
                         // QueryHealth so the server registers it as
@@ -5193,8 +5249,11 @@ internal sealed class HandshakeDriver : IDisposable
                     if (isHostile)
                     {
                         var qhNote = sendQueryHealth ? "+QueryHealth" : "";
+                        var cmdNote = combatAttackMode == AttackMode.Missile
+                            ? "Missile+TargetedMissileAttack"
+                            : "Melee+TargetedMeleeAttack";
                         Console.WriteLine(
-                            $"[observe]   -> PHASE7F ATTACK: cmd=Melee+TargetedMeleeAttack{qhNote} target=0x{motionTarget.Guid:X8} " +
+                            $"[observe]   -> PHASE7F ATTACK: cmd={cmdNote}{qhNote} target=0x{motionTarget.Guid:X8} " +
                             $"name='{motionTarget.Name}' wcid={motionTarget.WeenieClassId} height=Medium power=1.0 " +
                             $"pktSeq={packetSeq} fragSeqA={fragSeq} fragSeqB={fragSeqB}{(sendQueryHealth ? $" fragSeqC={fragSeqC}" : "")} totalBytes={sentLen}");
                     }

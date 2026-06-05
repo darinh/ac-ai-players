@@ -1951,7 +1951,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite). Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a blocked combo.");
         sb.AppendLine("- Read `## Server hints`: phrases like \"Double click X\" or \"Use X to ...\" tell you the exact verb+target. If that object is visible AND the server instructed it, emit `Use{target: name=\"X\"}`. The server is your tutorial; don't ignore it for pure exploration.");
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
-        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO melee weapon is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
@@ -2145,6 +2145,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var meleeWeaponWielded = world.Inventory.Any(i =>
             i.WieldedAt is uint w && w != 0 &&
             i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0);
+        // combat-missile-attack: the motor now ALSO executes a missile
+        // attack path (bow/crossbow/atlatl), so a wielded missile weapon
+        // counts as armed. Surface missile-weapon + ammo state as RAW
+        // FACTS — the server silently no-ops a missile attack from an
+        // ammo launcher with no ammo loaded, so the LLM needs to see
+        // whether ammo is loaded to decide whether to wield ammo first.
+        // Pure typed-affordance projection (ItemType MissileWeapon bit /
+        // MissileAmmo SLOT bit), no names/wcids/landblocks.
+        var missileWeaponWielded = world.Inventory.Any(i =>
+            i.WieldedAt is uint mw && mw != 0 &&
+            i.ItemType is uint mit && (mit & ItemTypeMasks.MissileWeapon) != 0);
+        var ammoLoaded = world.Inventory.Any(i =>
+            i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
+        var bagAmmo = (!missileWeaponWielded || ammoLoaded) ? null : world.Inventory.FirstOrDefault(i =>
+            (i.WieldedAt is not uint baw || baw == 0) &&
+            i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0);
+        var armed = meleeWeaponWielded || missileWeaponWielded;
         // Acquisition affordances surfaced ONLY when unarmed, so the LLM
         // can act on "arm yourself" instead of merely noting it is
         // unarmed (the live failure mode): an unwielded melee weapon
@@ -2152,10 +2169,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // melee weapon lying in the world (→ Pickup it). Both are pure
         // typed-affordance projections (ItemType MeleeWeapon bit), no
         // names/wcids/landblocks.
-        var bagWeapon = meleeWeaponWielded ? null : world.Inventory.FirstOrDefault(i =>
+        var bagWeapon = armed ? null : world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint bw || bw == 0) &&
             i.ItemType is uint bit && (bit & ItemTypeMasks.MeleeWeapon) != 0);
-        var groundWeapon = meleeWeaponWielded ? null : world.Visible
+        var groundWeapon = armed ? null : world.Visible
             .Where(v => !v.IsMonster &&
                         v.ItemType is uint vit && (vit & ItemTypeMasks.MeleeWeapon) != 0)
             .OrderBy(v => v.Distance ?? float.MaxValue)
@@ -2166,7 +2183,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .FirstOrDefault();
         var observedHostile = world.Visible.FirstOrDefault(v => v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
-        sb.AppendLine($"- weapon: {(meleeWeaponWielded ? "melee weapon wielded" : "NONE wielded - UNARMED")}");
+        string weaponLine;
+        if (meleeWeaponWielded)
+            weaponLine = "melee weapon wielded";
+        else if (missileWeaponWielded)
+            weaponLine = $"missile weapon wielded; missile ammo: {(ammoLoaded ? "loaded" : "EMPTY (wield ammo to fire)")}";
+        else
+            weaponLine = "NONE wielded - UNARMED";
+        sb.AppendLine($"- weapon: {weaponLine}");
         if (world.Self.HealthFraction is float crHf)
             sb.AppendLine($"- health: {crHf:P0}");
         if (bagWeapon is not null)
@@ -2176,6 +2200,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
             sb.AppendLine($"- melee weapon nearby (Pickup it to arm): {groundWeapon.Name}{gwd}");
         }
+        if (bagAmmo is not null)
+            sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
         if (nearestMonster is not null)
         {
             var dStr = nearestMonster.Distance is float dm ? $" d={dm:F1}" : "";
