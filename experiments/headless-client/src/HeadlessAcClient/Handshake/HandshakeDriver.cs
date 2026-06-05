@@ -477,6 +477,19 @@ internal sealed class HandshakeDriver : IDisposable
         // (WeenieError 0x36). Verified empirically in
         // phase6l-equip-run-06-decoded.log on a fresh account.
         var                  pendingEquip = new Dictionary<uint, uint>();
+        // Dequip-before-wield (weapon swap). The ACE server's
+        // CheckWeaponCollision refuses to wield a weapon while another
+        // weapon is equipped (silent InventoryServerSaveFailed err=None).
+        // When an LLM Wield goal targets a weapon blocked by a currently-
+        // wielded weapon, the motor first sends PutItemInContainer to move
+        // the BLOCKER into the pack; this dict maps the blocker's guid ->
+        // (targetWeaponGuid, targetEquipSlot) so the blocker's put-ack
+        // (which confirms it is now unequipped) drives the follow-up
+        // GetAndWieldItem of the intended weapon. Mirrors the PHASE6L
+        // pickup->equip handoff, but decouples the put item (blocker) from
+        // the wield item (target). The LLM still chose WHICH weapon; source
+        // only inserts the mechanical dequip the server requires.
+        var                  pendingWieldAfterDequip = new Dictionary<uint, (uint TargetGuid, uint TargetSlot, DateTime StartedUtc)>();
         // Phase 6n — anti-starvation: after an item is successfully
         // wielded, mark its weenie-class as "satisfied" so we stop
         // chasing duplicate quest-reward copies. Also count successful
@@ -1338,10 +1351,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 // this the LLM projection's inventory
                                 // filter (ContainerGuid==self) misses
                                 // freshly-acquired items for one or
-                                // more LLM-call windows.
+                                // more LLM-call windows. Also clear any
+                                // wielded state: an item moved into a
+                                // container is no longer equipped (a
+                                // dequip), so the WielderGuid/slot must
+                                // not linger — otherwise the swap logic
+                                // (and the LLM projection) would still
+                                // see a dequipped weapon as wielded until
+                                // the ObjectCreate arrives. For world
+                                // pickups/loot these were already null.
                                 if (worldState.TryGet(putAck.ItemGuid) is { } putSnap)
                                 {
                                     putSnap.ContainerGuid = putAck.ContainerGuid;
+                                    putSnap.WielderGuid = null;
+                                    putSnap.CurrentWieldedLocation = 0;
                                 }
                                 // Phase 6n — count this pickup so the
                                 // picker doesn't keep chasing identical
@@ -1392,6 +1415,45 @@ internal sealed class HandshakeDriver : IDisposable
                                     Console.WriteLine(
                                         $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
                                         $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
+                                }
+
+                                // Dequip-before-wield follow-up. The put-ack
+                                // for a dequipped weapon-swap BLOCKER confirms
+                                // it is now in the pack (unequipped), so the
+                                // intended target weapon can finally be wielded
+                                // without tripping CheckWeaponCollision. Send
+                                // the deferred GetAndWieldItem now (decoupled
+                                // from goal state, mirroring PHASE6L).
+                                if (pendingWieldAfterDequip.TryGetValue(putAck.ItemGuid, out var swap))
+                                {
+                                    pendingWieldAfterDequip.Remove(putAck.ItemGuid);
+                                    // Suppress the startup auto-equip pass from
+                                    // racing this exact wield.
+                                    inventoryEquipSent.Add(swap.TargetGuid);
+                                    var swapPktSeq = nextOutboundPacketSequence++;
+                                    var swapFragSeq = nextOutboundFragmentSequence++;
+                                    var swapBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                                    var swapLen = GameActionGetAndWieldItemMessage.Pack(
+                                        swapBuf,
+                                        itemGuid: swap.TargetGuid,
+                                        equipLocation: (int)swap.TargetSlot);
+                                    var swapMsg = new OutboundPacket();
+                                    if (lastReceivedSeq != 0)
+                                        swapMsg.AddAckSequence(lastReceivedSeq);
+                                    swapMsg.AddBlobFragment(
+                                        fragSequence: swapFragSeq,
+                                        fragId: OutboundFragmentId,
+                                        queue: (ushort)GameMessageGroup.UIQueue,
+                                        gameMessagePayload: swapBuf.AsSpan(0, swapLen));
+                                    var swapSentLen = swapMsg.Pack(sendBuf, myClientId,
+                                                                   sequence: swapPktSeq, iteration: 1,
+                                                                   encrypt: true, cryptoSend: cryptoSend);
+                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, swapSentLen),
+                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                    Console.WriteLine(
+                                        $"[strategy] SWAP-WIELD after dequip: blocker=0x{putAck.ItemGuid:X8} unequipped -> " +
+                                        $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
+                                        $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
                                 }
                             }
                             // M1.6 — PopupString is the canonical
@@ -3771,6 +3833,114 @@ internal sealed class HandshakeDriver : IDisposable
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
+
+                                // Dequip-before-wield (weapon swap). The ACE
+                                // server's CheckWeaponCollision refuses to wield
+                                // a weapon while another weapon is equipped (it
+                                // silently no-ops as InventoryServerSaveFailed
+                                // err=None). If a currently-wielded weapon blocks
+                                // this one, move the blocker into the pack FIRST;
+                                // its PutItemInContainer ack drives the deferred
+                                // wield (pendingWieldAfterDequip). Pure mechanical
+                                // prerequisite the server requires — the LLM still
+                                // chose WHICH weapon. Non-weapon wields
+                                // (armor/cloak/hat) and wields into an empty weapon
+                                // slot find no blocker and dispatch directly,
+                                // byte-identical to before.
+                                var swapInventory = new List<WeaponSwap.ItemFacts>();
+                                foreach (var so in worldState.Objects.Values)
+                                {
+                                    var ownedBag  = so.ContainerGuid is uint scg && scg == tacticsSelf.Guid;
+                                    var ownedWorn = so.WielderGuid is uint swg && swg == tacticsSelf.Guid;
+                                    if (!ownedBag && !ownedWorn) continue;
+                                    swapInventory.Add(new WeaponSwap.ItemFacts(
+                                        so.Guid, so.ItemType, so.ValidLocations, so.CurrentWieldedLocation));
+                                }
+                                var blockerGuid = WeaponSwap.FindBlockingWieldedWeapon(
+                                    new WeaponSwap.ItemFacts(
+                                        wieldItem.Guid, wieldItem.ItemType,
+                                        wieldItem.ValidLocations, wieldItem.CurrentWieldedLocation),
+                                    swapInventory);
+
+                                if (blockerGuid is uint blocker)
+                                {
+                                    // A stale pending entry means the dequip
+                                    // never acked (e.g. the pack was full) — do
+                                    // not soft-lock this blocker forever; let it
+                                    // re-dispatch after a bounded wait.
+                                    var pendingFresh =
+                                        pendingWieldAfterDequip.TryGetValue(blocker, out var pend) &&
+                                        (DateTime.UtcNow - pend.StartedUtc) < TimeSpan.FromSeconds(10);
+                                    if (pendingFresh)
+                                    {
+                                        // Dequip already in flight for this
+                                        // blocker; the put-ack will wield. Don't
+                                        // spam a duplicate dequip or a colliding
+                                        // direct wield. But if the LLM has since
+                                        // re-targeted a DIFFERENT weapon behind the
+                                        // same blocker, retarget the in-flight swap
+                                        // so the put-ack wields the newest choice
+                                        // (no second dequip — the blocker is the
+                                        // same and already moving).
+                                        if (pend.TargetGuid != wieldItem.Guid ||
+                                            pend.TargetSlot != wieldSlot)
+                                        {
+                                            pendingWieldAfterDequip[blocker] =
+                                                (wieldItem.Guid, wieldSlot, pend.StartedUtc);
+                                            inventoryEquipSent.Add(wieldItem.Guid);
+                                            Console.WriteLine(
+                                                $"[strategy] Wield swap retargeted: blocker=0x{blocker:X8} " +
+                                                $"now wields item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} " +
+                                                $"slot=0x{wieldSlot:X}; awaiting in-flight dequip ack.");
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine(
+                                                $"[strategy] Wield swap already pending: blocker=0x{blocker:X8}; awaiting dequip ack.");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Suppress the startup auto-equip pass from
+                                        // re-wielding the weapon we are dequipping,
+                                        // AND from racing a (doomed) wield of the
+                                        // target while the blocker is still equipped
+                                        // — the deferred put-ack wield owns the
+                                        // target.
+                                        pendingWieldAfterDequip[blocker] = (wieldItem.Guid, wieldSlot, DateTime.UtcNow);
+                                        inventoryEquipSent.Add(blocker);
+                                        inventoryEquipSent.Add(wieldItem.Guid);
+                                        var dqPktSeq  = nextOutboundPacketSequence++;
+                                        var dqFragSeq = nextOutboundFragmentSequence++;
+                                        var dqBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                                        var dqLen = GameActionPutItemInContainerMessage.Pack(
+                                            dqBuf,
+                                            itemGuid:      blocker,
+                                            containerGuid: chosenCharacterGuid,
+                                            placement:     0);
+                                        var dqMsg = new OutboundPacket();
+                                        if (lastReceivedSeq != 0)
+                                            dqMsg.AddAckSequence(lastReceivedSeq);
+                                        dqMsg.AddBlobFragment(
+                                            fragSequence: dqFragSeq,
+                                            fragId: OutboundFragmentId,
+                                            queue: (ushort)GameMessageGroup.UIQueue,
+                                            gameMessagePayload: dqBuf.AsSpan(0, dqLen));
+                                        var dqSent = dqMsg.Pack(sendBuf, myClientId,
+                                                                sequence: dqPktSeq, iteration: 1,
+                                                                encrypt: true, cryptoSend: cryptoSend);
+                                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, dqSent),
+                                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                        Console.WriteLine(
+                                            $"[strategy] LLM-GOAL Wield needs swap: dequip blocker=0x{blocker:X8} then " +
+                                            $"wield item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
+                                            $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                            $"sent PutItemInContainer pktSeq={dqPktSeq} fragSeq={dqFragSeq} bytes={dqSent}");
+                                    }
+                                    tactics.Clear("dequip-before-wield dispatched", eventStream);
+                                }
+                                else
+                                {
                                 var wieldPktSeq  = nextOutboundPacketSequence++;
                                 var wieldFragSeq = nextOutboundFragmentSequence++;
                                 var wieldBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
@@ -3798,6 +3968,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                     $"pktSeq={wieldPktSeq} fragSeq={wieldFragSeq} bytes={wieldSent}");
                                 tactics.Clear("wield dispatched", eventStream);
+                                }
                             }
                             else
                             {
