@@ -55,4 +55,56 @@ public class CombatRetryTests
         Assert.False(CombatRetry.ShouldReattack(1.0, cancelRetryRequested: true, Normal, Normal));
         Assert.True(CombatRetry.ShouldReattack(5.0, cancelRetryRequested: true, Normal, Normal));
     }
+
+    private const double StickSettle = 2.0;
+
+    [Fact]
+    public void ServerStickActive_SuppressesCancelDrivenFastRetry()
+        // The server is mid move-into-range (stick observed 0.5s ago); a
+        // cancel-driven re-send would cancel that move-to, so suppress it.
+        => Assert.False(CombatRetry.ShouldReattack(
+            0.5, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: 0.5, StickSettle));
+
+    [Fact]
+    public void ServerStickActive_SuppressesPeriodicReattack()
+        // Even past the 5s safety net, an active stick (still chasing)
+        // must not trigger a re-send that would cancel the server move-to.
+        => Assert.False(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: 1.0, StickSettle));
+
+    [Fact]
+    public void ServerStickStale_AllowsReattackAgain()
+        // The stick observation has aged past the settle window — the
+        // server has stopped sticking us, so the normal re-send resumes.
+        => Assert.True(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: 2.5, StickSettle));
+
+    [Fact]
+    public void ServerStickStale_AllowsCancelFastRetry()
+        => Assert.True(CombatRetry.ShouldReattack(
+            0.5, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: 3.0, StickSettle));
+
+    [Fact]
+    public void NoServerStickObserved_BehavesAsBefore()
+    {
+        // null stick == no suppression: identical to the legacy 4-arg form.
+        Assert.True(CombatRetry.ShouldReattack(
+            5.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle));
+        Assert.True(CombatRetry.ShouldReattack(
+            0.4, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle));
+    }
+
+    [Fact]
+    public void NegativeStickElapsed_TreatedAsNotActive()
+        // Clock skew on the stick timestamp must not be read as "active"
+        // (which would suppress forever); fall through to normal logic.
+        => Assert.True(CombatRetry.ShouldReattack(
+            5.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: -1.0, StickSettle));
 }
