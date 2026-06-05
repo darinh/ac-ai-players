@@ -1588,27 +1588,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         "rationale":   "<why this intent now>",
         "deadline_seconds": <optional number; null = no deadline>,
         "completion": {
-          // Pick exactly ONE typed completion predicate. Common ones:
-          //   {"$type":"inventory_contains_at_least","wcid":<n>,"count":<n>}
-          //   {"$type":"inventory_contains_at_least","name_contains":"<s>","count":<n>}
-          //   {"$type":"landblock_equals","value": 0x<hex>}
-          //   {"$type":"kill_count_since_push_at_least","count":<n>}
-          //   {"$type":"kill_count_total_at_least","count":<n>}
-          //   {"$type":"levels_gained_total_at_least","count":<n>}
-          //   {"$type":"num_deaths_at_least","count":<n>}
-          //   {"$type":"num_deaths_since_push_at_most","budget":<n>}
-          //   {"$type":"coin_value_at_least","count":<n>}
-          //   {"$type":"coin_gain_since_push_at_least","count":<n>}
-          //   {"$type":"units_traveled_since_push_at_least","units":<n>}
-          //   {"$type":"and","predicates":[ ...nested... ]}
-          //   {"$type":"or","predicates":[ ...nested... ]}
-          //   {"$type":"never"}  -- e.g. for safety-cap-only intents
+          // Pick exactly ONE typed completion predicate. The "type"
+          // field is the discriminator (NOT "$type"). Types + fields:
+          //   {"type":"landblock_changed_from_push"}   -- you left the landblock you were in when this intent was pushed
+          //   {"type":"landblock_equals","landblock":<number>}
+          //   {"type":"visible_tag","tag":"<tag>"}     -- a `Visible nearby` object carries this tag (e.g. "monster","corpse")
+          //   {"type":"no_monsters_visible"}
+          //   {"type":"inventory_has_name","name_contains":"<s>"}
+          //   {"type":"inventory_has_wcid","wcid":<n>}
+          //   {"type":"inventory_added_since_push_at_least","count":<n>,"name_contains":"<s>"?}
+          //   {"type":"kill_count_since_push_at_least","count":<n>,"name_contains":"<s>"?}
+          //   {"type":"kill_count_total_at_least","count":<n>}
+          //   {"type":"levels_gained_total_at_least","count":<n>}
+          //   {"type":"level_at_least","level":<n>}
+          //   {"type":"level_gain_since_push_at_least","count":<n>}
+          //   {"type":"num_deaths_at_least","count":<n>}
+          //   {"type":"num_deaths_since_push_at_most","count":<n>}
+          //   {"type":"coin_value_at_least","count":<n>}
+          //   {"type":"coin_gain_since_push_at_least","count":<n>}
+          //   {"type":"units_traveled_since_push_at_least","count":<n>}
+          //   {"type":"elapsed_seconds_at_least","seconds":<n>}
+          //   {"type":"health_fraction_at_most","fraction":<0..1>}
+          //   {"type":"any_of","children":[ ...nested... ]}
+          //   {"type":"all_of","children":[ ...nested... ]}
+          //   {"type":"not","child":{ ...nested... }}
+          //   {"type":"always_false"}  -- never auto-completes (deadline/pop_top only)
         },
-        // ESCAPE HATCH: if NO existing completion type fits, set
-        // completion to {"$type":"never"} and populate this field with
-        // a prose description of the predicate we need. We will add
-        // the type in the next dev iteration; meanwhile the intent
-        // can only be popped by deadline or by an explicit pop_top.
+        // ESCAPE HATCH: if NO existing type fits, set completion to
+        // {"type":"always_false"} and populate this field with a prose
+        // description of the predicate we need. Meanwhile the intent can
+        // only be popped by its deadline or by an explicit pop_top.
         "predicate_request": "<null or string>"
       },
       "reason": "<short note>"
@@ -1641,7 +1650,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (stack is not null)
         {
             sb.AppendLine("- STRATEGIC STACK: `## Intent stack` is the current plan; TOP is the active sub-goal, ancestors paused. Per-cycle goals advance TOP. PUSH on a discovered sub-task; POP_TOP when done and no predicate caught it (rare — predicates auto-pop); REPLACE_TOP when right-frame-wrong-target; MARK_TOP_BLOCKED when stuck. Always echo `stack_revision`.");
-            sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate matching your termination criterion; prefer server-authoritative (num_deaths, coin_value). *_total_* for absolute thresholds, *_since_push_* for deltas. If none fits, {\"$type\":\"never\"} + `predicate_request`.");
+            sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate matching your termination criterion (the discriminator field is `type`, e.g. `{\"type\":\"kill_count_total_at_least\",\"count\":3}`); prefer server-authoritative (num_deaths, coin_value). *_total_* for absolute thresholds, *_since_push_* for deltas. A hunt excursion typically completes on `{\"type\":\"any_of\",\"children\":[{\"type\":\"landblock_changed_from_push\"},{\"type\":\"visible_tag\",\"tag\":\"monster\"}]}`. If none fits, `{\"type\":\"always_false\"}` + `predicate_request`.");
         }
         sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the schema-only picker auto-drives WHERE TO WALK (nearest eligible candidate by distance) because you had no goal that tick; it OWNS NO VERBS. On arrival the motor sends NOTHING unless your Goal's Kind names a verb (`Use`/`Talk`/`Pickup`/`Attack`/`Give`). `picker has ARRIVED at target X` = parked next to X awaiting a verb — emit `Use`/`Talk`/`Pickup`/`Attack{target: name=\"X\"}`, or `Explore{target: name=\"<other>\"}` to redirect. Doing nothing parks ~2s then picks the next candidate.");
         sb.AppendLine("- TRANSITIONS — doors and portals: `door`/`portal`-tagged objects are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). When parked at a door/portal with no better verb, `Use` it — that's how the bot moves between rooms/buildings/landblocks. If a door rejects Use as Locked and you hold an item whose `short_desc`/name says key, retry `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
@@ -2383,11 +2392,12 @@ Intent stack — when `## Intent stack` is present in the prompt:
 - MARK_TOP_BLOCKED when you cannot advance and want to record why,
   so a later deliberation can pop or replace it.
 - Always echo `stack_revision` from the prompt so we detect races.
-- COMPLETION PREDICATES: prefer server-authoritative types
-  (num_deaths, coin_value) when applicable. Use *_total_* for
-  absolute thresholds, *_since_push_* for deltas. If none fits,
-  use `{"$type":"never"}` + populate `predicate_request` with the
-  predicate type we should add.
+- COMPLETION PREDICATES: the completion object's discriminator field
+  is `type` (e.g. `{"type":"num_deaths_at_least","count":3}`). Prefer
+  server-authoritative types (num_deaths, coin_value) when applicable.
+  Use *_total_* for absolute thresholds, *_since_push_* for deltas. If
+  none fits, use `{"type":"always_false"}` + populate
+  `predicate_request` with the predicate type we should add.
 
 Output JSON only. No prose outside the JSON object.
 """;

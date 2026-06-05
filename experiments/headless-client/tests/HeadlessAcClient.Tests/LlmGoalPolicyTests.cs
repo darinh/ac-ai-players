@@ -11,6 +11,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
 using Xunit;
 
 namespace HeadlessAcClient.Tests;
@@ -4611,5 +4612,84 @@ public class LlmGoalPolicyTests
         Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", p);
         Assert.Contains("FINISH MULTI-STEP DIRECTIVES", p);
         Assert.Contains("AUTONOMOUS PICKER", p);
+    }
+
+    // ---- Intent-stack completion-predicate schema accuracy ----
+    // The prompt teaches the LLM the JSON shape of completion predicates.
+    // It MUST match the actual System.Text.Json polymorphic contract on
+    // IntentPredicate (discriminator "type", names all_of/any_of/
+    // always_false, etc). A drift here silently breaks every LLM-pushed
+    // intent: the malformed completion throws during deserialization, so
+    // TryParseStackOps fails and the ENTIRE stack_ops batch is dropped.
+
+    [Fact]
+    public void StackOps_OldDollarTypeDiscriminator_FailsToParse()
+    {
+        // This is the exact shape the pre-fix prompt taught ($type +
+        // "never"). It must NOT deserialize — proving why intents pushed
+        // under the old prompt silently vanished.
+        var json = """
+        { "stack_ops": [ { "op": "push", "intent": {
+            "kind": "hunt", "rationale": "x",
+            "completion": { "$type": "never" } } } ] }
+        """;
+        var ok = LlmGoalPolicy.TryParseStackOps(json, out _, out var ops, out _);
+        Assert.False(ok && ops is { Count: > 0 });
+    }
+
+    [Fact]
+    public void StackOps_CorrectTypeDiscriminator_Parses()
+    {
+        var json = """
+        { "stack_ops": [ { "op": "push", "intent": {
+            "kind": "hunt", "rationale": "x",
+            "completion": { "type": "always_false" } } } ] }
+        """;
+        var ok = LlmGoalPolicy.TryParseStackOps(json, out _, out var ops, out var err);
+        Assert.True(ok, err);
+        Assert.NotNull(ops);
+        Assert.Single(ops!);
+        Assert.IsType<AlwaysFalsePredicate>(ops![0].Intent!.Completion);
+    }
+
+    [Fact]
+    public void StackOps_HuntExcursionCompletion_ParsesToAnyOf()
+    {
+        // The canonical hunt-excursion completion documented in the
+        // prompt: complete when the bot leaves its current landblock OR a
+        // monster comes into view.
+        var json = """
+        { "stack_ops": [ { "op": "push", "intent": {
+            "kind": "hunt-excursion", "rationale": "leave town to find monsters",
+            "completion": { "type": "any_of", "children": [
+                { "type": "landblock_changed_from_push" },
+                { "type": "visible_tag", "tag": "monster" } ] } } } ] }
+        """;
+        var ok = LlmGoalPolicy.TryParseStackOps(json, out _, out var ops, out var err);
+        Assert.True(ok, err);
+        var anyOf = Assert.IsType<AnyOfPredicate>(ops![0].Intent!.Completion);
+        Assert.Equal(2, anyOf.Children.Count);
+        Assert.IsType<LandblockChangedFromPushPredicate>(anyOf.Children[0]);
+        Assert.IsType<VisibleTagPredicate>(anyOf.Children[1]);
+    }
+
+    [Fact]
+    public void StackPrompt_DocumentsActualPredicateSchema()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, new IntentStack());
+
+        // Correct discriminator + names + hunt-relevant predicates present.
+        Assert.Contains("\"type\":\"always_false\"", prompt);
+        Assert.Contains("landblock_changed_from_push", prompt);
+        Assert.Contains("visible_tag", prompt);
+        Assert.Contains("any_of", prompt);
+
+        // The old, non-deserializable tokens must be gone.
+        Assert.DoesNotContain("\"$type\":\"never\"", prompt);
+        Assert.DoesNotContain("\"$type\":\"and\"", prompt);
+        Assert.DoesNotContain("\"$type\":\"or\"", prompt);
+        Assert.DoesNotContain("inventory_contains_at_least", prompt);
     }
 }
