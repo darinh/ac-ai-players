@@ -4,15 +4,30 @@
 //
 // AC1 melee is a server-side auto-repeat loop: one TargetedMeleeAttack
 // starts the swing loop and the server re-swings at weapon cadence
-// until the target dies, the bot leaves range, or the loop drops. The
-// headless bot is a non-FastTick player, so the server does NOT keep it
-// stuck to the target during a swing; when the bot/target geometry
-// drifts the server ends the loop and reports GameEventAttackDone with
-// errCode ActionCancelled. The motor must then re-send a bare
-// TargetedMeleeAttack to restart the loop (re-sending ChangeCombatMode
-// would itself cancel, so only the bare attack is re-sent).
+// until the target dies, the bot leaves range, or the loop drops. When
+// the bot/target geometry drifts the server ends the loop and reports
+// GameEventAttackDone with errCode ActionCancelled. The motor must then
+// re-send a bare TargetedMeleeAttack to restart the loop (re-sending
+// ChangeCombatMode would itself cancel, so only the bare attack is
+// re-sent).
 //
-// Two triggers re-send:
+// HOWEVER, against a MOBILE target the server first moves the bot into
+// melee range by sending the bot's own object a StickToObject motion
+// (sticky = the target). During that approach the server-side Attacking
+// flag is still FALSE, so its "if (Attacking) return;" no-op guard does
+// NOT cover a re-sent TargetedMeleeAttack — the re-send CANCELS the
+// in-progress move-to and restarts it, emitting another ActionCancelled.
+// Left unchecked that becomes a perpetual self-cancellation loop and the
+// swing never lands (0 damage, death). So while the server is actively
+// sticking the bot to the active combat target, the re-send is
+// SUPPRESSED: let the server complete its move-to and swing. The
+// suppression lapses once the stick observation goes stale (the
+// stickSettleSec window), after which the normal re-send resumes (by
+// then the server is typically Attacking==true so the re-send is no-op'd
+// server-side). A stationary target's move-to completes in one shot, so
+// no sustained stick/cancel loop occurs and that path is unaffected.
+//
+// Two triggers re-send (when not stick-suppressed):
 //   1. A periodic safety-net interval (the loop may have dropped for a
 //      reason we did not observe).
 //   2. The server explicitly reported the loop dropped (ActionCancelled)
@@ -46,13 +61,33 @@ internal static class CombatRetry
     /// The minimum spacing for a cancel-driven fast re-send (anti-spam).
     /// Should be smaller than <paramref name="normalIntervalSec"/>.
     /// </param>
+    /// <param name="secondsSinceServerStick">
+    /// Seconds since the most recent server StickToObject motion that
+    /// stuck the bot to the active combat target, or null if none has
+    /// been observed for this target. While this is within
+    /// <paramref name="stickSettleSec"/> the server is moving the bot
+    /// into range and the re-send is suppressed (a re-send would cancel
+    /// that in-progress move-to). Negative values (clock skew) are
+    /// treated as not-active.
+    /// </param>
+    /// <param name="stickSettleSec">
+    /// How long after a server stick-to-target the re-send stays
+    /// suppressed.
+    /// </param>
     public static bool ShouldReattack(
         double secondsSinceLastAttack,
         bool cancelRetryRequested,
         double normalIntervalSec,
-        double fastMinIntervalSec)
+        double fastMinIntervalSec,
+        double? secondsSinceServerStick = null,
+        double stickSettleSec = 0.0)
     {
         if (secondsSinceLastAttack < 0)
+            return false;
+        // The server is actively sticking us to the target (moving us
+        // into melee range). Re-sending TargetedMeleeAttack now would
+        // cancel that move-to and restart it; wait for it to settle.
+        if (secondsSinceServerStick is double s && s >= 0 && s < stickSettleSec)
             return false;
         if (secondsSinceLastAttack >= normalIntervalSec)
             return true;

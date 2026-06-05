@@ -522,6 +522,18 @@ internal sealed class HandshakeDriver : IDisposable
         // (AttackDone ActionCancelled) we re-send well before the 5s
         // safety net, but never faster than this.
         const double         CombatFastRetryMinIntervalSec = 0.35;
+        // Phase 7f.2 — server-stick suppression. Against a MOBILE target
+        // the server moves the bot into melee range by sticking the bot's
+        // own object to the target (StickToObject). While that approach is
+        // in flight the server-side Attacking flag is false, so a re-sent
+        // TargetedMeleeAttack cancels the move-to and restarts it — a
+        // perpetual self-cancellation loop that lands 0 damage. Track the
+        // most recent server stick to the active combat target and suppress
+        // the loop-keeper re-send (and the ActionCancelled fast-retry arm)
+        // until the observation goes stale.
+        const double         CombatStickSettleSec = 2.0;
+        uint?                combatServerStickTarget = null;
+        DateTime?            combatServerStickAt = null;
         const double         AbandonOnNoDamageSec   = 60.0;
         // Phase 7f.D — reactive low-health disengage (self-preservation
         // reflex). Break off combat when our OWN health is at or below
@@ -1541,17 +1553,30 @@ internal sealed class HandshakeDriver : IDisposable
 
                                     // ActionCancelled (0x0036) means the
                                     // server's auto-repeat swing loop
-                                    // dropped (the non-FastTick bot drifted
-                                    // out of sticky range, etc.). Request a
-                                    // fast re-send of the bare melee attack
-                                    // so the loop restarts well before the
-                                    // 5s safety net — but only while a
-                                    // combat target is active. This is
-                                    // mechanical loop-keeping, NOT target
-                                    // choice. Other non-zero codes are
-                                    // semantic refusals surfaced below for
-                                    // the LLM to pivot on, not retried here.
-                                    if (atkDone.ErrorCode == 0x0036u && combatTargetGuid is not null)
+                                    // dropped. Request a fast re-send of the
+                                    // bare melee attack so the loop restarts
+                                    // well before the 5s safety net — but
+                                    // only while a combat target is active
+                                    // AND the server is not currently
+                                    // sticking us into range (a cancel that
+                                    // is just the byproduct of the server's
+                                    // in-progress move-to must NOT arm a
+                                    // re-send, or it perpetuates the
+                                    // self-cancel loop against a mobile
+                                    // target). This is mechanical
+                                    // loop-keeping, NOT target choice. Other
+                                    // non-zero codes are semantic refusals
+                                    // surfaced below for the LLM to pivot on,
+                                    // not retried here.
+                                    var ctgStickActive =
+                                        combatServerStickTarget == combatTargetGuid &&
+                                        combatServerStickAt is DateTime acSat &&
+                                        (DateTime.UtcNow - acSat).TotalSeconds is double acAge &&
+                                        acAge >= 0 &&
+                                        acAge < CombatStickSettleSec;
+                                    if (atkDone.ErrorCode == 0x0036u &&
+                                        combatTargetGuid is not null &&
+                                        !ctgStickActive)
                                         combatFastRetryRequested = true;
 
                                     eventStream.Append(new StreamEvent
@@ -1690,6 +1715,23 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"autonomous={mm.IsAutonomous} " +
                                 $"seq=(inst={mm.InstanceSequence},mov={mm.MovementSequence},srv={mm.ServerControlSequence}) " +
                                 $"body={bodyDesc}");
+                            // Phase 7f.2 — record a server StickToObject that
+                            // sticks OUR OWN object to the active combat target.
+                            // The loop-keeper re-send is suppressed while this is
+                            // fresh so we don't cancel the server's in-progress
+                            // move-into-range (see CombatStickSettleSec). Purely
+                            // mechanical: it keys only on our own guid + the guid
+                            // we are already attacking, no game knowledge.
+                            if (mm.Guid == worldState.SelfGuid &&
+                                mm.Body?.Invalid?.StickyObjectGuid is uint stickyGuid)
+                            {
+                                combatServerStickTarget = stickyGuid;
+                                combatServerStickAt = DateTime.UtcNow;
+                                // A fresh server-driven approach supersedes any
+                                // pending cancel-driven fast retry.
+                                if (stickyGuid == combatTargetGuid)
+                                    combatFastRetryRequested = false;
+                            }
                             break;
                         case SetStateMessage ss:
                             Console.WriteLine(
@@ -2424,7 +2466,11 @@ internal sealed class HandshakeDriver : IDisposable
                         (DateTime.UtcNow - ffLast).TotalSeconds,
                         combatFastRetryRequested,
                         CombatRetryIntervalSec,
-                        CombatFastRetryMinIntervalSec) &&
+                        CombatFastRetryMinIntervalSec,
+                        (combatServerStickTarget == ffCtg && combatServerStickAt is DateTime ffSat)
+                            ? (DateTime.UtcNow - ffSat).TotalSeconds
+                            : (double?)null,
+                        CombatStickSettleSec) &&
                     worldState.Self is WorldObjectSnapshot ffSelf &&
                     worldState.TryGet(ffCtg) is WorldObjectSnapshot ffTarget &&
                     WorldDistance.TrySquaredDistance(ffSelf, ffTarget, out var ffD2) &&
