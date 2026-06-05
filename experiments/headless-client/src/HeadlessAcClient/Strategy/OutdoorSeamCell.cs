@@ -3,7 +3,8 @@ using System.Numerics;
 namespace HeadlessAcClient.Strategy;
 
 /// <summary>
-/// Pure geometry for the outdoor seam-cell AutonomousPosition override.
+/// Pure geometry for the outdoor AutonomousPosition cell-consistency
+/// override (cell must match the position's coordinates).
 ///
 /// Outdoor self positions are LANDBLOCK-relative (X,Y in 0..192). The
 /// motor dead-reckons a step as newPos = self + step in the locked
@@ -21,43 +22,53 @@ namespace HeadlessAcClient.Strategy;
 /// an outdoor target.
 ///
 /// This helper derives the AutonomousPosition cell from the step's GLOBAL
-/// coordinates and, when that cell sits in a DIFFERENT outdoor landblock
-/// than the claimed source cell, returns the neighbor (cellId,
-/// neighbor-landblock-local pos) so the packet is internally consistent
-/// and each per-tick transition is at most one adjacent cell. It is pure
-/// locomotion geometry: it never chooses a target, never inspects object
-/// types, and only re-expresses a position the motor has already decided
-/// to step to in the coordinate frame of the cell that contains it.
+/// coordinates and, when that cell differs from the claimed source cell,
+/// returns the coordinates' real (cellId, cell-landblock-local pos) so the
+/// packet is internally consistent and each per-tick transition matches
+/// where the bot actually stands. It is pure locomotion geometry: it never
+/// chooses a target, never inspects object types, and only re-expresses a
+/// position the motor has already decided to step to in the coordinate
+/// frame of the cell that contains it.
 ///
-/// Intra-landblock cell crossings are intentionally left unchanged
-/// (byte-identical): the server re-derives the structural cell from the
-/// AP coordinates WITHIN a landblock (update_object_server), so only a
-/// wrong LANDBLOCK — which the server cannot re-derive from a stale
-/// claim — needs correcting here.
+/// INTRA-landblock cell crossings are corrected too (NOT left to the
+/// server). An earlier version assumed the server re-derives the
+/// structural cell from the AP coordinates WITHIN a landblock
+/// (update_object_server), so it only corrected wrong LANDBLOCKS. Live
+/// combat evidence disproved that: a bot that walked across several
+/// intra-landblock 24 m cells during a melee approach kept claiming its
+/// frozen motion-start cell (e.g. cell 0x08) while its coordinates fell in
+/// a different cell (0x2D) of the SAME landblock; the server ADOPTED the
+/// stale (cell, pos) pair (it did NOT re-derive), and the server-side
+/// StickToObject move during combat then completed with an error
+/// (OnMoveComplete(error) -> HandleActionCancelAttack), cancelling every
+/// melee swing and dropping the bot out of combat stance — 0 damage, then
+/// death. So the invariant is now unconditional: an outbound outdoor
+/// position must claim the cell its own coordinates derive to, whether
+/// that cell is in the same landblock or a neighbor.
 /// </summary>
 internal static class OutdoorSeamCell
 {
-    /// <summary>The neighbor-landblock cell + local position to claim at a seam crossing.</summary>
+    /// <summary>The corrected cell + cell-landblock-local position to claim.</summary>
     internal readonly record struct SeamCell(uint CellId, Vector3 LocalPos);
 
     /// <summary>
-    /// Try to derive a neighbor-landblock AP cell + local position for an
-    /// outdoor walk step that crosses a landblock seam.
+    /// Try to derive the consistent outdoor AP cell + local position for a
+    /// walk step, given the step's GLOBAL coordinates.
     ///
-    /// Returns a <see cref="SeamCell"/> only when the step crosses into a
-    /// DIFFERENT outdoor landblock; returns null otherwise. A null result
-    /// means the caller must keep its own (locked cell, dead-reckoned local
-    /// position) unchanged — there is deliberately no out-parameter to
-    /// clobber, so a non-seam tick can never collapse the AP position to
-    /// the cell origin.
+    /// Returns a <see cref="SeamCell"/> only when the coordinates' derived
+    /// cell DIFFERS from the claimed source cell (intra-landblock OR a
+    /// landblock seam); returns null otherwise. A null result means the
+    /// caller must keep its own (locked cell, dead-reckoned local position)
+    /// unchanged — there is deliberately no out-parameter to clobber, so a
+    /// no-change tick can never collapse the AP position to the cell origin.
     /// </summary>
     /// <param name="followingIndoorPath">True when the indoor multi-cell cell-advance owns the AP cell (do nothing here).</param>
     /// <param name="selfCellIsOutdoor">True when the bot's current cell is outdoor.</param>
-    /// <param name="lockedCellId">The currently claimed (source landblock) cell.</param>
+    /// <param name="lockedCellId">The currently claimed (source) cell.</param>
     /// <param name="stepGlobalX">Global X of the step's destination position.</param>
     /// <param name="stepGlobalY">Global Y of the step's destination position.</param>
-    /// <param name="stepZ">Z to carry into the neighbor-local position (unchanged).</param>
-    /// <returns>The neighbor (cell, local pos) on a seam crossing; otherwise null.</returns>
+    /// <param name="stepZ">Z to carry into the cell-local position (unchanged).</param>
+    /// <returns>The corrected (cell, local pos) when it differs from the source; otherwise null.</returns>
     public static SeamCell? TryDeriveSeamCell(
         bool followingIndoorPath,
         bool selfCellIsOutdoor,
@@ -69,7 +80,7 @@ internal static class OutdoorSeamCell
         // The indoor cell-advance owns the AP cell while following a
         // planned multi-cell indoor path; and an indoor self cell is
         // client-authoritative (no coordinate re-derivation), so the
-        // outdoor seam logic never applies there.
+        // outdoor cell-consistency logic never applies there.
         if (followingIndoorPath || !selfCellIsOutdoor)
             return null;
 
@@ -77,10 +88,38 @@ internal static class OutdoorSeamCell
         if (derivedCell == 0u)
             return null;
 
-        // Only override on an actual landblock seam crossing; same-landblock
-        // outdoor steps keep the source cell so they are byte-identical (the
-        // server re-derives the intra-landblock cell from the AP coords).
-        if ((derivedCell & 0xFFFF0000u) == (lockedCellId & 0xFFFF0000u))
+        // No correction needed when the coordinates already fall in the
+        // claimed cell — return null so the caller keeps its own
+        // dead-reckoned (cell, pos) byte-identical (and emits no log spam).
+        if (derivedCell == lockedCellId)
+            return null;
+
+        return Canonicalize(stepGlobalX, stepGlobalY, stepZ);
+    }
+
+    /// <summary>
+    /// UNCONDITIONALLY derive the consistent outdoor (cell, cell-landblock-
+    /// local position) pair for a set of GLOBAL coordinates — i.e. the cell
+    /// the coordinates actually fall in plus that cell's landblock-local
+    /// position. Unlike <see cref="TryDeriveSeamCell"/> this never returns
+    /// null for outdoor coordinates: it always re-expresses the position in
+    /// its own canonical cell frame.
+    ///
+    /// Use this when the CALLER cannot guarantee its currently-held local
+    /// position is expressed in the claimed cell's landblock frame — e.g. the
+    /// STOP packet, whose cached waypoint local position may be in a frame the
+    /// server has since slid away from. Deriving the local position from the
+    /// frame-free global coordinates is then the only way to guarantee the
+    /// emitted (cell, pos) pair is internally consistent (a stale local pos
+    /// paired with a slid cell mis-projects by a full landblock, ~192 m).
+    ///
+    /// Returns null only for out-of-range global coordinates
+    /// (<see cref="AcCoords.OutdoorCellIdFromGlobal"/> == 0).
+    /// </summary>
+    public static SeamCell? Canonicalize(float globalX, float globalY, float z)
+    {
+        var derivedCell = AcCoords.OutdoorCellIdFromGlobal(globalX, globalY);
+        if (derivedCell == 0u)
             return null;
 
         var lbx = (int)((derivedCell >> 24) & 0xFFu);
@@ -88,8 +127,8 @@ internal static class OutdoorSeamCell
         return new SeamCell(
             derivedCell,
             new Vector3(
-                stepGlobalX - lbx * AcCoords.BlockLength,
-                stepGlobalY - lby * AcCoords.BlockLength,
-                stepZ));
+                globalX - lbx * AcCoords.BlockLength,
+                globalY - lby * AcCoords.BlockLength,
+                z));
     }
 }

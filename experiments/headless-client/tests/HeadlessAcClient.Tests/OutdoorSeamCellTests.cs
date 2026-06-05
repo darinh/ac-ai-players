@@ -7,10 +7,12 @@
 // the dead-reckoned step overshoots into a neighbor landblock. The
 // override re-expresses the step in the coordinate frame of the cell
 // that actually contains it so the (cell, pos) pair stays internally
-// consistent across a landblock seam. These tests assert it fires for
-// ANY outdoor self-cell step that crosses a landblock seam (no
-// frontier-probe / path-cell gating), declines on same-landblock steps,
-// and is gated out indoors / while an indoor path owns the AP cell.
+// consistent across any cell change. These tests assert it fires for ANY
+// outdoor self-cell step whose coordinates fall in a DIFFERENT cell than
+// the claimed source (intra-landblock OR a landblock seam; no
+// frontier-probe / path-cell gating), declines only when the coordinates
+// already fall in the claimed cell, and is gated out indoors / while an
+// indoor path owns the AP cell.
 //
 // The helper returns a nullable SeamCell (NOT out-parameters): a null
 // result means "no seam crossing — keep your own cell + position". This
@@ -108,15 +110,18 @@ public class OutdoorSeamCellTests
     }
 
     [Fact]
-    public void Override_SameLandblockStep_ReturnsNull()
+    public void Override_SameLandblock_DifferentCell_DerivesIntraLandblockCell()
     {
-        // Step to global (32500, 34600): lby = 34600/192 = 180 -> landblock
-        // 0xA9B4, SAME as the source. The override must NOT fire — same-
-        // landblock walks stay byte-identical (the server re-derives the
-        // intra-landblock cell from the AP coords). A null result tells the
-        // caller to keep its own dead-reckoned local position (NOT collapse
-        // it to the cell origin) — this is the regression guard for the
-        // live-caught out-parameter clobber bug.
+        // Step to global (32500, 34600): SAME landblock 0xA9B4 as the source
+        // (lbx=169, lby=180) but a DIFFERENT 24 m cell.
+        //   lx = 32500 - 169*192 = 52 -> cx = 2
+        //   ly = 34600 - 180*192 = 40 -> cy = 1
+        //   cell = 2*8 + 1 + 1 = 18 = 0x12
+        // The source cell is 0x01, so the coordinates fall in a different
+        // cell of the SAME landblock. The override MUST correct the claimed
+        // cell (the server does NOT re-derive intra-landblock cells — it
+        // adopts the stale claim, which breaks the in-combat StickToObject
+        // move). Local pos is unchanged (same landblock frame).
         var seam = OutdoorSeamCell.TryDeriveSeamCell(
             followingIndoorPath: false,
             selfCellIsOutdoor:   true,
@@ -125,7 +130,64 @@ public class OutdoorSeamCellTests
             stepGlobalY:         34600f,
             stepZ:               StepZ);
 
+        Assert.NotNull(seam);
+        Assert.Equal(0xA9B40012u, seam!.Value.CellId);
+        Assert.Equal(52f, seam.Value.LocalPos.X, 3);   // 32500 - 169*192
+        Assert.Equal(40f, seam.Value.LocalPos.Y, 3);   // 34600 - 180*192
+        Assert.Equal(StepZ, seam.Value.LocalPos.Z, 3);
+    }
+
+    [Fact]
+    public void Override_SameCell_ReturnsNull()
+    {
+        // A step whose coordinates fall in the SAME cell already claimed:
+        // no correction needed -> null so the caller keeps its own
+        // dead-reckoned (cell, pos) byte-identical (NOT collapsed to the
+        // cell origin). This is the regression guard for the live-caught
+        // out-parameter clobber bug. SourceCell 0xA9B40001 = cell index 1 =
+        // cx=0, cy=0 -> local X,Y in [0,24). global (32450, 34565):
+        //   lx = 32450 - 169*192 = 2 -> cx = 0; ly = 34565 - 180*192 = 5 -> cy = 0
+        //   cell = 0*8 + 0 + 1 = 1 -> same as source.
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
+            followingIndoorPath: false,
+            selfCellIsOutdoor:   true,
+            lockedCellId:        SourceCell,
+            stepGlobalX:         32450f,
+            stepGlobalY:         34565f,
+            stepZ:               StepZ);
+
         Assert.Null(seam);
+    }
+
+    [Fact]
+    public void Override_LiveCombatRepro_IntraLandblockApproach_CorrectsStaleCell()
+    {
+        // Exact live-verify repro (trkverify3, landblock 0xACB3 =
+        // lbx=0xAC=172, lby=0xB3=179): during a melee approach the bot's
+        // claimed cell froze at 0xACB30008 while its coordinates walked into
+        // a different cell of the SAME landblock. stopPos=(143.90,97.18):
+        //   global = (172*192 + 143.90, 179*192 + 97.18) = (33167.90, 34465.18)
+        //   lx = 143.90 -> cx = 5; ly = 97.18 -> cy = 4
+        //   cell = 5*8 + 4 + 1 = 45 = 0x2D
+        // The frozen claim 0x08 != the coords' real cell 0x2D, so the server
+        // adopted an inconsistent (cell, pos) and the in-combat StickToObject
+        // move errored -> every swing cancelled, 0 damage, death. The
+        // override must correct 0x08 -> 0x2D with the local pos unchanged.
+        const uint frozenCell = 0xACB30008u;
+        const float gx = 172 * 192 + 143.90f;
+        const float gy = 179 * 192 + 97.18f;
+        var seam = OutdoorSeamCell.TryDeriveSeamCell(
+            followingIndoorPath: false,
+            selfCellIsOutdoor:   true,
+            lockedCellId:        frozenCell,
+            stepGlobalX:         gx,
+            stepGlobalY:         gy,
+            stepZ:               27.79f);
+
+        Assert.NotNull(seam);
+        Assert.Equal(0xACB3002Du, seam!.Value.CellId);
+        Assert.Equal(143.90f, seam.Value.LocalPos.X, 2);
+        Assert.Equal(97.18f, seam.Value.LocalPos.Y, 2);
     }
 
     [Fact]
@@ -149,5 +211,69 @@ public class OutdoorSeamCellTests
         Assert.Equal(0xB4u, (seam.Value.CellId >> 16) & 0xFFu);  // lby = 180
         Assert.Equal(191f, seam.Value.LocalPos.X, 3);            // 32447 - 168*192
         Assert.Equal(40f, seam.Value.LocalPos.Y, 3);             // 34600 - 180*192
+    }
+
+    // --- Canonicalize: UNCONDITIONAL frame-free (cell, local pos) derivation.
+    //
+    // STOP cannot rely on TryDeriveSeamCell's null="keep your own pos"
+    // contract because its cached waypoint local pos may be in a frame the
+    // server has since slid away from (after a seam crossing). Both review
+    // models independently flagged this: when the server already advanced
+    // stopCell to the seam's neighbor cell, TryDeriveSeamCell sees
+    // derivedCell == lockedCellId and returns null, leaving the OLD-frame
+    // local pos paired with the NEW cell -> a full-landblock (~192 m)
+    // mis-projection. Canonicalize re-derives the local pos from the global
+    // coordinates UNCONDITIONALLY, so the emitted (cell, pos) pair is always
+    // internally consistent regardless of what cell the caller thought it was
+    // in.
+
+    [Fact]
+    public void Canonicalize_SeamGlobal_DerivesNeighborCellAndLocalPos()
+    {
+        var canon = OutdoorSeamCell.Canonicalize(StepGX, StepGY, StepZ);
+
+        Assert.NotNull(canon);
+        Assert.Equal(ExpectedNeighborCell, canon!.Value.CellId);
+        Assert.Equal(ExpectedLocalX, canon.Value.LocalPos.X, 3);
+        Assert.Equal(ExpectedLocalY, canon.Value.LocalPos.Y, 3);
+        Assert.Equal(StepZ, canon.Value.LocalPos.Z, 3);
+    }
+
+    [Fact]
+    public void Canonicalize_CoordsInClaimedCell_StillReturnsConsistentPair()
+    {
+        // The review-flagged regression case. The bot's coordinates fall in
+        // cell 0xA9B30018; if the caller naively kept a stale local pos
+        // generated in the SOURCE landblock 0xA9B4's frame (X=52 there would
+        // be X=52 in 0xB3 too, but consider a post-seam pos like X=193 in the
+        // old frame) it would mis-project. Canonicalize ignores any prior
+        // frame and returns the cell + the local pos derived straight from the
+        // global coords — it NEVER returns null for in-range coords, so the
+        // caller always gets a self-consistent pair to emit.
+        var canon = OutdoorSeamCell.Canonicalize(StepGX, StepGY, StepZ);
+
+        Assert.NotNull(canon);
+        // local pos is exactly global minus the derived cell's landblock origin
+        var lbx = (int)((canon!.Value.CellId >> 24) & 0xFFu);
+        var lby = (int)((canon.Value.CellId >> 16) & 0xFFu);
+        Assert.Equal(StepGX - lbx * 192f, canon.Value.LocalPos.X, 3);
+        Assert.Equal(StepGY - lby * 192f, canon.Value.LocalPos.Y, 3);
+    }
+
+    [Fact]
+    public void Canonicalize_SameLandblock_ReturnsSourceCellWithLocalPos()
+    {
+        // Coords that fall in the SOURCE cell 0xA9B40001 (cx=0, cy=0). Unlike
+        // TryDeriveSeamCell (which returns null here to stay byte-identical),
+        // Canonicalize returns the cell + local pos so STOP always has a
+        // concrete consistent pair. global (32450, 34565):
+        //   lx = 32450 - 169*192 = 2; ly = 34565 - 180*192 = 5; cell = 0x01.
+        var canon = OutdoorSeamCell.Canonicalize(32450f, 34565f, StepZ);
+
+        Assert.NotNull(canon);
+        Assert.Equal(0xA9B40001u, canon!.Value.CellId);
+        Assert.Equal(2f, canon.Value.LocalPos.X, 3);
+        Assert.Equal(5f, canon.Value.LocalPos.Y, 3);
+        Assert.Equal(StepZ, canon.Value.LocalPos.Z, 3);
     }
 }
