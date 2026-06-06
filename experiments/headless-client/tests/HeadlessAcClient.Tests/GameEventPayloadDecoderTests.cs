@@ -266,4 +266,78 @@ public class GameEventPayloadDecoderTests
 
         Assert.Null(p);
     }
+
+    [Fact]
+    public void Decode_DefenderNotification_ReadsAttackerNameAndDamage_FullBody()
+    {
+        // GameEventDefenderNotification (0x01B2): string16L attackerName,
+        // u32 damageType, f64 percent, u32 damage, u32 damageLocation,
+        // u32 criticalHit, u64 attackConditions, Align. "Drudge Skulker"
+        // = 14B → 2+14 = 16 (already 4-aligned, no pad). Use the FULL
+        // realistic body to prove the decoder reads the damage at the
+        // correct offset and ignores the trailing fields.
+        var name = Encoding.UTF8.GetBytes("Drudge Skulker");
+        var body = new byte[16 + 4 + 8 + 4 + 4 + 4 + 8]; // = 48
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(16, 4), 0x4); // damageType
+        BinaryPrimitives.WriteDoubleLittleEndian(body.AsSpan(20, 8), 0.15); // percent
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(28, 4), 9);    // damage
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(32, 4), 1);    // damageLocation
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(36, 4), 0);    // criticalHit
+        BinaryPrimitives.WriteUInt64LittleEndian(body.AsSpan(40, 8), 0);    // attackConditions
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.DefenderNotification);
+
+        Assert.NotNull(p?.DefenderNotification);
+        Assert.Equal("Drudge Skulker", p!.DefenderNotification!.AttackerName);
+        Assert.Equal(9u, p.DefenderNotification.Damage);
+    }
+
+    [Fact]
+    public void Decode_DefenderNotification_TooShort_ReturnsNull()
+    {
+        // Name present but truncated before the damage fields → decoder
+        // throws internally and Decode returns null (graceful fallback).
+        var name = Encoding.UTF8.GetBytes("Cow");
+        var body = new byte[8]; // just the padded name, no damage fields
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.DefenderNotification);
+
+        Assert.Null(p);
+    }
+
+    [Fact]
+    public void Decode_EvasionDefenderNotification_ReadsAttackerName()
+    {
+        // GameEventEvasionDefenderNotification (0x01B4): a single string16L
+        // with the attacker's name. "Drudge Skulker" = 14B → 16, no pad.
+        var name = Encoding.UTF8.GetBytes("Drudge Skulker");
+        var body = new byte[2 + name.Length];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.EvasionDefenderNotification);
+
+        Assert.NotNull(p?.EvasionDefenderNotification);
+        Assert.Equal("Drudge Skulker", p!.EvasionDefenderNotification!.AttackerName);
+    }
+
+    [Fact]
+    public void Decode_EvasionDefenderNotification_PadsNameToFourBytes()
+    {
+        // "Cow" = 3B → 2B len + 3B = 5, pad 3 → cursor 8. Decoder must
+        // tolerate the trailing padding bytes after the string.
+        var name = Encoding.UTF8.GetBytes("Cow");
+        var body = new byte[8];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), (ushort)name.Length);
+        name.CopyTo(body, 2);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.EvasionDefenderNotification);
+
+        Assert.NotNull(p?.EvasionDefenderNotification);
+        Assert.Equal("Cow", p!.EvasionDefenderNotification!.AttackerName);
+    }
 }

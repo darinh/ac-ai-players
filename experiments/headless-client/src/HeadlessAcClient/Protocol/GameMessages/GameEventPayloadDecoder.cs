@@ -385,6 +385,32 @@ internal sealed record EvasionAttackerNotificationPayload(string DefenderName)
 }
 
 /// <summary>
+/// GameEventDefenderNotification (0x01B2) — sent to the DEFENDER (the
+/// bot) when a creature's swing LANDS on it. Carries the attacker's
+/// display name plus the damage taken. Decoded so the Motor can surface
+/// RAW perception that a named creature is attacking the bot (populates
+/// ObservedHostile); the LLM owns the fight-vs-flee decision.
+/// </summary>
+internal sealed record DefenderNotificationPayload(string AttackerName, uint Damage)
+{
+    public override string ToString() =>
+        $"DefenderNotification(attacker=\"{AttackerName}\" damage={Damage})";
+}
+
+/// <summary>
+/// GameEventEvasionDefenderNotification (0x01B4) — sent to the DEFENDER
+/// (the bot) when it EVADES a creature's swing (a miss against the bot).
+/// Carries only the attacker's display name. Decoded for the same RAW
+/// "this creature is attacking me" perception — an evaded incoming swing
+/// is still evidence of hostility.
+/// </summary>
+internal sealed record EvasionDefenderNotificationPayload(string AttackerName)
+{
+    public override string ToString() =>
+        $"EvasionDefenderNotification(attacker=\"{AttackerName}\")";
+}
+
+/// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
 /// implemented here, all variants are null and the caller should
@@ -408,7 +434,9 @@ internal sealed record GameEventPayload(
     UpdateHealthPayload?                 UpdateHealth,
     AttackDonePayload?                   AttackDone,
     AttackerNotificationPayload?         AttackerNotification,
-    EvasionAttackerNotificationPayload?  EvasionAttackerNotification)
+    EvasionAttackerNotificationPayload?  EvasionAttackerNotification,
+    DefenderNotificationPayload?         DefenderNotification,
+    EvasionDefenderNotificationPayload?  EvasionDefenderNotification)
 {
     public override string ToString() => EventType switch
     {
@@ -429,6 +457,8 @@ internal sealed record GameEventPayload(
         GameEventType.AttackDone                   when AttackDone                 is { } x => x.ToString(),
         GameEventType.AttackerNotification         when AttackerNotification       is { } x => x.ToString(),
         GameEventType.EvasionAttackerNotification  when EvasionAttackerNotification is { } x => x.ToString(),
+        GameEventType.DefenderNotification         when DefenderNotification       is { } x => x.ToString(),
+        GameEventType.EvasionDefenderNotification  when EvasionDefenderNotification is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -477,6 +507,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { AttackerNotification = DecodeAttackerNotification(body) },
                 GameEventType.EvasionAttackerNotification =>
                     Empty(eventType) with { EvasionAttackerNotification = DecodeEvasionAttackerNotification(body) },
+                GameEventType.DefenderNotification =>
+                    Empty(eventType) with { DefenderNotification = DecodeDefenderNotification(body) },
+                GameEventType.EvasionDefenderNotification =>
+                    Empty(eventType) with { EvasionDefenderNotification = DecodeEvasionDefenderNotification(body) },
                 _ => null,
             };
         }
@@ -506,7 +540,9 @@ internal static class GameEventPayloadDecoder
             UpdateHealth: null,
             AttackDone: null,
             AttackerNotification: null,
-            EvasionAttackerNotification: null);
+            EvasionAttackerNotification: null,
+            DefenderNotification: null,
+            EvasionDefenderNotification: null);
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
@@ -805,6 +841,41 @@ internal static class GameEventPayloadDecoder
         var cursor = 0;
         var defenderName = ReadString16L(body, ref cursor);
         return new EvasionAttackerNotificationPayload(defenderName);
+    }
+
+    private static DefenderNotificationPayload DecodeDefenderNotification(ReadOnlySpan<byte> body)
+    {
+        // GameEventDefenderNotification (0x01B2) — sent to the DEFENDER
+        // (the bot) when an attacker's swing LANDS. Mirrors
+        // GameEventDefenderNotification.cs:
+        //   string16L attackerName  (DWORD-aligned)
+        //   u32       damageType
+        //   f64       percent
+        //   u32       damage
+        //   u32       damageLocation
+        //   u32       criticalHit
+        //   u64       attackConditions
+        // We only need the attacker name + damage; the remaining fields
+        // are read past for bounds safety but otherwise ignored.
+        var cursor = 0;
+        var attackerName = ReadString16L(body, ref cursor);
+        if (body.Length - cursor < 4 + 8 + 4) // damageType + percent + damage
+            throw new InvalidOperationException("body too short for DefenderNotification");
+        cursor += 4;                                  // skip damageType
+        cursor += 8;                                  // skip percent (f64)
+        var damage = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        return new DefenderNotificationPayload(attackerName, damage);
+    }
+
+    private static EvasionDefenderNotificationPayload DecodeEvasionDefenderNotification(ReadOnlySpan<byte> body)
+    {
+        // GameEventEvasionDefenderNotification (0x01B4) — sent to the
+        // DEFENDER (the bot) when it EVADES an attacker's swing. Mirrors
+        // GameEventEvasionDefenderNotification.cs: a single string16L
+        // with the attacker's name.
+        var cursor = 0;
+        var attackerName = ReadString16L(body, ref cursor);
+        return new EvasionDefenderNotificationPayload(attackerName);
     }
 
     /// <summary>

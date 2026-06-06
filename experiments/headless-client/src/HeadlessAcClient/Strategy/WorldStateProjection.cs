@@ -201,6 +201,11 @@ internal sealed record WorldStateProjection
         if (world.Self is not WorldObjectSnapshot self) return null;
         var selfGuid = self.Guid;
 
+        // Snapshot the recently-attacked-us name set once (already
+        // normalized + TTL-pruned by HandshakeDriver) for the per-object
+        // ObservedHostile derivation below.
+        var recentHostile = world.RecentHostileNames;
+
         var inv = world.Objects.Values
             .Where(o => o.ContainerGuid is uint c && c == selfGuid)
             .Where(o => !string.IsNullOrEmpty(o.Name))
@@ -238,6 +243,19 @@ internal sealed record WorldStateProjection
                 float? dist = null;
                 if (WorldDistance.TrySelectionSquaredDistance(self, o, out var d2))
                     dist = (float)Math.Sqrt(d2);
+
+                // observed-hostile perception: the server told us (via a
+                // recent DefenderNotification 0x01B2 / EvasionDefenderNotification
+                // 0x01B4) that a creature with this NAME is attacking the bot.
+                // The wire carries only the attacker's name, not a guid, so we
+                // match by normalized name — two same-named mobs both read as
+                // hostile, which is acceptable (no guid is available to
+                // disambiguate). HandshakeDriver prunes the set by TTL before
+                // each projection build, so a name here means "attacked us
+                // recently". RAW perception — the LLM decides fight vs flee.
+                var observedHostile = recentHostile is not null
+                    && NormalizeHostileName(o.Name) is string hn
+                    && recentHostile.Contains(hn);
 
                 var itemType = o.ItemType ?? 0u;
                 var isCreature = (itemType & ItemTypeMasks.Creature) != 0;
@@ -300,6 +318,7 @@ internal sealed record WorldStateProjection
                     IsAttackable = isAttackable,
                     HasRadarBlipColor = hasRadarBlipColor,
                     IsMonster = isMonster,
+                    ObservedHostile = observedHostile,
                 };
             })
             .Where(v => v.Distance is null || v.Distance <= visibleRadius)
@@ -350,5 +369,21 @@ internal sealed record WorldStateProjection
             CurrentFight = world.CurrentFight,
             CombatHistory = world.CombatHistory,
         };
+    }
+
+    /// <summary>
+    /// Normalizes a creature display name to a stable key for hostile-name
+    /// matching: collapse internal whitespace + lower-invariant. Purely
+    /// mechanical text normalization — no literal names or game knowledge.
+    /// Must stay byte-identical to the keying HandshakeDriver uses when it
+    /// records attacker names, so the projection and the tracker agree.
+    /// Returns null for null/blank input.
+    /// </summary>
+    internal static string? NormalizeHostileName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        var collapsed = string.Join(' ',
+            name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return collapsed.Length == 0 ? null : collapsed.ToLowerInvariant();
     }
 }

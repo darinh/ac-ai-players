@@ -158,6 +158,18 @@ internal sealed class WorldState
     /// </summary>
     public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; set; }
 
+    /// <summary>
+    /// observed-hostile perception: the set of NORMALIZED creature names
+    /// the server has recently told us are attacking the bot (decoded from
+    /// DefenderNotification 0x01B2 / EvasionDefenderNotification 0x01B4),
+    /// set/pruned by HandshakeDriver before each projection build. A
+    /// visible object whose normalized name is in this set is surfaced to
+    /// the LLM as <c>ObservedHostile</c> ("it has attacked you") — RAW
+    /// perception only; the LLM owns the fight-vs-flee decision. Empty/null
+    /// when nothing is currently attacking the bot.
+    /// </summary>
+    public IReadOnlySet<string>? RecentHostileNames { get; set; }
+
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;
 

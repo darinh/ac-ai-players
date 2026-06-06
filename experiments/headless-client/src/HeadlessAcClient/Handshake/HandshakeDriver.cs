@@ -611,6 +611,19 @@ internal sealed class HandshakeDriver : IDisposable
         bool                 combatFeedbackSent = false;
         string?              combatTargetName = null;
         uint?                combatStatsForGuid = null;
+        // observed-hostile perception: NORMALIZED attacker name -> last UTC
+        // the server reported that creature attacking the bot (decoded from
+        // DefenderNotification 0x01B2 / EvasionDefenderNotification 0x01B4).
+        // Pruned by TTL and published to worldState.RecentHostileNames before
+        // each projection build. Keyed by name because the wire defender
+        // notification carries no attacker guid. Cleared on landblock change.
+        var                  recentHostileAt = new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        // How long a creature stays flagged ObservedHostile after its last
+        // observed swing/evasion against the bot. AC melee cadence is a few
+        // seconds; 12s survives normal swing gaps within a fight and clears
+        // shortly after the attacker dies/disengages. Refreshed on every
+        // defender notification (re-stamps the name's UTC).
+        const double         ObservedHostileTtlSeconds = 12.0;
         // combat-missile-attack: the attack opcode family used for the
         // most recent ATTACK dispatch, for the cmd= log line only.
         AttackMode           combatAttackMode = AttackMode.Melee;
@@ -1906,6 +1919,29 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"(landed={combatSwingsLanded} evaded={combatSwingsEvaded} dmg={combatDamageDealt}) — waking LLM.");
                                 }
                             }
+                            // observed-hostile perception. DefenderNotification
+                            // (0x01B2) = a creature's swing LANDED on the bot;
+                            // EvasionDefenderNotification (0x01B4) = the bot
+                            // EVADED an incoming swing. Either way the named
+                            // attacker is actively hostile to the bot RIGHT NOW.
+                            // Record the attacker's normalized name with the
+                            // current time; the set published to
+                            // worldState.RecentHostileNames (pruned by TTL just
+                            // before each projection build) drives the
+                            // ObservedHostile projection flag. The wire carries
+                            // only the attacker NAME (no guid), so this is
+                            // name-keyed. RAW perception — the LLM owns the
+                            // fight-vs-flee decision.
+                            {
+                                string? hostileName =
+                                    ge.Payload?.DefenderNotification?.AttackerName
+                                    ?? ge.Payload?.EvasionDefenderNotification?.AttackerName;
+                                if (WorldStateProjection.NormalizeHostileName(hostileName) is string hk)
+                                {
+                                    recentHostileAt[hk] = DateTime.UtcNow;
+                                    Console.WriteLine($"[hostile] attacked by \"{hostileName}\" (tracking {recentHostileAt.Count})");
+                                }
+                            }
                             // M1.5 — surface WeenieErrorWithString
                             // to the EventStream as an ActionRejected
                             // event so the LLM can see the rejection
@@ -2359,6 +2395,15 @@ internal sealed class HandshakeDriver : IDisposable
                                 LandblockFrom = prevLb,
                                 LandblockTo = lb,
                             });
+                            // observed-hostile perception: a landblock change
+                            // (teleport, recall, on-foot seam, respawn) leaves
+                            // the prior attackers behind. Clear the name-keyed
+                            // hostile tracker so a same-named creature in the
+                            // new area is not falsely flagged hostile from a
+                            // stale entry (the TTL would also expire it, but an
+                            // explicit clear avoids a brief post-transition
+                            // false positive).
+                            recentHostileAt.Clear();
                             // Commit B — the inter-landblock edge is
                             // recorded below (after we have created the
                             // arrival node via RecordVisit). Setting
@@ -3366,6 +3411,25 @@ internal sealed class HandshakeDriver : IDisposable
                     tacticsSelf.CellId is uint tacticsSelfCell &&
                     tacticsSelfCell != 0)
                 {
+                    // observed-hostile perception: prune the recent-attacker
+                    // tracker by TTL and publish the fresh normalized-name set
+                    // so the projection's ObservedHostile flag reflects "this
+                    // creature attacked us within the last few seconds". Done
+                    // here (right before every projection build) so expiry is
+                    // evaluated each perception tick, NOT only when a new
+                    // defender notification happens to arrive.
+                    if (recentHostileAt.Count > 0)
+                    {
+                        var hostileCutoff = DateTime.UtcNow.AddSeconds(-ObservedHostileTtlSeconds);
+                        foreach (var staleName in recentHostileAt
+                                     .Where(kv => kv.Value < hostileCutoff)
+                                     .Select(kv => kv.Key).ToList())
+                            recentHostileAt.Remove(staleName);
+                    }
+                    worldState.RecentHostileNames = recentHostileAt.Count > 0
+                        ? new HashSet<string>(recentHostileAt.Keys, StringComparer.Ordinal)
+                        : null;
+
                     var projection = WorldStateProjection.FromWorldState(
                         worldState, weenies, visibleRadius: 120f, maxVisible: 48);
                     // Slice R wiring — pump lifetime stat counters and
