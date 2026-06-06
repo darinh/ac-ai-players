@@ -518,6 +518,14 @@ internal sealed class HandshakeDriver : IDisposable
         // the item from the inventory-equip candidate set on the
         // next tick.
         var                  inventoryEquipSent = new HashSet<uint>();
+        // cp-2273 — distinguishes guids the SOURCE autonomously auto-equipped
+        // (PHASE7F.4 below) from LLM-requested wields, so a server
+        // InventoryServerSaveFailed for an autonomous auto-equip (e.g. a
+        // level-gated starter cloak → 0x420 LevelTooLow) is NOT surfaced as a
+        // plan-invalidating ActionRejected the LLM would mis-attribute to its
+        // own current goal. inventoryEquipSent alone can't be used: it also
+        // holds LLM Pickup→equip and LLM Wield guids.
+        var                  autoEquipFailureFilter = new Strategy.AutoEquipFailureFilter();
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
         // creature (so we don't walk away mid-fight) and a retry timer
@@ -1642,6 +1650,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // same armor reward.
                             if (ge.Payload?.WieldObject is { } wieldAck)
                             {
+                                // cp-2273 — a successful wield ack resolves any
+                                // source-autonomous auto-equip attempt for this
+                                // guid: no failure is coming, so drop the marker
+                                // (otherwise it would linger and could swallow a
+                                // later LLM-owned inventory failure on the same
+                                // guid, e.g. dequipping this weapon as a swap
+                                // blocker).
+                                autoEquipFailureFilter.ClearAutonomous(wieldAck.ItemGuid);
                                 if (wieldAck.NewLocation != 0)
                                     satisfiedEquipSlots.Add(wieldAck.NewLocation);
                                 if (pendingEquipWcid.TryGetValue(wieldAck.ItemGuid, out var wcEq))
@@ -2021,6 +2037,24 @@ internal sealed class HandshakeDriver : IDisposable
                                 isf.ErrorType != 0)
                             {
                                 var invLabel = WeenieErrorLabels.Label(isf.ErrorType);
+                                // cp-2273 — a failure of a SOURCE-AUTONOMOUS
+                                // auto-equip (PHASE7F.4 chose to wield this item;
+                                // the LLM never asked) must not reach the Strategy
+                                // layer: surfaced as a semantic ActionRejected it
+                                // invalidates the in-flight plan AND the LLM
+                                // mis-attributes it to its own current goal (live:
+                                // a level-gated starter cloak's 0x420 LevelTooLow
+                                // made the LLM abandon its weapon-wield goal). Drop
+                                // it (one-shot, by guid); log for diagnostics. Any
+                                // LLM-requested wield/pickup failure surfaces below.
+                                if (autoEquipFailureFilter.TryConsumeAutonomous(isf.ItemGuid))
+                                {
+                                    Console.WriteLine(
+                                        $"[auto-equip] suppressed autonomous auto-equip rejection: " +
+                                        $"item=0x{isf.ItemGuid:X8} err=0x{isf.ErrorType:X} [{invLabel}] " +
+                                        $"(source-autonomous wield; not an LLM goal)");
+                                    break;
+                                }
                                 // Look up the item's name from the
                                 // visible-world snapshot so the LLM
                                 // sees a human-readable rejection.
@@ -3102,6 +3136,11 @@ internal sealed class HandshakeDriver : IDisposable
                     if (ieCandidate is not null)
                     {
                         inventoryEquipSent.Add(ieCandidate.Guid);
+                        // cp-2273 — this wield is source-autonomous (the motor
+                        // chose it, the LLM never asked). If the server rejects
+                        // it, suppress the rejection rather than letting it
+                        // invalidate / mislead the LLM's plan.
+                        autoEquipFailureFilter.MarkAutonomous(ieCandidate.Guid);
                         if (ieCandidate.WeenieClassId is uint ieWc)
                             pendingEquipWcid[ieCandidate.Guid] = ieWc;
 
@@ -4167,6 +4206,11 @@ internal sealed class HandshakeDriver : IDisposable
                             if (wieldItem is not null &&
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
+                                // cp-2273 — the LLM has explicitly taken ownership
+                                // of this guid. Drop any source-autonomous marker so
+                                // a subsequent InventoryServerSaveFailed for it
+                                // surfaces normally (the LLM asked for this wield).
+                                autoEquipFailureFilter.ClearAutonomous(wieldItem.Guid);
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
                                 // Dequip-before-wield (weapon swap). The ACE
