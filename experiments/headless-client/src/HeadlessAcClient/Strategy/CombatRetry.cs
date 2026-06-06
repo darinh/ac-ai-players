@@ -121,4 +121,47 @@ internal static class CombatRetry
             return true;
         return cancelRetryRequested && secondsSinceLastAttack >= fastMinIntervalSec;
     }
+
+    /// <summary>
+    /// AttackDone(ActionCancelled) wire code (0x0036) — the server's
+    /// auto-repeat swing loop dropped. See the file header for the loop
+    /// mechanics.
+    /// </summary>
+    public const uint AttackDoneActionCancelled = 0x0036u;
+
+    /// <summary>
+    /// Decide whether a non-zero <c>GameEventAttackDone</c> error should be
+    /// surfaced to the LLM as an <c>ActionRejected</c> learning signal.
+    /// </summary>
+    /// <param name="attackDoneErrorCode">
+    /// The non-zero error code from the AttackDone packet.
+    /// </param>
+    /// <param name="hasActiveCombatTarget">
+    /// True when the motor still holds a combat target lock
+    /// (combatTargetGuid is set).
+    /// </param>
+    /// <remarks>
+    /// Semantic refusals (OutOfRange, YouCanNotAttackThisCreature, …) always
+    /// surface so the LLM can pivot verb/target. The ONE exception is a
+    /// trailing ActionCancelled (0x0036) that arrives AFTER the engagement
+    /// already ended — i.e. with no active combat target. That cancel is the
+    /// benign teardown of the server's swing loop following a kill or a
+    /// disengage: it names no problem the LLM can act on (the target is
+    /// already dead/gone), yet surfacing it appends a misleading
+    /// "Attack rejected" event for a target the bot just killed AND, because
+    /// a non-transport ActionRejected is plan-invalidating, discards the
+    /// establishment LLM call the bot fires right after the kill — a wasted
+    /// round-trip per kill. An ActionCancelled WHILE a target is still locked
+    /// is part of the live loop-keeper signalling (Phase 7f.2) and is kept.
+    /// Mechanical: keys only on the wire code and combat-lock bookkeeping —
+    /// no target choice, no object identity.
+    /// </remarks>
+    public static bool ShouldSurfaceAttackDoneRejection(
+        uint attackDoneErrorCode,
+        bool hasActiveCombatTarget)
+    {
+        if (attackDoneErrorCode == AttackDoneActionCancelled && !hasActiveCombatTarget)
+            return false;
+        return true;
+    }
 }
