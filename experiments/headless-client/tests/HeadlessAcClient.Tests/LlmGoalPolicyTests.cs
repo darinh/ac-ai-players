@@ -66,6 +66,45 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_ParsesRaiseAttributeWithAmount()
+    {
+        var json = """
+        {
+          "goal_id": "raise-001",
+          "kind": "RaiseAttribute",
+          "target": { "name": "endurance" },
+          "amount": 12500,
+          "priority": 6,
+          "rationale": "80k unspent XP and only 3 max HP; invest in endurance."
+        }
+        """;
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.RaiseAttribute, g!.Kind);
+        Assert.Equal("endurance", g.Target.Name);
+        Assert.Equal(12500L, g.Amount);
+    }
+
+    [Fact]
+    public void TryParseGoal_RaiseAttributeWithoutAmount_ParsesButAmountNull()
+    {
+        // A missing amount still parses (target is non-empty); the dispatch
+        // layer rejects it (no source default) — proven in AttributeRaiseTests.
+        var json = """{"kind":"RaiseAttribute","target":{"name":"strength"},"rationale":"x","priority":5}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.RaiseAttribute, g!.Kind);
+        Assert.Null(g.Amount);
+    }
+
+    [Fact]
+    public void TryParseGoal_RaiseAttributeFractionalAmount_Rejected()
+    {
+        // The amount field is an integer; a fractional value is dropped at
+        // deserialization so a nonsensical fractional XP never dispatches.
+        var json = """{"kind":"RaiseAttribute","target":{"name":"endurance"},"amount":3.5,"rationale":"x","priority":5}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out _));
+    }
+
+    [Fact]
     public void TryParseGoal_AcceptsDashlessGuid_FromLlama()
     {
         // Regression: Llama-3.3-70B (and others) emit `goal_id` as a

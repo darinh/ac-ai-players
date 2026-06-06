@@ -884,6 +884,16 @@ internal sealed class HandshakeDriver : IDisposable
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
         DateTime?            motionStoppedAt = null;
+        // XP-spend (RaiseAttribute) pending-action bookkeeping. A self-action
+        // RaiseAttribute completes its goal on dispatch (like the self-arm
+        // Wield), so the LLM is consulted again next deliberation; this dedup
+        // window stops a re-spend of the SAME attribute before the
+        // server-confirmed unspent-XP decrease arrives. Records the wire
+        // attribute id, the clamped amount, the dispatch time, and the
+        // AvailableExperience observed pre-dispatch. Reconciled at the next
+        // RaiseAttribute attempt: cleared on a confirmed AvailableExperience
+        // decrease (success) or after the timeout (no confirmation seen).
+        (uint AttributeId, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaiseAttribute = null;
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         // The last walk-tick waypoint's GLOBAL (frame-free) XY, captured
@@ -3698,9 +3708,102 @@ internal sealed class HandshakeDriver : IDisposable
                     //     ResolveTarget would miss (no name match),
                     //     and the bot would sit motionless until the
                     //     LLM picked a different goal.
-                    if (goal is not null && goal.Kind == GoalKind.Explore)
+                    if (goal is not null && goal.Kind == GoalKind.RaiseAttribute)
                     {
-                        // Slice W.2 (#87) — if the LLM emitted
+                        // Self-action: spend accumulated experience to raise a
+                        // primary attribute. The LLM decides WHICH attribute
+                        // (goal.Target.name) and HOW MUCH (goal.Amount); the
+                        // motor only maps the name to the wire enum id,
+                        // validates+clamps the amount to the bot's observed
+                        // unspent XP, and sends the opcode. No motion, no world
+                        // target. There is NO source default amount and no
+                        // attribute preference — an unparseable attribute or a
+                        // missing/invalid amount is a motor error (nothing is
+                        // sent) and the goal fails so the LLM re-deliberates.
+                        long? availXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64 &&
+                            selfP64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNow)
+                                ? axNow : (long?)null;
+
+                        // Reconcile any prior pending raise: a confirmed drop in
+                        // AvailableExperience means the last spend landed; a
+                        // stale entry past the timeout is dropped so it can never
+                        // wedge the dedup window.
+                        if (pendingRaiseAttribute is { } pr0 &&
+                            ((pr0.PreAvailableXp is long preXp && availXpNow is long nowXp && nowXp < preXp) ||
+                             (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(12)))
+                        {
+                            var confirmed = pr0.PreAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
+                            Console.WriteLine(
+                                $"[xp-spend] pending RaiseAttribute id={pr0.AttributeId} amount={pr0.Amount} " +
+                                (confirmed
+                                    ? $"CONFIRMED (unspent {pr0.PreAvailableXp}->{availXpNow})"
+                                    : "timed out (no unspent-XP confirmation)"));
+                            pendingRaiseAttribute = null;
+                        }
+
+                        if (!AttributeRaise.TryResolveAttributeId(goal.Target.Name, out var attrId))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseAttribute: unknown attribute target='{goal.Target}' " +
+                                $"(expected strength/endurance/quickness/coordination/focus/self); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-attribute: unknown attribute name", eventStream);
+                        }
+                        else if (!AttributeRaise.TryValidateAndClampAmount(goal.Amount, availXpNow, out var spendAmount))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseAttribute id={attrId}: needs a positive whole `amount` and spendable XP " +
+                                $"(amount={(goal.Amount?.ToString() ?? "null")}, unspent={(availXpNow?.ToString() ?? "null")}); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-attribute: invalid amount or no unspent XP", eventStream);
+                        }
+                        else if (pendingRaiseAttribute is { } prDup)
+                        {
+                            // Generic pending-action dedup: ONE raise is allowed
+                            // in flight at a time. Any raise (same OR a different
+                            // attribute) is suppressed while a prior spend is still
+                            // awaiting confirmation, so an A->B->A burst can never
+                            // double-spend and the single pending entry is always
+                            // the one the next confirmed unspent-XP drop reconciles
+                            // (never an overwritten/mis-attributed request). Defer
+                            // until the pending raise confirms or times out.
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseAttribute id={attrId} suppressed — a raise (id={prDup.AttributeId}) is still " +
+                                $"pending (dispatched {(DateTime.UtcNow - prDup.At).TotalSeconds:F1}s ago); " +
+                                $"awaiting unspent-XP confirmation.");
+                            tactics.Fail("raise-attribute: a raise is already pending", eventStream);
+                        }
+                        else
+                        {
+                            var raisePktSeq  = nextOutboundPacketSequence++;
+                            var raiseFragSeq = nextOutboundFragmentSequence++;
+                            var raiseBuf = new byte[GameActionRaiseAttributeMessage.PackedSize];
+                            var raiseLen = GameActionRaiseAttributeMessage.Pack(raiseBuf, attrId, spendAmount);
+                            var raiseMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                raiseMsg.AddAckSequence(lastReceivedSeq);
+                            raiseMsg.AddBlobFragment(
+                                fragSequence: raiseFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: raiseBuf.AsSpan(0, raiseLen));
+                            var raiseSent = raiseMsg.Pack(sendBuf, myClientId,
+                                                          sequence: raisePktSeq, iteration: 1,
+                                                          encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            pendingRaiseAttribute = (attrId, spendAmount, DateTime.UtcNow, availXpNow);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL RaiseAttribute: id={attrId} amount={spendAmount} " +
+                                $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={raisePktSeq} fragSeq={raiseFragSeq} bytes={raiseSent}");
+                            tactics.Clear("raise-attribute dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.Explore)
+                    {
                         // `Explore{target}`, honor it: walk to that
                         // specific candidate (typically chosen from
                         // the "## Exploration candidates" prompt

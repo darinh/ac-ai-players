@@ -40,6 +40,17 @@ internal enum GoalKind
     Talk    = 7,
     Wait    = 8,
     Explore = 9,
+
+    /// <summary>
+    /// Spend accumulated experience to raise one of the six primary
+    /// attributes. A self-action (no world target / motion): the LLM
+    /// names the attribute in <see cref="Goal.Target"/> (name = one of
+    /// strength/endurance/quickness/coordination/focus/self) and the XP
+    /// to invest in <see cref="Goal.Amount"/>. The motor maps the name
+    /// to the wire enum id and sends the chunk; it makes NO decision
+    /// about WHICH attribute or HOW MUCH (Strategy owns that).
+    /// </summary>
+    RaiseAttribute = 10,
 }
 
 /// <summary>
@@ -129,6 +140,19 @@ internal sealed record Goal
     /// </summary>
     [JsonPropertyName("item")]
     public Selector? Item { get; init; }
+
+    /// <summary>
+    /// XP to spend, for the <see cref="GoalKind.RaiseAttribute"/> verb
+    /// only. The LLM MUST supply a positive whole number — there is no
+    /// source-side default, because choosing how much experience to
+    /// invest is a strategic decision the Strategy layer owns. The motor
+    /// clamps it down to the bot's observed available experience
+    /// (mechanical safety so the server doesn't reject the spend); a
+    /// null / non-positive / out-of-uint-range value is rejected with a
+    /// motor error and no opcode is sent. Ignored by every other verb.
+    /// </summary>
+    [JsonPropertyName("amount")]
+    public long? Amount { get; init; }
 
     /// <summary>
     /// Free-form rationale from Strategy. Used for log readability
