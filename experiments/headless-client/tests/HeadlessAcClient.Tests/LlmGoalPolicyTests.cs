@@ -4745,6 +4745,119 @@ public class LlmGoalPolicyTests
             dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
     }
 
+    // ---- Seam-independent barren-stall first-trigger (cp-2263 oscillation) ----
+    // A combat-ready bot oscillating between two adjacent safe landblocks resets
+    // per-landblock dwell at every seam, so dwellMinutes never reaches the
+    // threshold and the dwell first-trigger can never fire. sinceMaterialProgress
+    // does NOT reset at seams, so a long no-progress span ENGAGES egress even at
+    // dwell == 0. Threshold = 2x dwell (10min).
+
+    [Fact]
+    public void HuntEgress_BarrenStall_EngagesAtDwellZeroWhenNoProgressPastTimeout()
+    {
+        // The exact live loophole: dwell keeps resetting (0), not yet egressing,
+        // armed, monster-free, no material progress for 10min → engage.
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
+    }
+
+    [Fact]
+    public void HuntEgress_BarrenStall_DefersJustBelowTimeout()
+    {
+        // 9.9min < 10min barren-stall timeout AND dwell below threshold → defer.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(9.9)));
+    }
+
+    [Fact]
+    public void HuntEgress_BarrenStall_CancelledByMonsterEvenPastTimeout()
+    {
+        // An engageable monster still cancels — the bot reached a hunt.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: true,
+            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
+    }
+
+    // ---- IsEgressOverridableStationaryUse (cp-2263 forge fixation) ----
+    // While egressing, a Use of a STATIONARY non-transit world object extends the
+    // dwell like Talk/Give and is substituted; transit/interactive affordances
+    // (door/portal/corpse/openable) are preserved so the bot can still leave/loot.
+
+    private static WorldStateProjection StationaryUseWorld(
+        params VisibleObjectProjection[] visible)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+
+    private static Goal UseGoal(string name)
+        => new Goal { Kind = GoalKind.Use, Target = new Selector { Name = name } };
+
+    [Fact]
+    public void StationaryUse_OverridesPlainStationaryObject()
+    {
+        var world = StationaryUseWorld(new VisibleObjectProjection
+        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
+        Assert.True(LlmGoalPolicy.IsEgressOverridableStationaryUse(
+            UseGoal("Fletching Forge"), world));
+    }
+
+    [Theory]
+    [InlineData("door")]
+    [InlineData("portal")]
+    [InlineData("openable")]
+    [InlineData("corpse")]
+    public void StationaryUse_PreservesTransitAndInteractiveAffordances(string flag)
+    {
+        var v = new VisibleObjectProjection
+        {
+            Guid = 0x9u, Name = "Thing", Distance = 6f,
+            IsDoor = flag == "door",
+            IsPortal = flag == "portal",
+            IsOpenable = flag == "openable",
+            IsCorpse = flag == "corpse",
+        };
+        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
+            UseGoal("Thing"), StationaryUseWorld(v)));
+    }
+
+    [Fact]
+    public void StationaryUse_DoesNotOverrideNonUseKind()
+    {
+        var world = StationaryUseWorld(new VisibleObjectProjection
+        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Fletching Forge" } };
+        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(talk, world));
+    }
+
+    [Fact]
+    public void StationaryUse_DoesNotOverrideUnresolvedTarget()
+    {
+        // Target not in view → conservative: pass through (could be a transit
+        // object the bot is walking toward).
+        var world = StationaryUseWorld(new VisibleObjectProjection
+        { Guid = 0x9u, Name = "Something Else", Distance = 6f });
+        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
+            UseGoal("Fletching Forge"), world));
+    }
+
+    [Fact]
+    public void StationaryUse_DoesNotOverrideEmptySelector()
+    {
+        var world = StationaryUseWorld(new VisibleObjectProjection
+        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
+        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector() };
+        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(goal, world));
+    }
+
     [Fact]
     public void InventoryItemUsed_IsNotPlanInvalidating()
     {

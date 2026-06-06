@@ -110,13 +110,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // accepted server-side recovery-tick pattern (ac-ai-players#110).
     private const double EgressDwellMinutes = 5.0;
     private static readonly TimeSpan EgressNoProgressGrace = TimeSpan.FromMinutes(2);
+    // Seam-independent barren-stall first-trigger. The dwellMinutes trigger is
+    // per-landblock and resets at every seam, so a bot oscillating between two
+    // adjacent safe landblocks never accumulates the threshold in either and
+    // egress never engages. sinceMaterialProgress does NOT reset at seams (only
+    // on real own-progress: an inventory delta or a level gain), so this trigger
+    // catches a bot stalled across a small landblock cluster regardless of how
+    // it split its time. 2x the dwell threshold: even a perfectly even split
+    // across two landblocks accumulates here before either hits the per-landblock
+    // threshold, while a productive hunt resets it on every loot/level.
+    private static readonly TimeSpan BarrenStallTimeout =
+        TimeSpan.FromMinutes(2 * EgressDwellMinutes);
     // Wielded weapon bits that count as "combat-ready" for egress: Melee
     // (0x1) | Missile (0x100) | Caster (0x8000). A bot with no weapon is
     // not yet ready to hunt, so it keeps its full town grace.
     private const uint EgressWieldedWeaponMask =
         ItemTypeMasks.MeleeWeapon | 0x100u | 0x8000u;
     private int _egressLastInventoryCount = -1;
-    private DateTimeOffset _egressLastInventoryChangeUtc = DateTimeOffset.MinValue;
+    // Wall-clock of the bot's last MATERIAL own-progress: an inventory-count
+    // delta OR a level gain. Deliberately seam-independent (a landblock change
+    // is NOT progress). Feeds sinceMaterialProgress for both the no-progress
+    // grace and the seam-independent barren-stall trigger.
+    private DateTimeOffset _egressLastProgressUtc = DateTimeOffset.MinValue;
+    // Last observed self-level, for detecting a level gain as own-progress
+    // (resets the no-progress clock so an XP-only productive hunt is not
+    // flagged barren-stalled). Own data only — audit-safe.
+    private int? _egressLastObservedLevel;
     // Sticky egress latch. Once egress triggers we keep it engaged across
     // landblock seams until a monster appears, the bot disarms, or it makes
     // material progress. Without this latch the override would drop the tick
@@ -421,18 +440,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var lb = world.Self.Landblock;
 
         // Track MATERIAL progress: an inventory delta (received/spent a
-        // quest item, looted) stamps a fresh "last progress" time. Repeated
-        // identical NPC dialog is NOT progress (that is the loop we break) —
-        // so we deliberately do NOT look at dialog/hint events here. A
-        // landblock change is deliberately NOT treated as progress: crossing
+        // quest item, looted) OR a level gain stamps a fresh "last progress"
+        // time. Repeated identical NPC dialog is NOT progress (that is the loop
+        // we break) — so we deliberately do NOT look at dialog/hint events here.
+        // A landblock change is deliberately NOT treated as progress: crossing
         // an invisible spatial seam into another safe zone must NOT reset the
         // clock, or the bot ping-pongs between adjacent town landblocks
         // (each crossing granting a fresh grace). The sticky _isEgressing
-        // latch (below) carries egress through seams instead.
+        // latch (below) carries egress through seams, and the seam-independent
+        // barren-stall trigger ENGAGES it even when the per-landblock dwell
+        // keeps resetting.
         var invCount = world.Inventory.Count;
-        if (_egressLastInventoryCount >= 0 && invCount != _egressLastInventoryCount)
-            _egressLastInventoryChangeUtc = nowUtc;
+        if (_egressLastInventoryCount < 0)
+            // First observation this session: anchor the no-progress clock to
+            // now. The field default (MinValue) would otherwise read as years
+            // and fire the barren-stall trigger on the very first tick.
+            _egressLastProgressUtc = nowUtc;
+        else if (invCount != _egressLastInventoryCount)
+            _egressLastProgressUtc = nowUtc;
         _egressLastInventoryCount = invCount;
+        // A level gain is the purest own-progress signal: a productive hunt
+        // that yields XP-only progression (no inventory delta) must also reset
+        // the no-progress clock so it is not flagged barren-stalled mid-hunt.
+        if (world.Self.Level is int egLvlNow)
+        {
+            if (_egressLastObservedLevel is int egPrevLvl && egLvlNow > egPrevLvl)
+                _egressLastProgressUtc = nowUtc;
+            _egressLastObservedLevel = egLvlNow;
+        }
 
         var dwellEntry = DwellEntryForPrompt(lb);
         var dwellMin = dwellEntry is DateTimeOffset de
@@ -460,12 +495,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var effectiveMonsterInView = ComputeEffectiveMonsterInView(
             world.Visible, world.KilledKindsThisDwell, tappedOut);
 
-        var sinceProgress = nowUtc - _egressLastInventoryChangeUtc;
+        var sinceProgress = nowUtc - _egressLastProgressUtc;
         // Update the sticky latch every tick (idempotent). It engages once
         // dwell passes the threshold and DIS-engages the moment a cancel
         // condition holds, regardless of the current landblock.
+        var wasEgressing = _isEgressing;
         _isEgressing = ComputeEgressActive(
             _isEgressing, combatReady, effectiveMonsterInView, dwellMin, sinceProgress, tappedOut);
+        if (_isEgressing && !wasEgressing)
+            // Latch just engaged — log once per engagement so the trigger is
+            // observable even when the current goal is not overridable (e.g.
+            // the bot is looping on a preserved transit Use). dwell vs the
+            // seam-independent stall timer tells which first-trigger fired.
+            Console.WriteLine(
+                $"[llm-override] hunt-egress ENGAGED: dwell={dwellMin:F1}min, " +
+                $"no-progress={sinceProgress.TotalMinutes:F1}min, tappedOut={tappedOut}, " +
+                $"trigger={(dwellMin >= EgressDwellMinutes ? "dwell" : "barren-stall")}.");
         if (!_isEgressing)
             return goal;
 
@@ -483,6 +528,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         else if (goal.Kind == GoalKind.Attack &&
                  IsTappedOutRepeatKillAttack(goal, world, tappedOut))
             overrideReason = "repeat-farm-attack";
+        else if (IsEgressOverridableStationaryUse(goal, world))
+            overrideReason = "stationary-use";
 
         if (overrideReason is null)
             return goal;
@@ -531,17 +578,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return false;
         // Sticky: stay engaged once started, regardless of dwell reset at seams.
         if (currentlyEgressing) return true;
-        // Otherwise trigger only after dwelling in this safe zone past the
-        // threshold.
-        return dwellMinutes >= EgressDwellMinutes;
+        // First-trigger A: dwelled past the threshold in THIS landblock.
+        // First-trigger B (seam-independent): combat-ready, monster-free, and no
+        // material progress for well past the dwell threshold — catches a bot
+        // oscillating between adjacent safe landblocks where per-landblock dwell
+        // keeps resetting and trigger A can never fire.
+        return dwellMinutes >= EgressDwellMinutes
+            || sinceMaterialProgress >= BarrenStallTimeout;
     }
 
-    // Only social, dwell-extending verbs are substituted while egressing.
-    // Use/Pickup/Wield/Attack/Explore are never overridden (Use may be the
-    // door/portal transition itself; Pickup may be self-arming; the rest are
-    // already progress).
+    // Only social, dwell-extending verbs are substituted unconditionally while
+    // egressing. Pickup/Wield/Attack/Explore are never overridden here (Pickup
+    // may be self-arming; the rest are already progress). A Use is handled
+    // separately by IsEgressOverridableStationaryUse so transit Uses survive.
     internal static bool IsEgressOverridableVerb(GoalKind kind)
         => kind == GoalKind.Talk || kind == GoalKind.Give;
+
+    // While egressing, a Use targeting a STATIONARY non-transit world object
+    // (e.g. a crafting station the LLM fixates on and re-walks to) extends the
+    // dwell exactly like Talk/Give, so substitute it with Explore. Transit and
+    // interactive affordances are PRESERVED so the bot can still leave and loot:
+    // a door/portal Use is the way OUT, a corpse Use is looting, an openable
+    // (container) Use is real interaction. Decision uses ONLY typed wire-bit
+    // projection flags (IsPortal/IsDoor/IsOpenable/IsCorpse) — no object names,
+    // wcids, landblocks, or priorities. Conservative: overrides only when the
+    // target resolves to visible object(s) ALL confirmed non-transit; an
+    // unresolved or mixed target passes through untouched.
+    internal static bool IsEgressOverridableStationaryUse(
+        Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Use) return false;
+        var sel = goal.Target;
+        if (sel.IsEmpty) return false;
+        var matches = world.Visible
+            .Where(v => VisibleMatchesSelector(sel, v))
+            .ToList();
+        if (matches.Count == 0) return false;
+        return matches.All(v =>
+            !v.IsPortal && !v.IsDoor && !v.IsOpenable && !v.IsCorpse);
+    }
 
     // cold-start egress: true when a visible monster is one the bot has
     // already FARMED in the current landblock — i.e. the bot is tapped out
