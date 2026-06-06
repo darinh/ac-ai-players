@@ -5716,6 +5716,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("COMBAT SAFETY", p);
         Assert.Contains("DISENGAGE", p);
         Assert.Contains("AVOID re-attacking the same KIND", p);
+        // combat safety: absolute-HP / rising self-health interpretation (cp-2269)
+        Assert.Contains("trust the ABSOLUTE HP", p);
+        Assert.Contains("regenerating BELOW full strength", p);
         // looting: never skip a fresh corpse
         Assert.Contains("NEVER skip a fresh corpse", p);
         // door / passage traversal
