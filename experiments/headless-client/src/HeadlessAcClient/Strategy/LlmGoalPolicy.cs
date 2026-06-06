@@ -604,17 +604,93 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             $"progress for {sinceProgress.TotalMinutes:F1}min — substituting {goal.Kind} " +
             $"target={goal.Target} with Explore{{anywhere}} to leave the tapped-out zone.");
 
-        return new Goal
+        return MakeEgressExploreGoal(
+            nowUtc, "override:hunt-egress",
+            "mechanical hunt-egress: tapped-out monster-free safe zone, dwell past threshold " +
+            "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)");
+    }
+
+    // Construct the generic targetless Explore{anywhere} goal that the egress
+    // mechanisms substitute to leave a tapped-out zone. Centralized so every
+    // egress path mints an identical goal (the picker/frontier explorer drives
+    // the actual direction). Pure factory — no game knowledge.
+    private static Goal MakeEgressExploreGoal(DateTimeOffset nowUtc, string source, string rationale)
+        => new Goal
         {
             Kind = GoalKind.Explore,
             Target = new Selector { Name = "anywhere" },
-            Source = "override:hunt-egress",
+            Source = source,
             CreatedAtUtc = nowUtc,
             Id = Guid.NewGuid(),
             Priority = 1,
-            Rationale = "mechanical hunt-egress: tapped-out monster-free safe zone, dwell past threshold " +
-                        "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)",
+            Rationale = rationale,
         };
+
+    // Pure gate for the stuck-loop egress substitution (below). A combat-ready
+    // bot that is ALSO tapped out (dwelled past the threshold here with 0 levels
+    // gained) and faces no active attacker has nothing left to gain in this
+    // zone, so a proven no-progress interaction loop should send it away rather
+    // than to the fallback (which re-picks the same dead-end class of object).
+    // Extracted for deterministic unit testing. Own signals only — no game
+    // content.
+    internal static bool ShouldEscapeStuckLoop(
+        bool combatReady, bool tappedOut, bool hostileInView)
+        => combatReady && tappedOut && !hostileInView;
+
+    // When a fixation guard has detected a proven no-progress interaction loop
+    // (a door/forge/chest/NPC re-tried with no movement and no inventory
+    // change), substitute a generic Explore so a tapped-out combat-ready bot
+    // LEAVES instead of deferring to the fallback — which re-selects the same
+    // dead-end class of stationary object, keeping the bot wedged in a town.
+    // This enforces the LOOP-BREAK / HUNT EXCURSION prompt rules mechanically
+    // when a weak model ignores them, and works INDEPENDENTLY of the egress
+    // latch (which a persistent non-hostile creature in PVS can keep suppressed
+    // via the monster-in-view cancel). Gated tightly:
+    //   - combat-ready (typed wielded weapon) — an UNARMED bot may legitimately
+    //     need to Use objects to progress; do not send it wandering.
+    //   - tapped out (HuntTappedOutFact: dwelled past EgressDwellMinutes with 0
+    //     levels gained since arriving) — early in a zone a Use loop may be a
+    //     genuine progress attempt.
+    //   - no ObservedHostile attacker in view — defend/flee a real fight, never
+    //     turn away from it.
+    // Own signals only (typed wield, own dwell/level, own ObservedHostile
+    // perception); the trigger is the already-audited fixation guard. No
+    // door/chest/monster-kind knowledge; substitutes a generic Explore.
+    private bool ShouldEscapeStuckLoopWithExplore(WorldStateProjection world, DateTimeOffset nowUtc)
+    {
+        var combatReady = world.Inventory.Any(i =>
+            i.WieldedAt is uint w && w != 0 &&
+            i.ItemType is uint it && (it & EgressWieldedWeaponMask) != 0);
+        var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
+        var dwellMin = dwellEntry is DateTimeOffset de
+            ? Math.Max(0.0, (nowUtc - de).TotalMinutes) : 0.0;
+        var tappedOut = HuntTappedOutFact(
+            combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
+            dwellMin, EgressDwellMinutes) is not null;
+        var hostileInView = world.Visible.Any(
+            v => v.IsMonster && !v.IsCorpse && v.ObservedHostile);
+        return ShouldEscapeStuckLoop(combatReady, tappedOut, hostileInView);
+    }
+
+    // A fixation guard fired (proven no-progress interaction loop). Either send
+    // a tapped-out combat-ready bot away with Explore (stuck-loop egress) or, if
+    // not in that state, defer to the fallback as before.
+    private Goal? EscapeOrFallback(
+        WorldStateProjection world, EventStream events, Goal? currentGoal,
+        DateTimeOffset nowUtc, string loopKind)
+    {
+        if (ShouldEscapeStuckLoopWithExplore(world, nowUtc))
+        {
+            Console.WriteLine(
+                "[llm-override] stuck-loop egress: tapped-out combat-ready bot looping " +
+                $"{loopKind} with no progress and no hostile attacker in view — " +
+                "substituting Explore{anywhere} to leave the zone.");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:stuck-loop-egress",
+                $"mechanical stuck-loop egress: tapped-out, looping {loopKind} with no " +
+                "progress; leaving to find monsters (enforces the LOOP-BREAK rules)");
+        }
+        return _fallback.ProposeGoal(world, events, currentGoal);
     }
 
     // Pure sticky-latch transition for hunt-egress. Engages once the bot has
@@ -1541,7 +1617,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary world-object Use repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-op world-object Use loop");
-            return _fallback.ProposeGoal(world, events, currentGoal);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
         }
 
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
@@ -1558,7 +1634,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary NPC Talk repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress NPC Talk loop");
-            return _fallback.ProposeGoal(world, events, currentGoal);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "NPC Talk");
         }
 
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
@@ -1574,7 +1650,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary same-target interaction repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress cross-kind interaction loop");
-            return _fallback.ProposeGoal(world, events, currentGoal);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "interaction");
         }
 
         _training?.RecordEmittedGoal(decisionId, goal);
