@@ -250,6 +250,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // re-emission can be judged a no-progress loop.
     private const int NpcTalkRepeatThreshold = 4;
 
+    // Cross-kind interaction fixation loop-break (2026-06-05). After a kill,
+    // a weak model fixates on the resulting EMPTY corpse, ALTERNATING
+    // Use{Corpse} and Pickup{Corpse} forever. The per-kind guards above each
+    // count only their OWN GoalKind, so the alternation never trips either
+    // (Use never reaches 3 consecutive, and Pickup is unguarded). This holds
+    // the identity + self position of the last accepted INTERACT goal (Use
+    // with no Item, or Pickup) so a STATIONARY repeat ACROSS those kinds
+    // (same target, bot has not moved, nothing entered or left inventory) is
+    // detected and dropped. Pure mechanical bookkeeping over the bot's OWN
+    // emission key + its OWN self cell/position + inventory-change events —
+    // it parses NO server text and encodes no object knowledge. A real loot
+    // (Slice Q auto-loot / a successful Pickup) changes inventory and resets
+    // the streak, so a non-empty corpse is never suppressed; only a
+    // zero-progress fixation fires.
+    private InteractFixation? _lastInteractFixation;
+
+    private sealed record InteractFixation(
+        string Key, uint? Landblock, uint? Cell, float X, float Y,
+        long SequenceFloor, int Count);
+
+    // The cross-kind guard catches a mixed-kind alternation the per-kind
+    // guards miss; threshold 4 drops the 4th same-target interact in a
+    // stationary no-progress streak.
+    private const int InteractFixationThreshold = 4;
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -1146,6 +1171,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
+        // guards above each count only their own GoalKind, so a mixed
+        // Use{target} ↔ Pickup{target} alternation on one stationary target
+        // (classically an emptied corpse after a kill) trips neither. Drop the
+        // mixed-kind stationary repeat and defer to the fallback so the bot
+        // moves on. A real loot changes inventory and resets the streak.
+        if (IsStationaryInteractFixation(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM interact kind={goal.Kind} target={goal.Target}" +
+                " — stationary same-target interaction repeated with no progress; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: stationary no-progress cross-kind interaction loop");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -1535,6 +1576,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Count = count,
         };
         return count >= NpcTalkRepeatThreshold;
+    }
+
+    /// <summary>
+    /// True when the bot is fixating on ONE stationary target across the
+    /// INTERACT goal kinds — a world-object <see cref="GoalKind.Use"/>
+    /// (<c>goal.Item is null</c>) or a <see cref="GoalKind.Pickup"/> — by
+    /// re-emitting interactions at the SAME target
+    /// <see cref="InteractFixationThreshold"/> times in a row with no
+    /// movement and no inventory change. The per-kind guards
+    /// (<see cref="IsStationaryWorldUseRepeat"/>,
+    /// <see cref="IsExhaustedNpcTalkRepeat"/>) each count only their own
+    /// GoalKind, so a mixed alternation (classically Use{Corpse} ↔
+    /// Pickup{Corpse} on an emptied corpse after a kill) slips past both —
+    /// Use never reaches its threshold consecutively and Pickup is
+    /// unguarded. This guard closes that gap by counting across the interact
+    /// kinds on the SAME canonical target.
+    ///
+    /// <para>Pure mechanical bookkeeping, identical in shape to the per-kind
+    /// guards: keys on the bot's OWN emission identity
+    /// (<see cref="CanonicalUseTargetKey"/>), its OWN self cell/position, and
+    /// inventory-change EVENT PRESENCE. Parses NO server text and encodes no
+    /// object-type knowledge. A real loot (Slice Q auto-loot or a successful
+    /// Pickup) raises InventoryItemAdded/Removed and resets the streak, so a
+    /// productive interaction is never suppressed; movement or a different
+    /// target also resets. Under-specified selectors (no guid/exact-name) are
+    /// not guarded.</para>
+    /// </summary>
+    internal bool IsStationaryInteractFixation(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        bool isInteract = goal.Kind == GoalKind.Pickup
+            || (goal.Kind == GoalKind.Use && goal.Item is null);
+        if (!isInteract) return false;
+
+        var key = CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+
+        var self = world.Self;
+        var prev = _lastInteractFixation;
+
+        bool sameTarget = prev is not null &&
+            string.Equals(prev.Key, key, StringComparison.OrdinalIgnoreCase);
+
+        bool moved = prev is null
+            || prev.Landblock != self.Landblock
+            || prev.Cell != self.CellId
+            || SquaredXyDistance(prev.X, prev.Y, self.PositionX, self.PositionY) > StationaryUseEpsilonSq;
+
+        bool inventoryChanged = prev is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, prev.SequenceFloor)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, prev.SequenceFloor));
+
+        if (!sameTarget || moved || inventoryChanged)
+        {
+            _lastInteractFixation = new InteractFixation(
+                key, self.Landblock, self.CellId, self.PositionX, self.PositionY,
+                events.NextSequence, 1);
+            return false;
+        }
+
+        int interactCount = prev!.Count + 1;
+        _lastInteractFixation = prev with
+        {
+            X = self.PositionX,
+            Y = self.PositionY,
+            SequenceFloor = events.NextSequence,
+            Count = interactCount,
+        };
+        return interactCount >= InteractFixationThreshold;
     }
 
     private static float SquaredXyDistance(float ax, float ay, float bx, float by)
