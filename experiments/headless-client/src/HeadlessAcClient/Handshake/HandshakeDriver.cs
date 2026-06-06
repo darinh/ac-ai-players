@@ -1438,6 +1438,32 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"[observe]   -> GameEvent: type={ge.EventType} (0x{(uint)ge.EventType:X4}) " +
                                 $"recv=0x{ge.ReceiverGuid:X8} seq={ge.ServerEventSequence} " +
                                 $"payload={geDesc}");
+                            // PlayerDescription (0x0013) login bundle — seed the
+                            // bot's initial Level + experience totals so XP is
+                            // perceived from login (discrete 0x02CD/0x02CF updates
+                            // only fire AFTER an in-game change). Guard on the
+                            // GameEvent recipient guid matching self so a bundle
+                            // addressed elsewhere can never seed our own state.
+                            if (ge.Payload?.PlayerDescription is { } pdesc &&
+                                worldState.SelfGuid is uint pdSelf &&
+                                ge.ReceiverGuid == pdSelf)
+                            {
+                                bool seededLvl = pdesc.Level is int pdLvl &&
+                                    worldState.SeedSelfPropertyInt(25u, pdLvl);
+                                bool seededTot = pdesc.TotalExperience is long pdTot &&
+                                    worldState.SeedSelfPropertyInt64(
+                                        PrivateUpdatePropertyInt64Message.TotalExperienceId, pdTot);
+                                bool seededAvl = pdesc.AvailableExperience is long pdAvl &&
+                                    worldState.SeedSelfPropertyInt64(
+                                        PrivateUpdatePropertyInt64Message.AvailableExperienceId, pdAvl);
+                                Console.WriteLine(
+                                    $"[playerdesc] login bundle: level={pdesc.Level?.ToString() ?? "?"}" +
+                                    $"{(seededLvl ? "" : "(skip)")} " +
+                                    $"totalXp={pdesc.TotalExperience?.ToString() ?? "?"}" +
+                                    $"{(seededTot ? "" : "(skip)")} " +
+                                    $"unspentXp={pdesc.AvailableExperience?.ToString() ?? "?"}" +
+                                    $"{(seededAvl ? "" : "(skip)")}");
+                            }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh
                             // packet now that the server reports the

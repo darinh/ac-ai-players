@@ -525,6 +525,61 @@ internal sealed class WorldState
     }
 
     /// <summary>
+    /// Seed a self PropertyInt from the login PlayerDescription bundle
+    /// (0x0013), which carries no per-property byte sequence. Unlike
+    /// <see cref="ApplyPrivatePropertyInt"/> this DOES NOT touch the
+    /// stale-gating high-water map, so the first real discrete update
+    /// (0x02CD, whatever its starting sequence) is still accepted. The
+    /// seed is SKIPPED when a discrete update has already been applied
+    /// for the property (its byte-seq map entry exists) so an
+    /// out-of-order or re-sent bundle never clobbers a fresher discrete
+    /// value. Returns true if the value was seeded.
+    /// </summary>
+    public bool SeedSelfPropertyInt(uint property, int value)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PlayerDescription PropertyInt seed before SelfGuid known: " +
+                $"prop={property} val={value} (dropped)");
+            return false;
+        }
+        if (_selfPropertyByteSeq.ContainsKey(property))
+            return false; // a discrete update already owns this property
+
+        var snap = GetOrCreateSnapshot(selfGuid);
+        snap.PropertyInts ??= new Dictionary<uint, int>();
+        snap.PropertyInts[property] = value;
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// Seed a self PropertyInt64 from the login PlayerDescription bundle.
+    /// Same contract as <see cref="SeedSelfPropertyInt"/>: leaves the
+    /// Int64 stale-gating map untouched and defers to any
+    /// already-applied discrete update for the property.
+    /// </summary>
+    public bool SeedSelfPropertyInt64(uint property, long value)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PlayerDescription PropertyInt64 seed before SelfGuid known: " +
+                $"prop={property} val={value} (dropped)");
+            return false;
+        }
+        if (_selfPropertyInt64ByteSeq.ContainsKey(property))
+            return false;
+
+        var snap = GetOrCreateSnapshot(selfGuid);
+        snap.PropertyInt64s ??= new Dictionary<uint, long>();
+        snap.PropertyInt64s[property] = value;
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
     /// Apply a PrivateUpdateVital (0x02E7). Like
     /// PrivateUpdatePropertyInt it has no guid and is implicitly
     /// scoped to the receiving session's player. We only track the
