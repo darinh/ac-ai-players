@@ -121,6 +121,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // threshold, while a productive hunt resets it on every loot/level.
     private static readonly TimeSpan BarrenStallTimeout =
         TimeSpan.FromMinutes(2 * EgressDwellMinutes);
+    // Liveness backstop for the monster-in-view egress veto. Once the bot is
+    // tapped out, a NON-HOSTILE monster KIND that stays visible-but-unengaged
+    // (the bot keeps choosing overridable social/stationary goals instead of
+    // attacking it or leaving) for this long no longer counts as a reason to
+    // stay. This is the ONLY signal — source assigns the kind no value/danger
+    // label; an ObservedHostile attacker is NEVER ignored, and the override it
+    // unblocks can only redirect a social/stationary verb (Attack/Pickup/
+    // Explore/transit-Use/corpse-loot stay preserved), so a false positive
+    // costs at most one redirected Talk. Mirrors the per-dwell killed-kind
+    // exclusion (IsFarmedHere). Without it, a single passive attackable
+    // creature (which legitimately passes IsMonster) pins a tapped-out bot in
+    // a starter zone forever via the monsterInView veto.
+    private static readonly TimeSpan IgnoredKindExposureTimeout =
+        TimeSpan.FromMinutes(EgressDwellMinutes);
+    private static readonly IReadOnlySet<string> EmptyKindSet =
+        new HashSet<string>();
     // Wielded weapon bits that count as "combat-ready" for egress: Melee
     // (0x1) | Missile (0x100) | Caster (0x8000). A bot with no weapon is
     // not yet ready to hunt, so it keeps its full town grace.
@@ -142,6 +158,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // after the bot crosses a seam (dwell resets to 0), reverting to Talk and
     // pathing back — an infinite ping-pong between two adjacent safe zones.
     private bool _isEgressing;
+    // Per monster-KIND wall-clock of when it first became CONTINUOUSLY visible
+    // while the bot was tapped out and choosing an overridable (non-engaging,
+    // non-leaving) goal. A kind whose continuous eligible exposure passes
+    // IgnoredKindExposureTimeout joins the per-dwell "ignored" set so it stops
+    // vetoing egress (see ComputeEffectiveMonsterInView). Reset per kind on PVS
+    // absence, on the LLM engaging the kind (Attack), and whenever the bot is
+    // not tapped-out-and-ignoring; cleared wholesale on a landblock change
+    // (the notion is per-dwell, like the killed set). Own observed behavior
+    // only — audit-safe.
+    private readonly Dictionary<string, DateTimeOffset> _ignoredKindFirstEligibleUtc = new();
+    private uint? _ignoredExposureLandblock;
+    // Kinds already logged as "ignored" this dwell, so the observability line
+    // fires once per kind per dwell (cleared with the tracker on a landblock
+    // change). Pure logging bookkeeping.
+    private readonly HashSet<string> _loggedIgnoredKinds = new();
     // The bot's OWN self-level captured when it entered the current dwell
     // landblock (snapshotted in UpdateDwellTracking; lazily filled if level
     // was not yet observed at entry). Compared against the current level to
@@ -492,8 +523,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // kind or any ObservedHostile attacker still counts — the bot stays
         // and the LLM engages it. This is the only change to the egress
         // trigger; ComputeEgressActive itself stays pure.
+        //
+        // Liveness backstop: also drop a non-hostile kind the bot has kept
+        // visible-but-unengaged for a sustained tapped-out window (it keeps
+        // choosing overridable goals rather than attacking it or leaving) so a
+        // single passive attackable creature cannot pin a tapped-out bot here
+        // forever. Reset the tracker on a landblock change (per-dwell, like the
+        // killed set); accrue only while tapped out AND the goal this tick is
+        // overridable (Talk/Give/Use) — engaging (Attack/Pickup/Wield) or
+        // leaving (Explore) is not "ignoring".
+        if (_ignoredExposureLandblock != lb)
+        {
+            _ignoredKindFirstEligibleUtc.Clear();
+            _loggedIgnoredKinds.Clear();
+            _ignoredExposureLandblock = lb;
+        }
+        var ignoreEligible = tappedOut && IsEgressIgnoreEligibleGoal(goal.Kind);
+        var engagedKinds = goal.Kind == GoalKind.Attack
+            ? VisibleKindKeysMatching(goal.Target, world)
+            : EmptyKindSet;
+        var ignoredKinds = UpdateIgnoredKindExposure(
+            _ignoredKindFirstEligibleUtc,
+            VisibleMonsterKindKeys(world),
+            engagedKinds, ignoreEligible, nowUtc, IgnoredKindExposureTimeout);
+        foreach (var ik in ignoredKinds)
+            if (_loggedIgnoredKinds.Add(ik))
+                // Observability: a non-hostile kind has been visible-but-
+                // unengaged past the timeout this dwell, so it no longer vetoes
+                // egress. Logged once per kind per dwell (opaque kind-key only).
+                Console.WriteLine(
+                    $"[llm-override] hunt-egress ignored-kind: '{ik}' visible-but-unengaged " +
+                    $">= {IgnoredKindExposureTimeout.TotalMinutes:F0}min while tapped out — " +
+                    $"no longer vetoes egress.");
+
         var effectiveMonsterInView = ComputeEffectiveMonsterInView(
-            world.Visible, world.KilledKindsThisDwell, tappedOut);
+            world.Visible, world.KilledKindsThisDwell, tappedOut, ignoredKinds);
 
         var sinceProgress = nowUtc - _egressLastProgressUtc;
         // Update the sticky latch every tick (idempotent). It engages once
@@ -637,14 +701,118 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // cold-start egress: like the plain "any monster in view" check, but a
-    // kind the bot has already farmed here (see IsFarmedHere) does not count
-    // while tapped out. A first-time/unknown kind or any ObservedHostile
-    // attacker still counts (cancels egress so the bot engages it).
+    // kind the bot has already farmed here (see IsFarmedHere) OR has kept
+    // visible-but-unengaged past the liveness timeout (see IsIgnoredHere) does
+    // not count while tapped out. A first-time/unknown kind or any
+    // ObservedHostile attacker still counts (cancels egress so the bot engages
+    // it). ignoredThisDwell is optional so existing callers are unaffected.
     internal static bool ComputeEffectiveMonsterInView(
         IReadOnlyList<VisibleObjectProjection> visible,
-        IReadOnlySet<string>? killedThisDwell, bool tappedOut)
+        IReadOnlySet<string>? killedThisDwell, bool tappedOut,
+        IReadOnlySet<string>? ignoredThisDwell = null)
         => visible.Any(v => v.IsMonster && !v.IsCorpse
-                            && !IsFarmedHere(v, killedThisDwell, tappedOut));
+                            && !IsFarmedHere(v, killedThisDwell, tappedOut)
+                            && !IsIgnoredHere(v, ignoredThisDwell, tappedOut));
+
+    // Liveness backstop counterpart to IsFarmedHere: true when a visible
+    // non-hostile monster's kind-key is in the per-dwell "ignored" set (the
+    // bot kept it visible-but-unengaged past IgnoredKindExposureTimeout while
+    // tapped out). ObservedHostile attackers are never ignored. Same own-data
+    // basis as IsFarmedHere — no value/danger label per type.
+    internal static bool IsIgnoredHere(
+        VisibleObjectProjection v, IReadOnlySet<string>? ignoredThisDwell, bool tappedOut)
+    {
+        if (!tappedOut) return false;
+        if (v.ObservedHostile) return false;
+        if (ignoredThisDwell is null || ignoredThisDwell.Count == 0) return false;
+        return CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name))
+                   is string k
+               && ignoredThisDwell.Contains(k);
+    }
+
+    // A goal whose presence (while tapped out) counts as the bot "ignoring" a
+    // visible monster: the social/stationary verbs egress may override. An
+    // Attack/Pickup/Wield (engaging/arming) or Explore (already leaving) is NOT
+    // ignoring, so it does not accrue ignored-kind exposure.
+    private static bool IsEgressIgnoreEligibleGoal(GoalKind kind)
+        => kind == GoalKind.Talk || kind == GoalKind.Give || kind == GoalKind.Use;
+
+    // Pure update of the per-kind eligible-exposure tracker. Mutates
+    // firstEligibleUtc in place and returns the set of kind-keys whose
+    // CONTINUOUS eligible exposure has reached `timeout` (the "ignored" set).
+    // When eligibleContext is false the tracker is cleared (no accrual). A kind
+    // that is hostile, is one the bot just chose to engage (engagedKinds), or
+    // is no longer visible is dropped — so a qualifying kind must be present,
+    // non-hostile, and unengaged the WHOLE window. Own-behavior bookkeeping
+    // only; assigns no value to any kind.
+    internal static IReadOnlySet<string> UpdateIgnoredKindExposure(
+        IDictionary<string, DateTimeOffset> firstEligibleUtc,
+        IReadOnlyCollection<(string Key, bool Hostile)> visibleMonsterKinds,
+        IReadOnlySet<string> engagedKinds,
+        bool eligibleContext,
+        DateTimeOffset now,
+        TimeSpan timeout)
+    {
+        if (!eligibleContext)
+        {
+            firstEligibleUtc.Clear();
+            return EmptyKindSet;
+        }
+        var eligibleNow = new HashSet<string>();
+        foreach (var (key, hostile) in visibleMonsterKinds)
+        {
+            if (hostile) continue;
+            if (engagedKinds.Contains(key)) continue;
+            eligibleNow.Add(key);
+        }
+        foreach (var stale in firstEligibleUtc.Keys.Where(k => !eligibleNow.Contains(k)).ToList())
+            firstEligibleUtc.Remove(stale);
+        var ignored = new HashSet<string>();
+        foreach (var key in eligibleNow)
+        {
+            if (!firstEligibleUtc.TryGetValue(key, out var first))
+            {
+                first = now;
+                firstEligibleUtc[key] = first;
+            }
+            if (now - first >= timeout)
+                ignored.Add(key);
+        }
+        return ignored.Count == 0 ? EmptyKindSet : ignored;
+    }
+
+    // Kind-keys of all currently-visible monsters paired with whether each is
+    // an active ObservedHostile attacker. Corpses excluded. Null kind-keys
+    // (no wcid and no name) dropped.
+    private static IReadOnlyCollection<(string Key, bool Hostile)> VisibleMonsterKindKeys(
+        WorldStateProjection world)
+    {
+        var list = new List<(string, bool)>();
+        foreach (var v in world.Visible)
+        {
+            if (!v.IsMonster || v.IsCorpse) continue;
+            if (CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name)) is string k)
+                list.Add((k, v.ObservedHostile));
+        }
+        return list;
+    }
+
+    // Kind-keys of the visible monsters a selector resolves to (the kinds the
+    // bot is choosing to engage this tick). Empty when nothing matches.
+    private static IReadOnlySet<string> VisibleKindKeysMatching(
+        Selector sel, WorldStateProjection world)
+    {
+        if (sel.IsEmpty) return EmptyKindSet;
+        var set = new HashSet<string>();
+        foreach (var v in world.Visible)
+        {
+            if (!v.IsMonster || v.IsCorpse) continue;
+            if (!VisibleMatchesSelector(sel, v)) continue;
+            if (CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name)) is string k)
+                set.Add(k);
+        }
+        return set.Count == 0 ? EmptyKindSet : set;
+    }
 
     // cold-start egress: true only for a narrow, safe-to-substitute Attack —
     // an Attack the LLM emitted, while tapped out, whose every matching

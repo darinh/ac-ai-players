@@ -6392,6 +6392,141 @@ public class LlmGoalPolicyTests
             visible, new HashSet<string> { key }, tappedOut: true));
     }
 
+    // ---- ignored-kind liveness backstop (visible-but-unengaged) ----
+
+    [Fact]
+    public void IsIgnoredHere_NotTappedOut_False()
+    {
+        var v = Mob(0x1u, "Cow", 14u);
+        Assert.False(LlmGoalPolicy.IsIgnoredHere(
+            v, new HashSet<string> { "w:14" }, tappedOut: false));
+    }
+
+    [Fact]
+    public void IsIgnoredHere_ObservedHostile_False()
+    {
+        var v = Mob(0x1u, "Cow", 14u, hostile: true);
+        Assert.False(LlmGoalPolicy.IsIgnoredHere(
+            v, new HashSet<string> { "w:14" }, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsIgnoredHere_NullOrEmptySet_False()
+    {
+        var v = Mob(0x1u, "Cow", 14u);
+        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, null, tappedOut: true));
+        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string>(), tappedOut: true));
+    }
+
+    [Fact]
+    public void IsIgnoredHere_KindInSet_True()
+    {
+        var v = Mob(0x1u, "Cow", 14u);
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
+        Assert.True(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string> { key }, tappedOut: true));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_IgnoredKind_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
+        var visible = new[] { Mob(0x1u, "Cow", 14u) };
+        // Not in the KILLED set, but in the IGNORED set → no longer effective.
+        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, null, tappedOut: true));
+        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_IgnoredSetButHostile_True()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
+        var visible = new[] { Mob(0x1u, "Cow", 14u, hostile: true) };
+        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
+    }
+
+    private static readonly System.Collections.Generic.IReadOnlySet<string> NoEngaged =
+        new HashSet<string>();
+
+    [Fact]
+    public void UpdateIgnoredKindExposure_NotEligible_ClearsAndEmpty()
+    {
+        var dict = new Dictionary<string, DateTimeOffset>
+        {
+            ["w:14"] = DateTimeOffset.UnixEpoch,
+        };
+        var now = DateTimeOffset.UnixEpoch.AddMinutes(10);
+        var result = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged,
+            eligibleContext: false, now, TimeSpan.FromMinutes(5));
+        Assert.Empty(result);
+        Assert.Empty(dict); // tracker cleared when not eligible
+    }
+
+    [Fact]
+    public void UpdateIgnoredKindExposure_DefersBeforeTimeout_ThenIgnoresAtTimeout()
+    {
+        var dict = new Dictionary<string, DateTimeOffset>();
+        var t0 = DateTimeOffset.UnixEpoch;
+        // First eligible observation stamps the clock, not yet ignored.
+        var r1 = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
+        Assert.Empty(r1);
+        // Just before timeout → still deferred.
+        var r2 = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
+        Assert.Empty(r2);
+        // At/after timeout → ignored.
+        var r3 = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(5), TimeSpan.FromMinutes(5));
+        Assert.Contains("w:14", r3);
+    }
+
+    [Fact]
+    public void UpdateIgnoredKindExposure_AbsenceResetsContinuity()
+    {
+        var dict = new Dictionary<string, DateTimeOffset>();
+        var t0 = DateTimeOffset.UnixEpoch;
+        LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
+        // Kind leaves PVS for a tick → dropped from tracker.
+        LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, System.Array.Empty<(string, bool)>(), NoEngaged, true, t0.AddMinutes(4), TimeSpan.FromMinutes(5));
+        Assert.DoesNotContain("w:14", dict.Keys);
+        // Reappears → clock restarts; 4.9 min after FIRST sighting is < timeout from the restart.
+        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
+        Assert.Empty(r);
+    }
+
+    [Fact]
+    public void UpdateIgnoredKindExposure_HostileNeverAccrues()
+    {
+        var dict = new Dictionary<string, DateTimeOffset>();
+        var t0 = DateTimeOffset.UnixEpoch;
+        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", true) }, NoEngaged, true, t0.AddMinutes(100), TimeSpan.FromMinutes(5));
+        Assert.Empty(r);
+        Assert.Empty(dict);
+    }
+
+    [Fact]
+    public void UpdateIgnoredKindExposure_EngagedKindDropped()
+    {
+        var dict = new Dictionary<string, DateTimeOffset>();
+        var t0 = DateTimeOffset.UnixEpoch;
+        LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
+        // Bot now Attacks this kind → it is engaged, so dropped from the tracker.
+        var engaged = (System.Collections.Generic.IReadOnlySet<string>)new HashSet<string> { "w:14" };
+        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
+            dict, new[] { ("w:14", false) }, engaged, true, t0.AddMinutes(10), TimeSpan.FromMinutes(5));
+        Assert.Empty(r);
+        Assert.Empty(dict);
+    }
+
     private static WorldStateProjection EgressWorld(
         IReadOnlyList<VisibleObjectProjection> visible,
         IReadOnlySet<string>? killed,
