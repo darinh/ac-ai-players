@@ -124,6 +124,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_ParsesRaiseSkillWithAmount()
+    {
+        var json = """
+        {
+          "goal_id": "raise-skill-001",
+          "kind": "RaiseSkill",
+          "target": { "name": "war magic" },
+          "amount": 5000,
+          "priority": 6,
+          "rationale": "Unspent XP; invest in my trained war magic skill."
+        }
+        """;
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.RaiseSkill, g!.Kind);
+        Assert.Equal("war magic", g.Target.Name);
+        Assert.Equal(5000L, g.Amount);
+    }
+
+    [Fact]
     public void TryParseGoal_AcceptsDashlessGuid_FromLlama()
     {
         // Regression: Llama-3.3-70B (and others) emit `goal_id` as a
@@ -5702,15 +5721,20 @@ public class LlmGoalPolicyTests
 
     // Prompt-floor compaction: the static RULES + schema text dominates the
     // user prompt and drives gpt-4.1-mini's http-413 in dense areas. Lock the
-    // floor in with a near-empty world so it cannot silently regrow.
+    // floor in with a near-empty world so it cannot SILENTLY regrow. Budget
+    // bumped 13000 -> 13300 (cp-2282) for the third XP-spend advancement verb
+    // RaiseSkill (its schema enum entry + the inline SPEND XP example). This
+    // is an intentional, reviewed wire-verb addition, not silent regrowth; the
+    // ~130-char delta (~33 tokens) does not move the runtime 413 risk, which
+    // is driven by dense per-tick WORLD/visible sections, not the static floor.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 13000,
-            $"static prompt floor grew to {prompt.Length} chars (budget 13000)");
+        Assert.True(prompt.Length <= 13300,
+            $"static prompt floor grew to {prompt.Length} chars (budget 13300)");
     }
 
     // combat-feel: the "## Combat readiness" combat-history block renders
