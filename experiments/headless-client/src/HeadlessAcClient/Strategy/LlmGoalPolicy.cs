@@ -442,28 +442,56 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var combatReady = world.Inventory.Any(i =>
             i.WieldedAt is uint w && w != 0 &&
             i.ItemType is uint it && (it & EgressWieldedWeaponMask) != 0);
-        var monsterInView = world.Visible.Any(v => v.IsMonster && !v.IsCorpse);
+
+        // "Tapped out" = combat-ready, dwelled past the threshold here, and
+        // gained 0 levels since arriving (the bot's OWN raw self-progress
+        // signal — see HuntTappedOutFact). Only when tapped out does an
+        // already-farmed-here kind stop counting as a reason to stay.
+        var tappedOut = HuntTappedOutFact(
+            combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
+            dwellMin, EgressDwellMinutes) is not null;
+
+        // A visible monster keeps the bot here (cancels egress) UNLESS it is
+        // a kind the bot has already farmed in THIS landblock while tapped
+        // out (and is not currently attacking the bot). A first-time/unknown
+        // kind or any ObservedHostile attacker still counts — the bot stays
+        // and the LLM engages it. This is the only change to the egress
+        // trigger; ComputeEgressActive itself stays pure.
+        var effectiveMonsterInView = ComputeEffectiveMonsterInView(
+            world.Visible, world.KilledKindsThisDwell, tappedOut);
 
         var sinceProgress = nowUtc - _egressLastInventoryChangeUtc;
         // Update the sticky latch every tick (idempotent). It engages once
         // dwell passes the threshold and DIS-engages the moment a cancel
         // condition holds, regardless of the current landblock.
         _isEgressing = ComputeEgressActive(
-            _isEgressing, combatReady, monsterInView, dwellMin, sinceProgress);
+            _isEgressing, combatReady, effectiveMonsterInView, dwellMin, sinceProgress, tappedOut);
         if (!_isEgressing)
             return goal;
 
-        // Egress is engaged. Only substitute the social, dwell-extending
-        // verbs the LLM keeps emitting; let any other goal (including an
-        // Explore/Use the LLM itself produced, or the door/portal transition)
-        // pass through untouched.
-        if (!IsEgressOverridableVerb(goal.Kind))
+        // Egress is engaged. Substitute the goals that would keep the bot
+        // stuck in this tapped-out zone: the social dwell-extending verbs
+        // (Talk/Give) the LLM loops on, AND — only when tapped out — an
+        // Attack that merely re-kills a kind already farmed here (yields no
+        // levels). Everything else passes through untouched: an Explore/Use
+        // (door/portal) the LLM itself produced, a Pickup (self-arm), a
+        // first-time/unknown-kind Attack, a self-defense Attack on a HOSTILE,
+        // and corpse looting (Use/Pickup on a corpse).
+        string? overrideReason = null;
+        if (IsEgressOverridableVerb(goal.Kind))
+            overrideReason = "social-verb";
+        else if (goal.Kind == GoalKind.Attack &&
+                 IsTappedOutRepeatKillAttack(goal, world, tappedOut))
+            overrideReason = "repeat-farm-attack";
+
+        if (overrideReason is null)
             return goal;
 
         Console.WriteLine(
             $"[llm-override] town-stuck hunt-egress: dwell={dwellMin:F1}min, combat-ready, " +
-            $"no monster in view, no inventory progress for {sinceProgress.TotalMinutes:F1}min — " +
-            $"substituting {goal.Kind} target={goal.Target} with Explore{{anywhere}} to leave the safe zone.");
+            $"reason={overrideReason}, no productive/hostile monster in view, no inventory " +
+            $"progress for {sinceProgress.TotalMinutes:F1}min — substituting {goal.Kind} " +
+            $"target={goal.Target} with Explore{{anywhere}} to leave the tapped-out zone.");
 
         return new Goal
         {
@@ -486,13 +514,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // content. Extracted for deterministic unit testing.
     internal static bool ComputeEgressActive(
         bool currentlyEgressing, bool combatReady, bool monsterInView,
-        double dwellMinutes, TimeSpan sinceMaterialProgress)
+        double dwellMinutes, TimeSpan sinceMaterialProgress, bool tappedOut = false)
     {
         // Cancel conditions take priority — they end an egress in progress:
         //  - a monster is now engageable here (we reached the hunt);
         //  - the bot is no longer combat-ready (disarmed);
-        //  - material (inventory) progress happened recently (real quest).
-        if (monsterInView || !combatReady || sinceMaterialProgress < EgressNoProgressGrace)
+        //  - material (inventory) progress happened recently (real quest) —
+        //    UNLESS the bot is tapped out. When tapped out (combat-ready,
+        //    dwelled past the threshold, 0 levels gained here) the inventory
+        //    churn is just trivial-corpse loot from re-farming the same kinds;
+        //    the bot's own 0-levels self-progress signal is the authority, so
+        //    the loot grace must not keep deferring egress forever.
+        if (monsterInView || !combatReady)
+            return false;
+        if (!tappedOut && sinceMaterialProgress < EgressNoProgressGrace)
             return false;
         // Sticky: stay engaged once started, regardless of dwell reset at seams.
         if (currentlyEgressing) return true;
@@ -507,6 +542,89 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // already progress).
     internal static bool IsEgressOverridableVerb(GoalKind kind)
         => kind == GoalKind.Talk || kind == GoalKind.Give;
+
+    // cold-start egress: true when a visible monster is one the bot has
+    // already FARMED in the current landblock — i.e. the bot is tapped out
+    // (0 levels gained here), the monster is NOT currently attacking the bot,
+    // and its kind-key is in the per-dwell killed set. Such a monster no
+    // longer counts as a reason to stay. Uses ONLY the bot's own outcomes
+    // (its own kills here + its own level progress) and wire-derived
+    // hostility — no hardcoded names/wcids/landblocks, no value/danger label.
+    internal static bool IsFarmedHere(
+        VisibleObjectProjection v, IReadOnlySet<string>? killedThisDwell, bool tappedOut)
+    {
+        if (!tappedOut) return false;
+        if (v.ObservedHostile) return false;
+        if (killedThisDwell is null || killedThisDwell.Count == 0) return false;
+        return CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name))
+                   is string k
+               && killedThisDwell.Contains(k);
+    }
+
+    // cold-start egress: like the plain "any monster in view" check, but a
+    // kind the bot has already farmed here (see IsFarmedHere) does not count
+    // while tapped out. A first-time/unknown kind or any ObservedHostile
+    // attacker still counts (cancels egress so the bot engages it).
+    internal static bool ComputeEffectiveMonsterInView(
+        IReadOnlyList<VisibleObjectProjection> visible,
+        IReadOnlySet<string>? killedThisDwell, bool tappedOut)
+        => visible.Any(v => v.IsMonster && !v.IsCorpse
+                            && !IsFarmedHere(v, killedThisDwell, tappedOut));
+
+    // cold-start egress: true only for a narrow, safe-to-substitute Attack —
+    // an Attack the LLM emitted, while tapped out, whose every matching
+    // visible monster is a non-hostile kind already farmed in this landblock.
+    // Guards (all must hold): tapped out; the goal is an Attack with a target
+    // selector; the bot has killed something here; NO visible monster is
+    // currently attacking the bot (self-defense outranks egress); the bot is
+    // not mid-fight (CurrentFight null — let the active swing resolve); the
+    // selector resolves to at least one visible monster and EVERY match is an
+    // already-farmed-here kind (so a name-collision with an unfarmed/tougher
+    // kind is never suppressed). Decision uses the bot's own learned futility
+    // only; the LLM still owns engaging anything new.
+    internal static bool IsTappedOutRepeatKillAttack(
+        Goal goal, WorldStateProjection world, bool tappedOut)
+    {
+        if (!tappedOut) return false;
+        if (goal.Kind != GoalKind.Attack) return false;
+        var sel = goal.Target;
+        if (sel.IsEmpty) return false;
+        var killedHere = world.KilledKindsThisDwell;
+        if (killedHere is null || killedHere.Count == 0) return false;
+        if (world.Visible.Any(v => v.IsMonster && !v.IsCorpse && v.ObservedHostile))
+            return false;
+        if (world.CurrentFight is not null) return false;
+
+        var matches = world.Visible
+            .Where(v => v.IsMonster && !v.IsCorpse && VisibleMatchesSelector(sel, v))
+            .ToList();
+        if (matches.Count == 0) return false;
+        return matches.All(m => IsFarmedHere(m, killedHere, tappedOut));
+    }
+
+    // Conservative projection-level selector match for the egress Attack
+    // override. Mirrors the positive identity predicates of
+    // Tactics.SelectorResolver (guid / exact name / name-substring / wcid)
+    // against a VisibleObjectProjection. Requires at least one identity field
+    // to be set so a loose/empty selector never matches-all.
+    private static bool VisibleMatchesSelector(Selector sel, VisibleObjectProjection v)
+    {
+        var hasIdentity = sel.Guid is not null
+            || !string.IsNullOrEmpty(sel.Name)
+            || !string.IsNullOrEmpty(sel.NameContains)
+            || sel.Wcid is not null;
+        if (!hasIdentity) return false;
+        if (sel.Guid is uint g && v.Guid != g) return false;
+        if (!string.IsNullOrEmpty(sel.Name)
+            && !string.Equals(v.Name, sel.Name, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrEmpty(sel.NameContains)
+            && (v.Name is null
+                || !v.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        if (sel.Wcid is uint w && !(v.Wcid is uint vw && vw == w)) return false;
+        return true;
+    }
 
     // Pure "hunt tapped out" perception signal. Returns a raw self-progress
     // fact string to surface to the LLM when the bot, combat-ready, has
