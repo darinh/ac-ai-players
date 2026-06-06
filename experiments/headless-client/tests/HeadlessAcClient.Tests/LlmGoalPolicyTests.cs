@@ -4637,6 +4637,45 @@ public class LlmGoalPolicyTests
             dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
     }
 
+    // --- stuck-loop egress gate (cp-2266) -----------------------------------
+    // When a fixation guard has detected a proven no-progress interaction loop,
+    // ShouldEscapeStuckLoop decides whether to send a tapped-out, combat-ready,
+    // unthreatened bot away with Explore instead of deferring to the fallback
+    // (which re-picks the same dead-end class of stationary object).
+
+    [Fact]
+    public void StuckLoop_EscapesWhenCombatReadyTappedOutAndNoHostile()
+    {
+        Assert.True(LlmGoalPolicy.ShouldEscapeStuckLoop(
+            combatReady: true, tappedOut: true, hostileInView: false));
+    }
+
+    [Fact]
+    public void StuckLoop_SuppressedWhenUnarmed()
+    {
+        // An UNARMED bot may legitimately need to Use objects to progress —
+        // do not send it wandering off.
+        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
+            combatReady: false, tappedOut: true, hostileInView: false));
+    }
+
+    [Fact]
+    public void StuckLoop_SuppressedBeforeTappedOut()
+    {
+        // Early in a zone a Use loop may be a genuine progress attempt.
+        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
+            combatReady: true, tappedOut: false, hostileInView: false));
+    }
+
+    [Fact]
+    public void StuckLoop_SuppressedWhenHostileInView()
+    {
+        // An active attacker is present — defend or flee the fight, never
+        // turn away to wander.
+        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
+            combatReady: true, tappedOut: true, hostileInView: true));
+    }
+
     [Fact]
     public void HuntEgress_SuppressedBeforeDwellThreshold()
     {
