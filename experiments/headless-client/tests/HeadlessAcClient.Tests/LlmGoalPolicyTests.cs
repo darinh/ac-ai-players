@@ -3811,6 +3811,117 @@ public class LlmGoalPolicyTests
         return count;
     }
 
+    // ---- IsUnreachableTargetRepeat (cp-2274) ----
+
+    private static WorldStateProjection BuildWorldWithVisible(
+        params VisibleObjectProjection[] visible) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = visible,
+    };
+
+    private static void AppendNoLiveObjectFail(EventStream es, string targetName)
+        => es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
+            Name = targetName, Text = $"Attack: selector resolved to no live object",
+        });
+
+    private static Goal AttackGoal(string name)
+        => new() { Kind = GoalKind.Attack, Target = new Selector { Name = name } };
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_TwoFailsOutOfPvs_Suppresses()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        var world = BuildWorldWithVisible(); // target not in view
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OneFail_AllowsRetry()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        var world = BuildWorldWithVisible();
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_TargetInPvs_NeverSuppresses()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+            ItemType = 0x10u, Distance = 20f, IsCreature = true,
+        });
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_CombatDeferredReason_DoesNotCount()
+    {
+        var es = new EventStream();
+        for (var i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
+                Name = "Drudge Skulker",
+                Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+            });
+        var world = BuildWorldWithVisible();
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_DifferentTargetName_DoesNotLeak()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Young Banderling");
+        AppendNoLiveObjectFail(es, "Young Banderling");
+        var world = BuildWorldWithVisible();
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_NonAttackKind_DoesNotFire()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Samuel");
+        AppendNoLiveObjectFail(es, "Samuel");
+        var world = BuildWorldWithVisible();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Samuel" } };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(talk, world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_NoTargetName_DoesNotFire()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        var world = BuildWorldWithVisible();
+        var goal = new Goal { Kind = GoalKind.Attack, Target = new Selector { Wcid = 7u } };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(goal, world, es));
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
