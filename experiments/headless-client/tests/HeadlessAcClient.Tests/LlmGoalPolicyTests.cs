@@ -4426,7 +4426,164 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
     }
 
-    // ---- Hunt-egress enforcement (town-stuck LLM-COMPLIANCE backstop) ----
+    // ---- Cross-kind interaction fixation loop-break (emptied corpse) ----
+    //
+    // After a kill, a weak model fixates on the resulting EMPTY corpse,
+    // alternating Use{Corpse} and Pickup{Corpse} forever. The per-kind Use
+    // and Talk guards each count only their own GoalKind, so the alternation
+    // slips past both. IsStationaryInteractFixation counts ACROSS the interact
+    // kinds (world-object Use + Pickup) on the same stationary target and
+    // drops the 4th no-progress repeat. A real loot (InventoryItemAdded /
+    // Removed) or any movement resets the streak.
+
+    [Fact]
+    public void InteractFixation_DropsFourthMixedUsePickup_OnSameCorpse()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 39.7f, 78.5f);
+        var corpse = new Selector { Guid = 0x80002688u };
+        var use = new Goal { Kind = GoalKind.Use, Target = corpse };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = corpse };
+
+        Assert.False(policy.IsStationaryInteractFixation(use, world, es));    // 1
+        Assert.False(policy.IsStationaryInteractFixation(pickup, world, es)); // 2
+        Assert.False(policy.IsStationaryInteractFixation(use, world, es));    // 3
+        Assert.True(policy.IsStationaryInteractFixation(pickup, world, es));  // 4 -> stuck
+        Assert.True(policy.IsStationaryInteractFixation(use, world, es));     // stays stuck
+    }
+
+    [Fact]
+    public void InteractFixation_DropsFourthAllPickup_OnSameCorpse()
+    {
+        // Pickup is unguarded by the per-kind guards; the cross-kind guard
+        // catches a pure Pickup loop too.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 39.7f, 78.5f);
+        var goal = new Goal { Kind = GoalKind.Pickup, Target = new Selector { Name = "Corpse of Chicken" } };
+
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.True(policy.IsStationaryInteractFixation(goal, world, es));
+    }
+
+    [Fact]
+    public void InteractFixation_ExemptsWhenInventoryChanges()
+    {
+        // A non-empty corpse: each interaction adds loot, so the bot IS making
+        // progress even though it has not moved -> never suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 39.7f, 78.5f);
+        var corpse = new Selector { Guid = 0x80002688u };
+        var use = new Goal { Kind = GoalKind.Use, Target = corpse };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = corpse };
+
+        Assert.False(policy.IsStationaryInteractFixation(use, world, es));
+        es.Append(InvAdded("Mana Potion"));
+        Assert.False(policy.IsStationaryInteractFixation(pickup, world, es));
+        es.Append(InvAdded("Pyreal"));
+        Assert.False(policy.IsStationaryInteractFixation(use, world, es));
+        es.Append(InvAdded("Leather"));
+        Assert.False(policy.IsStationaryInteractFixation(pickup, world, es));
+    }
+
+    [Fact]
+    public void InteractFixation_ResetsWhenBotMovesCell()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var corpse = new Selector { Guid = 0x80002688u };
+        var use = new Goal { Kind = GoalKind.Use, Target = corpse };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = corpse };
+
+        Assert.False(policy.IsStationaryInteractFixation(use, WorldAt(0xA9B3u, 0xA9B3000Cu, 0, 0), es));
+        Assert.False(policy.IsStationaryInteractFixation(pickup, WorldAt(0xA9B3u, 0xA9B3000Du, 0, 0), es)); // moved cell
+        Assert.False(policy.IsStationaryInteractFixation(use, WorldAt(0xA9B3u, 0xA9B3000Eu, 0, 0), es));    // moved cell
+        Assert.False(policy.IsStationaryInteractFixation(pickup, WorldAt(0xA9B3u, 0xA9B3000Fu, 0, 0), es)); // moved cell
+    }
+
+    [Fact]
+    public void InteractFixation_JitterWithinEpsilon_StillTrips()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var corpse = new Selector { Guid = 0x80002688u };
+        var use = new Goal { Kind = GoalKind.Use, Target = corpse };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = corpse };
+
+        Assert.False(policy.IsStationaryInteractFixation(use, WorldAt(0xA9B3u, 0xA9B3000Cu, 0.0f, 0.0f), es));
+        Assert.False(policy.IsStationaryInteractFixation(pickup, WorldAt(0xA9B3u, 0xA9B3000Cu, 0.3f, 0.2f), es)); // <0.75u
+        Assert.False(policy.IsStationaryInteractFixation(use, WorldAt(0xA9B3u, 0xA9B3000Cu, 0.1f, 0.4f), es));
+        Assert.True(policy.IsStationaryInteractFixation(pickup, WorldAt(0xA9B3u, 0xA9B3000Cu, 0.2f, 0.1f), es));
+    }
+
+    [Fact]
+    public void InteractFixation_DistinctCorpses_DoNotCollapse()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 0, 0);
+        var corpseA = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x80002688u } };
+        var corpseB = new Goal { Kind = GoalKind.Pickup, Target = new Selector { Guid = 0x80002689u } };
+
+        Assert.False(policy.IsStationaryInteractFixation(corpseA, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(corpseB, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(corpseA, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(corpseB, world, es));
+    }
+
+    [Fact]
+    public void InteractFixation_IgnoresInventoryUseGoals()
+    {
+        // goal.Item set => use-with-target / inventory; owned by
+        // IsInventoryUseRecentlyDispatched, not this guard.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 0, 0);
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Guid = 0x80002688u },
+            Item = new Selector { Name = "Key" },
+        };
+
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+    }
+
+    [Fact]
+    public void InteractFixation_IgnoresNonInteractGoals()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 0, 0);
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Guid = 0x80002688u } };
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002688u } };
+
+        Assert.False(policy.IsStationaryInteractFixation(attack, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(talk, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(attack, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(talk, world, es));
+    }
+
+    [Fact]
+    public void InteractFixation_UnderspecifiedSelector_NotGuarded()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B3u, 0xA9B3000Cu, 0, 0);
+        var goal = new Goal { Kind = GoalKind.Pickup, Target = new Selector { NameContains = "orpse" } };
+
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+        Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
+    }
     //
     // Pure decision behind the mechanical backstop: when the bot is
     // demonstrably stuck in a tapped-out, monster-free safe zone the policy
