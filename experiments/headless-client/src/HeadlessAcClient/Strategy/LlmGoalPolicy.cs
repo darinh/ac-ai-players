@@ -169,6 +169,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // (resets the no-progress clock so an XP-only productive hunt is not
     // flagged barren-stalled). Own data only — audit-safe.
     private int? _egressLastObservedLevel;
+    // Own-death recency for the prompt. The server-tracked NumDeaths is a
+    // CUMULATIVE count (persists across sessions), so it cannot tell the LLM
+    // whether a death just happened or was long ago. These track the wall-clock
+    // of the most recent IN-SESSION death increment so the prompt can render
+    // recency telemetry the LLM uses to decide whether to head back out and
+    // resume hunting. First observation only anchors the count (a pre-existing
+    // total is NOT a fresh death); only an increment stamps the clock. Own
+    // outcome + a timer — no game content. Mirrors _egressLastObservedLevel.
+    private int? _lastObservedDeaths;
+    private DateTimeOffset? _lastOwnDeathUtc;
     // Fresh-directive tracking (paired with FreshDirectiveGrace above).
     // _egressLastDirectiveSeqSeen is the high-water event sequence already
     // examined (so each tick scans only NEW events — idempotent + cheap).
@@ -1068,6 +1078,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // latest observation regardless of which path this tick takes
         // (in-flight poll, backoff, coalesce, fallback). See field docs.
         UpdateDwellTracking(world.Self.Landblock, world.Self.Level, events, nowUtc);
+        UpdateDeathRecencyTracking(world.Self.NumDeaths, nowUtc);
 
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
@@ -1393,7 +1404,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc));
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -2690,6 +2701,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             ? _dwellEntryUtc
             : (DateTimeOffset?)null;
 
+    // Mechanical own-death recency bookkeeping for the prompt. Stamps the
+    // wall-clock when the bot's own server-tracked death count increments — the
+    // LLM cannot derive recency from a cumulative count alone. First observation
+    // only anchors (a pre-existing count from prior sessions is not a fresh
+    // death); an equal/decreased/null value never stamps. Own outcome only — no
+    // game content. Mirrors the level-gain anchoring in UpdateDwellTracking.
+    private void UpdateDeathRecencyTracking(int? numDeaths, DateTimeOffset nowUtc)
+    {
+        if (numDeaths is not int nd) return;
+        if (_lastObservedDeaths is int prev && nd > prev)
+            _lastOwnDeathUtc = nowUtc;
+        _lastObservedDeaths = nd;
+    }
+
+    // Whole seconds since the last observed in-session own-death, or null if the
+    // bot has not died this session. Clamped to >= 0. Handed to the prompt
+    // builder as recency telemetry.
+    private int? SecondsSinceLastOwnDeath(DateTimeOffset nowUtc)
+        => _lastOwnDeathUtc is DateTimeOffset d
+            ? Math.Max(0, (int)(nowUtc - d).TotalSeconds)
+            : (int?)null;
+
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
@@ -2713,7 +2746,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlyList<ExplorationCandidate>? explorationCandidates,
         DateTimeOffset? dwellEntryUtc = null,
         IReadOnlyList<SightedRecallProjection>? recentSightings = null,
-        int? levelAtLandblockEntry = null)
+        int? levelAtLandblockEntry = null,
+        int? secondsSinceLastDeath = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -2872,7 +2906,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string selfHealthLine)
             sb.AppendLine(selfHealthLine);
-        if (world.Self.NumDeaths is int nd) sb.AppendLine($"- deaths (server-tracked): {nd}");
+        if (world.Self.NumDeaths is int nd)
+        {
+            // Cumulative total + (when known) how long ago the most recent
+            // in-session death was, so the LLM can tell a fresh respawn from an
+            // old count and decide whether to head back out. Raw telemetry — no
+            // urgency/recommendation baked in by source.
+            var recency = secondsSinceLastDeath is int ds
+                ? $" (most recent observed ~{ds}s ago)"
+                : "";
+            sb.AppendLine($"- deaths (server-tracked): {nd}{recency}");
+        }
         if (world.Self.CoinValue is int cv) sb.AppendLine($"- coin (server-tracked): {cv} pyreals");
         sb.AppendLine();
 
