@@ -126,6 +126,24 @@ internal enum EventKind
     // band is a generic magnitude-visibility bucket (log10), NOT an
     // attribute/skill XP cost. Text = the raw self-fact summary.
     SelfProgressChanged     = 19,
+    // visible-recent-interaction (2026-06-06): the Motor just completed
+    // a SPATIAL interact (Use without an item, or Pickup) against a world
+    // object — the spatial analogue of InventoryItemUsed above. ItemGuid =
+    // the object's guid, Wcid + Name = its identity. Emitted once per
+    // completed action cycle whose locked goal was Use/Pickup.
+    //
+    // Used by LlmGoalPolicy to render the `## Recently interacted objects`
+    // surface so the LLM can see "you already interacted with this
+    // chest/door N times" and stop re-picking the same object. Motivating
+    // case (cp-2290 live-fire): a bot Used the same Holtburg chest 3x and
+    // revisited the same door, burning a ~5s LLM round-trip each cycle
+    // because nothing in the prompt flagged those objects as already worked.
+    //
+    // Deliberately NOT salient (does not wake the LLM) and NOT
+    // plan-invalidating — a self-emitted echo that exists solely for
+    // prompt rendering. UNLIKE the inventory dedup, it drives NO
+    // source-side goal drop; whether to re-interact stays the LLM's call.
+    WorldObjectInteracted   = 20,
 }
 
 /// <summary>

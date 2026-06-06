@@ -5335,6 +5335,83 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("used x", prompt);
     }
 
+    private static StreamEvent WorldObjInteracted(string name, uint wcid, uint guid) => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow,
+        Kind = EventKind.WorldObjectInteracted,
+        ItemGuid = guid, Wcid = wcid, Name = name,
+    };
+
+    private static WorldStateProjection WorldWithVisibleChest(uint guid, string name) =>
+        BuildExitTokenWorld() with
+        {
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = guid, Name = name, Wcid = 4321u,
+                    ItemType = 0x10u, Distance = 12f, IsChest = true, IsOpenable = true,
+                },
+            },
+        };
+
+    [Fact]
+    public void BuildUserPrompt_RendersRecentlyInteractedObjects_WhenStillVisible()
+    {
+        // cp-2290 tempo loop: the bot Used the same visible chest 3x. The
+        // self-emitted WorldObjectInteracted echoes must surface as a
+        // "## Recently interacted objects" block so the LLM stops re-picking.
+        const uint chestGuid = 0x7A9B400Bu;
+        var world = WorldWithVisibleChest(chestGuid, "Treasure Chest");
+        var es = new EventStream();
+        es.Append(WorldObjInteracted("Treasure Chest", 4321u, chestGuid));
+        es.Append(WorldObjInteracted("Treasure Chest", 4321u, chestGuid));
+        es.Append(WorldObjInteracted("Treasure Chest", 4321u, chestGuid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.Contains("## Recently interacted objects", prompt);
+        Assert.Contains("Treasure Chest", prompt);
+        Assert.Contains("interacted x3 recently", prompt);
+        Assert.Contains($"guid=0x{chestGuid:X8}", prompt);
+        Assert.Contains("unlikely to produce a different outcome", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsRecentlyInteracted_WhenObjectNoLongerVisible()
+    {
+        // Interaction echo exists but the object is NOT in the current
+        // Visible set → not actionable context, so the block is omitted.
+        var world = WorldWithVisibleChest(0x1111_2222u, "Some Other Object");
+        var es = new EventStream();
+        es.Append(WorldObjInteracted("Treasure Chest", 4321u, 0x7A9B400Bu));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.DoesNotContain("## Recently interacted objects", prompt);
+        Assert.DoesNotContain("interacted x", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsRecentlyInteractedSection_WhenNoInteractions()
+    {
+        // No WorldObjectInteracted events → section absent (so it adds
+        // nothing to the static-floor prompt budget).
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        Assert.DoesNotContain("## Recently interacted objects", prompt);
+        Assert.DoesNotContain("interacted x", prompt);
+    }
+
+    [Fact]
+    public void WorldObjectInteracted_IsNotSalient_AndNotPlanInvalidating()
+    {
+        // Pure self-emitted bookkeeping echo: must never wake the LLM nor
+        // drop the current plan (mirrors InventoryItemUsed).
+        Assert.False(LlmGoalPolicy.IsSalientKind(EventKind.WorldObjectInteracted));
+        Assert.False(LlmGoalPolicy.IsPlanInvalidatingKind(EventKind.WorldObjectInteracted));
+    }
+
     [Fact]
     public void BuildUserPrompt_IncludesInventoryUseLoopBreakRule()
     {

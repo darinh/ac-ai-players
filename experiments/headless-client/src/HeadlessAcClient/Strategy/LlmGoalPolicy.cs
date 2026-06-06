@@ -3063,6 +3063,53 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
+        // visible-recent-interaction (cp-2290): WORLD-object analogue of
+        // the inventory-USE recency surface above. Renders recent
+        // EventKind.WorldObjectInteracted echoes (self-emitted by the Motor
+        // when a spatial Use/Pickup action cycle completes) for objects that
+        // are STILL VISIBLE, so the LLM can see "you already interacted with
+        // this chest/door N times" and stop re-picking it. Live-observed
+        // loop: the bot Used the same Holtburg chest 3x + revisited the same
+        // door, burning a ~5s LLM round-trip each cycle, because nothing in
+        // the prompt told it those objects were already worked. Telemetry
+        // ONLY — unlike the inventory dedup, the policy does NOT drop the
+        // repeat goal; the LLM decides. Filtered to currently-visible guids
+        // so it is actionable context, not history noise. Conditional, so it
+        // adds nothing to the static-floor prompt budget.
+        var visibleGuids = world.Visible.Select(v => v.Guid).ToHashSet();
+        var recentObjInteractions = events.Recent(64)
+            .Where(e => e.Kind == EventKind.WorldObjectInteracted
+                        && e.ItemGuid is uint g && visibleGuids.Contains(g))
+            .GroupBy(e => e.ItemGuid!.Value)
+            .Select(grp => new
+            {
+                Guid = grp.Key,
+                Name = grp.Select(e => e.Name).FirstOrDefault(n => !string.IsNullOrEmpty(n)),
+                Wcid = grp.Select(e => e.Wcid).FirstOrDefault(w => w is not null),
+                Count = grp.Count(),
+                LastSeq = grp.Max(e => e.Sequence),
+            })
+            .OrderByDescending(x => x.LastSeq)
+            .Take(8)
+            .ToList();
+        if (recentObjInteractions.Count > 0)
+        {
+            sb.AppendLine("## Recently interacted objects");
+            foreach (var o in recentObjInteractions)
+            {
+                var nm = string.IsNullOrEmpty(o.Name) ? "(unknown)" : o.Name;
+                var wcidStr = o.Wcid is uint ow ? $" wcid={ow}" : "";
+                sb.AppendLine($"- {nm}{wcidStr} guid=0x{o.Guid:X8}: interacted x{o.Count} recently (still visible)");
+            }
+            sb.AppendLine(
+                "- NOTE: you have already interacted with the object(s) above. " +
+                "Re-using the same world object without a new event (action " +
+                "rejection, NPC dialog, inventory change, server hint) is " +
+                "unlikely to produce a different outcome. Prefer a different " +
+                "target or action unless you have a concrete new reason to retry.");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Visible nearby");
         AppendVisibleNearby(sb, world.Visible);
         sb.AppendLine();
