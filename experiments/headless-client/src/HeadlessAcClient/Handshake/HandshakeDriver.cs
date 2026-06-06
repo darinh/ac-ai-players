@@ -1000,6 +1000,16 @@ internal sealed class HandshakeDriver : IDisposable
         // must advance at the same rate or motion-done detection drifts.
         const float          WalkSpeedUnitsPerSec = 5.0f;
         const int            MotionWallClockTimeoutSec = 30;
+        // cp-2272 (motor tempo): a "no-lock" motion — the pre-emptor could
+        // not resolve the goal target to a live snapshot, a sighting-memory
+        // steer, or an exploration frontier, and the schema picker found no
+        // in-range candidate, so the bot sends a stationary AutonomousPosition
+        // and drifts blindly — has nothing to walk toward. It used to burn the
+        // full 30s safety timeout before re-deliberating (the dominant
+        // cold-start tempo waste). Time it out fast so the Strategy layer picks
+        // a new goal ~5x sooner. Productive motions (locked target, remembered
+        // sighting, or explored-route follow) keep the long timeout.
+        const int            MotionNoLockTimeoutSec = 6;
         // Slice S — blocked-motion detection. Server-authoritative
         // walkSelf.Position is updated by UpdatePosition packets from
         // the server. After we send an AP(intent), if the server's
@@ -5334,7 +5344,15 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
                 var stopByTimeout = motionStartedAt is DateTime stopStartTs &&
-                                    (DateTime.UtcNow - stopStartTs).TotalSeconds > MotionWallClockTimeoutSec;
+                                    Strategy.MotionTimeout.IsExpired(
+                                        stopStartTs, DateTime.UtcNow,
+                                        hasProductiveLock:
+                                            motionTarget is not null ||
+                                            motionRememberedDest is not null ||
+                                            motionIndoorPath is not null ||
+                                            motionIndoorPathCells is not null,
+                                        lockedSec: MotionWallClockTimeoutSec,
+                                        noLockSec: MotionNoLockTimeoutSec);
                 if (moveToStateStartSent &&
                     !moveToStateStopSent &&
                     (motionDone || stopByDistance || stopByTimeout) &&
@@ -6017,13 +6035,27 @@ internal sealed class HandshakeDriver : IDisposable
 
                 // Wall-clock safety stop — independent of all other
                 // gates, prevents a runaway walk if something else
-                // wedges (lost echoes, server stall, etc.).
+                // wedges (lost echoes, server stall, etc.). cp-2272:
+                // a no-lock standstill (nothing to walk toward) times
+                // out fast so the bot re-deliberates instead of
+                // drifting blindly for the full safety window.
+                var motionHasProductiveLock =
+                    motionTarget is not null ||
+                    motionRememberedDest is not null ||
+                    motionIndoorPath is not null ||
+                    motionIndoorPathCells is not null;
                 if (!motionDone &&
                     motionStartedAt is DateTime startedAt &&
-                    (DateTime.UtcNow - startedAt).TotalSeconds > MotionWallClockTimeoutSec)
+                    Strategy.MotionTimeout.IsExpired(
+                        startedAt, DateTime.UtcNow,
+                        hasProductiveLock: motionHasProductiveLock,
+                        lockedSec: MotionWallClockTimeoutSec,
+                        noLockSec: MotionNoLockTimeoutSec))
                 {
                     motionDone = true;
-                    Console.WriteLine($"[motion] walk-tick: wall-clock timeout {MotionWallClockTimeoutSec}s elapsed — stopping");
+                    var motionTimeoutSec = Strategy.MotionTimeout.EffectiveSeconds(
+                        motionHasProductiveLock, MotionWallClockTimeoutSec, MotionNoLockTimeoutSec);
+                    Console.WriteLine($"[motion] walk-tick: wall-clock timeout {motionTimeoutSec}s elapsed — stopping");
                     // Slice J — surface unreachable target as
                     // ActionRejected so the LLM and the fallback
                     // policy can both avoid retargeting the same
