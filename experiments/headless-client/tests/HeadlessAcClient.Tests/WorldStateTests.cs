@@ -305,15 +305,46 @@ public class WorldStateTests
         var ws = new WorldState();
         ws.SetSelf(TestGuid);
 
-        // Advance the family-wide byte sequence to 100.
+        // Advance property 25's (Level) per-property byte sequence to 100.
         Assert.True(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 100, Property: 25, Value: 10)));
         Assert.Equal(10, ws.Self!.PropertyInts![25]);
 
-        // A subsequent property update with byte-seq 50 is stale
-        // (NOT a wrap — 50 - 100 = -50, mod 256 = 206 which is
+        // A subsequent update of the SAME property with byte-seq 50 is
+        // stale (NOT a wrap — 50 - 100 = -50, mod 256 = 206 which is
         // beyond the 128 wrap window, so it's treated as backward).
         Assert.False(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 50, Property: 25, Value: 999)));
         Assert.Equal(10, ws.Self.PropertyInts[25]);   // unchanged
+    }
+
+    [Fact]
+    public void PrivatePropertyInt_PerPropertySequence_IndependentCounters()
+    {
+        // Regression for the shared-counter bug: the server keys the
+        // PropertyInt ByteSequence by (SequenceType.UpdatePropertyInt,
+        // property), so each property advances its own counter. A
+        // frequently-ticking property (Age=125) must NOT cause a later
+        // first-time update of another property (Level=25) at a low
+        // per-property sequence to be dropped as stale.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+
+        // Age tickers drive Age's counter high.
+        Assert.True(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 40, Property: 125, Value: 1000)));
+        Assert.True(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 41, Property: 125, Value: 1001)));
+
+        // First-ever Level update arrives at its own low sequence (0).
+        // Under a shared counter this would be dropped (0 vs 41); with
+        // per-property counters it must be ACCEPTED.
+        Assert.True(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 0, Property: 25, Value: 2)));
+        Assert.Equal(2, ws.Self!.PropertyInts![25]);
+
+        // Level's own counter still gates Level: a genuine stale Level
+        // resend (seq below Level's high-water 0 → e.g. 200, backward)
+        // is dropped, while Age keeps advancing independently.
+        Assert.False(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 200, Property: 25, Value: 3)));
+        Assert.Equal(2, ws.Self.PropertyInts[25]);
+        Assert.True(ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 42, Property: 125, Value: 1002)));
+        Assert.Equal(1002, ws.Self.PropertyInts[125]);
     }
 
     [Fact]

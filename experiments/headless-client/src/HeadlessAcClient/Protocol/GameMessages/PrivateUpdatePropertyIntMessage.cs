@@ -27,8 +27,8 @@
 // is ~660 entries (Source/ACE.Entity/Enum/Properties/PropertyInt.cs)
 // and not worth verbatim copying yet.
 //
-// ! BYTE-SEQUENCE FAMILY NOTE !
-// The 1-byte sequence (NOT u32) is shared by the ENTIRE
+// ! BYTE-SEQUENCE NOTE !
+// The 1-byte sequence (NOT u32) is used by the ENTIRE
 // PrivateUpdate* / PublicUpdate* property-update family:
 //   PrivateUpdatePropertyBool   (size 13)
 //   PrivateUpdatePropertyInt    (size 13) <-- this one
@@ -40,7 +40,14 @@
 //   PublicUpdatePropertyFloat   (size 21, ADDS u32 sender guid)
 //   PublicUpdatePropertyInt64   (size 21, ADDS u32 sender guid)
 //   PublicUpdatePropertyString  (variable, ADDS u32 sender guid)
-// All use ByteSequence (NextBytes is a single byte). Public
+// All use ByteSequence (NextBytes is a single byte), but the
+// counter is NOT shared across them. The server keys every
+// sequence by (SequenceType << 16 | property) — see
+// SequenceManager.GetSequence — so each message type AND each
+// property within it advances an INDEPENDENT 1-byte counter. The
+// client must therefore stale-gate per (decoded family, property),
+// not against one global max (live-proven for Int64: TotalExperience
+// and AvailableExperience carry independent sequences). Public
 // variants insert a u32 sender guid AFTER the sequence (for the
 // Int/Bool/Float/Int64 versions); the String variant swaps the
 // guid/property field order, so check the writer when you get
