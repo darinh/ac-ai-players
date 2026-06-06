@@ -4404,7 +4404,162 @@ internal sealed class HandshakeDriver : IDisposable
                                 // Geometry-only search; reads no names/wcids/
                                 // types/quest state.
                                 WorldObjectSnapshot? frontier = null;
-                                if (targetSnap is null)
+
+                                // cp-2271 (directed hunt-target travel): an LLM
+                                // Attack whose named target is out of the bot's
+                                // current view (targetSnap null) would otherwise
+                                // degrade to a generic geometric frontier wander
+                                // (drifting toward whatever unexplored cell is
+                                // nearest — e.g. back into town). Before that,
+                                // mechanically resolve the LLM's OWN target
+                                // selector against the bot's per-bot sighting
+                                // memory — the SAME FOV-consumption path the
+                                // Explore branch already uses (SightedTargetResolver
+                                // + the cross-landblock route prefix) — and steer
+                                // toward where the bot last saw a matching entity.
+                                // This fulfils the LLM's EXPLICIT Attack request
+                                // (the "what" is still goal.Target, matched by
+                                // Name/NameContains/Wcid only — no type priority,
+                                // no hardcoded names/wcids/landblocks, no autonomous
+                                // target choice). No verb is dispatched at the
+                                // remembered coords: the approach locks as an inert
+                                // frontier probe that PRESERVES the Attack goal, so
+                                // when the target re-enters PVS the normal Attack
+                                // lock fires. Excludes combatDeferredAttack — a
+                                // low-health deferral wants to wander AWAY, not walk
+                                // back toward the monster.
+                                // !selfCombatSuppressed: combatDeferredAttack is
+                                // only set when a LIVE target resolved (targetSnap
+                                // not null); for an out-of-PVS target it stays
+                                // false, so gate directly on the self-health
+                                // suppression state (computed above) too — a bot
+                                // recovering below the re-engage threshold must NOT
+                                // be steered back toward a monster it can't yet see.
+                                if (targetSnap is null && !combatDeferredAttack &&
+                                    !selfCombatSuppressed &&
+                                    goal.Kind == GoalKind.Attack && goal.Target is not null)
+                                {
+                                    var nowWallA = DateTime.UtcNow;
+                                    var onCooldownA = new HashSet<Guid>();
+                                    foreach (var kv in rememberedSightedCooldownUntil)
+                                        if (kv.Value > nowWallA) onCooldownA.Add(kv.Key);
+
+                                    // Same-landblock: steer straight to the
+                                    // remembered coords.
+                                    var rememberedA = SightedTargetResolver.Resolve(
+                                        navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA);
+                                    if (rememberedA is not null)
+                                    {
+                                        var destA = new WorldObjectSnapshot(0u)
+                                        {
+                                            Name = rememberedA.Name,
+                                            CellId = rememberedA.CellId,
+                                            Position = rememberedA.Position,
+                                        };
+                                        bool destResolvedA =
+                                            WorldDistance.TrySquaredDistance(tacticsSelf, destA, out var d2memA);
+                                        var memStopRadiusA = MotorStopRadius.For(destA);
+                                        if (destResolvedA && d2memA <= memStopRadiusA * memStopRadiusA)
+                                        {
+                                            // Already standing on the remembered
+                                            // coords but the live worldState still
+                                            // didn't surface the entity (it moved or
+                                            // despawned). Cool down + fall through to
+                                            // geometric frontier.
+                                            rememberedSightedCooldownUntil[rememberedA.Id] =
+                                                nowWallA + rememberedSightedRevisitCooldown;
+                                            Console.WriteLine(
+                                                $"[strategy] LLM-GOAL Attack{{target}} memory hit " +
+                                                $"'{rememberedA.Name}' already at bot position but entity " +
+                                                $"not in view (moved/despawned); cooling down " +
+                                                $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s");
+                                        }
+                                        else
+                                        {
+                                            motionRememberedSightingId = rememberedA.Id;
+                                            rememberedSightedCooldownUntil[rememberedA.Id] =
+                                                nowWallA + rememberedSightedRevisitCooldown;
+                                            frontier = destA;
+                                            Console.WriteLine(
+                                                $"[strategy] LLM-GOAL Attack{{target}} resolved from MEMORY " +
+                                                $"(selector {goal.Target}) -> sighted '{rememberedA.Name}' " +
+                                                $"cell=0x{rememberedA.CellId:X8} " +
+                                                $"pos=({rememberedA.Position.X:F1},{rememberedA.Position.Y:F1}) " +
+                                                $"lastSeen={rememberedA.LastSeenUtc:HH:mm:ss}; steering to remembered " +
+                                                $"coords (inert approach, Attack re-locks when target re-enters view)");
+                                        }
+                                    }
+
+                                    // Cross-landblock: route over the bot's OWN
+                                    // explored connectivity toward a sighting in
+                                    // another landblock (the live evidence case —
+                                    // monster seen in an adjacent landblock).
+                                    if (frontier is null)
+                                    {
+                                        // Bound the advance-node cooldown map the
+                                        // same way the Explore branch does so an
+                                        // Attack-heavy session that rarely hits
+                                        // Explore can't leak entries.
+                                        if (crossLbAdvanceCooldownUntil.Count > 256)
+                                        {
+                                            var expiredAdvA = new List<Guid>();
+                                            foreach (var kv in crossLbAdvanceCooldownUntil)
+                                                if (kv.Value <= nowWallA) expiredAdvA.Add(kv.Key);
+                                            foreach (var k in expiredAdvA)
+                                                crossLbAdvanceCooldownUntil.Remove(k);
+                                        }
+                                        var farA = SightedTargetResolver.ResolveCrossLandblock(
+                                            navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA);
+                                        if (farA is not null)
+                                        {
+                                            var planA = navGraph.PlanWaypointToward(
+                                                tacticsSelfCell, tacticsSelf.Position, farA.CellId, farA.Position);
+                                            if (planA.Kind == RouteWaypointKind.Advance &&
+                                                planA.BoundaryNode is NavNode boundaryA &&
+                                                planA.Waypoints.Count > 0 &&
+                                                (!crossLbAdvanceCooldownUntil.TryGetValue(boundaryA.Id, out var advCdA) ||
+                                                 advCdA <= nowWallA))
+                                            {
+                                                var routeWaypointsA = new List<IndoorWaypoint>(planA.Waypoints.Count);
+                                                foreach (var wp in planA.Waypoints)
+                                                    routeWaypointsA.Add(new IndoorWaypoint(
+                                                        wp.Position, wp.CellId, WalkableNodeKind.Floor, null));
+                                                motionIndoorPath = routeWaypointsA;
+                                                motionIndoorPathIndex = 0;
+                                                motionIndoorPathCells = planA.PathCells;
+                                                motionIndoorPathAttempted = true;
+                                                motionRememberedSightingId = farA.Id;
+                                                crossLbAdvanceCooldownUntil[boundaryA.Id] =
+                                                    nowWallA + crossLbAdvanceCooldown;
+                                                frontier = new WorldObjectSnapshot(0u)
+                                                {
+                                                    Name = farA.Name,
+                                                    CellId = boundaryA.CellId,
+                                                    Position = boundaryA.Position,
+                                                };
+                                                Console.WriteLine(
+                                                    $"[strategy] LLM-GOAL Attack{{target}} CROSS-LB route advance " +
+                                                    $"(selector {goal.Target}) -> '{farA.Name}' in lb " +
+                                                    $"0x{(farA.CellId >> 16):X4}; following {routeWaypointsA.Count}-hop " +
+                                                    $"route prefix through {planA.PathCells.Count} cells to boundary " +
+                                                    $"node 0x{boundaryA.CellId:X8} (inert approach, Attack re-locks " +
+                                                    $"when target re-enters view)");
+                                            }
+                                            else
+                                            {
+                                                rememberedSightedCooldownUntil[farA.Id] =
+                                                    nowWallA + rememberedSightedRevisitCooldown;
+                                                Console.WriteLine(
+                                                    $"[strategy] LLM-GOAL Attack{{target}} '{farA.Name}' is " +
+                                                    $"cross-landblock (lb 0x{(farA.CellId >> 16):X4}); {planA.Kind} " +
+                                                    $"(no on-foot route prefix); cooling down " +
+                                                    $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if (frontier is null && targetSnap is null)
                                     frontier = TryChooseFrontierDest(
                                         tacticsSelfCell, frontierCellCooldownUntil);
 
