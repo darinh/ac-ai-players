@@ -164,4 +164,35 @@ internal static class CombatRetry
             return false;
         return true;
     }
+
+    /// <summary>
+    /// Decide whether to abandon the current melee target EARLY because the
+    /// bot demonstrably cannot damage it: every swing this fight has been
+    /// evaded and zero damage has been dealt. This is a liveness/tempo guard
+    /// in the same family as the absolute no-damage watchdog
+    /// (<c>AbandonOnNoDamageSec</c>) — it just trips sooner once the bot has
+    /// swung enough times to make "0 landed" conclusive rather than unlucky,
+    /// so the bot stops wasting the full watchdog window on a target that
+    /// out-defends it and is free to try a different one.
+    /// </summary>
+    /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
+    /// <param name="damageDealt">Total damage dealt to the target this fight.</param>
+    /// <param name="swingsEvaded">Swings the target evaded this fight.</param>
+    /// <param name="minEvadedSwings">
+    /// Minimum number of all-evaded swings (with zero landed and zero damage)
+    /// before the bot concludes it cannot damage this target. Chosen high
+    /// enough that a winnable fight's unlucky early-evade streak does not trip
+    /// it.
+    /// </param>
+    /// <remarks>
+    /// Mechanical: keys ONLY on the bot's own swing outcomes (landed/evaded)
+    /// and its own damage dealt — no monster KIND, name, wcid, landblock, or
+    /// server text, and it never chooses a new target. It mirrors the prompt's
+    /// COMBAT SAFETY guidance ("many evaded with 0 landed means you cannot win
+    /// — disengage") as a fast motor reflex, because the LLM round-trip is too
+    /// slow to break a live engagement.
+    /// </remarks>
+    public static bool ShouldAbandonUnbeatable(
+        int swingsLanded, uint damageDealt, int swingsEvaded, int minEvadedSwings)
+        => swingsLanded == 0 && damageDealt == 0u && swingsEvaded >= minEvadedSwings;
 }

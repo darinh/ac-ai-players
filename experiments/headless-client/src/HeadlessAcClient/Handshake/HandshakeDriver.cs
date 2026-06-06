@@ -567,6 +567,16 @@ internal sealed class HandshakeDriver : IDisposable
         const double         CombatActivityQuiescenceSec = 4.0;
         DateTime?            lastServerCombatActivityAt = null;
         const double         AbandonOnNoDamageSec   = 60.0;
+        // Phase 7f — EARLY "cannot damage" abandon. The 60s no-damage
+        // watchdog above is the ultimate backstop; this trips sooner once
+        // the bot has swung enough times with EVERY swing evaded and zero
+        // damage dealt that "0 landed" is conclusive (a fresh low-skill bot
+        // routinely meets mobs it cannot hit and otherwise burns the full
+        // 60s per such mob). Requires both a minimum all-evaded swing count
+        // and a minimum elapsed time so a winnable fight's unlucky early
+        // evade streak does not trip it. See CombatRetry.ShouldAbandonUnbeatable.
+        const int            AbandonAllEvadedMinSwings = 12;
+        const double         AbandonAllEvadedMinSec    = 25.0;
         // Phase 7f.D — reactive low-health disengage (self-preservation
         // reflex). Break off combat when our OWN health is at or below
         // EITHER a fraction of max OR an absolute HP floor (a low-level
@@ -1913,6 +1923,12 @@ internal sealed class HandshakeDriver : IDisposable
                                 // source surfaces RAW landed/evaded/damage and the
                                 // LLM decides whether to keep fighting or disengage
                                 // (COMBAT SAFETY rule + the persistent prompt line).
+                                // The motor independently breaks a mechanically
+                                // non-progressing lock (all swings evaded, 0 damage)
+                                // via the early "cannot damage" abandon watchdog —
+                                // a liveness/tempo reflex on the bot's OWN swing
+                                // outcomes, NOT a target-value judgment; WHICH mob
+                                // to fight remains the LLM's choice.
                                 if (!combatFeedbackSent)
                                 {
                                     combatFeedbackSent = true;
@@ -2846,10 +2862,26 @@ internal sealed class HandshakeDriver : IDisposable
                     var sinceLastDamage = lastDamageAt is DateTime ld
                         ? (DateTime.UtcNow - ld).TotalSeconds
                         : (DateTime.UtcNow - cstart).TotalSeconds;
+                    // Two trips to the SAME abandon path: the absolute 60s
+                    // no-damage backstop, and an earlier "cannot damage this
+                    // target" conclusion once enough all-evaded swings have
+                    // accumulated (own swing outcomes only — see
+                    // CombatRetry.ShouldAbandonUnbeatable).
+                    string? abandonReason = null;
                     if (sinceLastDamage >= AbandonOnNoDamageSec)
+                        abandonReason =
+                            $"after {sinceLastDamage:F0}s with no damage";
+                    else if (sinceLastDamage >= AbandonAllEvadedMinSec &&
+                             CombatRetry.ShouldAbandonUnbeatable(
+                                 combatSwingsLanded, combatDamageDealt,
+                                 combatSwingsEvaded, AbandonAllEvadedMinSwings))
+                        abandonReason =
+                            $"after {combatSwingsEvaded} swings all evaded (0 landed, " +
+                            $"0 damage) in {sinceLastDamage:F0}s — target out-defends bot";
+                    if (abandonReason is not null)
                     {
                         Console.WriteLine(
-                            $"[combat] NO-PROGRESS abandon after {sinceLastDamage:F0}s with no damage on 0x{ctgWatch:X8} " +
+                            $"[combat] NO-PROGRESS abandon {abandonReason} on 0x{ctgWatch:X8} " +
                             $"lastHealth={lastObservedTargetHealthFraction?.ToString("F3") ?? "<none>"}; " +
                             $"adding to visited so picker moves on (NOT poisoning wcid — other " +
                             $"individuals of the same type may still be killable, e.g. different " +
