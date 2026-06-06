@@ -5388,6 +5388,14 @@ internal sealed class HandshakeDriver : IDisposable
                                 Distance = t.distance,
                                 CellId   = t.snap.CellId ?? 0u,
                                 Visited  = visitedTargetGuids.Contains(t.snap.Guid),
+                                // Same wire-derived classification used for
+                                // visible objects + sighting memory. Lets the
+                                // LLM tell a creature candidate from inert
+                                // scenery; no priority assigned here.
+                                Kind     = EntityClassifier.ClassifySighting(
+                                    t.snap.ItemType ?? 0u,
+                                    t.snap.ObjectDescriptionFlags ?? 0u,
+                                    t.snap.WeenieFlags ?? 0u),
                             }).ToList();
                             explorationCandidatesForLlm = top;
                         }
