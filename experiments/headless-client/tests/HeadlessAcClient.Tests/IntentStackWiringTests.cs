@@ -628,6 +628,33 @@ public class IntentStackWiringTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ExplorationCandidates_RenderWireDerivedKind()
+    {
+        // Kind is raw wire perception (mob/npc/object) so the LLM can
+        // tell a creature candidate from inert scenery among off-screen
+        // candidates. Mob/NPC render their token; everything else (and
+        // the default) renders "object".
+        var candidates = new List<ExplorationCandidate>
+        {
+            new() { Guid = 0x80001111u, Name = "Drudge",   Distance = 30f, CellId = 0x12340002u, Visited = false, Kind = EntityKind.Mob },
+            new() { Guid = 0x80002222u, Name = "Merchant", Distance = 40f, CellId = 0x12340002u, Visited = false, Kind = EntityKind.NPC },
+            new() { Guid = 0x80003333u, Name = "Apple",    Distance = 50f, CellId = 0x12340002u, Visited = false, Kind = EntityKind.Item },
+            new() { Guid = 0x80004444u, Name = "Marker",   Distance = 60f, CellId = 0x12340002u, Visited = false /* Kind defaults to Unknown */ },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: candidates);
+
+        Assert.Contains("\"Drudge\" dist=30.0u cell=0x12340002 kind=mob", prompt);
+        Assert.Contains("\"Merchant\" dist=40.0u cell=0x12340002 kind=npc", prompt);
+        // Non-creature kinds (Item, and the Unknown default) collapse to "object".
+        Assert.Contains("\"Apple\" dist=50.0u cell=0x12340002 kind=object", prompt);
+        Assert.Contains("\"Marker\" dist=60.0u cell=0x12340002 kind=object", prompt);
+        // The RULES bullet documents the new token vocabulary.
+        Assert.Contains("kind=mob|npc|object", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_WithoutExplorationCandidates_OmitsCandidateBlock()
     {
         var p1 = LlmGoalPolicy.BuildUserPrompt(

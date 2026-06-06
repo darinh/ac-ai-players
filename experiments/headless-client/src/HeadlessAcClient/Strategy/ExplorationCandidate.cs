@@ -15,9 +15,16 @@
 //   different one. Schema-only — no game knowledge baked in.
 //
 // Fields are deliberately small and audit-safe: guid, name,
-// distance, cell, and a visited boolean. No type-of-content tag,
-// no "this is a door" hint — the LLM already sees those via the
-// "## Visible nearby" block when applicable.
+// distance, cell, a visited boolean, and a coarse wire-derived
+// Kind (mob/npc/object). The Kind is the SAME single-source-of-
+// truth classification used for visible objects and sighting
+// memory (EntityClassifier.ClassifySighting) — a mechanical
+// projection of ItemType/ObjectDescriptionFlag/WeenieHeader bits,
+// NOT an English-name match and NOT a priority. It lets the LLM
+// tell a creature candidate from an inert scenery marker among
+// OFF-screen candidates (which, being off-screen, are usually
+// absent from the "## Visible nearby" block). The bot assigns no
+// preference to any Kind; the LLM owns the Explore choice.
 
 using System;
 
@@ -50,4 +57,13 @@ internal sealed record ExplorationCandidate
     /// the LLM may still pick it to deliberately backtrack and
     /// re-stimulate cells the bot can no longer see.</summary>
     public required bool Visited { get; init; }
+
+    /// <summary>Coarse wire-derived category (Mob / NPC / else
+    /// Unknown) from <see cref="EntityClassifier.ClassifySighting"/>.
+    /// Mechanical projection of ItemType/ObjectDescriptionFlag/
+    /// WeenieHeader bits — not a name match, not a priority. Defaults
+    /// to <see cref="EntityKind.Unknown"/> so existing call sites
+    /// that don't classify (e.g. tests) compile unchanged; the live
+    /// candidate-build site sets the real kind.</summary>
+    public EntityKind Kind { get; init; } = EntityKind.Unknown;
 }

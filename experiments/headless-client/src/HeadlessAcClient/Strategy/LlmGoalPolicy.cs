@@ -2868,7 +2868,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         sb.AppendLine("- AUTONOMOUS PICKER: when `## Autonomous picker activity` is present, the schema-only picker auto-drives WHERE TO WALK (nearest eligible candidate by distance) because you had no goal that tick; it OWNS NO VERBS. On arrival the motor sends NOTHING unless your Goal's Kind names a verb (`Use`/`Talk`/`Pickup`/`Attack`/`Give`). `picker has ARRIVED at target X` = parked next to X awaiting a verb — emit `Use`/`Talk`/`Pickup`/`Attack{target: name=\"X\"}`, or `Explore{target: name=\"<other>\"}` to redirect. Doing nothing parks ~2s then picks the next candidate.");
         sb.AppendLine("- TRANSITIONS — doors and portals: `door`/`portal`-tagged objects are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). When parked at a door/portal with no better verb, `Use` it — that's how the bot moves between rooms/buildings/landblocks. If a door rejects Use as Locked and you hold an item whose `short_desc`/name says key, retry `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
-        sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback walks to the nearest off-screen object; the TOP entry is the default. To pick a DIFFERENT one (e.g. backtrack through a visited door, or skip a distant pickup for a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` (guid is the most reliable selector) or `{name: \"...\"}`.");
+        sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback walks to the nearest off-screen object; the TOP entry is the default. Each line shows `kind=mob|npc|object` (raw perception; `object`=non-creature). To pick a DIFFERENT one (e.g. an off-screen `mob` to hunt, backtrack through a visited door, or skip a distant pickup for a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` (guid is the most reliable selector) or `{name: \"...\"}`.");
         sb.AppendLine("- PURSUE UNSEEN OBJECTIVES: when dialog or a hint tells you to find/reach/talk-to someone NOT in `Visible nearby` (e.g. \"talk to the trainer in the next room\", \"find the captain\"), emit a goal NAMING it — `Talk`/`Give`/`Explore{target: {name: \"<role-or-name>\"}}` — even though it is not yet visible; the bot walks through rooms to discover it. A role phrase (\"the guard\", \"the trainer\") is a valid target name when no proper name is given. Do NOT keep re-talking an NPC whose dialog you already got — pursue the objective that dialog gave you. With no named objective and nothing useful visible, emit `Explore{target: {name: \"anywhere\"}}`.");
         sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: `## Server hints` text that tells you how to LEAVE, EXIT, PROCEED PAST, or ADVANCE BEYOND the area — especially naming a person/place or warning the step is irreversible — OUTRANKS repeating a local interaction you already observed (re-picking an item you hold, re-talking an NPC who gave no new dialog, re-using an object that didn't change). When such an instruction is present and unacted, emit a `Talk`/`Use`/`Explore` toward the named target (even if not visible) INSTEAD of looping completed steps.");
         sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: if you hold an item the server gave you for an unfinished objective (\"take this and bring it back\", \"give X to Y\", \"use this to leave\"), completing it OUTRANKS incidental looting/exploration — return to the NAMED npc/object and `Give`/`Use` it. Treat an unused objective item as an open task, not as done.");
@@ -2985,8 +2985,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             foreach (var c in explorationCandidates)
             {
                 var vis = c.Visited ? " VISITED" : "";
+                // Raw wire-derived kind so the LLM can tell a creature
+                // candidate from inert scenery; ClassifySighting only
+                // yields Mob/NPC/Unknown. No priority — perception only.
+                var kind = c.Kind switch
+                {
+                    EntityKind.Mob => "mob",
+                    EntityKind.NPC => "npc",
+                    _ => "object",
+                };
                 sb.AppendLine(
-                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8}{vis}");
+                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8} kind={kind}{vis}");
             }
             sb.AppendLine(
                 "- NOTE: the in-range queue is empty. The fallback picker will walk to the TOP " +
