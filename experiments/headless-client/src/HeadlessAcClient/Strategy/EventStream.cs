@@ -113,6 +113,19 @@ internal enum EventKind
     // Name = the defender's
     // display name, Text = the raw "landed N / evaded M" summary.
     CombatFeedback          = 18,
+    // self-progress wake (cp-2280): the bot's unspent experience (the
+    // spendable self-progress resource, PropertyInt64 AvailableExperience)
+    // first became KNOWN or crossed a coarse order-of-magnitude band. The
+    // Motor emits ONE deduped event (per band) carrying RAW self facts
+    // (unspent XP, lifetime total, current/peak HP, level). Structural
+    // salience wake ONLY — a direct analogue of CombatFeedback: it makes
+    // the LLM re-read `## Self` early instead of discovering an XP balance
+    // only by diffing successive projections. Source assigns NO urgency,
+    // names NO attribute/skill, and says NOTHING about spending — WHAT to
+    // do with the XP is owned entirely by the prompt RULES (SPEND XP). The
+    // band is a generic magnitude-visibility bucket (log10), NOT an
+    // attribute/skill XP cost. Text = the raw self-fact summary.
+    SelfProgressChanged     = 19,
 }
 
 /// <summary>
@@ -189,6 +202,7 @@ internal sealed record StreamEvent
         EventKind.PickerArrivedNoAction => $"#{Sequence} PickerArrivedNoAction guid=0x{ItemGuid ?? 0:X8} name=\"{Name}\" \"{Truncate(Text, 80)}\"",
         EventKind.InventoryItemUsed    => $"#{Sequence} InventoryUsed wcid={Wcid} name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8}",
         EventKind.CombatFeedback       => $"#{Sequence} CombatFeedback target=\"{Name}\" \"{Truncate(Text, 120)}\"",
+        EventKind.SelfProgressChanged  => $"#{Sequence} SelfProgress  \"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 

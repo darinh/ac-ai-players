@@ -629,6 +629,13 @@ internal sealed class HandshakeDriver : IDisposable
         bool                 combatFeedbackSent = false;
         string?              combatTargetName = null;
         uint?                combatStatsForGuid = null;
+        // self-progress wake dedup (cp-2280): one-shot guard — true once a
+        // SelfProgressChanged event has been emitted this connection. A
+        // pure structural one-shot (mirror of combatFeedbackSent): surface
+        // the unspent-XP balance ONCE the first time it is known; no
+        // magnitude judgment. Reset naturally per login (fresh handler
+        // scope). See MaybeEmitSelfProgress.
+        bool                 selfProgressWakeSent = false;
         // observed-hostile perception: NORMALIZED attacker name -> last UTC
         // the server reported that creature attacking the bot (decoded from
         // DefenderNotification 0x01B2 / EvasionDefenderNotification 0x01B4).
@@ -1463,6 +1470,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"{(seededTot ? "" : "(skip)")} " +
                                     $"unspentXp={pdesc.AvailableExperience?.ToString() ?? "?"}" +
                                     $"{(seededAvl ? "" : "(skip)")}");
+                                MaybeEmitSelfProgress(ref selfProgressWakeSent, worldState, eventStream);
                             }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh
@@ -2121,6 +2129,7 @@ internal sealed class HandshakeDriver : IDisposable
                         case PrivateUpdatePropertyInt64Message pup64:
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt64: {pup64.PropertyName} = {pup64.Value} (seq={pup64.Sequence})");
+                            MaybeEmitSelfProgress(ref selfProgressWakeSent, worldState, eventStream);
                             break;
                         case PrivateUpdateVitalMessage puv:
                             // Surface the bot's own health changes. Only
@@ -7685,6 +7694,93 @@ internal sealed class HandshakeDriver : IDisposable
     }
 
     public void Dispose() => _socket?.Dispose();
+
+    // ---- self-progress wake (cp-2280) ------------------------------------
+    // Structural salience nudge: the FIRST time the bot's unspent experience
+    // (the spendable self-progress resource) becomes known, append ONE
+    // SelfProgressChanged event so the LLM re-reads `## Self` early. Direct
+    // analogue of the CombatFeedback wake — a one-shot per connection, the
+    // same shape as combatFeedbackSent. Source surfaces RAW self facts only
+    // (unspent XP, lifetime total, current/peak HP, level); it assigns NO
+    // urgency, names NO attribute/skill, applies NO magnitude/materiality
+    // judgment, and says nothing about spending — WHAT to do with the XP is
+    // owned entirely by the prompt RULES. Pure bookkeeping + wire-fact
+    // rendering, no game-knowledge.
+
+    /// <summary>
+    /// Build a SelfProgressChanged event from raw self facts the first time
+    /// unspent XP is known (one-shot: <paramref name="alreadySent"/> is set
+    /// on emit and suppresses all later calls). Returns false (and emits
+    /// nothing) when already sent or unspent XP is unknown. The event Text
+    /// is raw facts only — no directive, no attribute name, no urgency, no
+    /// magnitude judgment.
+    /// </summary>
+    internal static bool TryBuildSelfProgressEvent(
+        long? unspentXp, long? totalXp, int? level, uint? hpCurrent, uint? hpMax,
+        ref bool alreadySent, out StreamEvent ev, out string logLine)
+    {
+        ev = null!;
+        logLine = string.Empty;
+        if (alreadySent)
+            return false;
+        if (unspentXp is not long unspent)
+            return false;
+        alreadySent = true;
+
+        var hp = hpCurrent is uint hc && hpMax is uint hm && hm > 0
+            ? $"{hc}/{hm} HP"
+            : "unknown HP";
+        var lvlTxt = level is int l ? $"level {l}, " : string.Empty;
+        var totTxt = totalXp is long t ? $"{t} total" : "unknown total";
+
+        ev = new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.SelfProgressChanged,
+            Text = $"Self progress: {lvlTxt}{unspent} unspent experience, {totTxt}, {hp}.",
+        };
+        logLine =
+            $"[self-progress] SelfProgressChanged: unspent={unspent} " +
+            $"total={totalXp?.ToString() ?? "?"} level={level?.ToString() ?? "?"} " +
+            $"hp={hp} — waking LLM (one-shot).";
+        return true;
+    }
+
+    /// <summary>
+    /// Read the bot's current self facts from <paramref name="worldState"/>
+    /// and, the first time unspent XP is known, append a SelfProgressChanged
+    /// event to <paramref name="eventStream"/>. No-op when self/XP is
+    /// unknown or the one-shot has already fired this connection.
+    /// </summary>
+    private static void MaybeEmitSelfProgress(
+        ref bool alreadySent, WorldState worldState, EventStream eventStream)
+    {
+        if (alreadySent)
+            return;
+        var self = worldState.Self;
+        if (self is null)
+            return;
+
+        long? unspent = self.PropertyInt64s is { } p64 &&
+            p64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var ax)
+                ? ax : (long?)null;
+        long? total = self.PropertyInt64s is { } p64t &&
+            p64t.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var tx)
+                ? tx : (long?)null;
+        // PropertyInt id 25 = Level (see WorldStateProjection / ACE-bots
+        // Source/ACE.Entity/Enum/Properties/PropertyInt.cs).
+        int? level = self.PropertyInts is { } pi &&
+            pi.TryGetValue(25u, out var lv) ? lv : (int?)null;
+
+        if (TryBuildSelfProgressEvent(
+                unspent, total, level, self.HealthCurrent, self.HealthMax,
+                ref alreadySent, out var ev, out var logLine))
+        {
+            eventStream.Append(ev);
+            Console.WriteLine(logLine);
+        }
+    }
 
     private readonly record struct ConnectRequestData(
         double ServerTime,
