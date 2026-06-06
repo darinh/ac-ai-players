@@ -2001,6 +2001,32 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine(
                                 $"[observe]   -> ObjectDelete: guid=0x{od.Guid:X8} " +
                                 $"instSeq={od.InstanceSequence} [{deleteVerdict}]");
+                            // Combat: if the object we are actively attacking
+                            // was just removed from the world (killed + culled,
+                            // or despawned), clear the combat lock NOW instead
+                            // of letting the no-progress watchdog burn the full
+                            // AbandonOnNoDamageSec on a guid the server no
+                            // longer knows (a removed object can never report
+                            // damage or health). "removed" (preDeletePresent &&
+                            // applied) is the strong signal — a confirmed
+                            // client-side delete, not a transient distance cull.
+                            // Mechanical motor bookkeeping (object existence);
+                            // no game knowledge.
+                            if (preDeletePresent && applied &&
+                                combatTargetGuid is uint ctgDel && ctgDel == od.Guid)
+                            {
+                                Console.WriteLine(
+                                    $"[combat] target 0x{ctgDel:X8} removed from world — clearing combat " +
+                                    $"lock (no AbandonOnNoDamageSec wait).");
+                                visitedTargetGuids.Add(ctgDel);
+                                combatTargetGuid = null;
+                                combatStartedAt = null;
+                                lastCombatAttackAt = null;
+                                lastDamageAt = null;
+                                lastObservedTargetHealthFraction = null;
+                                combatFastRetryRequested = false;
+                                ClearCombatFightStats();
+                            }
                             break;
                         case HearSpeechMessage hs:
                             var hsPreview = hs.Message.Length > 80 ? hs.Message.Substring(0, 80) + "..." : hs.Message;
@@ -5176,6 +5202,31 @@ internal sealed class HandshakeDriver : IDisposable
                     // moved to the LLM.
                     var isHostile = lockedGoalKind == GoalKind.Attack;
                     var isPickup  = lockedGoalKind == GoalKind.Pickup;
+
+                    // Target-vanished guard. If a hostile Attack target was
+                    // removed from the world snapshot (e.g. killed +
+                    // ObjectDelete'd, or culled) between target selection and
+                    // this dispatch, do NOT arm a fresh combat lock + no-
+                    // progress watchdog on a guid the server no longer knows —
+                    // the attack silently no-ops and the watchdog burns the
+                    // full AbandonOnNoDamageSec (~60s) before giving up.
+                    // motionTarget is a snapshot captured when the lock was
+                    // set; it can be stale, so re-check the LIVE world snapshot.
+                    // Mirrors the walk-tick "disappeared from world snapshot —
+                    // stopping" guard. useSent is already true above, so
+                    // falling through parks the bot + re-deliberates. Snapshot
+                    // absence may be a transient cull, so do NOT permanently
+                    // blacklist the guid here — the ObjectDelete handler owns
+                    // confirmed-removal visited-add. Mechanical motor
+                    // bookkeeping (object existence); no game knowledge.
+                    if (isHostile && worldState.TryGet(motionTarget.Guid) is null)
+                    {
+                        Console.WriteLine(
+                            $"[combat] target 0x{motionTarget.Guid:X8} '{motionTarget.Name}' absent from " +
+                            $"world snapshot at attack dispatch — skipping (re-deliberate).");
+                        suppressVisitedAddOnReset = true;
+                        goto _slice_l_explore_done;
+                    }
 
                     // Self-preservation gate (paired with the Phase 7f.D
                     // disengage reflex): refuse to dispatch a melee Attack
