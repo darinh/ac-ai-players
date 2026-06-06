@@ -6027,4 +6027,123 @@ public class LlmGoalPolicyTests
         await policy.WaitForInFlightAsync();
         Assert.Equal(2, reqs.Count);    // intent-left-top → ended → real call
     }
+
+    // ---- HuntTappedOutFact (coldstart hunt-zone discovery perception) ----
+
+    [Fact]
+    public void HuntTappedOutFact_NotCombatReady_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: false, currentLevel: 3, levelAtLandblockEntry: 3,
+            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_UnknownLevel_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: null, levelAtLandblockEntry: 3,
+            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_UnknownEntryLevel_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: 3, levelAtLandblockEntry: null,
+            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_DwellBelowThreshold_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
+            dwellMinutes: 4.9, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_UnknownDwell_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
+            dwellMinutes: null, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_LeveledHere_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: 4, levelAtLandblockEntry: 3,
+            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
+    }
+
+    [Fact]
+    public void HuntTappedOutFact_TappedOut_ReturnsFact()
+    {
+        var fact = LlmGoalPolicy.HuntTappedOutFact(
+            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
+            dwellMinutes: 7.0, dwellThresholdMinutes: 5.0);
+        Assert.NotNull(fact);
+        Assert.Contains("tapped out", fact);
+        Assert.Contains("7 min", fact);
+        Assert.Contains("level", fact);
+        // Raw self-data only — no verb directive embedded (audit finding #1).
+        Assert.DoesNotContain("Explore", fact);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_TappedOut_SurfacesFactInCombatReadiness()
+    {
+        // Combat-ready (melee wielded), dwelled > threshold, no level gained
+        // since entry → the tapped-out fact must appear under Combat readiness.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+                Level = 3,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, stack: null, pickerActivity: null,
+            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
+            levelAtLandblockEntry: 3);
+        Assert.Contains("tapped out: level", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LeveledHere_OmitsTappedOutFact()
+    {
+        // Same dwell, but the bot gained a level here → fact suppressed.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+                Level = 4,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, stack: null, pickerActivity: null,
+            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
+            levelAtLandblockEntry: 3);
+        Assert.DoesNotContain("tapped out: level", prompt);
+    }
 }
