@@ -280,7 +280,7 @@ public class PlayerDescriptionSeedTests
     }
 
     [Fact]
-    public void SeedAttributesAndSkills_WriteIntoSnapshot_FirstSeedWins()
+    public void SeedAttributesAndSkills_WriteIntoSnapshot_MergeContract()
     {
         var ws = new WorldState();
         ws.SetSelf(Self);
@@ -295,11 +295,13 @@ public class PlayerDescriptionSeedTests
         Assert.Same(attrs, snap.SelfAttributes);
         Assert.Same(skills, snap.SelfSkills);
 
-        // A second (re-sent) bundle must NOT clobber the first seed.
+        // Re-sending an ALREADY-PRESENT key is a no-op and must NOT clobber
+        // the existing value (returns false, reference unchanged).
         Assert.False(ws.SeedSelfAttributes(new[] { new PdAttribute("endurance", 99u, 9u, 9u) }));
-        Assert.False(ws.SeedSelfSkills(new[] { new PdSkill("Axe", 1u, 1u, 0u, 0u, 0u) }));
+        Assert.False(ws.SeedSelfSkills(new[] { new PdSkill("WarMagic", 34u, 2u, 99u, 0u, 9u) }));
         Assert.Same(attrs, ws.TryGet(Self)!.SelfAttributes);
         Assert.Same(skills, ws.TryGet(Self)!.SelfSkills);
+        Assert.Equal(40u, ws.TryGet(Self)!.SelfAttributes!.Single(a => a.Name == "endurance").Base);
     }
 
     [Fact]

@@ -138,6 +138,26 @@ internal sealed class WorldState
     private byte? _selfHealthLevelByteSeq;
 
     /// <summary>
+    /// Per-(skill id) byte-sequence high-water marks for discrete
+    /// PrivateUpdateSkill (0x02DD). The server keys this ByteSequence by
+    /// (SequenceType.UpdateSkill, skillId), so each skill advances an
+    /// INDEPENDENT 1-byte counter — gate per skill id, exactly like the
+    /// per-property Int64 counters. Nullable because 0 is a valid
+    /// sequence; absent key = never seen. NOT touched by the login
+    /// PlayerDescription seed (only real discrete packets populate it).
+    /// </summary>
+    private readonly Dictionary<uint, byte> _selfSkillByteSeq = new();
+
+    /// <summary>
+    /// Per-(primary-attribute id) byte-sequence high-water marks for
+    /// discrete PrivateUpdateAttribute (0x02E3). Keyed by
+    /// (SequenceType.UpdateAttribute, attrId); independent per attribute.
+    /// Same contract as <see cref="_selfSkillByteSeq"/>.
+    /// </summary>
+    private readonly Dictionary<uint, byte> _selfAttributeByteSeq = new();
+
+
+    /// <summary>
     /// Guid of the bot's own player. Set by SetSelf — typically
     /// pre-seeded from the chosen character guid at EnterWorld
     /// time so private property updates can be routed BEFORE
@@ -251,6 +271,8 @@ internal sealed class WorldState
             PrivateUpdatePropertyInt64Message p64 => ApplyPrivatePropertyInt64(p64),
             PrivateUpdateVitalMessage v       => ApplyPrivateVital(v),
             PrivateUpdateAttribute2ndLevelMessage a => ApplyPrivateVitalLevel(a),
+            PrivateUpdateSkillMessage sk      => ApplyPrivateSkill(sk),
+            PrivateUpdateAttributeMessage at  => ApplyPrivateAttribute(at),
             PlayerCreateMessage pc            => ApplyPlayerCreate(pc),
             _                                 => false,
         };
@@ -581,10 +603,14 @@ internal sealed class WorldState
 
     /// <summary>
     /// Seed the bot's attribute ranks from the login PlayerDescription
-    /// bundle. Login-only (no discrete attribute-update opcode is decoded
-    /// yet), so the first seed wins and a later re-sent bundle is ignored —
-    /// this never clobbers fresher state because none exists. Returns true
-    /// if the snapshot was populated.
+    /// bundle. Merges into the self snapshot: if a discrete
+    /// PrivateUpdateAttribute (0x02E3) already populated an attribute before
+    /// this login seed (SelfGuid is known before world entry, so an early
+    /// discrete can land first), that fresher entry is preserved and only the
+    /// missing attributes are filled in. A re-sent login bundle therefore adds
+    /// nothing (all names already present) — same effect as the old
+    /// first-seed-wins contract, without clobbering live discrete state.
+    /// Returns true if the snapshot was populated or extended.
     /// </summary>
     public bool SeedSelfAttributes(IReadOnlyList<PdAttribute> attributes)
     {
@@ -595,16 +621,37 @@ internal sealed class WorldState
             return false;
         }
         var snap = GetOrCreateSnapshot(selfGuid);
-        if (snap.SelfAttributes is not null)
-            return false; // already seeded this connection
-        snap.SelfAttributes = attributes;
+        if (snap.SelfAttributes is null)
+        {
+            snap.SelfAttributes = attributes;
+            snap.Touch();
+            return true;
+        }
+        var merged = new List<PdAttribute>(snap.SelfAttributes);
+        var present = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var a in merged)
+            present.Add(a.Name);
+        bool added = false;
+        foreach (var a in attributes)
+        {
+            if (present.Add(a.Name))
+            {
+                merged.Add(a);
+                added = true;
+            }
+        }
+        if (!added)
+            return false; // every attribute already known (discrete or re-send)
+        snap.SelfAttributes = merged;
         snap.Touch();
         return true;
     }
 
     /// <summary>
     /// Seed the bot's skills from the login PlayerDescription bundle. Same
-    /// login-only contract as <see cref="SeedSelfAttributes"/>.
+    /// merge contract as <see cref="SeedSelfAttributes"/>, keyed by skill id:
+    /// a discrete PrivateUpdateSkill (0x02DD) that landed before login is
+    /// preserved and only the missing skills are filled in.
     /// </summary>
     public bool SeedSelfSkills(IReadOnlyList<PdSkill> skills)
     {
@@ -615,12 +662,145 @@ internal sealed class WorldState
             return false;
         }
         var snap = GetOrCreateSnapshot(selfGuid);
-        if (snap.SelfSkills is not null)
-            return false; // already seeded this connection
-        snap.SelfSkills = skills;
+        if (snap.SelfSkills is null)
+        {
+            snap.SelfSkills = skills;
+            snap.Touch();
+            return true;
+        }
+        var merged = new List<PdSkill>(snap.SelfSkills);
+        var present = new HashSet<uint>();
+        foreach (var s in merged)
+            present.Add(s.Id);
+        bool added = false;
+        foreach (var s in skills)
+        {
+            if (present.Add(s.Id))
+            {
+                merged.Add(s);
+                added = true;
+            }
+        }
+        if (!added)
+            return false; // every skill already known (discrete or re-send)
+        snap.SelfSkills = merged;
         snap.Touch();
         return true;
     }
+
+    /// <summary>
+    /// Apply a discrete PrivateUpdateSkill (0x02DD): the server reports a
+    /// single skill's new descriptor after a RaiseSkill (or a full sync).
+    /// Upserts the matching PdSkill in the self snapshot by skill id so the
+    /// surfaced raised ranks / advancement class stay live after a spend
+    /// (the login bundle is otherwise stale until relogin). Stale-gated PER
+    /// SKILL (see <see cref="_selfSkillByteSeq"/>). No guid on the wire;
+    /// implicitly the receiving session's player.
+    /// </summary>
+    private bool ApplyPrivateSkill(PrivateUpdateSkillMessage m)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PrivateUpdateSkill before SelfGuid known: " +
+                $"skill={m.Skill} ranks={m.Ranks} (dropped)");
+            return false;
+        }
+
+        byte? prevSeq = _selfSkillByteSeq.TryGetValue(m.Skill, out var s)
+            ? s
+            : (byte?)null;
+        if (!SequenceCompare.IsCurrentOrNewer(m.Sequence, prevSeq))
+            return false;
+        _selfSkillByteSeq[m.Skill] = m.Sequence;
+
+        var snap = GetOrCreateSnapshot(selfGuid);
+        var updated = new PdSkill(
+            GameEventPayloadDecoder.SkillName(m.Skill),
+            m.Skill, m.AdvancementClass, m.Ranks, m.InitLevel, m.ExperienceSpent);
+        snap.SelfSkills = UpsertSkill(snap.SelfSkills, updated);
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a discrete PrivateUpdateAttribute (0x02E3): a single primary
+    /// attribute's new descriptor after a RaiseAttribute (or full sync).
+    /// Upserts the matching PdAttribute by canonical lowercase NAME (the
+    /// attribute snapshot carries no id; the name is the stable key shared
+    /// with the login seed). Stale-gated PER ATTRIBUTE
+    /// (see <see cref="_selfAttributeByteSeq"/>). Only the six primaries
+    /// flow here; vital max-pools ride 0x02E7/0x02E9.
+    /// </summary>
+    private bool ApplyPrivateAttribute(PrivateUpdateAttributeMessage m)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PrivateUpdateAttribute before SelfGuid known: " +
+                $"attr={m.Attribute} ranks={m.Ranks} (dropped)");
+            return false;
+        }
+
+        var name = GameEventPayloadDecoder.PrimaryAttributeName(m.Attribute);
+        if (name is null)
+            return false; // not one of the six primary attributes
+
+        byte? prevSeq = _selfAttributeByteSeq.TryGetValue(m.Attribute, out var s)
+            ? s
+            : (byte?)null;
+        if (!SequenceCompare.IsCurrentOrNewer(m.Sequence, prevSeq))
+            return false;
+        _selfAttributeByteSeq[m.Attribute] = m.Sequence;
+
+        var snap = GetOrCreateSnapshot(selfGuid);
+        var updated = new PdAttribute(
+            name, m.StartingValue + m.Ranks, m.Ranks, m.ExperienceSpent);
+        snap.SelfAttributes = UpsertAttribute(snap.SelfAttributes, updated);
+        snap.Touch();
+        return true;
+    }
+
+    // Replace the PdSkill with a matching id, or append if new. Returns a
+    // fresh list (the snapshot field is replaced wholesale) so a concurrent
+    // projection read never sees a half-mutated list.
+    private static IReadOnlyList<PdSkill> UpsertSkill(
+        IReadOnlyList<PdSkill>? existing, PdSkill updated)
+    {
+        var list = existing is null
+            ? new List<PdSkill>()
+            : new List<PdSkill>(existing);
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (list[i].Id == updated.Id)
+            {
+                list[i] = updated;
+                return list;
+            }
+        }
+        list.Add(updated);
+        return list;
+    }
+
+    // Replace the PdAttribute with a matching name (ordinal), or append.
+    private static IReadOnlyList<PdAttribute> UpsertAttribute(
+        IReadOnlyList<PdAttribute>? existing, PdAttribute updated)
+    {
+        var list = existing is null
+            ? new List<PdAttribute>()
+            : new List<PdAttribute>(existing);
+        for (int i = 0; i < list.Count; i++)
+        {
+            if (string.Equals(list[i].Name, updated.Name, StringComparison.Ordinal))
+            {
+                list[i] = updated;
+                return list;
+            }
+        }
+        list.Add(updated);
+        return list;
+    }
+
     /// PrivateUpdatePropertyInt it has no guid and is implicitly
     /// scoped to the receiving session's player. We only track the
     /// HEALTH vital; Stamina/Mana updates are accepted (to advance the
