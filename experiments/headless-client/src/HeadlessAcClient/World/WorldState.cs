@@ -170,6 +170,20 @@ internal sealed class WorldState
     /// </summary>
     public IReadOnlySet<string>? RecentHostileNames { get; set; }
 
+    /// <summary>
+    /// cold-start egress: stable kind-keys (in <see
+    /// cref="HeadlessAcClient.Strategy.CombatFeelLedger.KeyOf"/> form —
+    /// <c>w:wcid</c> or <c>n:name</c>) of monster KINDS the bot has KILLED
+    /// since it entered the current landblock. Reset on landblock change and
+    /// published by HandshakeDriver before each projection build. The
+    /// mechanical hunt-egress override uses it to tell whether a visible
+    /// monster is a kind the bot has already farmed HERE (so, once the bot
+    /// is tapped out, that kind no longer keeps it in the zone) — RAW
+    /// bot-owned outcome data; it carries no danger/value/priority label.
+    /// Null when the bot has killed nothing in this landblock yet.
+    /// </summary>
+    public IReadOnlySet<string>? KilledKindsThisDwell { get; set; }
+
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;
 

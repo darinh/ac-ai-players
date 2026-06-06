@@ -624,6 +624,14 @@ internal sealed class HandshakeDriver : IDisposable
         // shortly after the attacker dies/disengages. Refreshed on every
         // defender notification (re-stamps the name's UTC).
         const double         ObservedHostileTtlSeconds = 12.0;
+        // cold-start egress: stable kind-keys (CombatFeelLedger.KeyOf) of
+        // monster kinds the bot has KILLED since entering the current
+        // landblock. Cleared on landblock change; published to
+        // worldState.KilledKindsThisDwell before each projection build so the
+        // hunt-egress override can see which visible kinds the bot has already
+        // farmed HERE (proven non-leveling once the bot is tapped out). Bot's
+        // own outcome bookkeeping — no danger/value label.
+        var                  killedKindsThisLandblock = new HashSet<string>(StringComparer.Ordinal);
         // combat-missile-attack: the attack opcode family used for the
         // most recent ATTACK dispatch, for the cmd= log line only.
         AttackMode           combatAttackMode = AttackMode.Melee;
@@ -1701,9 +1709,15 @@ internal sealed class HandshakeDriver : IDisposable
                                         // the foe we locked (name/wcid survive a
                                         // notification-driven name update).
                                         var killSnap = worldState.TryGet(ctgHealth);
-                                        combatFeel.RecordKill(new CombatFeelLedger.MobIdentity(
+                                        var killIdentity = new CombatFeelLedger.MobIdentity(
                                             killSnap?.WeenieClassId ?? lastCombatFoe?.Wcid,
-                                            killSnap?.Name ?? combatTargetName ?? lastCombatFoe?.Name));
+                                            killSnap?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
+                                        combatFeel.RecordKill(killIdentity);
+                                        // cold-start egress: remember this KIND was killed in
+                                        // the current landblock so the egress override can treat
+                                        // it as already-farmed-here (bot's own outcome; no label).
+                                        if (CombatFeelLedger.KeyOf(killIdentity) is string killKindKey)
+                                            killedKindsThisLandblock.Add(killKindKey);
                                         PublishCombatHistory();
                                         // The kill resolves the engagement —
                                         // a later self-death is NOT this foe.
@@ -2404,6 +2418,11 @@ internal sealed class HandshakeDriver : IDisposable
                             // explicit clear avoids a brief post-transition
                             // false positive).
                             recentHostileAt.Clear();
+                            // cold-start egress: a new landblock is a fresh hunt
+                            // zone — the per-dwell killed-kind set must not carry
+                            // across the seam (mirrors the dwell/level reset in
+                            // LlmGoalPolicy.UpdateDwellTracking).
+                            killedKindsThisLandblock.Clear();
                             // Commit B — the inter-landblock edge is
                             // recorded below (after we have created the
                             // arrival node via RecordVisit). Setting
@@ -3461,6 +3480,12 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     worldState.RecentHostileNames = recentHostileAt.Count > 0
                         ? new HashSet<string>(recentHostileAt.Keys, StringComparer.Ordinal)
+                        : null;
+                    // cold-start egress: publish the per-landblock killed-kind
+                    // set so the projection (and the hunt-egress override that
+                    // reads it) sees which kinds the bot has already farmed here.
+                    worldState.KilledKindsThisDwell = killedKindsThisLandblock.Count > 0
+                        ? new HashSet<string>(killedKindsThisLandblock, StringComparer.Ordinal)
                         : null;
 
                     var projection = WorldStateProjection.FromWorldState(

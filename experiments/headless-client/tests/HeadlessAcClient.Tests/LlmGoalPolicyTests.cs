@@ -4704,6 +4704,48 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void HuntEgress_TappedOut_BypassesLootGrace()
+    {
+        // cp-2260 live regression: a tapped-out bot re-farming trivial mobs
+        // loots a corpse every <2min, so sinceMaterialProgress never reaches
+        // the 2min grace and egress would never engage. When tapped out, the
+        // grace is bypassed (the bot's own 0-levels signal is the authority),
+        // so egress engages despite very recent inventory churn.
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
+    }
+
+    [Fact]
+    public void HuntEgress_NotTappedOut_LootGraceStillApplies()
+    {
+        // Same recent-loot churn but NOT tapped out (e.g. still leveling here)
+        // → the grace is preserved, egress defers.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: false));
+    }
+
+    [Fact]
+    public void HuntEgress_TappedOut_StillCancelledByMonster()
+    {
+        // Tapped-out bypasses only the loot grace — an engageable (unfarmed/
+        // hostile) monster still cancels egress so the bot fights it.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: true,
+            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
+    }
+
+    [Fact]
+    public void HuntEgress_TappedOut_StillRequiresCombatReady()
+    {
+        // Tapped-out does not override the disarmed cancel.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: false, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
+    }
+
+    [Fact]
     public void InventoryItemUsed_IsNotPlanInvalidating()
     {
         // Self-emitted echo must not invalidate in-flight LLM calls.
@@ -6145,5 +6187,208 @@ public class LlmGoalPolicyTests
             explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
             levelAtLandblockEntry: 3);
         Assert.DoesNotContain("tapped out: level", prompt);
+    }
+
+    // ---- cp-2260 cold-start trivial-farm egress override helpers ----
+
+    private static VisibleObjectProjection Mob(
+        uint guid, string name, uint? wcid, bool corpse = false, bool hostile = false)
+        => new VisibleObjectProjection
+        {
+            Guid = guid, Name = name, Wcid = wcid, ItemType = 0x10u, Distance = 2f,
+            IsCreature = true, IsMonster = true, IsCorpse = corpse, ObservedHostile = hostile,
+        };
+
+    [Fact]
+    public void IsFarmedHere_NotTappedOut_False()
+    {
+        var v = Mob(0x1u, "Chicken", 10u);
+        Assert.False(LlmGoalPolicy.IsFarmedHere(
+            v, new HashSet<string> { "w:10" }, tappedOut: false));
+    }
+
+    [Fact]
+    public void IsFarmedHere_ObservedHostile_False()
+    {
+        var v = Mob(0x1u, "Chicken", 10u, hostile: true);
+        Assert.False(LlmGoalPolicy.IsFarmedHere(
+            v, new HashSet<string> { "w:10" }, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsFarmedHere_NullOrEmptyKilledSet_False()
+    {
+        var v = Mob(0x1u, "Chicken", 10u);
+        Assert.False(LlmGoalPolicy.IsFarmedHere(v, null, tappedOut: true));
+        Assert.False(LlmGoalPolicy.IsFarmedHere(
+            v, new HashSet<string>(), tappedOut: true));
+    }
+
+    [Fact]
+    public void IsFarmedHere_KindInSet_True()
+    {
+        var v = Mob(0x1u, "Chicken", 10u);
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"));
+        Assert.NotNull(key);
+        Assert.True(LlmGoalPolicy.IsFarmedHere(
+            v, new HashSet<string> { key! }, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsFarmedHere_UnknownKind_False()
+    {
+        var v = Mob(0x1u, "Drudge", 99u);
+        Assert.False(LlmGoalPolicy.IsFarmedHere(
+            v, new HashSet<string> { "w:10" }, tappedOut: true));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_AllFarmed_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) };
+        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, new HashSet<string> { key }, tappedOut: true));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_UnknownKindPresent_True()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u) };
+        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, new HashSet<string> { key }, tappedOut: true));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_FarmedButCorpse_IgnoredAndNotEffective()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var visible = new[] { Mob(0x1u, "Chicken", 10u, corpse: true) };
+        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, new HashSet<string> { key }, tappedOut: true));
+    }
+
+    [Fact]
+    public void ComputeEffectiveMonsterInView_FarmedKindAttackingBot_True()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        // Same farmed kind, but it's HOSTILE (attacking) → still counts.
+        var visible = new[] { Mob(0x1u, "Chicken", 10u, hostile: true) };
+        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
+            visible, new HashSet<string> { key }, tappedOut: true));
+    }
+
+    private static WorldStateProjection EgressWorld(
+        IReadOnlyList<VisibleObjectProjection> visible,
+        IReadOnlySet<string>? killed,
+        CombatFightStatus? fight = null)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f, Level = 3,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+            KilledKindsThisDwell = killed,
+            CurrentFight = fight,
+        };
+
+    private static Goal AttackGoal(Selector target) => new Goal
+    {
+        Kind = GoalKind.Attack, Target = target, Source = "llm",
+    };
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_NotTappedOut_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: false));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_NonAttackGoal_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Chicken" }, Source = "llm" };
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(talk, world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_EmptySelector_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector()), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_NoKillsHere_False()
+    {
+        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, null);
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_HostileInView_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        // A different mob is attacking the bot → self-defense outranks egress.
+        var world = EgressWorld(
+            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u, hostile: true) },
+            new HashSet<string> { key });
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_MidFight_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var world = EgressWorld(
+            new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key },
+            fight: new CombatFightStatus(0x1u, "Chicken", 0, 0, 0));
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_AllMatchesFarmed_True()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        var world = EgressWorld(
+            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) },
+            new HashSet<string> { key });
+        Assert.True(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_NoVisibleMatch_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
+        // Killed a Chicken here, but the Attack selector names a Drudge not in view.
+        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Drudge" }), world, tappedOut: true));
+    }
+
+    [Fact]
+    public void IsTappedOutRepeatKillAttack_MixedMatchUnfarmed_False()
+    {
+        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Rat"))!;
+        // Two visible "Rat" by NAME selector: one farmed wcid 10, one fresh wcid 99.
+        var world = EgressWorld(
+            new[] { Mob(0x1u, "Rat", 10u), Mob(0x2u, "Rat", 99u) },
+            new HashSet<string> { key });
+        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
+            AttackGoal(new Selector { Name = "Rat" }), world, tappedOut: true));
     }
 }

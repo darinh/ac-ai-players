@@ -192,6 +192,17 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("combat_history")]
     public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; init; }
 
+    /// <summary>
+    /// cold-start egress: kind-keys (<see cref="CombatFeelLedger.KeyOf"/>
+    /// form) of monster kinds the bot has killed since entering the current
+    /// landblock. Copied from <see cref="WorldState.KilledKindsThisDwell"/>.
+    /// Consumed only by the mechanical hunt-egress override to recognise an
+    /// already-farmed-here kind once the bot is tapped out — raw bot-owned
+    /// outcome data, no danger/value label. Not serialised to the LLM prompt.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlySet<string>? KilledKindsThisDwell { get; init; }
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -368,6 +379,7 @@ internal sealed record WorldStateProjection
             Visible = visible,
             CurrentFight = world.CurrentFight,
             CombatHistory = world.CombatHistory,
+            KilledKindsThisDwell = world.KilledKindsThisDwell,
         };
     }
 
