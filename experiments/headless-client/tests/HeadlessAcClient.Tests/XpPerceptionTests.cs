@@ -239,8 +239,8 @@ public class XpPerceptionTests
         var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
 
         var prompt = LlmGoalPolicy.BuildUserPrompt(proj!, new EventStream(), currentGoal: null);
-        Assert.Contains("- attributes at login: endurance 45", prompt);
-        Assert.Contains("- trained skills at login (valid RaiseSkill targets): WarMagic (trained, raised 30)", prompt);
+        Assert.Contains("- attributes: endurance 45", prompt);
+        Assert.Contains("- trained skills (valid RaiseSkill targets): WarMagic (trained, raised 30)", prompt);
         Assert.DoesNotContain("WarMagic (trained, raised 30), Axe", prompt); // Untrained never surfaces in the list
     }
 
@@ -253,9 +253,9 @@ public class XpPerceptionTests
         var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
 
         var prompt = LlmGoalPolicy.BuildUserPrompt(proj!, new EventStream(), currentGoal: null);
-        Assert.DoesNotContain("- attributes at login:", prompt);
+        Assert.DoesNotContain("- attributes:", prompt);
         // The render bullet, not the SPEND XP rule (which references the
-        // phrase "trained skills at login" unconditionally).
-        Assert.DoesNotContain("- trained skills at login (valid RaiseSkill targets):", prompt);
+        // phrase "trained skills" unconditionally).
+        Assert.DoesNotContain("- trained skills (valid RaiseSkill targets):", prompt);
     }
 }

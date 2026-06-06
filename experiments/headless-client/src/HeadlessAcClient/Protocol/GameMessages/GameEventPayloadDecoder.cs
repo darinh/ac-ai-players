@@ -902,12 +902,29 @@ internal static class GameEventPayloadDecoder
     }
 
     // Wire skill-id -> name via the local Protocol.Skill mirror. Unknown
-    // ids (future/unmapped) fall back to a stable synthetic name.
-    private static string SkillName(uint id)
+    // ids (future/unmapped) fall back to a stable synthetic name. Internal
+    // so the discrete PrivateUpdateSkill (0x02DD) apply resolves names the
+    // same way the login bundle does.
+    internal static string SkillName(uint id)
     {
         var e = (Skill)id;
         return Enum.IsDefined(typeof(Skill), e) ? e.ToString() : $"Skill{id}";
     }
+
+    // Wire primary-attribute-id -> the SAME canonical lowercase name the
+    // login bundle seeds (so discrete 0x02E3 updates upsert by name). Only
+    // the six primaries (PropertyAttribute 1..6); returns null otherwise
+    // (vitals ride separate opcodes).
+    internal static string? PrimaryAttributeName(uint id) => id switch
+    {
+        1 => "strength",
+        2 => "endurance",
+        3 => "quickness",
+        4 => "coordination",
+        5 => "focus",
+        6 => "self",
+        _ => null,
+    };
 
 
     private static void WarnPlayerDescOverrun(string section, int needed, int bodyLen, int cursor)

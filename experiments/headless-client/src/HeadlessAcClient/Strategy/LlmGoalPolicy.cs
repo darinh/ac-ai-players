@@ -2722,7 +2722,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
-        sb.AppendLine("- SPEND XP: `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested — raise an attribute with `RaiseAttribute{target: {name: \"endurance\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), a vital pool with `RaiseVital{target: {name: \"health\"}, amount: <XP>}` (names: health, stamina, mana), or a trained skill with `RaiseSkill{target: {name: \"war magic\"}, amount: <XP>}` (use a name from `trained skills at login` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Endurance/health raise MAX HEALTH. Invest a chunk when max HP is low.");
+        sb.AppendLine("- SPEND XP: `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested — raise an attribute with `RaiseAttribute{target: {name: \"endurance\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), a vital pool with `RaiseVital{target: {name: \"health\"}, amount: <XP>}` (names: health, stamina, mana), or a trained skill with `RaiseSkill{target: {name: \"war magic\"}, amount: <XP>}` (use a name from `trained skills` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Endurance/health raise MAX HEALTH. Invest a chunk when max HP is low.");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
         sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
@@ -2762,17 +2762,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         if (world.Self.Attributes is { Count: > 0 } selfAttrs)
         {
-            // RAW login snapshot of base attribute values (unbuffed). May be
-            // stale after a Raise* until relogin — framed as "at login".
-            sb.AppendLine($"- attributes at login: {string.Join(", ", selfAttrs.Select(a => $"{a.Name} {a.Base}"))}");
+            // RAW base attribute values (unbuffed), seeded at login and kept
+            // live by discrete PrivateUpdateAttribute (0x02E3) after a raise.
+            sb.AppendLine($"- attributes: {string.Join(", ", selfAttrs.Select(a => $"{a.Name} {a.Base}"))}");
         }
         if (world.Self.TrainedSkills is { Count: > 0 } selfSkills)
         {
             // RAW list of the skills the character actually has (wire
-            // AdvancementClass Trained/Specialized) — these are the only valid
-            // RaiseSkill targets. raised ranks are login-time and may be stale.
+            // AdvancementClass Trained/Specialized) — the only valid RaiseSkill
+            // targets. Seeded at login, kept live by discrete
+            // PrivateUpdateSkill (0x02DD) after a raise.
             sb.AppendLine(
-                "- trained skills at login (valid RaiseSkill targets): " +
+                "- trained skills (valid RaiseSkill targets): " +
                 string.Join(", ", selfSkills.Select(s =>
                     $"{s.Name} ({s.Advancement}, raised {s.RaisedRanks})")));
         }
