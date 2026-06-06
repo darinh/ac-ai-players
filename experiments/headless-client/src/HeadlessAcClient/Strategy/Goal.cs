@@ -62,6 +62,17 @@ internal enum GoalKind
     /// MUCH (Strategy owns that).
     /// </summary>
     RaiseVital = 11,
+
+    /// <summary>
+    /// Spend accumulated experience to raise one trained skill. A self-action
+    /// (no world target / motion): the LLM names the skill in
+    /// <see cref="Goal.Target"/> (name = a skill, e.g. "war magic", "melee
+    /// defense") and the XP to invest in <see cref="Goal.Amount"/>. The motor
+    /// maps the name to the wire ordinal and sends the chunk; it makes NO
+    /// decision about WHICH skill or HOW MUCH, and does NOT pre-judge whether
+    /// the skill is trained (the server validates and rejects untrained ones).
+    /// </summary>
+    RaiseSkill = 12,
 }
 
 /// <summary>

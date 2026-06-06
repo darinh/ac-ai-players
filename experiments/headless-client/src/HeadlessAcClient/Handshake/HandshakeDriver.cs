@@ -3929,6 +3929,95 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("raise-vital dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.RaiseSkill)
+                    {
+                        // Self-action: spend accumulated experience to raise a
+                        // trained skill. The LLM decides WHICH skill
+                        // (goal.Target.name) and HOW MUCH (goal.Amount); the
+                        // motor only maps the name to the wire ordinal,
+                        // validates+clamps the amount to the bot's observed
+                        // unspent XP, and sends the opcode. No motion, no world
+                        // target. There is NO source default amount and no
+                        // skill preference — an unparseable skill or a
+                        // missing/invalid amount is a motor error (nothing is
+                        // sent) and the goal fails so the LLM re-deliberates.
+                        // The source does NOT pre-judge whether the skill is
+                        // trained; the server validates and rejects untrained/
+                        // retired skills with a chat message. Mirror of the
+                        // RaiseAttribute/RaiseVital branches; shares the single
+                        // in-flight `pendingRaise` slot (all draw the same XP
+                        // pool).
+                        long? availXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64s &&
+                            selfP64s.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNowS)
+                                ? axNowS : (long?)null;
+
+                        if (pendingRaise is { } ps0 &&
+                            ((ps0.PreAvailableXp is long preXpS && availXpNow is long nowXpS && nowXpS < preXpS) ||
+                             (DateTime.UtcNow - ps0.At) > TimeSpan.FromSeconds(12)))
+                        {
+                            var confirmedS = ps0.PreAvailableXp is long pxpS && availXpNow is long nxpS && nxpS < pxpS;
+                            Console.WriteLine(
+                                $"[xp-spend] pending Raise{ps0.Kind} id={ps0.Id} amount={ps0.Amount} " +
+                                (confirmedS
+                                    ? $"CONFIRMED (unspent {ps0.PreAvailableXp}->{availXpNow})"
+                                    : "timed out (no unspent-XP confirmation)"));
+                            pendingRaise = null;
+                        }
+
+                        if (!SkillRaise.TryResolveSkillId(goal.Target.Name, out var skillId))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseSkill: unknown skill target='{goal.Target}' " +
+                                $"(expected a skill name, e.g. \"war magic\"/\"melee defense\"/\"healing\"); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-skill: unknown skill name", eventStream);
+                        }
+                        else if (!AttributeRaise.TryValidateAndClampAmount(goal.Amount, availXpNow, out var spendAmountS))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseSkill id={skillId}: needs a positive whole `amount` and spendable XP " +
+                                $"(amount={(goal.Amount?.ToString() ?? "null")}, unspent={(availXpNow?.ToString() ?? "null")}); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-skill: invalid amount or no unspent XP", eventStream);
+                        }
+                        else if (pendingRaise is { } psDup)
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseSkill id={skillId} suppressed — a raise " +
+                                $"(Raise{psDup.Kind} id={psDup.Id}) is still " +
+                                $"pending (dispatched {(DateTime.UtcNow - psDup.At).TotalSeconds:F1}s ago); " +
+                                $"awaiting unspent-XP confirmation.");
+                            tactics.Fail("raise-skill: a raise is already pending", eventStream);
+                        }
+                        else
+                        {
+                            var raisePktSeqS  = nextOutboundPacketSequence++;
+                            var raiseFragSeqS = nextOutboundFragmentSequence++;
+                            var raiseBufS = new byte[GameActionRaiseSkillMessage.PackedSize];
+                            var raiseLenS = GameActionRaiseSkillMessage.Pack(raiseBufS, skillId, spendAmountS);
+                            var raiseMsgS = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                raiseMsgS.AddAckSequence(lastReceivedSeq);
+                            raiseMsgS.AddBlobFragment(
+                                fragSequence: raiseFragSeqS,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: raiseBufS.AsSpan(0, raiseLenS));
+                            var raiseSentS = raiseMsgS.Pack(sendBuf, myClientId,
+                                                            sequence: raisePktSeqS, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentS),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            pendingRaise = ("Skill", skillId, spendAmountS, DateTime.UtcNow, availXpNow);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL RaiseSkill: id={skillId} amount={spendAmountS} " +
+                                $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={raisePktSeqS} fragSeq={raiseFragSeqS} bytes={raiseSentS}");
+                            tactics.Clear("raise-skill dispatched", eventStream);
+                        }
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that

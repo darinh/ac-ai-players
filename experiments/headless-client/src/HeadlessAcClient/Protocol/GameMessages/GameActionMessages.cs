@@ -46,6 +46,7 @@ internal enum GameActionType : uint
     GetAndWieldItem     = 0x001A,
     RaiseVital          = 0x0044,
     RaiseAttribute      = 0x0045,
+    RaiseSkill          = 0x0046,
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
     GiveObjectRequest   = 0x00CD,
@@ -353,6 +354,44 @@ internal static class GameActionRaiseVitalMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.RaiseVital, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), vitalId); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), xpSpent); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// RaiseSkill (0x0046). Spends accumulated experience to raise one trained
+/// skill. The server handler (GameActionRaiseSkill.cs) reads u32 skillId then
+/// u32 xpSpent and calls Player.HandleActionRaiseSkill, which accepts a spend
+/// against a trained/specialized skill (it accumulates the spend and
+/// recomputes the rank — there is no exact per-rank cost), so the client may
+/// spend any clamped chunk. On success the server emits a private skill
+/// update; on failure (untrained / retired / unimplemented skill, or amount
+/// &gt; AvailableExperience) it sends a "Your attempt to raise X has failed."
+/// chat and no update.
+///
+/// skillId is the raw <see cref="Skill"/> wire ordinal. The motor only maps
+/// the LLM-named skill to this id and sends the chunk the LLM asked for; it
+/// makes NO decision about WHICH skill or HOW MUCH, and does NOT pre-judge
+/// whether the skill is trained — that is the Strategy layer's job and the
+/// server's validation. No game-content knowledge (e.g. a skill's effect or
+/// which skills are "good") lives here.
+///
+/// Payload after the 12B GameAction header:
+///   u32 skillId
+///   u32 xpSpent
+/// </summary>
+internal static class GameActionRaiseSkillMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, uint skillId, uint xpSpent, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.RaiseSkill, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), skillId); cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), xpSpent); cursor += 4;
         return cursor;
     }
