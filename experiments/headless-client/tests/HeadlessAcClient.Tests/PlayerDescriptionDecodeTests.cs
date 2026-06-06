@@ -175,11 +175,14 @@ public class PlayerDescriptionDecodeTests
     }
 
     [Fact]
-    public void Decode_Int64CountExceedsBody_ClampsToAvailableEntries()
+    public void Decode_Int64CountExceedsBody_FailsClosed_LeavesXpNull()
     {
         // Hand-build a body whose Int64 count claims 5 entries but only
-        // one entry's worth of bytes follows. The decoder must clamp and
-        // read the single present entry rather than overrunning.
+        // one entry's worth of bytes follows. Because the decoder now
+        // continues past Int64 to the attribute/skill vectors, a bogus
+        // count must FAIL CLOSED (return partial with XP null) rather than
+        // clamp-and-continue — a desynced cursor could otherwise decode
+        // garbage as attributes/skills.
         var buf = new List<byte>();
         void U16(ushort v) { var b = new byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); buf.AddRange(b); }
         void U32(uint v)   { var b = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); buf.AddRange(b); }
@@ -192,7 +195,10 @@ public class PlayerDescriptionDecodeTests
 
         var p = GameEventPayloadDecoder.Decode(buf.ToArray(), GameEventType.PlayerDescription);
 
-        Assert.Equal(999L, p!.PlayerDescription!.AvailableExperience);
+        Assert.NotNull(p?.PlayerDescription);
+        Assert.Null(p!.PlayerDescription!.AvailableExperience);
+        Assert.Null(p.PlayerDescription.Attributes);
+        Assert.Null(p.PlayerDescription.Skills);
     }
 
     [Fact]
@@ -271,5 +277,36 @@ public class PlayerDescriptionSeedTests
         var ws = new WorldState();
         Assert.False(ws.SeedSelfPropertyInt(LevelId, 5));
         Assert.False(ws.SeedSelfPropertyInt64(TotalId, 5L));
+    }
+
+    [Fact]
+    public void SeedAttributesAndSkills_WriteIntoSnapshot_FirstSeedWins()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(Self);
+
+        var attrs = new[] { new PdAttribute("endurance", 40u, 5u, 50u) };
+        var skills = new[] { new PdSkill("WarMagic", 34u, 2u, 30u, 0u, 5000u) };
+
+        Assert.True(ws.SeedSelfAttributes(attrs));
+        Assert.True(ws.SeedSelfSkills(skills));
+
+        var snap = ws.TryGet(Self)!;
+        Assert.Same(attrs, snap.SelfAttributes);
+        Assert.Same(skills, snap.SelfSkills);
+
+        // A second (re-sent) bundle must NOT clobber the first seed.
+        Assert.False(ws.SeedSelfAttributes(new[] { new PdAttribute("endurance", 99u, 9u, 9u) }));
+        Assert.False(ws.SeedSelfSkills(new[] { new PdSkill("Axe", 1u, 1u, 0u, 0u, 0u) }));
+        Assert.Same(attrs, ws.TryGet(Self)!.SelfAttributes);
+        Assert.Same(skills, ws.TryGet(Self)!.SelfSkills);
+    }
+
+    [Fact]
+    public void SeedAttributesAndSkills_DroppedWhenSelfGuidUnknown()
+    {
+        var ws = new WorldState();
+        Assert.False(ws.SeedSelfAttributes(new[] { new PdAttribute("self", 10u, 0u, 0u) }));
+        Assert.False(ws.SeedSelfSkills(new[] { new PdSkill("Healing", 21u, 2u, 0u, 0u, 0u) }));
     }
 }

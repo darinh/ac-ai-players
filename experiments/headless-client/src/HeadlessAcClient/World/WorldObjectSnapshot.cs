@@ -101,6 +101,16 @@ internal sealed class WorldObjectSnapshot
     // AvailableExperience=2). Null until the first 0x02CF arrives.
     public Dictionary<uint, long>? PropertyInt64s { get; internal set; }
 
+    // Self character-sheet attributes + skills, seeded once from the login
+    // PlayerDescription (0x0013) bundle. Only populated for the bot's own
+    // player. Login-only for now: there is no discrete skill/attribute
+    // update decode yet, so raised ranks here go stale after a Raise* until
+    // relogin (AvailableExperience still updates live). Null until the
+    // login bundle is seeded. See PdAttribute / PdSkill.
+    public IReadOnlyList<PdAttribute>? SelfAttributes { get; internal set; }
+    public IReadOnlyList<PdSkill>? SelfSkills { get; internal set; }
+
+
     // Self HEALTH vital — only populated for the bot's own player
     // (PrivateUpdateVital is implicitly scoped to the receiving
     // session, like PropertyInts). HealthCurrent is the latest
