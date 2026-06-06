@@ -173,6 +173,43 @@ internal sealed record SelfProjection
 
     /// <summary>PropertyInt.CoinValue (20). Pyreals in inventory (server-totaled).</summary>
     [JsonPropertyName("coin_value")] public int? CoinValue { get; init; }
+
+    /// <summary>
+    /// Character-sheet attribute base values (StartingValue + raised Ranks),
+    /// seeded once from the login PlayerDescription. Null until the login
+    /// bundle is decoded. Login-only: stale after a RaiseAttribute/RaiseVital
+    /// until relogin.
+    /// </summary>
+    [JsonPropertyName("attributes")]
+    public IReadOnlyList<SelfAttributeProjection>? Attributes { get; init; }
+
+    /// <summary>
+    /// The character's RAISABLE skills — those whose wire AdvancementClass is
+    /// Trained or Specialized (Untrained/Inactive can't be raised). Seeded
+    /// once from the login PlayerDescription. Null when none are known yet.
+    /// </summary>
+    [JsonPropertyName("trained_skills")]
+    public IReadOnlyList<SelfSkillProjection>? TrainedSkills { get; init; }
+}
+
+/// <summary>One self attribute/vital base value for the prompt.</summary>
+internal sealed record SelfAttributeProjection
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    [JsonPropertyName("base")] public uint Base { get; init; }
+}
+
+/// <summary>
+/// One raisable self skill. <see cref="Advancement"/> is "trained" or
+/// "specialized" (the wire SkillAdvancementClass). <see cref="RaisedRanks"/>
+/// is the raised ranks only (excludes the creation/training InitLevel bonus
+/// and the attribute contribution).
+/// </summary>
+internal sealed record SelfSkillProjection
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    [JsonPropertyName("advancement")] public required string Advancement { get; init; }
+    [JsonPropertyName("raised_ranks")] public uint RaisedRanks { get; init; }
 }
 
 internal sealed record WorldStateProjection
@@ -386,6 +423,35 @@ internal sealed record WorldStateProjection
             if (props64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var ax)) availXp = ax;
         }
 
+        // Character-sheet attributes + raisable skills, seeded from the login
+        // PlayerDescription. Filtering skills to AdvancementClass Trained(2)/
+        // Specialized(3) is a raw wire fact (these are the ones the character
+        // actually has and can raise) — NOT a value judgement about which to
+        // raise; that decision stays with the LLM.
+        IReadOnlyList<SelfAttributeProjection>? attrProj = null;
+        if (self.SelfAttributes is { Count: > 0 } sa)
+        {
+            attrProj = sa
+                .Select(a => new SelfAttributeProjection { Name = a.Name, Base = a.Base })
+                .ToList();
+        }
+
+        IReadOnlyList<SelfSkillProjection>? skillProj = null;
+        if (self.SelfSkills is { } ss)
+        {
+            var raisable = ss
+                .Where(s => s.AdvancementClass is 2u or 3u)
+                .OrderBy(s => s.Name, StringComparer.Ordinal)
+                .Select(s => new SelfSkillProjection
+                {
+                    Name = s.Name,
+                    Advancement = s.AdvancementClass == 3u ? "specialized" : "trained",
+                    RaisedRanks = s.Ranks,
+                })
+                .ToList();
+            if (raisable.Count > 0) skillProj = raisable;
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -406,6 +472,8 @@ internal sealed record WorldStateProjection
                 HealthRising = self.HealthRising,
                 NumDeaths = numDeaths,
                 CoinValue = coinValue,
+                Attributes = attrProj,
+                TrainedSkills = skillProj,
             },
             Inventory = inv,
             Visible = visible,

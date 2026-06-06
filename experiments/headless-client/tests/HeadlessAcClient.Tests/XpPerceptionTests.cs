@@ -163,4 +163,99 @@ public class XpPerceptionTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(proj!, new EventStream(), currentGoal: null);
         Assert.DoesNotContain("- experience:", prompt);
     }
+
+    // ---- attribute + skill perception (login PlayerDescription seed) ----
+
+    [Fact]
+    public void Projection_TrainedSkillsFilter_OnlyTrainedAndSpecialized()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.SeedSelfAttributes(new[]
+        {
+            new PdAttribute("endurance", 45u, 5u, 50u),
+            new PdAttribute("self", 30u, 0u, 0u),
+        });
+        ws.SeedSelfSkills(new[]
+        {
+            new PdSkill("WarMagic", 34u, 2u, 30u, 0u, 5000u),   // Trained
+            new PdSkill("Healing", 21u, 3u, 12u, 10u, 8000u),   // Specialized
+            new PdSkill("Axe", 1u, 1u, 0u, 0u, 0u),             // Untrained -> dropped
+            new PdSkill("Mace", 5u, 0u, 0u, 0u, 0u),            // Inactive -> dropped
+        });
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+
+        Assert.Equal(2, proj!.Self.Attributes!.Count);
+        Assert.Equal(45u, proj.Self.Attributes!.Single(a => a.Name == "endurance").Base);
+
+        var skills = proj.Self.TrainedSkills!;
+        Assert.Equal(2, skills.Count); // Untrained + Inactive filtered out
+        var war = skills.Single(s => s.Name == "WarMagic");
+        Assert.Equal("trained", war.Advancement);
+        Assert.Equal(30u, war.RaisedRanks);
+        Assert.Equal("specialized", skills.Single(s => s.Name == "Healing").Advancement);
+        Assert.DoesNotContain(skills, s => s.Name == "Axe");
+    }
+
+    [Fact]
+    public void Projection_NoSeededSkills_TrainedSkillsNull()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        Assert.Null(proj!.Self.Attributes);
+        Assert.Null(proj.Self.TrainedSkills);
+    }
+
+    [Fact]
+    public void Projection_AllSkillsUntrained_TrainedSkillsNull()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.SeedSelfSkills(new[]
+        {
+            new PdSkill("Axe", 1u, 1u, 0u, 0u, 0u),  // Untrained
+            new PdSkill("Mace", 5u, 0u, 0u, 0u, 0u), // Inactive
+        });
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.Null(proj!.Self.TrainedSkills);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersAttributeAndTrainedSkillLines()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 1, Property: 25, Value: 5));
+        ws.SeedSelfAttributes(new[] { new PdAttribute("endurance", 45u, 5u, 50u) });
+        ws.SeedSelfSkills(new[]
+        {
+            new PdSkill("WarMagic", 34u, 2u, 30u, 0u, 5000u),
+            new PdSkill("Axe", 1u, 1u, 0u, 0u, 0u),
+        });
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(proj!, new EventStream(), currentGoal: null);
+        Assert.Contains("- attributes at login: endurance 45", prompt);
+        Assert.Contains("- trained skills at login (valid RaiseSkill targets): WarMagic (trained, raised 30)", prompt);
+        Assert.DoesNotContain("WarMagic (trained, raised 30), Axe", prompt); // Untrained never surfaces in the list
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoSkillsOrAttributes_OmitsLines()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PrivateUpdatePropertyIntMessage(Sequence: 1, Property: 25, Value: 2));
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(proj!, new EventStream(), currentGoal: null);
+        Assert.DoesNotContain("- attributes at login:", prompt);
+        // The render bullet, not the SPEND XP rule (which references the
+        // phrase "trained skills at login" unconditionally).
+        Assert.DoesNotContain("- trained skills at login (valid RaiseSkill targets):", prompt);
+    }
 }

@@ -580,7 +580,47 @@ internal sealed class WorldState
     }
 
     /// <summary>
-    /// Apply a PrivateUpdateVital (0x02E7). Like
+    /// Seed the bot's attribute ranks from the login PlayerDescription
+    /// bundle. Login-only (no discrete attribute-update opcode is decoded
+    /// yet), so the first seed wins and a later re-sent bundle is ignored —
+    /// this never clobbers fresher state because none exists. Returns true
+    /// if the snapshot was populated.
+    /// </summary>
+    public bool SeedSelfAttributes(IReadOnlyList<PdAttribute> attributes)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                "[worldstate] PlayerDescription attribute seed before SelfGuid known (dropped)");
+            return false;
+        }
+        var snap = GetOrCreateSnapshot(selfGuid);
+        if (snap.SelfAttributes is not null)
+            return false; // already seeded this connection
+        snap.SelfAttributes = attributes;
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// Seed the bot's skills from the login PlayerDescription bundle. Same
+    /// login-only contract as <see cref="SeedSelfAttributes"/>.
+    /// </summary>
+    public bool SeedSelfSkills(IReadOnlyList<PdSkill> skills)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                "[worldstate] PlayerDescription skill seed before SelfGuid known (dropped)");
+            return false;
+        }
+        var snap = GetOrCreateSnapshot(selfGuid);
+        if (snap.SelfSkills is not null)
+            return false; // already seeded this connection
+        snap.SelfSkills = skills;
+        snap.Touch();
+        return true;
+    }
     /// PrivateUpdatePropertyInt it has no guid and is implicitly
     /// scoped to the receiving session's player. We only track the
     /// HEALTH vital; Stamina/Mana updates are accepted (to advance the

@@ -1467,13 +1467,21 @@ internal sealed class HandshakeDriver : IDisposable
                                 bool seededAvl = pdesc.AvailableExperience is long pdAvl &&
                                     worldState.SeedSelfPropertyInt64(
                                         PrivateUpdatePropertyInt64Message.AvailableExperienceId, pdAvl);
+                                bool seededAttrs = pdesc.Attributes is { Count: > 0 } pdAttrs &&
+                                    worldState.SeedSelfAttributes(pdAttrs);
+                                bool seededSkills = pdesc.Skills is { Count: > 0 } pdSkills &&
+                                    worldState.SeedSelfSkills(pdSkills);
                                 Console.WriteLine(
                                     $"[playerdesc] login bundle: level={pdesc.Level?.ToString() ?? "?"}" +
                                     $"{(seededLvl ? "" : "(skip)")} " +
                                     $"totalXp={pdesc.TotalExperience?.ToString() ?? "?"}" +
                                     $"{(seededTot ? "" : "(skip)")} " +
                                     $"unspentXp={pdesc.AvailableExperience?.ToString() ?? "?"}" +
-                                    $"{(seededAvl ? "" : "(skip)")}");
+                                    $"{(seededAvl ? "" : "(skip)")} " +
+                                    $"attrs={pdesc.Attributes?.Count ?? 0}" +
+                                    $"{(seededAttrs ? "" : "(skip)")} " +
+                                    $"skills={pdesc.Skills?.Count ?? 0}" +
+                                    $"{(seededSkills ? "" : "(skip)")}");
                                 MaybeEmitSelfProgress(ref selfProgressWakeSent, worldState, eventStream);
                             }
                             // Phase 6l — pickup-ack triggers the queued

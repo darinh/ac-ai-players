@@ -417,22 +417,49 @@ internal sealed record EvasionDefenderNotificationPayload(string AttackerName)
 
 /// <summary>
 /// Partial decode of the PlayerDescription (0x0013) login bundle.
-/// Only the initial Level (PropertyInt 25) and experience totals
-/// (PropertyInt64 TotalExperience=1, AvailableExperience=2) are
-/// extracted; the rest of the character-sheet serialization is not
-/// parsed. Any field is null when its property/section is absent
-/// (or the bundle was truncated before it).
+/// Extracts the initial Level (PropertyInt 25), experience totals
+/// (PropertyInt64 TotalExperience=1, AvailableExperience=2), and the
+/// character sheet's attribute ranks (<see cref="PdAttribute"/>) and
+/// skills (<see cref="PdSkill"/>). The later spell/enchantment/option/
+/// inventory sections are not parsed. Any field is null when its
+/// property/section is absent (or the bundle was truncated before it).
 /// </summary>
 internal sealed record PlayerDescriptionPayload(
     int? Level,
     long? TotalExperience,
-    long? AvailableExperience)
+    long? AvailableExperience,
+    IReadOnlyList<PdAttribute>? Attributes = null,
+    IReadOnlyList<PdSkill>? Skills = null)
 {
     public override string ToString()
-        => $"PlayerDescription(level={Level?.ToString() ?? "?"} " +
-           $"totalXp={TotalExperience?.ToString() ?? "?"} " +
-           $"unspentXp={AvailableExperience?.ToString() ?? "?"})";
+    {
+        var attrPart = Attributes is null ? "" : $" attrs={Attributes.Count}";
+        var skillPart = Skills is null ? "" : $" skills={Skills.Count}";
+        return $"PlayerDescription(level={Level?.ToString() ?? "?"} " +
+               $"totalXp={TotalExperience?.ToString() ?? "?"} " +
+               $"unspentXp={AvailableExperience?.ToString() ?? "?"}{attrPart}{skillPart})";
+    }
 }
+
+/// <summary>
+/// One primary attribute or vital from the login character sheet.
+/// <see cref="Base"/> is the unbuffed base value (StartingValue + raised
+/// <see cref="Ranks"/>); it excludes equipment/spell buffs and, for vitals,
+/// the Endurance/Self-derived max formula. <see cref="ExperienceSpent"/> is
+/// the XP already invested in this attribute.
+/// </summary>
+internal sealed record PdAttribute(string Name, uint Base, uint Ranks, uint ExperienceSpent);
+
+/// <summary>
+/// One skill entry from the login character sheet.
+/// <see cref="AdvancementClass"/> is the wire SkillAdvancementClass enum:
+/// 0=Inactive, 1=Untrained, 2=Trained, 3=Specialized (only Trained and
+/// Specialized are raisable). <see cref="Ranks"/> is the RAISED ranks only
+/// (it excludes the <see cref="InitLevel"/> training/creation bonus and the
+/// attribute contribution to the displayed skill value).
+/// </summary>
+internal sealed record PdSkill(
+    string Name, uint Id, uint AdvancementClass, uint Ranks, uint InitLevel, uint ExperienceSpent);
 
 /// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
@@ -574,92 +601,314 @@ internal static class GameEventPayloadDecoder
             EvasionDefenderNotification: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
-    // serializer GameEventPlayerDescription.cs. We extract ONLY the
-    // initial Level (PropertyInt 25) + experience totals (PropertyInt64
-    // TotalExperience=1 / AvailableExperience=2). The body begins at the
-    // back-patched property-flags dword; sections are written in a fixed
-    // order Int32 → Int64 → Bool → … regardless of flag-bit value, so
-    // Int64 sits right after Int32 and we can stop once both are read.
-    private const uint DescFlagPropertyInt32 = 0x0001;
-    private const uint DescFlagPropertyInt64 = 0x0080;
+    // serializer GameEventPlayerDescription.cs. We extract the initial
+    // Level (PropertyInt 25) + experience totals (PropertyInt64
+    // TotalExperience=1 / AvailableExperience=2) from the leading property
+    // hashtables, then traverse the remaining property sections to reach
+    // the attribute + skill vectors that carry the character sheet.
+    //
+    // The body begins at the back-patched property-flags dword. Property
+    // sections are written in a FIXED order that is NOT the flag-bit order:
+    //   Int32(0x0001), Int64(0x0080), Bool(0x0002), Double(0x0004),
+    //   String(0x0010), Did(0x0008), Iid(0x0040), Position(0x0020).
+    // Each is a PackableHashTable (u16 count + u16 numBuckets, then
+    // entries). After them comes the (non-flag-gated) vector section:
+    //   u32 vectorFlags, u32 healthPresent, [attribute block], [skill PHT].
+    private const uint DescFlagPropertyInt32  = 0x0001;
+    private const uint DescFlagPropertyBool   = 0x0002;
+    private const uint DescFlagPropertyDouble = 0x0004;
+    private const uint DescFlagPropertyDid    = 0x0008;
+    private const uint DescFlagPropertyString = 0x0010;
+    private const uint DescFlagPosition       = 0x0020;
+    private const uint DescFlagPropertyIid    = 0x0040;
+    private const uint DescFlagPropertyInt64  = 0x0080;
     private const uint LevelPropertyIntId = 25;
     private const uint TotalExperienceInt64Id = 1;
     private const uint AvailableExperienceInt64Id = 2;
+
+    // DescriptionVectorFlag bits (GameEventPlayerDescription.cs).
+    private const uint VectorFlagAttribute = 0x0001;
+    private const uint VectorFlagSkill     = 0x0002;
+
+    // AttributeCache bits in the server's WRITE order. The 6 primary
+    // attributes write 3 u32s (Ranks, StartingValue, ExperienceSpent); the
+    // 3 vitals append a 4th u32 (Current) we do not surface. Names match the
+    // RaiseAttribute / RaiseVital resolver vocabulary.
+    private static readonly (uint Bit, string Name, bool IsVital)[] AttributeOrder =
+    {
+        (0x0001, "strength",     false),
+        (0x0002, "endurance",    false),
+        (0x0004, "quickness",    false),
+        (0x0008, "coordination", false),
+        (0x0010, "focus",        false),
+        (0x0020, "self",         false),
+        (0x0040, "health",       true),
+        (0x0080, "stamina",      true),
+        (0x0100, "mana",         true),
+    };
+
+    // Per-skill wire entry: u32 id + u16 Ranks + u16(=1) + u32
+    // AdvancementClass + u32 ExperienceSpent + u32 InitLevel + u32(=0
+    // resistance) + f64(=0 last-used) = 32B. NOTE: CreatureSkill.Ranks is
+    // a ushort on the server (CreatureSkill.cs), so Ranks is 2 bytes —
+    // unlike attributes/vitals whose Ranks are u32.
+    private const int SkillEntrySize = 32;
 
     private static PlayerDescriptionPayload DecodePlayerDescription(ReadOnlySpan<byte> body)
     {
         int? level = null;
         long? totalXp = null;
         long? availXp = null;
+        List<PdAttribute>? attributes = null;
+        List<PdSkill>? skills = null;
+
+        PlayerDescriptionPayload Result() =>
+            new(level, totalXp, availXp, attributes, skills);
 
         // u32 propertyFlags + u32 weenieType
         if (body.Length < 8)
         {
             WarnPlayerDescOverrun("header", 8, body.Length, cursor: 0);
-            return new PlayerDescriptionPayload(level, totalXp, availXp);
+            return Result();
         }
         var flags = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4));
         var cursor = 8; // skip flags + weenieType
 
-        if ((flags & DescFlagPropertyInt32) != 0)
+        // Property sections in WRITE order. We read the two we care about
+        // (Int32 Level, Int64 XP) and SKIP the rest. Unlike the old
+        // (stop-after-Int64) decoder these fail CLOSED: any malformed or
+        // overrunning section returns the fields gathered so far with
+        // attrs/skills null, so a corrupt count can never desync the cursor
+        // and make us decode garbage as attributes/skills.
+        if ((flags & DescFlagPropertyInt32) != 0 &&
+            !TryReadInt32Section(body, ref cursor, ref level))
+            return Result();
+        if ((flags & DescFlagPropertyInt64) != 0 &&
+            !TryReadInt64Section(body, ref cursor, ref totalXp, ref availXp))
+            return Result();
+        if ((flags & DescFlagPropertyBool) != 0 &&
+            !TrySkipFixedPht(body, ref cursor, entrySize: 8, "bool"))
+            return Result();
+        if ((flags & DescFlagPropertyDouble) != 0 &&
+            !TrySkipFixedPht(body, ref cursor, entrySize: 12, "double"))
+            return Result();
+        if ((flags & DescFlagPropertyString) != 0 &&
+            !TrySkipStringSection(body, ref cursor))
+            return Result();
+        if ((flags & DescFlagPropertyDid) != 0 &&
+            !TrySkipFixedPht(body, ref cursor, entrySize: 8, "did"))
+            return Result();
+        if ((flags & DescFlagPropertyIid) != 0 &&
+            !TrySkipFixedPht(body, ref cursor, entrySize: 8, "iid"))
+            return Result();
+        // Position entry = u32 PositionType key + (u32 landblock + 3 floats
+        // + 4 floats) = 4 + 32 = 36B.
+        if ((flags & DescFlagPosition) != 0 &&
+            !TrySkipFixedPht(body, ref cursor, entrySize: 36, "position"))
+            return Result();
+
+        // Vector section — NOT propertyFlags-gated; always written.
+        if (cursor + 8 > body.Length)
         {
-            // PackableHashTable header: u16 count, u16 numBuckets.
-            if (cursor + 4 > body.Length)
-            {
-                WarnPlayerDescOverrun("int32-header", 4, body.Length, cursor);
-                return new PlayerDescriptionPayload(level, totalXp, availXp);
-            }
-            var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
-            cursor += 4; // count + numBuckets (numBuckets ignored)
-
-            // Each entry is u32 key + s32 value = 8B; bound the loop by
-            // what the body can actually hold so a corrupt count can't
-            // read past the buffer.
-            if (count > (body.Length - cursor) / 8)
-            {
-                WarnPlayerDescOverrun("int32-entries", count * 8, body.Length, cursor);
-                count = (ushort)((body.Length - cursor) / 8);
-            }
-            for (int i = 0; i < count; i++)
-            {
-                var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
-                var val = BinaryPrimitives.ReadInt32LittleEndian(body.Slice(cursor + 4, 4));
-                cursor += 8;
-                if (key == LevelPropertyIntId)
-                    level = val;
-            }
+            WarnPlayerDescOverrun("vector-header", 8, body.Length, cursor);
+            return Result();
         }
+        var vectorFlags = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        cursor += 8; // vectorFlags + healthPresent (u32 bool)
 
-        if ((flags & DescFlagPropertyInt64) != 0)
-        {
-            if (cursor + 4 > body.Length)
-            {
-                WarnPlayerDescOverrun("int64-header", 4, body.Length, cursor);
-                return new PlayerDescriptionPayload(level, totalXp, availXp);
-            }
-            var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
-            cursor += 4;
+        if ((vectorFlags & VectorFlagAttribute) != 0 &&
+            !TryReadAttributeVector(body, ref cursor, out attributes))
+            return Result();
+        if ((vectorFlags & VectorFlagSkill) != 0 &&
+            !TryReadSkillVector(body, ref cursor, out skills))
+            return Result();
 
-            // Each entry is u32 key + s64 value = 12B.
-            if (count > (body.Length - cursor) / 12)
-            {
-                WarnPlayerDescOverrun("int64-entries", count * 12, body.Length, cursor);
-                count = (ushort)((body.Length - cursor) / 12);
-            }
-            for (int i = 0; i < count; i++)
-            {
-                var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
-                var val = BinaryPrimitives.ReadInt64LittleEndian(body.Slice(cursor + 4, 8));
-                cursor += 12;
-                if (key == TotalExperienceInt64Id)
-                    totalXp = val;
-                else if (key == AvailableExperienceInt64Id)
-                    availXp = val;
-            }
-        }
-
-        return new PlayerDescriptionPayload(level, totalXp, availXp);
+        return Result();
     }
+
+    // Reads the PropertyInt32 PackableHashTable, capturing Level (id 25).
+    private static bool TryReadInt32Section(ReadOnlySpan<byte> body, ref int cursor, ref int? level)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("int32-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4; // count + numBuckets
+        if (count > (body.Length - cursor) / 8)
+        {
+            WarnPlayerDescOverrun("int32-entries", count * 8, body.Length, cursor);
+            return false;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+            var val = BinaryPrimitives.ReadInt32LittleEndian(body.Slice(cursor + 4, 4));
+            cursor += 8;
+            if (key == LevelPropertyIntId)
+                level = val;
+        }
+        return true;
+    }
+
+    // Reads the PropertyInt64 PackableHashTable, capturing Total/Available XP.
+    private static bool TryReadInt64Section(ReadOnlySpan<byte> body, ref int cursor, ref long? totalXp, ref long? availXp)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("int64-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4;
+        if (count > (body.Length - cursor) / 12)
+        {
+            WarnPlayerDescOverrun("int64-entries", count * 12, body.Length, cursor);
+            return false;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+            var val = BinaryPrimitives.ReadInt64LittleEndian(body.Slice(cursor + 4, 8));
+            cursor += 12;
+            if (key == TotalExperienceInt64Id)
+                totalXp = val;
+            else if (key == AvailableExperienceInt64Id)
+                availXp = val;
+        }
+        return true;
+    }
+
+    // Skips a PackableHashTable whose entries are a fixed byte size.
+    private static bool TrySkipFixedPht(ReadOnlySpan<byte> body, ref int cursor, int entrySize, string section)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun(section + "-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4;
+        long needed = (long)count * entrySize;
+        if (needed > body.Length - cursor)
+        {
+            WarnPlayerDescOverrun(section + "-entries", (int)Math.Min(int.MaxValue, needed), body.Length, cursor);
+            return false;
+        }
+        cursor += (int)needed;
+        return true;
+    }
+
+    // Skips the PropertyString PackableHashTable. Each entry is a u32 key
+    // followed by WriteString16L { u16 len + len CP1252 bytes + pad so
+    // (2 + len) is a multiple of 4 }.
+    private static bool TrySkipStringSection(ReadOnlySpan<byte> body, ref int cursor)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("string-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4;
+        for (int i = 0; i < count; i++)
+        {
+            if (cursor + 6 > body.Length) // u32 key + u16 len
+            {
+                WarnPlayerDescOverrun("string-entry", 6, body.Length, cursor);
+                return false;
+            }
+            cursor += 4; // key
+            int len = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+            int field = 2 + len;
+            int advance = field + ((4 - (field % 4)) % 4);
+            if (cursor + advance > body.Length)
+            {
+                WarnPlayerDescOverrun("string-data", advance, body.Length, cursor);
+                return false;
+            }
+            cursor += advance;
+        }
+        return true;
+    }
+
+    // Reads the attribute block: u32 attributeFlags then, per set bit (in
+    // AttributeOrder), the 3 (or 4 for vitals) u32 fields. Base = StartingValue
+    // + Ranks. On overrun, surfaces the entries read so far and stops.
+    private static bool TryReadAttributeVector(ReadOnlySpan<byte> body, ref int cursor, out List<PdAttribute>? attributes)
+    {
+        attributes = null;
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("attr-flags", 4, body.Length, cursor);
+            return false;
+        }
+        var attrFlags = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        cursor += 4;
+        var list = new List<PdAttribute>(AttributeOrder.Length);
+        attributes = list;
+        foreach (var (bit, name, isVital) in AttributeOrder)
+        {
+            if ((attrFlags & bit) == 0)
+                continue;
+            int need = isVital ? 16 : 12;
+            if (cursor + need > body.Length)
+            {
+                WarnPlayerDescOverrun("attr-" + name, need, body.Length, cursor);
+                return false;
+            }
+            var ranks         = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+            var startingValue = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor + 4, 4));
+            var xpSpent       = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor + 8, 4));
+            cursor += need; // vitals append a u32 Current we don't surface
+            list.Add(new PdAttribute(name, startingValue + ranks, ranks, xpSpent));
+        }
+        return true;
+    }
+
+    // Reads the skill PackableHashTable into PdSkill entries (all skills,
+    // any AdvancementClass — the render layer filters to raisable ones).
+    private static bool TryReadSkillVector(ReadOnlySpan<byte> body, ref int cursor, out List<PdSkill>? skills)
+    {
+        skills = null;
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("skill-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4;
+        if ((long)count * SkillEntrySize > body.Length - cursor)
+        {
+            WarnPlayerDescOverrun("skill-entries", count * SkillEntrySize, body.Length, cursor);
+            return false;
+        }
+        var list = new List<PdSkill>(count);
+        skills = list;
+        for (int i = 0; i < count; i++)
+        {
+            var id    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+            var ranks = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor + 4, 2));
+            // cursor + 6: u16 const 1
+            var sac   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor + 8, 4));
+            var xp    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor + 12, 4));
+            var init  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor + 16, 4));
+            // cursor + 20: u32 resistance(0), cursor + 24: f64 last-used(0)
+            cursor += SkillEntrySize;
+            list.Add(new PdSkill(SkillName(id), id, sac, ranks, init, xp));
+        }
+        return true;
+    }
+
+    // Wire skill-id -> name via the local Protocol.Skill mirror. Unknown
+    // ids (future/unmapped) fall back to a stable synthetic name.
+    private static string SkillName(uint id)
+    {
+        var e = (Skill)id;
+        return Enum.IsDefined(typeof(Skill), e) ? e.ToString() : $"Skill{id}";
+    }
+
 
     private static void WarnPlayerDescOverrun(string section, int needed, int bodyLen, int cursor)
         => Console.Error.WriteLine(
