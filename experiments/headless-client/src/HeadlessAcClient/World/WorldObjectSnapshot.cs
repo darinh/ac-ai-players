@@ -105,6 +105,16 @@ internal sealed class WorldObjectSnapshot
     public uint? HealthCurrent { get; internal set; }
     public uint? HealthMax { get; internal set; }
 
+    // Raw observed health TREND: true when the last accepted current
+    // reading was strictly GREATER than the prior accepted reading
+    // (regen/heal), false when it was lower or equal, null until a
+    // second reading establishes a direction. A rising reading proves
+    // the bot is BELOW its true max, so HealthMax (the peak-observed
+    // proxy) is an under-estimate and any fraction computed from it
+    // OVERSTATES health — the LLM uses this to avoid trusting a
+    // misleading "100%" while regenerating from a sub-max login value.
+    public bool? HealthRising { get; internal set; }
+
     // Lifecycle timestamps.
     public DateTimeOffset FirstSeen { get; }
     public DateTimeOffset LastUpdated { get; internal set; }
