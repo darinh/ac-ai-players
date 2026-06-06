@@ -44,6 +44,7 @@ internal enum GameActionType : uint
     TargetedMeleeAttack = 0x0008,
     TargetedMissileAttack = 0x000A,
     GetAndWieldItem     = 0x001A,
+    RaiseVital          = 0x0044,
     RaiseAttribute      = 0x0045,
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
@@ -315,6 +316,43 @@ internal static class GameActionRaiseAttributeMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.RaiseAttribute, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), attributeId); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), xpSpent); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// RaiseVital (0x0044). Spends accumulated experience to raise one of the
+/// three secondary-attribute (vital) maximums. The server handler
+/// (GameActionRaiseVital.cs) reads u32 vitalId then u32 xpSpent and calls
+/// Player.HandleActionRaiseVital, which accepts ANY amount &lt;=
+/// AvailableExperience (it accumulates the spend and recomputes the rank —
+/// there is no exact per-rank cost), so the client may spend any clamped
+/// chunk. On success the server emits a private vital update (perceivable as
+/// a higher max Health/Stamina/Mana pool); on failure it sends a "Your
+/// attempt to raise X has failed." chat and no update.
+///
+/// vitalId is the raw PropertyAttribute2nd wire enum for the raisable MAX
+/// pools (MaxHealth=1, MaxStamina=3, MaxMana=5). The motor only maps the
+/// LLM-named vital to this id and sends the chunk the LLM asked for; it makes
+/// NO decision about WHICH vital or HOW MUCH — that is the Strategy layer's
+/// job. No game-content knowledge (e.g. a vital's in-game effect) lives here.
+///
+/// Payload after the 12B GameAction header:
+///   u32 vitalId
+///   u32 xpSpent
+/// </summary>
+internal static class GameActionRaiseVitalMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, uint vitalId, uint xpSpent, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.RaiseVital, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), vitalId); cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), xpSpent); cursor += 4;
         return cursor;
     }

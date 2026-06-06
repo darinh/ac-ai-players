@@ -892,15 +892,19 @@ internal sealed class HandshakeDriver : IDisposable
         DateTime?            motionStartedAt = null;
         DateTime?            motionStoppedAt = null;
         // XP-spend (RaiseAttribute) pending-action bookkeeping. A self-action
-        // RaiseAttribute completes its goal on dispatch (like the self-arm
-        // Wield), so the LLM is consulted again next deliberation; this dedup
-        // window stops a re-spend of the SAME attribute before the
-        // server-confirmed unspent-XP decrease arrives. Records the wire
-        // attribute id, the clamped amount, the dispatch time, and the
-        // AvailableExperience observed pre-dispatch. Reconciled at the next
-        // RaiseAttribute attempt: cleared on a confirmed AvailableExperience
-        // decrease (success) or after the timeout (no confirmation seen).
-        (uint AttributeId, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaiseAttribute = null;
+        // RaiseAttribute/RaiseVital complete their goal on dispatch (like the
+        // self-arm Wield), so the LLM is consulted again next deliberation;
+        // this dedup window stops a re-spend before the server-confirmed
+        // unspent-XP decrease arrives. ONE raise of ANY kind is allowed in
+        // flight at a time (a vital raise and an attribute raise both draw
+        // from the same AvailableExperience pool, so a single shared slot is
+        // what the next confirmed unspent-XP drop reconciles). Records the
+        // raise kind ("attribute"/"vital"), the wire id, the clamped amount,
+        // the dispatch time, and the AvailableExperience observed
+        // pre-dispatch. Reconciled at the next raise attempt (of either kind):
+        // cleared on a confirmed AvailableExperience decrease (success) or
+        // after the timeout (no confirmation seen).
+        (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaise = null;
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         // The last walk-tick waypoint's GLOBAL (frame-free) XY, captured
@@ -3764,17 +3768,17 @@ internal sealed class HandshakeDriver : IDisposable
                         // AvailableExperience means the last spend landed; a
                         // stale entry past the timeout is dropped so it can never
                         // wedge the dedup window.
-                        if (pendingRaiseAttribute is { } pr0 &&
+                        if (pendingRaise is { } pr0 &&
                             ((pr0.PreAvailableXp is long preXp && availXpNow is long nowXp && nowXp < preXp) ||
                              (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(12)))
                         {
                             var confirmed = pr0.PreAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
                             Console.WriteLine(
-                                $"[xp-spend] pending RaiseAttribute id={pr0.AttributeId} amount={pr0.Amount} " +
+                                $"[xp-spend] pending Raise{pr0.Kind} id={pr0.Id} amount={pr0.Amount} " +
                                 (confirmed
                                     ? $"CONFIRMED (unspent {pr0.PreAvailableXp}->{availXpNow})"
                                     : "timed out (no unspent-XP confirmation)"));
-                            pendingRaiseAttribute = null;
+                            pendingRaise = null;
                         }
 
                         if (!AttributeRaise.TryResolveAttributeId(goal.Target.Name, out var attrId))
@@ -3793,18 +3797,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"source={goal.Source}");
                             tactics.Fail("raise-attribute: invalid amount or no unspent XP", eventStream);
                         }
-                        else if (pendingRaiseAttribute is { } prDup)
+                        else if (pendingRaise is { } prDup)
                         {
                             // Generic pending-action dedup: ONE raise is allowed
                             // in flight at a time. Any raise (same OR a different
-                            // attribute) is suppressed while a prior spend is still
-                            // awaiting confirmation, so an A->B->A burst can never
-                            // double-spend and the single pending entry is always
-                            // the one the next confirmed unspent-XP drop reconciles
-                            // (never an overwritten/mis-attributed request). Defer
-                            // until the pending raise confirms or times out.
+                            // attribute/vital) is suppressed while a prior spend
+                            // is still awaiting confirmation, so an A->B->A burst
+                            // can never double-spend and the single pending entry
+                            // is always the one the next confirmed unspent-XP drop
+                            // reconciles (never an overwritten/mis-attributed
+                            // request). Defer until the pending raise confirms or
+                            // times out.
                             Console.WriteLine(
-                                $"[xp-spend] RaiseAttribute id={attrId} suppressed — a raise (id={prDup.AttributeId}) is still " +
+                                $"[xp-spend] RaiseAttribute id={attrId} suppressed — a raise " +
+                                $"(Raise{prDup.Kind} id={prDup.Id}) is still " +
                                 $"pending (dispatched {(DateTime.UtcNow - prDup.At).TotalSeconds:F1}s ago); " +
                                 $"awaiting unspent-XP confirmation.");
                             tactics.Fail("raise-attribute: a raise is already pending", eventStream);
@@ -3828,13 +3834,99 @@ internal sealed class HandshakeDriver : IDisposable
                                                           encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSent),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaiseAttribute = (attrId, spendAmount, DateTime.UtcNow, availXpNow);
+                            pendingRaise = ("Attribute", attrId, spendAmount, DateTime.UtcNow, availXpNow);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseAttribute: id={attrId} amount={spendAmount} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={raisePktSeq} fragSeq={raiseFragSeq} bytes={raiseSent}");
                             tactics.Clear("raise-attribute dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.RaiseVital)
+                    {
+                        // Self-action: spend accumulated experience to raise one
+                        // of the three vital MAX pools (max health / stamina /
+                        // mana). The LLM decides WHICH vital (goal.Target.name)
+                        // and HOW MUCH (goal.Amount); the motor only maps the
+                        // name to the wire enum id, validates+clamps the amount
+                        // to the bot's observed unspent XP, and sends the opcode.
+                        // No motion, no world target. There is NO source default
+                        // amount and no vital preference — an unparseable vital or
+                        // a missing/invalid amount is a motor error (nothing is
+                        // sent) and the goal fails so the LLM re-deliberates.
+                        // Mirror of the RaiseAttribute branch; shares the single
+                        // in-flight `pendingRaise` slot (both draw the same XP
+                        // pool).
+                        long? availXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64v &&
+                            selfP64v.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNowV)
+                                ? axNowV : (long?)null;
+
+                        if (pendingRaise is { } pv0 &&
+                            ((pv0.PreAvailableXp is long preXpV && availXpNow is long nowXpV && nowXpV < preXpV) ||
+                             (DateTime.UtcNow - pv0.At) > TimeSpan.FromSeconds(12)))
+                        {
+                            var confirmedV = pv0.PreAvailableXp is long pxpV && availXpNow is long nxpV && nxpV < pxpV;
+                            Console.WriteLine(
+                                $"[xp-spend] pending Raise{pv0.Kind} id={pv0.Id} amount={pv0.Amount} " +
+                                (confirmedV
+                                    ? $"CONFIRMED (unspent {pv0.PreAvailableXp}->{availXpNow})"
+                                    : "timed out (no unspent-XP confirmation)"));
+                            pendingRaise = null;
+                        }
+
+                        if (!VitalRaise.TryResolveVitalId(goal.Target.Name, out var vitalId))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseVital: unknown vital target='{goal.Target}' " +
+                                $"(expected health/stamina/mana); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-vital: unknown vital name", eventStream);
+                        }
+                        else if (!AttributeRaise.TryValidateAndClampAmount(goal.Amount, availXpNow, out var spendAmountV))
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseVital id={vitalId}: needs a positive whole `amount` and spendable XP " +
+                                $"(amount={(goal.Amount?.ToString() ?? "null")}, unspent={(availXpNow?.ToString() ?? "null")}); not sending. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("raise-vital: invalid amount or no unspent XP", eventStream);
+                        }
+                        else if (pendingRaise is { } pvDup)
+                        {
+                            Console.WriteLine(
+                                $"[xp-spend] RaiseVital id={vitalId} suppressed — a raise " +
+                                $"(Raise{pvDup.Kind} id={pvDup.Id}) is still " +
+                                $"pending (dispatched {(DateTime.UtcNow - pvDup.At).TotalSeconds:F1}s ago); " +
+                                $"awaiting unspent-XP confirmation.");
+                            tactics.Fail("raise-vital: a raise is already pending", eventStream);
+                        }
+                        else
+                        {
+                            var raisePktSeqV  = nextOutboundPacketSequence++;
+                            var raiseFragSeqV = nextOutboundFragmentSequence++;
+                            var raiseBufV = new byte[GameActionRaiseVitalMessage.PackedSize];
+                            var raiseLenV = GameActionRaiseVitalMessage.Pack(raiseBufV, vitalId, spendAmountV);
+                            var raiseMsgV = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                raiseMsgV.AddAckSequence(lastReceivedSeq);
+                            raiseMsgV.AddBlobFragment(
+                                fragSequence: raiseFragSeqV,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: raiseBufV.AsSpan(0, raiseLenV));
+                            var raiseSentV = raiseMsgV.Pack(sendBuf, myClientId,
+                                                            sequence: raisePktSeqV, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentV),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            pendingRaise = ("Vital", vitalId, spendAmountV, DateTime.UtcNow, availXpNow);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL RaiseVital: id={vitalId} amount={spendAmountV} " +
+                                $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={raisePktSeqV} fragSeq={raiseFragSeqV} bytes={raiseSentV}");
+                            tactics.Clear("raise-vital dispatched", eventStream);
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)

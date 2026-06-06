@@ -105,6 +105,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_ParsesRaiseVitalWithAmount()
+    {
+        var json = """
+        {
+          "goal_id": "raise-vital-001",
+          "kind": "RaiseVital",
+          "target": { "name": "health" },
+          "amount": 8000,
+          "priority": 6,
+          "rationale": "Unspent XP and low max HP; invest directly in max health."
+        }
+        """;
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.RaiseVital, g!.Kind);
+        Assert.Equal("health", g.Target.Name);
+        Assert.Equal(8000L, g.Amount);
+    }
+
+    [Fact]
     public void TryParseGoal_AcceptsDashlessGuid_FromLlama()
     {
         // Regression: Llama-3.3-70B (and others) emit `goal_id` as a
