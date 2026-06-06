@@ -84,25 +84,30 @@ internal sealed class WorldState
     private readonly Dictionary<uint, WorldObjectSnapshot> _objects = new();
 
     /// <summary>
-    /// Highest byte-sequence we've seen on PrivateUpdatePropertyInt.
-    /// On the wire, the byte sequence is shared across the whole
-    /// property-update family (Private/Public * Int/Bool/Float/
-    /// Int64/String) — they all advance a single 1-byte counter
-    /// per session. We only DECODE PrivateUpdatePropertyInt today,
-    /// so this field is effectively per-message. When the rest of
-    /// the family comes online, they must AdvanceFamilyByteSeq
-    /// through the same counter or stale-message gating will
-    /// incorrectly accept resends after an undecoded sibling
-    /// advanced the true server counter.
-    /// Nullable because 0 is a valid sequence value.
+    /// Per-(32-bit PropertyInt property) byte-sequence high-water
+    /// marks. The server keys this sequence by
+    /// (SequenceType.UpdatePropertyInt, property) — see
+    /// SequenceManager.GetSequence: key = (type &lt;&lt; 16) | property —
+    /// so every PropertyInt advances an INDEPENDENT 1-byte counter
+    /// (e.g. the per-heartbeat Age ticker advances only Age's counter,
+    /// not Level's). An earlier single shared counter was a BUG: a
+    /// frequently-ticking property (Age) drove the shared max up so a
+    /// later first-time update of another property (a Level-up,
+    /// CoinValue, NumDeaths) at its own low per-property sequence was
+    /// falsely dropped as stale. We therefore key the high-water mark
+    /// by property, mirroring <see cref="_selfPropertyInt64ByteSeq"/>.
+    /// Values nullable because 0 is a valid sequence; absent key =
+    /// never seen. (Distinct SequenceTypes — Int vs Int64 vs Bool vs
+    /// Float vs String, Private vs Public — are already separate
+    /// counters server-side, so each decoded family keeps its own map.)
     /// </summary>
-    private byte? _selfPropertyByteSeq;
+    private readonly Dictionary<uint, byte> _selfPropertyByteSeq = new();
 
     /// <summary>
-    /// Per-(Int64 property) byte-sequence high-water marks. UNLIKE the
-    /// 32-bit path's single <see cref="_selfPropertyByteSeq"/>, the
-    /// server keys the Int64 sequence by
-    /// (SequenceType.UpdatePropertyInt64, property) — so TotalExperience
+    /// Per-(Int64 property) byte-sequence high-water marks. Like the
+    /// 32-bit <see cref="_selfPropertyByteSeq"/>, the server keys the
+    /// Int64 sequence by (SequenceType.UpdatePropertyInt64, property) —
+    /// so TotalExperience
     /// and AvailableExperience advance INDEPENDENT counters (e.g.
     /// spending XP advances AvailableExperience without TotalExperience).
     /// Gating all Int64 properties against one shared max would falsely
@@ -116,9 +121,9 @@ internal sealed class WorldState
     /// Highest byte-sequence seen on PrivateUpdateVital for the HEALTH
     /// vital. This is a SEPARATE counter from _selfPropertyByteSeq: the
     /// vital update uses a per-(type,vital) UpdateAttribute2ndLevel
-    /// ByteSequence (see GameMessagePrivateUpdateVital), not the
-    /// shared property-update family counter. Nullable because 0 is a
-    /// valid sequence value.
+    /// ByteSequence (see GameMessagePrivateUpdateVital), keyed by a
+    /// different SequenceType than the PropertyInt counters. Nullable
+    /// because 0 is a valid sequence value.
     /// </summary>
     private byte? _selfHealthVitalByteSeq;
 
@@ -467,13 +472,18 @@ internal sealed class WorldState
             return false;
         }
 
-        // Family-wide byte-sequence check (the byte counter is
-        // shared across all PrivateUpdateProperty* / Public-
-        // UpdateProperty* messages — see PrivateUpdatePropertyInt-
-        // Message header comment for the full family).
-        if (!SequenceCompare.IsCurrentOrNewer(pup.Sequence, _selfPropertyByteSeq))
+        // Per-property byte-sequence check. The server keys the
+        // PropertyInt ByteSequence by (SequenceType.UpdatePropertyInt,
+        // property) — see _selfPropertyByteSeq — so each property has
+        // an independent counter; gating against a single shared max
+        // would falsely drop a valid update once two properties'
+        // counters diverge (e.g. Age ticking past a first Level-up).
+        byte? prevSeq = _selfPropertyByteSeq.TryGetValue(pup.Property, out var s)
+            ? s
+            : (byte?)null;
+        if (!SequenceCompare.IsCurrentOrNewer(pup.Sequence, prevSeq))
             return false;
-        _selfPropertyByteSeq = pup.Sequence;
+        _selfPropertyByteSeq[pup.Property] = pup.Sequence;
 
         var snap = GetOrCreateSnapshot(selfGuid);
         snap.PropertyInts ??= new Dictionary<uint, int>();
