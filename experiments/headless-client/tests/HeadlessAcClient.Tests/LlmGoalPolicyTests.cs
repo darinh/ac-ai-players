@@ -5007,6 +5007,129 @@ public class LlmGoalPolicyTests
             dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
     }
 
+    // ---- fresh-directive egress veto (cp-2285 academy-completion) ----------
+    // A low-level bot still being actively guided by the server (a fresh,
+    // DISTINCT tutorial PopupString it has not acted on) must finish that
+    // training before the dwell/stall egress fires it out to hunt. Wired as a
+    // top-tier ComputeEgressActive cancel fed by the RecentFreshDirective
+    // freshness gate (PopupString-only, distinct-text, ages out so it can't
+    // deadlock). Answers the user question "should it value the academy XP?".
+
+    [Fact]
+    public void HuntEgress_FreshDirective_VetoesEvenPastDwellAndTappedOut()
+    {
+        // The exact academy bailout case: combat-ready, no monster, dwell well
+        // past threshold, tappedOut (no level gained yet) — would normally
+        // ENGAGE — but a fresh server directive is active, so egress is vetoed.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
+            tappedOut: true, recentFreshDirective: true));
+    }
+
+    [Fact]
+    public void HuntEgress_FreshDirective_CancelsInProgressEgress()
+    {
+        // The veto is top-tier: it even cancels an egress already latched on.
+        Assert.False(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: true, combatReady: true, monsterInView: false,
+            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
+            tappedOut: true, recentFreshDirective: true));
+    }
+
+    [Fact]
+    public void HuntEgress_NoFreshDirective_StillEngagesPastDwell()
+    {
+        // Regression guard: with no fresh directive, behaviour is unchanged —
+        // a tapped-out bot past the dwell threshold still egresses.
+        Assert.True(LlmGoalPolicy.ComputeEgressActive(
+            currentlyEgressing: false, combatReady: true, monsterInView: false,
+            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.FromMinutes(10),
+            tappedOut: true, recentFreshDirective: false));
+    }
+
+    // ---- RecentFreshDirective freshness gate (cp-2285) ---------------------
+    // Distinct-text + ages-out semantics that keep the veto from deadlocking.
+
+    private static LlmGoalPolicy NewBarePolicy()
+    {
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("x") }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        return new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
+    }
+
+    [Fact]
+    public void RecentFreshDirective_FirstDistinctPopup_CreditsAndAgesOut()
+    {
+        var policy = NewBarePolicy();
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow;
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Use the bow." });
+        Assert.True(policy.RecentFreshDirective(es, t0));
+        // Still held a minute later with no new events (within the 2min grace).
+        Assert.True(policy.RecentFreshDirective(es, t0.AddMinutes(1)));
+        // Ages out just past the grace — so it can never deadlock.
+        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
+    }
+
+    [Fact]
+    public void RecentFreshDirective_RepeatedIdenticalPopup_DoesNotReExtend()
+    {
+        var policy = NewBarePolicy();
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow;
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
+        Assert.True(policy.RecentFreshDirective(es, t0));
+        // A REPEAT of the same text (the anti-idle loop) must NOT reset the grace,
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
+        // so by t0+2.01min the veto has aged out and egress is allowed again.
+        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
+    }
+
+    [Fact]
+    public void RecentFreshDirective_NewDistinctPopup_ReExtends()
+    {
+        var policy = NewBarePolicy();
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow;
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Step one." });
+        Assert.True(policy.RecentFreshDirective(es, t0));
+        // A genuinely NEW instruction that ARRIVES later (its own Utc is t1)
+        // re-extends the grace from its own emit time.
+        var t1 = t0.AddMinutes(1.5);
+        es.Append(new StreamEvent { Sequence = -1, Utc = t1, Kind = EventKind.PopupString, Text = "Step two." });
+        Assert.True(policy.RecentFreshDirective(es, t1));
+        Assert.True(policy.RecentFreshDirective(es, t1.AddMinutes(1.0)));
+    }
+
+    [Fact]
+    public void RecentFreshDirective_StalePopup_DoesNotCredit()
+    {
+        // A popup whose OWN timestamp is older than the grace (e.g. an old
+        // login popup seen on the first whole-buffer scan, or one processed
+        // after a delay) must NOT grant a fresh veto — freshness is anchored to
+        // the directive's emit time, not the processing time.
+        var policy = NewBarePolicy();
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow;
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Old login popup." });
+        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(3)));
+    }
+
+    [Fact]
+    public void RecentFreshDirective_NonPopupEvents_DoNotCredit()
+    {
+        var policy = NewBarePolicy();
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow;
+        // NpcDialog is deliberately NOT credited (a town full of NPCs would
+        // otherwise pin the bot forever); ServerMessage broadcast is ignored too.
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.NpcDialog, Name = "Trainer", Text = "Welcome, adventurer." });
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.ServerMessage, Text = "Someone says hi." });
+        Assert.False(policy.RecentFreshDirective(es, t0));
+    }
+
     // ---- IsEgressOverridableStationaryUse (cp-2263 forge fixation) ----
     // While egressing, a Use of a STATIONARY non-transit world object extends the
     // dwell like Talk/Give and is substituted; transit/interactive affordances

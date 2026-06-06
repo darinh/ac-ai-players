@@ -121,6 +121,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // threshold, while a productive hunt resets it on every loot/level.
     private static readonly TimeSpan BarrenStallTimeout =
         TimeSpan.FromMinutes(2 * EgressDwellMinutes);
+    // Fresh-directive egress veto window. A low-level bot still being actively
+    // guided by the server (a NEW, distinct tutorial/instruction PopupString it
+    // has not yet acted on) is making progress even with no inventory/level
+    // delta — finishing available guided training grants outsized early rewards
+    // (XP, skill credits, gear) and outranks an optional hunt. While a fresh
+    // distinct directive is within this window the egress latch is vetoed
+    // (same tier as a visible monster). BOUNDED so it can NEVER deadlock: only
+    // server-pushed PopupStrings count (low-volume, directed-at-self, NOT the
+    // per-NPC dialog the town-stuck loop is built from, and never self-driven
+    // by the bot's own Talk loop), only DISTINCT text resets it (a repeated
+    // popup does not), and the veto ages out FreshDirectiveGrace after the last
+    // distinct directive — so once training stops instructing, egress proceeds.
+    // Enforcement-only: mechanically mirrors the LLM-facing HUNT EXCURSION
+    // prompt rule ("Quest progress outranks an optional hunt … a NEW
+    // server/quest directive … interrupts the hunt") in BuildUserPrompt; if
+    // that bullet is removed, revisit this veto so it stays prompt-anchored.
+    private static readonly TimeSpan FreshDirectiveGrace = TimeSpan.FromMinutes(2);
     // Liveness backstop for the monster-in-view egress veto. Once the bot is
     // tapped out, a NON-HOSTILE monster KIND that stays visible-but-unengaged
     // (the bot keeps choosing overridable social/stationary goals instead of
@@ -152,6 +169,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // (resets the no-progress clock so an XP-only productive hunt is not
     // flagged barren-stalled). Own data only — audit-safe.
     private int? _egressLastObservedLevel;
+    // Fresh-directive tracking (paired with FreshDirectiveGrace above).
+    // _egressLastDirectiveSeqSeen is the high-water event sequence already
+    // examined (so each tick scans only NEW events — idempotent + cheap).
+    // _egressLastCreditedDirectiveText is the last popup text that reset the
+    // grace, used to reject a REPEATED identical popup (the anti-idle loop).
+    // _egressLastFreshDirectiveUtc is the wall-clock of the last DISTINCT
+    // directive; the veto holds while now - it < FreshDirectiveGrace. Own
+    // observation only (typed event kind + freshness) — audit-safe.
+    private long _egressLastDirectiveSeqSeen = -1;
+    private string? _egressLastCreditedDirectiveText;
+    private DateTimeOffset _egressLastFreshDirectiveUtc = DateTimeOffset.MinValue;
     // Sticky egress latch. Once egress triggers we keep it engaged across
     // landblock seams until a monster appears, the bot disarms, or it makes
     // material progress. Without this latch the override would drop the tick
@@ -560,12 +588,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.Visible, world.KilledKindsThisDwell, tappedOut, ignoredKinds);
 
         var sinceProgress = nowUtc - _egressLastProgressUtc;
+        // A fresh, distinct server tutorial/instruction directive vetoes egress
+        // for a bounded grace (see FreshDirectiveGrace) so a low-level bot
+        // finishes available guided training before being forced out to hunt.
+        var recentFreshDirective = RecentFreshDirective(events, nowUtc);
         // Update the sticky latch every tick (idempotent). It engages once
         // dwell passes the threshold and DIS-engages the moment a cancel
         // condition holds, regardless of the current landblock.
         var wasEgressing = _isEgressing;
         _isEgressing = ComputeEgressActive(
-            _isEgressing, combatReady, effectiveMonsterInView, dwellMin, sinceProgress, tappedOut);
+            _isEgressing, combatReady, effectiveMonsterInView, dwellMin, sinceProgress,
+            tappedOut, recentFreshDirective);
         if (_isEgressing && !wasEgressing)
             // Latch just engaged — log once per engagement so the trigger is
             // observable even when the current goal is not overridable (e.g.
@@ -693,6 +726,55 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return _fallback.ProposeGoal(world, events, currentGoal);
     }
 
+    // Returns true while a FRESH, distinct server tutorial/instruction popup is
+    // within FreshDirectiveGrace — the signal that the bot is actively being
+    // guided and should finish training before egress. Idempotent per tick:
+    // scans only events newer than the high-water sequence, credits the grace
+    // ONLY on a PopupString whose text differs from the last credited one (a
+    // repeated popup is the anti-idle loop and must NOT reset it), and lets the
+    // veto age out so it can never deadlock. PopupString only (NOT NpcDialog):
+    // popups are low-volume, server-pushed, directed-at-self, and never emitted
+    // by the bot's own Talk loop — so a town full of NPCs cannot pin the bot.
+    // Typed event-kind + freshness; no names/wcids/landblocks — audit-safe.
+    internal bool RecentFreshDirective(EventStream events, DateTimeOffset nowUtc)
+    {
+        var newestSeq = _egressLastDirectiveSeqSeen;
+        string? freshText = null;
+        var freshUtc = DateTimeOffset.MinValue;
+        foreach (var e in events.Recent()) // newest-first
+        {
+            if (e.Sequence <= _egressLastDirectiveSeqSeen) break;
+            if (e.Sequence > newestSeq) newestSeq = e.Sequence;
+            if (e.Kind != EventKind.PopupString) continue;
+            var t = e.Text?.Trim();
+            if (string.IsNullOrEmpty(t)) continue;
+            // First (newest) distinct popup in this batch wins.
+            if (freshText is null && t != _egressLastCreditedDirectiveText)
+            {
+                freshText = t;
+                freshUtc = e.Utc;
+            }
+        }
+        _egressLastDirectiveSeqSeen = newestSeq;
+        // Credit the grace from the DIRECTIVE'S OWN timestamp, not call time,
+        // and only if the directive itself is recent. A stale popup (e.g. an
+        // old login popup picked up on the first whole-buffer scan, or one
+        // processed after a delay) must NOT grant a full fresh veto when no
+        // current guidance exists. Clamp the stamp to <= now so a future-dated
+        // event can't over-extend.
+        if (freshText is not null && (nowUtc - freshUtc) < FreshDirectiveGrace)
+        {
+            _egressLastCreditedDirectiveText = freshText;
+            _egressLastFreshDirectiveUtc = freshUtc < nowUtc ? freshUtc : nowUtc;
+            Console.WriteLine(
+                "[llm-override] hunt-egress directive-grace: fresh server directive " +
+                $"credited — deferring egress up to {FreshDirectiveGrace.TotalMinutes:F0}min " +
+                "to finish guided training.");
+        }
+        return _egressLastFreshDirectiveUtc != DateTimeOffset.MinValue
+            && (nowUtc - _egressLastFreshDirectiveUtc) < FreshDirectiveGrace;
+    }
+
     // Pure sticky-latch transition for hunt-egress. Engages once the bot has
     // dwelled past the threshold in a tapped-out monster-free safe zone, and
     // STAYS engaged across landblock seams (so the bot actually leaves the
@@ -701,8 +783,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // content. Extracted for deterministic unit testing.
     internal static bool ComputeEgressActive(
         bool currentlyEgressing, bool combatReady, bool monsterInView,
-        double dwellMinutes, TimeSpan sinceMaterialProgress, bool tappedOut = false)
+        double dwellMinutes, TimeSpan sinceMaterialProgress, bool tappedOut = false,
+        bool recentFreshDirective = false)
     {
+        // Highest-priority cancel: the bot is actively being guided by the
+        // server (a fresh, distinct, not-yet-acted tutorial/instruction popup
+        // within FreshDirectiveGrace). Finishing available guided training
+        // outranks an optional hunt, so veto egress entirely — including an
+        // egress already in progress. This can NEVER deadlock: only DISTINCT
+        // server popups credit it (a repeat does not) and it ages out once the
+        // server stops instructing, after which the dwell/stall triggers below
+        // fire normally. See FreshDirectiveGrace + RecentFreshDirective.
+        if (recentFreshDirective)
+            return false;
         // Cancel conditions take priority — they end an egress in progress:
         //  - a monster is now engageable here (we reached the hunt);
         //  - the bot is no longer combat-ready (disarmed);
