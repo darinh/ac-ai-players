@@ -925,6 +925,13 @@ internal sealed class HandshakeDriver : IDisposable
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
+        // visible-recent-interaction: set ONLY when a spatial Use/Pickup
+        // opcode is actually dispatched against motionTarget (not merely
+        // when useSent is raised by an arrival/deliberation-race-guard
+        // skip). Gates the WorldObjectInteracted echo so it never reports
+        // a "no opcode sent" arrival as an interaction. Reset in the same
+        // cascade as useSent.
+        bool                 worldInteractDispatched = false;
         // Phase 3.1 — indoor-nav path-following state. Once per motion
         // lock we attempt to plan a collision-aware path through the
         // static indoor mesh; if that succeeds, the walk-tick steps
@@ -2846,6 +2853,7 @@ internal sealed class HandshakeDriver : IDisposable
                     motionLockedCellId = 0;
                     motionDone = false;
                     useSent = false;
+                    worldInteractDispatched = false;
                     useSentAt = null;
                     lastSentWaypointPos = null;
                     lastSentWaypointGlobalXY = null;
@@ -3342,6 +3350,29 @@ internal sealed class HandshakeDriver : IDisposable
                             "[strategy] motion lock arrived but a different goal is now current " +
                             $"(locked={motionLockedGoalId?.ToString() ?? "none"} current={tactics.CurrentGoal.Id}); " +
                             "preserving the fresh goal (deliberation-race guard)");
+
+                    // visible-recent-interaction: self-emitted echo so the
+                    // LLM can see "you already interacted with this world
+                    // object N times" and stop re-picking the same chest/
+                    // door it just used (the cp-2290 Holtburg Use{Chest} ->
+                    // Use{Door} -> Use{Chest} tempo loop). Spatial mirror of
+                    // the InventoryItemUsed echo. NOT salient, NOT plan-
+                    // invalidating. Gated to actual interact verbs (Use /
+                    // Pickup) so nav-only arrivals, frontier probes, and
+                    // Explore/Talk completions don't count.
+                    if (motionTarget is not null && worldInteractDispatched)
+                    {
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.WorldObjectInteracted,
+                            ItemGuid = motionTarget.Guid,
+                            Wcid     = motionTarget.WeenieClassId,
+                            Name     = motionTarget.Name,
+                        });
+                    }
+                    worldInteractDispatched = false;
 
                     Console.WriteLine(
                         $"[motion] action cycle #{actionsCompleted} complete (visited 0x{motionTarget?.Guid:X8} '{motionTarget?.Name}') " +
@@ -6157,6 +6188,7 @@ internal sealed class HandshakeDriver : IDisposable
                             containerGuid: chosenCharacterGuid,
                             placement: 0);
                         fragSeq    = nextOutboundFragmentSequence++;
+                        worldInteractDispatched = true;
                     }
                     else if (lockedGoalKind == GoalKind.Use && pendingUseWithItemGuid is uint useWithSrc)
                     {
@@ -6186,6 +6218,7 @@ internal sealed class HandshakeDriver : IDisposable
                         actionBuf  = new byte[GameActionUseMessage.PackedSize];
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
+                        worldInteractDispatched = lockedGoalKind == GoalKind.Use;
 
                         // Slice Q + Slice U — track USE on any openable
                         // loot container (corpse, treasure chest,
