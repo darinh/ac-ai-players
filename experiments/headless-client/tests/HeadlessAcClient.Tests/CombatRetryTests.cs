@@ -107,4 +107,90 @@ public class CombatRetryTests
         => Assert.True(CombatRetry.ShouldReattack(
             5.0, cancelRetryRequested: false, Normal, FastMin,
             secondsSinceServerStick: -1.0, StickSettle));
+
+    private const double Quiescence = 4.0;
+
+    [Fact]
+    public void ServerLoopAlive_SuppressesCancelDrivenFastRetry()
+        // The server's auto-repeat loop swung 0.5s ago (alive). A
+        // cancel-driven re-send would throw YoureTooBusy and cancel the
+        // server loop — suppress it.
+        => Assert.False(CombatRetry.ShouldReattack(
+            0.5, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: 0.5, Quiescence));
+
+    [Fact]
+    public void ServerLoopAlive_SuppressesPeriodicReattack()
+        // Even past the 5s safety net, recent server combat activity
+        // (3.5s ago, still < 4s quiescence) means the loop is alive — a
+        // periodic re-send would cancel it, so suppress.
+        => Assert.False(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: 3.5, Quiescence));
+
+    [Fact]
+    public void ServerLoopQuiescent_AllowsPeriodicReattack()
+        // No server activity for 5s (> 4s quiescence) and past the normal
+        // interval — the loop genuinely dropped, so re-acquire.
+        => Assert.True(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: 5.0, Quiescence));
+
+    [Fact]
+    public void ServerLoopQuiescent_StillRespectsNormalInterval()
+        // Quiescent server loop does NOT override the normal interval: a
+        // re-send still waits for the interval (no busy-spam on silence).
+        => Assert.False(CombatRetry.ShouldReattack(
+            2.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: 10.0, Quiescence));
+
+    [Fact]
+    public void ServerLoopQuiescent_AllowsCancelFastRetry()
+        // After the loop went quiescent, a cancel-driven fast re-send may
+        // fire to restart it.
+        => Assert.True(CombatRetry.ShouldReattack(
+            0.5, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: 5.0, Quiescence));
+
+    [Fact]
+    public void NoServerActivityObserved_BehavesAsBefore()
+    {
+        // null activity == no suppression: identical to the 6-arg form.
+        Assert.True(CombatRetry.ShouldReattack(
+            5.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: null, Quiescence));
+        Assert.True(CombatRetry.ShouldReattack(
+            0.4, cancelRetryRequested: true, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: null, Quiescence));
+    }
+
+    [Fact]
+    public void NegativeActivityElapsed_TreatedAsNotActive()
+        // Clock skew on the activity timestamp must not suppress forever.
+        => Assert.True(CombatRetry.ShouldReattack(
+            5.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: null, StickSettle,
+            secondsSinceServerCombatActivity: -1.0, Quiescence));
+
+    [Fact]
+    public void StickAndActivity_EitherSuppresses()
+    {
+        // An active stick suppresses even if activity is stale.
+        Assert.False(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: 0.5, StickSettle,
+            secondsSinceServerCombatActivity: 10.0, Quiescence));
+        // Active server combat suppresses even if the stick is stale.
+        Assert.False(CombatRetry.ShouldReattack(
+            6.0, cancelRetryRequested: false, Normal, FastMin,
+            secondsSinceServerStick: 3.0, StickSettle,
+            secondsSinceServerCombatActivity: 1.0, Quiescence));
+    }
 }
