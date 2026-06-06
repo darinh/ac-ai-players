@@ -225,6 +225,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const float StationaryUseEpsilonSq = StationaryUseEpsilon * StationaryUseEpsilon;
     private const int StationaryUseRepeatThreshold = 3;
 
+    // Stationary NPC Talk loop-break (2026-06-05). A weak model loops
+    // Talk{same NPC} on a dead-end NPC whose quest it cannot satisfy
+    // (e.g. "bring me a frost infusion"); the server re-emits the same
+    // canned dialog on every Talk, so neither the inventory-USE dedup nor
+    // the world-object USE dedup catch it, and the advisory recent-Talk
+    // COUNT surface is ignored. This holds the identity + self position of
+    // the last accepted Talk so a STATIONARY repeat (same NPC, bot has not
+    // moved, nothing entered or left inventory) can be detected and
+    // dropped. Pure mechanical bookkeeping over the bot's OWN Talk emission
+    // key + its OWN self cell/position + inventory-change events — it parses
+    // NO server dialog text and encodes no NPC knowledge (mirrors
+    // IsStationaryWorldUseRepeat). Movement or an inventory change (a real
+    // multi-step turn-in) resets the streak, so genuine progress is never
+    // suppressed.
+    private NpcTalkRepeat? _lastNpcTalkRepeat;
+
+    private sealed record NpcTalkRepeat(
+        string Key, uint? Landblock, uint? Cell, float X, float Y,
+        long SequenceFloor, int Count);
+
+    // Talk gets slightly more loop-break tolerance than Use (4 vs 3): an
+    // initial Talk commonly yields a multi-message reply before a stationary
+    // re-emission can be judged a no-progress loop.
+    private const int NpcTalkRepeatThreshold = 4;
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -1104,6 +1129,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
+        // stationary NPC with no movement and no inventory change is an
+        // exhausted conversation (the server just re-greets) — drop it and
+        // defer to the fallback so the bot does something else instead of
+        // re-locking the dead NPC. A real turn-in changes inventory and
+        // walking to a different NPC changes the cell, so both reset the
+        // streak and are never suppressed.
+        if (IsExhaustedNpcTalkRepeat(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — stationary NPC Talk repeated with no progress; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: stationary no-progress NPC Talk loop");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -1437,6 +1479,62 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Count = count,
         };
         return count >= StationaryUseRepeatThreshold;
+    }
+
+    /// <summary>
+    /// True when an LLM-authored <see cref="GoalKind.Talk"/> at the SAME
+    /// stationary NPC has been re-emitted <see cref="NpcTalkRepeatThreshold"/>
+    /// times in a row with no movement and no inventory change — an
+    /// exhausted conversation the LLM keeps re-proposing because the server
+    /// re-emits the same canned reply on every Talk. Pure mechanical
+    /// bookkeeping over the bot's OWN emission identity, its OWN self
+    /// cell/position, and inventory-change events — parses NO server dialog
+    /// text and encodes no NPC knowledge (mirrors
+    /// <see cref="IsStationaryWorldUseRepeat"/>). Returns false for
+    /// under-specified selectors (no stable per-NPC identity to loop-break).
+    /// A real multi-step turn-in changes inventory (reset) and walking
+    /// between NPCs changes the cell (reset), so genuine progress is never
+    /// suppressed.
+    /// </summary>
+    internal bool IsExhaustedNpcTalkRepeat(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+
+        var key = CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+
+        var self = world.Self;
+        var prev = _lastNpcTalkRepeat;
+
+        bool sameTarget = prev is not null &&
+            string.Equals(prev.Key, key, StringComparison.OrdinalIgnoreCase);
+
+        bool moved = prev is null
+            || prev.Landblock != self.Landblock
+            || prev.Cell != self.CellId
+            || SquaredXyDistance(prev.X, prev.Y, self.PositionX, self.PositionY) > StationaryUseEpsilonSq;
+
+        bool inventoryChanged = prev is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, prev.SequenceFloor)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, prev.SequenceFloor));
+
+        if (!sameTarget || moved || inventoryChanged)
+        {
+            _lastNpcTalkRepeat = new NpcTalkRepeat(
+                key, self.Landblock, self.CellId, self.PositionX, self.PositionY,
+                events.NextSequence, 1);
+            return false;
+        }
+
+        int count = prev!.Count + 1;
+        _lastNpcTalkRepeat = prev with
+        {
+            X = self.PositionX,
+            Y = self.PositionY,
+            SequenceFloor = events.NextSequence,
+            Count = count,
+        };
+        return count >= NpcTalkRepeatThreshold;
     }
 
     private static float SquaredXyDistance(float ax, float ay, float bx, float by)

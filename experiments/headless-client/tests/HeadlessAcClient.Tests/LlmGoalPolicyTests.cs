@@ -4304,6 +4304,128 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
     }
 
+    // ---- Stationary NPC Talk loop-break (exhausted conversation) ----
+    //
+    // A weak model re-emits Talk{same NPC} on a dead-end quest NPC whose
+    // canned dialog never changes; the server replies identically each time
+    // so no inventory/movement signals progress. IsExhaustedNpcTalkRepeat
+    // tracks the bot's OWN Talk identity + self cell/position + inventory
+    // events (NO dialog text), mirroring the world-object USE guard, and
+    // drops the stationary repeat once it has fired NpcTalkRepeatThreshold(4)
+    // times.
+
+    [Fact]
+    public void ExhaustedNpcTalk_DropsFourthSameTalk_WhenBotHasNotMoved()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 138.99f, 7.37f);
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Apprentice" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es)); // 1st seen
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es)); // 2nd seen
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es)); // 3rd seen
+        Assert.True(policy.IsExhaustedNpcTalkRepeat(goal, world, es));  // 4th -> stuck
+        Assert.True(policy.IsExhaustedNpcTalkRepeat(goal, world, es));  // stays stuck until movement
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_ResetsWhenBotMovesCell()
+    {
+        // Walking between distinct NPCs (cell changes) never trips even if
+        // both are named the same.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Apprentice" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // moved cell
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es)); // moved cell
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es)); // moved cell
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B4001Du, 0, 0), es)); // moved cell
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_ResetsWhenBotMovesPastEpsilon()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Apprentice" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 0f, 0f), es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 5f, 0f), es)); // moved > epsilon
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 10f, 0f), es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, WorldAt(0xA9B4u, 0xA9B40019u, 15f, 0f), es));
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_ExemptsWhenInventoryChanges()
+    {
+        // A real quest turn-in: an inventory change each Talk (token
+        // consumed / reward granted) -> progress -> must never be suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Master" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        es.Append(InvAdded("Reward 1"));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        es.Append(InvAdded("Reward 2"));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        es.Append(InvAdded("Reward 3"));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        es.Append(InvAdded("Reward 4"));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_DistinctNpcTargets_DoNotCollapse()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcA, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcB, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcA, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcB, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcA, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(npcB, world, es));
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_IgnoresNonTalkGoals()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(use, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(use, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(use, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(use, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(use, world, es));
+    }
+
+    [Fact]
+    public void ExhaustedNpcTalk_UnderspecifiedSelector_NotGuarded()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { NameContains = "prentice" } };
+
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+        Assert.False(policy.IsExhaustedNpcTalkRepeat(goal, world, es));
+    }
+
     // ---- Hunt-egress enforcement (town-stuck LLM-COMPLIANCE backstop) ----
     //
     // Pure decision behind the mechanical backstop: when the bot is
