@@ -2987,6 +2987,19 @@ internal sealed class HandshakeDriver : IDisposable
                     ieSelf.CellId is uint &&
                     worldState.SelfGuid is uint ieSelfGuid)
                 {
+                    // Snapshot the bot's own inventory (pack + worn) once so
+                    // the per-candidate weapon-collision check below mirrors
+                    // the server's CheckWeaponCollision precondition.
+                    var ieInventory = new List<WeaponSwap.ItemFacts>();
+                    foreach (var io in worldState.Objects.Values)
+                    {
+                        var ieOwnedBag  = io.ContainerGuid is uint icg && icg == ieSelfGuid;
+                        var ieOwnedWorn = io.WielderGuid   is uint iwg && iwg == ieSelfGuid;
+                        if (!ieOwnedBag && !ieOwnedWorn) continue;
+                        ieInventory.Add(new WeaponSwap.ItemFacts(
+                            io.Guid, io.ItemType, io.ValidLocations, io.CurrentWieldedLocation));
+                    }
+
                     WorldObjectSnapshot? ieCandidate = null;
                     uint                 ieEquipSlot = 0;
                     foreach (var snap in worldState.Objects.Values)
@@ -2999,6 +3012,26 @@ internal sealed class HandshakeDriver : IDisposable
                         if (satisfiedEquipSlots.Contains(slot)) continue;
                         if (snap.WeenieClassId is uint wcSat2 &&
                             satisfiedWeenieClasses.Contains(wcSat2)) continue;
+
+                        // Don't auto-equip a primary weapon (melee/missile/
+                        // caster) the server would reject because another
+                        // primary weapon is already wielded — that wield
+                        // silently no-ops as InventoryServerSaveFailed
+                        // (err=None) and wastes a round-trip (the Royal Atlatl
+                        // vs an already-wielded Training Spadone case). Skip
+                        // it here; it stays a candidate for a later tick if the
+                        // blocker is dequipped. An intentional weapon SWAP is
+                        // the LLM Wield dispatch's job (it dequips the blocker
+                        // first via WeaponSwap). This mirrors the server
+                        // precondition mechanically — no weapon preference, no
+                        // game knowledge; non-weapons never trigger a blocker
+                        // and the first weapon (empty weapon slot) is unchanged.
+                        if (WeaponSwap.FindBlockingWieldedWeapon(
+                                new WeaponSwap.ItemFacts(
+                                    snap.Guid, snap.ItemType,
+                                    snap.ValidLocations, snap.CurrentWieldedLocation),
+                                ieInventory) is not null)
+                            continue;
 
                         ieCandidate = snap;
                         ieEquipSlot = slot;
