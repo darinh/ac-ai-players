@@ -51,6 +51,17 @@ internal enum GoalKind
     /// about WHICH attribute or HOW MUCH (Strategy owns that).
     /// </summary>
     RaiseAttribute = 10,
+
+    /// <summary>
+    /// Spend accumulated experience to raise one of the three vital MAX
+    /// pools (max health / max stamina / max mana). A self-action (no world
+    /// target / motion): the LLM names the vital in <see cref="Goal.Target"/>
+    /// (name = one of health/stamina/mana) and the XP to invest in
+    /// <see cref="Goal.Amount"/>. The motor maps the name to the wire enum id
+    /// and sends the chunk; it makes NO decision about WHICH vital or HOW
+    /// MUCH (Strategy owns that).
+    /// </summary>
+    RaiseVital = 11,
 }
 
 /// <summary>
