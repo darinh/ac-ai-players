@@ -72,11 +72,16 @@
 //     u32 chatMessageType
 //     u32 padding (always 0; see GameEventTell.cs)
 //
-// PlayerDescription (0x0013) is deliberately NOT decoded here — it
-// is a multi-section character-sheet serialization (PackableHashTable
-// of 7 different property collections, attributes, skills, spells,
-// enchantments, character options, shortcuts, spell bars, inventory,
-// equipment) that warrants its own dedicated phase.
+// PlayerDescription (0x0013) is PARTIALLY decoded here: only the
+// initial Level (PropertyInt 25) and experience totals (PropertyInt64
+// TotalExperience=1 / AvailableExperience=2) are extracted from the
+// leading property-flags + Int32 + Int64 PackableHashTable sections.
+// The remaining sections (Bool/Double/String/Did/Iid/Position, the
+// attribute/skill/spell/enchantment vectors, character options,
+// inventory, equipment) are intentionally NOT parsed — they warrant
+// their own dedicated phase. Layout: u32 propertyFlags, u32 weenieType,
+// then each present section in fixed write order Int32 → Int64 → …
+// (PackableHashTable header = u16 count + u16 numBuckets, then entries).
 
 using System;
 using System.Buffers.Binary;
@@ -411,6 +416,25 @@ internal sealed record EvasionDefenderNotificationPayload(string AttackerName)
 }
 
 /// <summary>
+/// Partial decode of the PlayerDescription (0x0013) login bundle.
+/// Only the initial Level (PropertyInt 25) and experience totals
+/// (PropertyInt64 TotalExperience=1, AvailableExperience=2) are
+/// extracted; the rest of the character-sheet serialization is not
+/// parsed. Any field is null when its property/section is absent
+/// (or the bundle was truncated before it).
+/// </summary>
+internal sealed record PlayerDescriptionPayload(
+    int? Level,
+    long? TotalExperience,
+    long? AvailableExperience)
+{
+    public override string ToString()
+        => $"PlayerDescription(level={Level?.ToString() ?? "?"} " +
+           $"totalXp={TotalExperience?.ToString() ?? "?"} " +
+           $"unspentXp={AvailableExperience?.ToString() ?? "?"})";
+}
+
+/// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
 /// implemented here, all variants are null and the caller should
@@ -418,6 +442,7 @@ internal sealed record EvasionDefenderNotificationPayload(string AttackerName)
 /// </summary>
 internal sealed record GameEventPayload(
     GameEventType EventType,
+    PlayerDescriptionPayload?            PlayerDescription,
     WeenieErrorPayload?                  WeenieError,
     WeenieErrorWithStringPayload?        WeenieErrorWithString,
     CharacterTitlePayload?               CharacterTitle,
@@ -440,6 +465,7 @@ internal sealed record GameEventPayload(
 {
     public override string ToString() => EventType switch
     {
+        GameEventType.PlayerDescription            when PlayerDescription          is { } x => x.ToString(),
         GameEventType.WeenieError                  when WeenieError                is { } x => x.ToString(),
         GameEventType.WeenieErrorWithString        when WeenieErrorWithString      is { } x => x.ToString(),
         GameEventType.CharacterTitle               when CharacterTitle             is { } x => x.ToString(),
@@ -473,6 +499,8 @@ internal static class GameEventPayloadDecoder
         {
             return eventType switch
             {
+                GameEventType.PlayerDescription =>
+                    Empty(eventType) with { PlayerDescription = DecodePlayerDescription(body) },
                 GameEventType.WeenieError =>
                     Empty(eventType) with { WeenieError = DecodeWeenieError(body) },
                 GameEventType.WeenieErrorWithString =>
@@ -524,6 +552,7 @@ internal static class GameEventPayloadDecoder
 
     private static GameEventPayload Empty(GameEventType et) =>
         new GameEventPayload(et,
+            PlayerDescription: null,
             WeenieError: null,
             WeenieErrorWithString: null,
             CharacterTitle: null,
@@ -543,6 +572,99 @@ internal static class GameEventPayloadDecoder
             EvasionAttackerNotification: null,
             DefenderNotification: null,
             EvasionDefenderNotification: null);
+
+    // PlayerDescription (0x0013) — wire layout from the ACE-bots server
+    // serializer GameEventPlayerDescription.cs. We extract ONLY the
+    // initial Level (PropertyInt 25) + experience totals (PropertyInt64
+    // TotalExperience=1 / AvailableExperience=2). The body begins at the
+    // back-patched property-flags dword; sections are written in a fixed
+    // order Int32 → Int64 → Bool → … regardless of flag-bit value, so
+    // Int64 sits right after Int32 and we can stop once both are read.
+    private const uint DescFlagPropertyInt32 = 0x0001;
+    private const uint DescFlagPropertyInt64 = 0x0080;
+    private const uint LevelPropertyIntId = 25;
+    private const uint TotalExperienceInt64Id = 1;
+    private const uint AvailableExperienceInt64Id = 2;
+
+    private static PlayerDescriptionPayload DecodePlayerDescription(ReadOnlySpan<byte> body)
+    {
+        int? level = null;
+        long? totalXp = null;
+        long? availXp = null;
+
+        // u32 propertyFlags + u32 weenieType
+        if (body.Length < 8)
+        {
+            WarnPlayerDescOverrun("header", 8, body.Length, cursor: 0);
+            return new PlayerDescriptionPayload(level, totalXp, availXp);
+        }
+        var flags = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4));
+        var cursor = 8; // skip flags + weenieType
+
+        if ((flags & DescFlagPropertyInt32) != 0)
+        {
+            // PackableHashTable header: u16 count, u16 numBuckets.
+            if (cursor + 4 > body.Length)
+            {
+                WarnPlayerDescOverrun("int32-header", 4, body.Length, cursor);
+                return new PlayerDescriptionPayload(level, totalXp, availXp);
+            }
+            var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+            cursor += 4; // count + numBuckets (numBuckets ignored)
+
+            // Each entry is u32 key + s32 value = 8B; bound the loop by
+            // what the body can actually hold so a corrupt count can't
+            // read past the buffer.
+            if (count > (body.Length - cursor) / 8)
+            {
+                WarnPlayerDescOverrun("int32-entries", count * 8, body.Length, cursor);
+                count = (ushort)((body.Length - cursor) / 8);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+                var val = BinaryPrimitives.ReadInt32LittleEndian(body.Slice(cursor + 4, 4));
+                cursor += 8;
+                if (key == LevelPropertyIntId)
+                    level = val;
+            }
+        }
+
+        if ((flags & DescFlagPropertyInt64) != 0)
+        {
+            if (cursor + 4 > body.Length)
+            {
+                WarnPlayerDescOverrun("int64-header", 4, body.Length, cursor);
+                return new PlayerDescriptionPayload(level, totalXp, availXp);
+            }
+            var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+            cursor += 4;
+
+            // Each entry is u32 key + s64 value = 12B.
+            if (count > (body.Length - cursor) / 12)
+            {
+                WarnPlayerDescOverrun("int64-entries", count * 12, body.Length, cursor);
+                count = (ushort)((body.Length - cursor) / 12);
+            }
+            for (int i = 0; i < count; i++)
+            {
+                var key = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+                var val = BinaryPrimitives.ReadInt64LittleEndian(body.Slice(cursor + 4, 8));
+                cursor += 12;
+                if (key == TotalExperienceInt64Id)
+                    totalXp = val;
+                else if (key == AvailableExperienceInt64Id)
+                    availXp = val;
+            }
+        }
+
+        return new PlayerDescriptionPayload(level, totalXp, availXp);
+    }
+
+    private static void WarnPlayerDescOverrun(string section, int needed, int bodyLen, int cursor)
+        => Console.Error.WriteLine(
+            $"[playerdesc] decode overrun in {section}: needed {needed}B at cursor {cursor} " +
+            $"but body is {bodyLen}B — returning partial (extracted fields may be null)");
 
     private static WeenieErrorPayload DecodeWeenieError(ReadOnlySpan<byte> body)
     {
