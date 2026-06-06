@@ -2,6 +2,7 @@
 // Strategy + Tactics Slice A foundation tests.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
@@ -315,6 +316,83 @@ public class StrategyFoundationTests
         Assert.True(byGuid[HealerGuid].IsHealer);
         Assert.True(byGuid[CorpseGuid].IsCorpse);
         Assert.False(byGuid[MisnamedGuid].IsDoor); // name "Door" alone is NOT enough
+    }
+
+    [Fact]
+    public void WorldStateProjection_ObservedHostile_SetFromRecentHostileNames()
+    {
+        // observed-hostile perception: a visible creature whose normalized
+        // name is in world.RecentHostileNames (the TTL-pruned set of
+        // attackers the server reported via DefenderNotification) projects
+        // as ObservedHostile=true; a creature NOT in the set does not.
+        const uint AttackerGuid = 0x90000041;
+        const uint BystanderGuid = 0x90000042;
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, AttackerGuid, "Drudge Skulker", wcid: 7u, itemType: 0x10u, cellId: 0x86020001u);
+        SeedSnapshot(ws, BystanderGuid, "Town Crier", wcid: 8u, itemType: 0x10u, cellId: 0x86020001u);
+        // Set is already normalized (collapse + lower-invariant) by the
+        // writer; here we seed the normalized form directly.
+        ws.RecentHostileNames = new HashSet<string>(StringComparer.Ordinal) { "drudge skulker" };
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid[AttackerGuid].ObservedHostile);
+        Assert.False(byGuid[BystanderGuid].ObservedHostile);
+    }
+
+    [Fact]
+    public void WorldStateProjection_ObservedHostile_FalseWhenSetNullOrEmpty()
+    {
+        // No recent attackers → nothing is flagged hostile (the default).
+        const uint CreatureGuid = 0x90000043;
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, CreatureGuid, "Drudge Skulker", wcid: 7u, itemType: 0x10u, cellId: 0x86020001u);
+
+        ws.RecentHostileNames = null;
+        var projNull = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.False(projNull!.Visible.Single(v => v.Guid == CreatureGuid).ObservedHostile);
+
+        ws.RecentHostileNames = new HashSet<string>(StringComparer.Ordinal);
+        var projEmpty = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.False(projEmpty!.Visible.Single(v => v.Guid == CreatureGuid).ObservedHostile);
+    }
+
+    [Fact]
+    public void WorldStateProjection_ObservedHostile_NameNormalizationMatchesCaseAndWhitespace()
+    {
+        // The projection normalizes the object name the same way the writer
+        // normalizes the wire attacker name (collapse whitespace + lower).
+        // A server object name with odd casing / extra spaces must still
+        // match a normalized set entry.
+        const uint CreatureGuid = 0x90000044;
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, CreatureGuid, "  Young   Banderling ", wcid: 9u, itemType: 0x10u, cellId: 0x86020001u);
+
+        ws.RecentHostileNames = new HashSet<string>(StringComparer.Ordinal) { "young banderling" };
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        Assert.True(proj!.Visible.Single(v => v.Guid == CreatureGuid).ObservedHostile);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("   ", null)]
+    [InlineData("Drudge Skulker", "drudge skulker")]
+    [InlineData("  Young   Banderling ", "young banderling")]
+    [InlineData("COW", "cow")]
+    public void WorldStateProjection_NormalizeHostileName_CollapsesAndLowercases(string? input, string? expected)
+    {
+        Assert.Equal(expected, WorldStateProjection.NormalizeHostileName(input));
     }
 
     [Fact]
