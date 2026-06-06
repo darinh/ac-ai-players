@@ -235,4 +235,44 @@ public class CombatRetryTests
             0x0001u, hasActiveCombatTarget: false));
         Assert.Equal(0x0036u, CombatRetry.AttackDoneActionCancelled);
     }
+
+    // --- ShouldAbandonUnbeatable (early "cannot damage" abandon) ------------
+    private const int MinEvaded = 12;
+
+    [Fact]
+    public void Unbeatable_AllEvadedPastThreshold_Abandons()
+        // 12 swings, all evaded, 0 landed, 0 damage — conclusively cannot hit.
+        => Assert.True(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 0, damageDealt: 0u, swingsEvaded: 12, MinEvaded));
+
+    [Fact]
+    public void Unbeatable_AllEvadedWellPastThreshold_Abandons()
+        => Assert.True(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 0, damageDealt: 0u, swingsEvaded: 30, MinEvaded));
+
+    [Fact]
+    public void Unbeatable_BelowEvadeThreshold_DoesNotAbandon()
+        // An unlucky early-evade streak short of the threshold is tolerated.
+        => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 0, damageDealt: 0u, swingsEvaded: 11, MinEvaded));
+
+    [Fact]
+    public void Unbeatable_OneLanded_DoesNotAbandon()
+        // A single landed hit proves the bot CAN damage this target — keep
+        // fighting (let the 60s no-damage backstop own any later stall).
+        => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 1, damageDealt: 0u, swingsEvaded: 20, MinEvaded));
+
+    [Fact]
+    public void Unbeatable_DamageDealtNoLandCount_DoesNotAbandon()
+        // Damage recorded (even if the landed-swing counter lagged) means
+        // progress is being made — do not abandon early.
+        => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 0, damageDealt: 3u, swingsEvaded: 20, MinEvaded));
+
+    [Fact]
+    public void Unbeatable_NoSwingsYet_DoesNotAbandon()
+        // Fresh engagement, nothing observed — never trip on zero data.
+        => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
+            swingsLanded: 0, damageDealt: 0u, swingsEvaded: 0, MinEvaded));
 }
