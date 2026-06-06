@@ -3419,13 +3419,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     ///   * Most-recent first; capped by row count and a char budget.
     /// </summary>
     /// <summary>
-    /// Finds the bot's own recorded combat outcome for a monster KIND by
-    /// EXACT identity match against the surfaced combat-history rows.
-    /// Matching reuses <see cref="CombatFeelLedger.KeyOf"/> so it is
-    /// wcid-preferred then exact normalized-name — NO substring/fuzzy match
-    /// and NO match on the "(unknown)" display fallback. Returns null when
-    /// there is no history or no exact shared key (the asymmetric
-    /// wcid-vs-name-only case is deliberately omitted rather than guessed).
+    /// Looks up the bot's OWN recorded combat outcomes for a visible
+    /// monster and returns an AGGREGATE record (summed counts) over every
+    /// history row that shares the monster's identity — i.e. the exact
+    /// wcid-preferred key OR the exact normalized display name. The name
+    /// join is load-bearing: the wire assigns DIFFERENT wcids to variants
+    /// that share one display name (e.g. an aggro and a no-aggro "Drudge
+    /// Skulker"), so a death recorded against one variant must still warn
+    /// the LLM about the other (the LLM reasons by name). Aggregating —
+    /// rather than returning one arbitrary row — keeps the surfaced counts
+    /// complete and order-independent. Matching is EXACT only: no
+    /// substring/fuzzy match, and the "(unknown)" display fallback never
+    /// joins. Returns null when there is no history or nothing matches.
     /// Pure projection join: surfaces the SAME raw counts already in the
     /// combat-history block, colocated at the decision point. No priority,
     /// no danger label, no ordering.
@@ -3436,12 +3441,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (history is null || history.Count == 0) return null;
         var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(wcid, name));
         if (key is null) return null;
+        var normName = CombatFeelLedger.NormalizeName(name);
+
+        int fights = 0, kills = 0, deaths = 0, nearDeaths = 0;
+        string? lastOutcome = null;   // history is recency-ordered: first match is newest
+        string? displayName = null;   // representative name: first (newest) matched row
+        var matched = false;
         foreach (var h in history)
         {
             var hKey = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(h.Wcid, h.Name));
-            if (hKey is not null && hKey == key) return h;
+            var isMatch = (hKey is not null && hKey == key)
+                || (normName is not null
+                    && CombatFeelLedger.NormalizeName(h.Name) == normName);
+            if (!isMatch) continue;
+            matched = true;
+            fights += h.Fights;
+            kills += h.Kills;
+            deaths += h.Deaths;
+            nearDeaths += h.NearDeaths;
+            lastOutcome ??= h.LastOutcome;
+            displayName ??= h.Name;
         }
-        return null;
+        if (!matched) return null;
+        return new CombatHistoryEntry(
+            Name: displayName ?? name ?? "(unknown)",
+            Wcid: wcid,
+            Kills: kills,
+            Deaths: deaths,
+            NearDeaths: nearDeaths,
+            Fights: fights,
+            LastOutcome: lastOutcome ?? "");
     }
 
     /// <summary>

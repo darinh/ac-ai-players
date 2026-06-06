@@ -55,12 +55,22 @@ internal sealed class CombatFeelLedger
         return n is null ? null : "n:" + n;
     }
 
-    private static string? NormalizeName(string? name)
+    /// <summary>
+    /// Whitespace-collapsed, lower-invariant form of a display name, or
+    /// null when the name is unusable. Exposed so the LLM-facing lookup
+    /// can match a visible monster against recorded rows by the SAME name
+    /// normalization the ledger keys by. The <c>"(unknown)"</c> Snapshot
+    /// display fallback (a row with no observed name) is deliberately NOT
+    /// matchable so it can never produce a spurious join.
+    /// </summary>
+    internal static string? NormalizeName(string? name)
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
         var collapsed = string.Join(' ',
             name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
-        return collapsed.Length == 0 ? null : collapsed.ToLowerInvariant();
+        if (collapsed.Length == 0) return null;
+        var lower = collapsed.ToLowerInvariant();
+        return lower == "(unknown)" ? null : lower;
     }
 
     public void RecordKill(MobIdentity id) => Bump(id, e => { e.Kills++; }, "kill");

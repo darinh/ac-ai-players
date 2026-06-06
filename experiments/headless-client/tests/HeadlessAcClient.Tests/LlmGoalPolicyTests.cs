@@ -5767,15 +5767,57 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void FindCombatRecord_NoMatch_OnWcidVsNameOnlyAsymmetry()
+    public void FindCombatRecord_MatchesByName_OnWcidVsNameOnlyAsymmetry()
     {
-        // History keyed by wcid; visible row has name only -> no shared
-        // exact key -> deliberately omitted (not guessed).
+        // cp-2275: history keyed by wcid; the visible row carries the same
+        // display name but no wcid. The wire DOES assign different wcids to
+        // same-named variants (aggro vs no-aggro), and the LLM reasons by
+        // name, so this MUST surface the death record (was deliberately
+        // omitted before, which orphaned hard-won death memory).
         var hist = new[]
         {
             new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 0, 1, "death"),
         };
-        Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, "Drudge Skulker"));
+        var rec = LlmGoalPolicy.FindCombatRecord(hist, null, "Drudge Skulker");
+        Assert.NotNull(rec);
+        Assert.Equal(1, rec!.Deaths);
+    }
+
+    [Fact]
+    public void FindCombatRecord_AggregatesAcrossWcidVariants_SharingName()
+    {
+        // The live cp-2275 scenario: died to the aggro "Drudge Skulker"
+        // (wcid 7) and killed the no-aggro one (wcid 19257) twice; both
+        // share the display name. A visible no-aggro Skulker must see the
+        // COMBINED record (incl. the death) so the LLM is warned.
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Skulker", 19257u, 2, 0, 0, 2, "kill"),
+            new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 1, 1, "death"),
+        };
+        var rec = LlmGoalPolicy.FindCombatRecord(hist, 19257u, "Drudge Skulker");
+        Assert.NotNull(rec);
+        Assert.Equal(2, rec!.Kills);
+        Assert.Equal(1, rec.Deaths);
+        Assert.Equal(1, rec.NearDeaths);
+        Assert.Equal(3, rec.Fights);
+        // LastOutcome comes from the FIRST (most-recent) matched row.
+        Assert.Equal("kill", rec.LastOutcome);
+    }
+
+    [Fact]
+    public void FindCombatRecord_DoesNotAggregate_DifferentNames()
+    {
+        // A sibling Drudge with a DIFFERENT name must NOT fold into the
+        // record (no name-family/substring matching).
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Slinker", 19258u, 0, 1, 0, 1, "death"),
+            new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 0, 1, "death"),
+        };
+        var rec = LlmGoalPolicy.FindCombatRecord(hist, 99999u, "Drudge Skulker");
+        Assert.NotNull(rec);
+        Assert.Equal(1, rec!.Deaths); // only the Skulker row, not the Slinker
     }
 
     [Fact]
@@ -5795,6 +5837,25 @@ public class LlmGoalPolicyTests
         var hist = new[] { new CombatHistoryEntry("X", 7u, 1, 0, 0, 1, "kill") };
         Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, null));
         Assert.Null(LlmGoalPolicy.FindCombatRecord(hist, null, "(unknown)"));
+    }
+
+    [Fact]
+    public void FormatCombatRecordFor_RendersAggregatedCounts()
+    {
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Skulker", 19257u, 2, 0, 0, 2, "kill"),
+            new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 0, 1, "death"),
+        };
+        var s = LlmGoalPolicy.FormatCombatRecordFor(hist, 19257u, "Drudge Skulker");
+        Assert.Equal(" [your record: fights 3, kills 2, deaths 1, near-deaths 0, last kill]", s);
+    }
+
+    [Fact]
+    public void FormatCombatRecordFor_EmptyWhenNoMatch()
+    {
+        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
+        Assert.Equal("", LlmGoalPolicy.FormatCombatRecordFor(hist, 7u, "Drudge Skulker"));
     }
 
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
