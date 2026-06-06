@@ -2669,7 +2669,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine($"- landblock: 0x{world.Self.Landblock ?? 0:X4}");
         sb.AppendLine($"- pos: ({world.Self.PositionX:F1}, {world.Self.PositionY:F1}, {world.Self.PositionZ:F1})");
         if (world.Self.Level is int lv) sb.AppendLine($"- level: {lv}");
-        if (world.Self.HealthFraction is float hf) sb.AppendLine($"- health: {hf:P0}");
+        if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string selfHealthLine)
+            sb.AppendLine(selfHealthLine);
         if (world.Self.NumDeaths is int nd) sb.AppendLine($"- deaths (server-tracked): {nd}");
         if (world.Self.CoinValue is int cv) sb.AppendLine($"- coin (server-tracked): {cv} pyreals");
         sb.AppendLine();
@@ -2878,8 +2879,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         else
             weaponLine = "NONE wielded - UNARMED";
         sb.AppendLine($"- weapon: {weaponLine}");
-        if (world.Self.HealthFraction is float crHf)
-            sb.AppendLine($"- health: {crHf:P0}");
+        if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
+            sb.AppendLine(crHealthLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
         // is combat-ready and has farmed this landblock past the dwell
         // threshold without leveling, so the LLM knows to travel for tougher
@@ -3375,6 +3376,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (rec is null) return "";
         return $" [your record: fights {rec.Fights}, kills {rec.Kills}, " +
                $"deaths {rec.Deaths}, near-deaths {rec.NearDeaths}, last {rec.LastOutcome}]";
+    }
+
+    /// <summary>
+    /// Render the raw self-health line for the prompt. Surfaces the
+    /// wire-authoritative ABSOLUTE current HP (and observed peak) next to
+    /// the fraction so the LLM is never misled by a "100%" computed from an
+    /// under-estimated observed peak (e.g. logged in damaged at 1 HP). A
+    /// `rising` note flags that current is still climbing (regen) and is
+    /// therefore BELOW the true max. Returns null when no health is known.
+    /// </summary>
+    internal static string? FormatSelfHealth(
+        int? current, int? observedPeak, float? fraction, bool? rising)
+    {
+        if (current is null && fraction is null) return null;
+        var sb = new StringBuilder("- health: ");
+        sb.Append(fraction is float f ? f.ToString("P0") : "unknown");
+        if (current is int c)
+        {
+            sb.Append(" (");
+            sb.Append(c);
+            if (observedPeak is int p) { sb.Append('/'); sb.Append(p); }
+            sb.Append(" HP");
+            if (rising == true) sb.Append(", rising"); // still regenerating => below true max
+            sb.Append(')');
+        }
+        return sb.ToString();
     }
 
     internal static void AppendRecentSightings(

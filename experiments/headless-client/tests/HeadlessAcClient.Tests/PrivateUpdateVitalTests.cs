@@ -326,4 +326,122 @@ public class PrivateUpdateVitalTests
         Assert.NotNull(proj);
         Assert.Null(proj!.Self.HealthFraction);
     }
+
+    // ---- raw self-health trend + absolute facts (self-health-raw-facts) ----
+
+    [Fact]
+    public void HealthRising_NullOnFirstReading_TrueWhenClimbing_FalseWhenDropping()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+
+        // First reading: no prior, so trend is unknown (null).
+        Assert.True(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Health, Current: 1)));
+        Assert.Null(ws.Self!.HealthRising);
+
+        // Regen up-tick: rising.
+        Assert.True(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 2, Vital: (uint)VitalKind.Health, Current: 2)));
+        Assert.True(ws.Self!.HealthRising);
+
+        // Took damage: not rising.
+        Assert.True(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 3, Vital: (uint)VitalKind.Health, Current: 1)));
+        Assert.False(ws.Self!.HealthRising);
+
+        // Flat (no change): trend left unchanged (still false).
+        Assert.True(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 4, Vital: (uint)VitalKind.Health, Current: 1)));
+        Assert.False(ws.Self!.HealthRising);
+    }
+
+    [Fact]
+    public void HealthRising_NotClobberedByDuplicateFromAlternateSource()
+    {
+        // Both 0x02E9 (current-level) and 0x02E7 (descriptor) report the same
+        // Health current through separate sequence gates. A genuine up-tick
+        // followed by a redundant same-value report from the other source
+        // must NOT reset the rising signal to false (regression guard for the
+        // dual-source false-negative).
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Health, Current: 1));
+        // Regen up-tick via the current-level packet.
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 2, Vital: (uint)VitalKind.Health, Current: 2));
+        Assert.True(ws.Self!.HealthRising);
+
+        // Descriptor re-reports the SAME current (2) — must not clobber.
+        ws.Apply(new PrivateUpdateVitalMessage(
+            Sequence: 1, Vital: (uint)VitalKind.MaxHealth,
+            Ranks: 0, StartingValue: 0, ExperienceSpent: 0, Current: 2));
+        Assert.True(ws.Self!.HealthRising);
+    }
+
+    [Fact]
+    public void Projection_SurfacesAbsoluteCurrentPeakAndRising()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PlayerCreateMessage(TestGuid));
+
+        // Damaged-login regression scenario: first reading is sub-max (1 HP),
+        // so the peak under-estimates the true max. Then health regenerates.
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Health, Current: 1));
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 2, Vital: (uint)VitalKind.Health, Current: 2));
+
+        var proj = WorldStateProjection.FromWorldState(ws, null);
+        Assert.NotNull(proj);
+        // Absolute current is wire-authoritative even though the fraction
+        // (computed from the under-estimated peak) reads a misleading 100%.
+        Assert.Equal(2, proj!.Self.HealthCurrent);
+        Assert.Equal(2, proj.Self.HealthObservedPeak);
+        Assert.True(proj.Self.HealthRising);
+        Assert.Equal(1.0f, proj.Self.HealthFraction!.Value, 3);
+    }
+
+    [Fact]
+    public void FormatSelfHealth_DamagedLogin_ShowsAbsoluteHpNotJustPercent()
+    {
+        // The evidenced bug: at current=1/peak=1 the old render showed only
+        // "health: 100%". The fix surfaces absolute HP so the LLM is not misled.
+        var line = HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfHealth(
+            current: 1, observedPeak: 1, fraction: 1.0f, rising: null);
+        Assert.NotNull(line);
+        Assert.Contains("1/1 HP", line);
+        Assert.Contains("100", line);
+    }
+
+    [Fact]
+    public void FormatSelfHealth_Regenerating_AppendsRisingNote()
+    {
+        var line = HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfHealth(
+            current: 2, observedPeak: 2, fraction: 1.0f, rising: true);
+        Assert.NotNull(line);
+        Assert.Contains("2/2 HP", line);
+        Assert.Contains("rising", line);
+    }
+
+    [Fact]
+    public void FormatSelfHealth_HealthyMidFight_ShowsFractionAndAbsolute_NoRising()
+    {
+        var line = HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfHealth(
+            current: 2, observedPeak: 5, fraction: 0.4f, rising: false);
+        Assert.NotNull(line);
+        Assert.Contains("2/5 HP", line);
+        Assert.Contains("40", line);
+        Assert.DoesNotContain("rising", line);
+    }
+
+    [Fact]
+    public void FormatSelfHealth_NoData_ReturnsNull()
+    {
+        Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfHealth(
+            current: null, observedPeak: null, fraction: null, rising: null));
+    }
 }

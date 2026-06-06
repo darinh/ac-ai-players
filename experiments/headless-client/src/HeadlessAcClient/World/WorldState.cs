@@ -536,14 +536,35 @@ internal sealed class WorldState
     /// seeds to the true max on a full-health login/respawn, rises on
     /// level-up at full health, and never shrinks from taking damage -
     /// avoiding a reimplementation of AC's Endurance-derived max formula.
+    /// The peak can UNDER-estimate the true max when the first reading is
+    /// a sub-max value (logged in damaged); the raw HealthRising trend
+    /// (below) lets Strategy detect that case (current still climbing via
+    /// regen => below true max) instead of trusting a misleading fraction.
     /// </summary>
     private void WriteSelfHealth(uint selfGuid, uint current)
     {
         var snap = GetOrCreateSnapshot(selfGuid);
+        var prev = snap.HealthCurrent;
         snap.HealthCurrent = current;
         snap.HealthMax = snap.HealthMax is uint prevMax && prevMax >= current
             ? prevMax
             : current;
+        // Raw observed trend over DISTINCT current readings. Both wire
+        // sources (0x02E7 descriptor and 0x02E9 current-level) feed through
+        // here and both report the same Health current, so a redundant
+        // same-value update from the alternate source must NOT clobber a
+        // rising signal: only a strict change updates the trend; an equal
+        // reading leaves the prior trend unchanged. null until the first
+        // distinct change establishes a direction.
+        if (prev is uint p)
+        {
+            if (current != p)
+                snap.HealthRising = current > p;
+        }
+        else
+        {
+            snap.HealthRising = null;
+        }
         snap.Touch();
     }
 

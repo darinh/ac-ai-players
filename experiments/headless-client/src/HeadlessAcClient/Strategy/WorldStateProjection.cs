@@ -151,6 +151,17 @@ internal sealed record SelfProjection
     [JsonPropertyName("level")]   public int? Level { get; init; }
     [JsonPropertyName("health_fraction")] public float? HealthFraction { get; init; }
 
+    // Raw self-health perception facts (current HP is wire-authoritative;
+    // observed peak is a max PROXY that can under-estimate the true max
+    // when the bot logged in damaged). Surfaced so Strategy is not misled
+    // by a fraction that reads "100%" at a sub-max observed peak.
+    /// <summary>Latest wire-authoritative current HP (absolute).</summary>
+    [JsonPropertyName("health_current")] public int? HealthCurrent { get; init; }
+    /// <summary>Peak current HP ever observed this session — a max proxy; may under-estimate the true max if the first reading was sub-max.</summary>
+    [JsonPropertyName("health_observed_peak")] public int? HealthObservedPeak { get; init; }
+    /// <summary>True when current HP is strictly rising over the last two readings (regen) — proves the bot is BELOW its true max, so the fraction overstates health.</summary>
+    [JsonPropertyName("health_rising")] public bool? HealthRising { get; init; }
+
     // Server-authoritative counters (read directly from PropertyInts;
     // ACE pushes these on character-load + on every change).
     /// <summary>PropertyInt.NumDeaths (43). Total deaths this character has ever suffered. Persists across sessions.</summary>
@@ -343,6 +354,8 @@ internal sealed record WorldStateProjection
         int? numDeaths = null;
         int? coinValue = null;
         float? hfrac = null;
+        int? hcurOut = self.HealthCurrent is uint hc0 ? (int)hc0 : (int?)null;
+        int? hpeakOut = self.HealthMax is uint hm0 ? (int)hm0 : (int?)null;
         if (self.HealthCurrent is uint hcur && self.HealthMax is uint hmax && hmax > 0)
         {
             // Clamp to [0,1] — Current should never exceed the
@@ -372,6 +385,9 @@ internal sealed record WorldStateProjection
                 PositionZ = self.Position.Z,
                 Level = level,
                 HealthFraction = hfrac,
+                HealthCurrent = hcurOut,
+                HealthObservedPeak = hpeakOut,
+                HealthRising = self.HealthRising,
                 NumDeaths = numDeaths,
                 CoinValue = coinValue,
             },
