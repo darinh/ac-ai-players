@@ -5901,6 +5901,116 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("combat history (your own outcomes", p);
     }
 
+    // death-recency: the deaths line carries how long ago the most recent
+    // in-session death was (when known), so the LLM can tell a fresh respawn
+    // from an old cumulative count. Raw telemetry — no urgency baked in.
+    [Fact]
+    public void BuildUserPrompt_DeathRecency_ShownWhenProvided()
+    {
+        var world = BuildExitTokenWorld();
+        world = world with { Self = world.Self with { NumDeaths = 3 } };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            secondsSinceLastDeath: 15);
+        Assert.Contains("deaths (server-tracked): 3 (most recent observed ~15s ago)", p);
+        // No source-side urgency/recommendation leaked into the render.
+        Assert.DoesNotContain("should", p.Split('\n').First(l => l.Contains("deaths (server-tracked)")));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DeathRecency_OmittedWhenNull()
+    {
+        var world = BuildExitTokenWorld();
+        world = world with { Self = world.Self with { NumDeaths = 3 } };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            secondsSinceLastDeath: null);
+        Assert.Contains("deaths (server-tracked): 3", p);
+        Assert.DoesNotContain("most recent observed", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DeathRecency_NoDeathsLineWhenNumDeathsNull()
+    {
+        // NumDeaths unknown (null) → no deaths line at all, regardless of recency.
+        var world = BuildExitTokenWorld(); // Self.NumDeaths is null by default
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            secondsSinceLastDeath: 10);
+        Assert.DoesNotContain("deaths (server-tracked)", p);
+    }
+
+    // death-recency tracking logic (the stateful half, reflected directly so
+    // the anchoring/increment-only/no-retro-stamp invariants are asserted
+    // without going through the async LLM HTTP path or prompt coalescing).
+    private static LlmGoalPolicy MakeBarePolicyForTracking()
+    {
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{}") }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        return new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
+    }
+
+    private static void InvokeUpdateDeathRecency(LlmGoalPolicy policy, int? numDeaths, DateTimeOffset nowUtc)
+    {
+        var m = typeof(LlmGoalPolicy).GetMethod(
+            "UpdateDeathRecencyTracking",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        m.Invoke(policy, new object?[] { numDeaths, nowUtc });
+    }
+
+    private static int? InvokeSecondsSinceLastOwnDeath(LlmGoalPolicy policy, DateTimeOffset nowUtc)
+    {
+        var m = typeof(LlmGoalPolicy).GetMethod(
+            "SecondsSinceLastOwnDeath",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        return (int?)m.Invoke(policy, new object?[] { nowUtc });
+    }
+
+    [Fact]
+    public void DeathRecency_FirstObservation_AnchorsOnly_NoRecency()
+    {
+        // A bot that logs in with a pre-existing cumulative NumDeaths (from
+        // prior sessions) must NOT be treated as having just died.
+        var policy = MakeBarePolicyForTracking();
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        InvokeUpdateDeathRecency(policy, 5, t0);
+        Assert.Null(InvokeSecondsSinceLastOwnDeath(policy, t0));
+        Assert.Null(InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(10)));
+    }
+
+    [Fact]
+    public void DeathRecency_Increment_Stamps_RecencyCounts()
+    {
+        var policy = MakeBarePolicyForTracking();
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        InvokeUpdateDeathRecency(policy, 5, t0);              // anchor
+        InvokeUpdateDeathRecency(policy, 6, t0.AddSeconds(30)); // real death
+        Assert.Equal(0, InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(30)));
+        Assert.Equal(60, InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(90)));
+    }
+
+    [Fact]
+    public void DeathRecency_EqualDecreaseNull_DoNotStamp_NorCorruptAnchor()
+    {
+        var policy = MakeBarePolicyForTracking();
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        InvokeUpdateDeathRecency(policy, 5, t0);                 // anchor at 5
+        InvokeUpdateDeathRecency(policy, 5, t0.AddSeconds(10));  // equal -> no stamp
+        Assert.Null(InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(10)));
+        InvokeUpdateDeathRecency(policy, 4, t0.AddSeconds(20));  // decrease -> no stamp
+        Assert.Null(InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(20)));
+        InvokeUpdateDeathRecency(policy, null, t0.AddSeconds(30)); // null -> early return
+        Assert.Null(InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(30)));
+        // The null tick must not have corrupted the anchor: a later increment
+        // over the last real count (4) still stamps a fresh death.
+        InvokeUpdateDeathRecency(policy, 6, t0.AddSeconds(40));
+        Assert.Equal(0, InvokeSecondsSinceLastOwnDeath(policy, t0.AddSeconds(40)));
+    }
+
     // combat-record-nearest: the nearest-monster line in "## Combat
     // readiness" is annotated INLINE with the bot's own raw record for
     // that monster KIND, matched by exact identity (wcid or normalized
