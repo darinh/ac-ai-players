@@ -193,4 +193,46 @@ public class CombatRetryTests
             secondsSinceServerStick: 3.0, StickSettle,
             secondsSinceServerCombatActivity: 1.0, Quiescence));
     }
+
+    // ShouldSurfaceAttackDoneRejection — whether a non-zero AttackDone
+    // error becomes an LLM-facing ActionRejected learning signal.
+
+    [Fact]
+    public void Cancel_NoActiveTarget_NotSurfaced()
+        // Benign post-kill / post-disengage swing-loop teardown: the
+        // ActionCancelled arrives with no combat lock. Suppress so it
+        // neither pollutes the prompt nor discards the post-kill LLM call.
+        => Assert.False(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            CombatRetry.AttackDoneActionCancelled, hasActiveCombatTarget: false));
+
+    [Fact]
+    public void Cancel_WithActiveTarget_Surfaced()
+        // A cancel WHILE still engaged is live loop-keeper signalling —
+        // keep it (preserves cp-2253 in-fight behavior).
+        => Assert.True(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            CombatRetry.AttackDoneActionCancelled, hasActiveCombatTarget: true));
+
+    [Fact]
+    public void SemanticRefusal_NoActiveTarget_Surfaced()
+        // A real WeenieError (e.g. OutOfRange 0x0030) must always reach the
+        // LLM so it can pivot — even with no active target.
+        => Assert.True(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            0x0030u, hasActiveCombatTarget: false));
+
+    [Fact]
+    public void SemanticRefusal_WithActiveTarget_Surfaced()
+        => Assert.True(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            0x0030u, hasActiveCombatTarget: true));
+
+    [Fact]
+    public void OnlyActionCancelledIsGated_OtherCodesAlwaysSurface()
+    {
+        // The suppression is keyed to the exact ActionCancelled code; no
+        // other refusal code is gated by the missing-target condition.
+        Assert.True(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            0x001Du /* YoureTooBusy */, hasActiveCombatTarget: false));
+        Assert.True(CombatRetry.ShouldSurfaceAttackDoneRejection(
+            0x0001u, hasActiveCombatTarget: false));
+        Assert.Equal(0x0036u, CombatRetry.AttackDoneActionCancelled);
+    }
 }

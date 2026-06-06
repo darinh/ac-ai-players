@@ -1771,15 +1771,31 @@ internal sealed class HandshakeDriver : IDisposable
                                         !ctgStickActive)
                                         combatFastRetryRequested = true;
 
-                                    eventStream.Append(new StreamEvent
+                                    // Surface the refusal as an LLM learning
+                                    // signal — EXCEPT a trailing
+                                    // ActionCancelled with no active combat
+                                    // target, which is the benign post-kill /
+                                    // post-disengage teardown of the server's
+                                    // swing loop. Surfacing that would append a
+                                    // misleading "Attack rejected" for a target
+                                    // the bot just killed AND discard the
+                                    // establishment LLM call fired right after
+                                    // the kill (a non-transport ActionRejected
+                                    // is plan-invalidating). Mechanical gate on
+                                    // the wire code + combat-lock state.
+                                    if (CombatRetry.ShouldSurfaceAttackDoneRejection(
+                                            atkDone.ErrorCode, combatTargetGuid is not null))
                                     {
-                                        Sequence = 0,
-                                        Utc = DateTimeOffset.UtcNow,
-                                        Kind = EventKind.ActionRejected,
-                                        Text = $"Attack rejected: {attackLabel}",
-                                        ErrorCode = atkDone.ErrorCode,
-                                        ErrorLabel = attackLabel,
-                                    });
+                                        eventStream.Append(new StreamEvent
+                                        {
+                                            Sequence = 0,
+                                            Utc = DateTimeOffset.UtcNow,
+                                            Kind = EventKind.ActionRejected,
+                                            Text = $"Attack rejected: {attackLabel}",
+                                            ErrorCode = atkDone.ErrorCode,
+                                            ErrorLabel = attackLabel,
+                                        });
+                                    }
                                 }
                                 else if (combatTargetGuid is not null)
                                 {
