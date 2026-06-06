@@ -1120,6 +1120,95 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void NoQuestKnowledgePolicy_SkipsWield_WhenWeaponCollidesWithWieldedWeapon()
+    {
+        // Regression: a melee weapon is already wielded; the bag holds a
+        // redundant missile weapon (Royal Atlatl) the server would refuse
+        // to wield (CheckWeaponCollision). The fallback must NOT propose
+        // Wield for it — otherwise the LLM Wield dispatch's dequip-before-
+        // wield swap (cp-2244) dequips the working melee weapon and leaves
+        // the bot holding an ammoless missile weapon (self-disarm). Step 3
+        // must skip the colliding weapon and fall through to Talk.
+        const uint WieldedSpadoneGuid = 0x80005514;
+        const uint UnwieldedAtlatlGuid = 0x80009C7E;
+        const uint VisibleNpcGuid = 0x80000700;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    // Already wielded melee weapon (TwoHanded slot 0x2000000).
+                    Guid = WieldedSpadoneGuid, Name = "Training Spadone", Wcid = 41512u,
+                    ItemType = 0x1u, ValidLocations = 0x2000000u, WieldedAt = 0x2000000u,
+                },
+                new InventoryItemProjection
+                {
+                    // Unwielded missile weapon — collides, must be skipped.
+                    Guid = UnwieldedAtlatlGuid, Name = "Royal Atlatl", Wcid = 20640u,
+                    ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null,
+                },
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = VisibleNpcGuid, Name = "Society Greeter",
+                    Wcid = 700u, ItemType = 0x10u, Distance = 4.0f,
+                },
+            },
+        };
+        var events = new EventStream();
+
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        // Must not try to wield the colliding atlatl (which would self-disarm).
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_ProposesWield_FirstWeaponIntoEmptySlot()
+    {
+        // Positive control: with NO weapon wielded, the first unwielded
+        // weapon is NOT blocked (empty weapon slot) and the fallback DOES
+        // propose Wield for it. The collision guard only suppresses a
+        // SECOND weapon while one is already wielded.
+        const uint UnwieldedAtlatlGuid = 0x80009C7E;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = UnwieldedAtlatlGuid, Name = "Royal Atlatl", Wcid = 20640u,
+                    ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null,
+                },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var events = new EventStream();
+
+        var goal = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Wield, goal!.Kind);
+        Assert.Equal(UnwieldedAtlatlGuid, goal.Item!.Guid);
+    }
+
+    [Fact]
     public void NoQuestKnowledgePolicy_PrefersPickup_OverOpenable_BothVisible()
     {
         // Step 4 (Pickup) runs BEFORE Step 5b (Openable). A pickup-mask

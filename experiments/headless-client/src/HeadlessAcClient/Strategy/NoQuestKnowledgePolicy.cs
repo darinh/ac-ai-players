@@ -152,10 +152,33 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // NO WieldObject ever. From L3023 onward fallback re-proposed
         // Wield{Cap} on every one of 24+ ticks; step 5d (Use Portal)
         // never executed despite portal visible at d=12.6u.
+        // Mechanical weapon-collision facts for the whole inventory, used
+        // to skip a self-disarming auto-wield below. Mirrors the PHASE7F.4
+        // auto-equip collision skip (HandshakeDriver) and the server's
+        // CheckWeaponCollision precondition.
+        var nqpInventoryFacts = world.Inventory
+            .Select(i => new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt))
+            .ToList();
         var unwielded = world.Inventory
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .Where(i => !_recentProposedGuids.Contains(i.Guid))
+            // Do NOT auto-wield a primary weapon (melee/missile/caster) that
+            // the server would refuse because another primary weapon is
+            // already wielded. Without this guard the fallback proposed a
+            // Wield of a redundant second weapon (e.g. a Royal Atlatl while
+            // a Training Spadone is wielded); the LLM Wield dispatch's
+            // cp-2244 dequip-before-wield swap then DEQUIPPED the working
+            // melee weapon to wield the ammoless atlatl, SELF-DISARMING the
+            // bot (readiness flips to "missile ammo: EMPTY" → it stops
+            // hunting). An intentional weapon swap stays the LLM's job; the
+            // mechanical fallback only equips into non-colliding slots. Pure
+            // server-precondition mirror — no weapon preference, no game
+            // knowledge; non-weapons never trigger a blocker, and the first
+            // weapon into an empty weapon slot is unaffected.
+            .Where(i => WeaponSwap.FindBlockingWieldedWeapon(
+                new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt),
+                nqpInventoryFacts) is null)
             // No source-side gear-class ordering: ranking inventory by
             // "weapons/armor first" is a game-knowledge rule-of-thumb the
             // LLM owns, not the mechanical fallback. The fallback wields
