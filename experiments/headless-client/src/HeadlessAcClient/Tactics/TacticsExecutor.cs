@@ -132,6 +132,11 @@ internal sealed class TacticsExecutor
             Utc = DateTimeOffset.UtcNow,
             Kind = EventKind.GoalFailed,
             GoalId = id,
+            // Carry the failed goal's target selector name so the policy
+            // can correlate a repeated terminal failure to a specific
+            // selector (e.g. an out-of-PVS Attack target that keeps
+            // failing to resolve). Our OWN selector name, not server text.
+            Name = CurrentGoal.Target?.Name,
             Text = $"{CurrentGoal.Kind}: {reason}",
         });
         _training?.RecordOutcome(id, "failed", reason);

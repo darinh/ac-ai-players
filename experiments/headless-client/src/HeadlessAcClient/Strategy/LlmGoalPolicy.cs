@@ -1653,6 +1653,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "interaction");
         }
 
+        // Unreachable-Attack repeat loop-break (2026-06-05): cp-2272 cut the
+        // motor's no-lock fast-fail from 30s to 6s, which ~5x's the rate at
+        // which a weak model can re-emit the SAME Attack on a monster that has
+        // wandered OUT of PVS (no live snapshot, no explored sighting route,
+        // no frontier → motor emits a terminal GoalFailed "selector resolved
+        // to no live object"). Each re-emit just re-fails instantly and wakes
+        // another no-current-goal LLM call — burning quota. Drop the repeat
+        // and defer to the fallback (a real Explore that MOVES the bot) once
+        // the motor has failed to reach this exact target twice. Skipped the
+        // moment the target re-enters PVS (let the real engagement proceed)
+        // and self-expiring as the failures age out of the event window.
+        if (IsUnreachableTargetRepeat(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Attack target={goal.Target}" +
+                " — target repeatedly unreachable (out of PVS, no route); deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: repeatedly-unreachable out-of-PVS Attack target");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "unreachable Attack");
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -1808,6 +1829,65 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsTransportFailureRejection(StreamEvent ev) =>
         ev.Kind == EventKind.ActionRejected &&
         ev.ErrorCode is 0xFFFCu or 0xFFFDu or 0xFFFEu;
+
+    /// <summary>
+    /// The exact suffix of the GoalFailed reason text the motor emits when a
+    /// goal's selector resolved to no live world object AND no sighting route
+    /// AND no frontier (the terminal "give up, re-deliberate" branch in
+    /// HandshakeDriver). The full Text is "{GoalKind}: selector resolved to no
+    /// live object" — matching the SUFFIX excludes the other Fail reason at
+    /// the same site ("...: combat deferred: self-health too low..."), which
+    /// must NOT be treated as an unreachable target.
+    /// </summary>
+    private const string NoLiveObjectFailSuffix =
+        ": selector resolved to no live object";
+
+    /// <summary>
+    /// True iff an LLM <see cref="GoalKind.Attack"/> is re-proposing a target
+    /// the motor has REPEATEDLY (≥ <c>UnreachableRepeatThreshold</c>) failed
+    /// to reach with a terminal "selector resolved to no live object"
+    /// GoalFailed — i.e. the named monster is out of PVS, the bot has no
+    /// explored sighting route to it, and frontier exploration found nothing.
+    /// Re-emitting it just re-fails instantly (cp-2272's 6s no-lock fast-fail)
+    /// and wakes another no-current-goal LLM call, burning per-day quota.
+    ///
+    /// Pure, no policy state: the implicit cooldown is the recent-event
+    /// window — once the failures age out the Attack flows again (and the
+    /// motor's cp-2271 sighting-route path gets another try). Skipped the
+    /// instant the target re-enters PVS (<see cref="VisibleMatchesSelector"/>)
+    /// so a real engagement is never suppressed. Correlates by the failed
+    /// goal's OWN selector name (carried on the GoalFailed event) — no server
+    /// dialogue text, no hardcoded names/wcids/landblocks.
+    /// </summary>
+    internal static bool IsUnreachableTargetRepeat(
+        Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Attack) return false;
+        var target = goal.Target;
+        var targetName = target?.Name;
+        if (target is null || string.IsNullOrWhiteSpace(targetName)) return false;
+
+        // Target currently in view → never suppress; the motor will resolve a
+        // live snapshot and the real Attack can fire.
+        if (world.Visible.Any(v => VisibleMatchesSelector(target, v)))
+            return false;
+
+        const int LookbackEvents = 30;
+        const int UnreachableRepeatThreshold = 2;
+        int count = 0;
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (ev.Kind != EventKind.GoalFailed) continue;
+            if (ev.Text is null ||
+                !ev.Text.EndsWith(NoLiveObjectFailSuffix, StringComparison.Ordinal))
+                continue;
+            if (string.IsNullOrWhiteSpace(ev.Name) ||
+                !string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (++count >= UnreachableRepeatThreshold) return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// True iff a <see cref="EventKind.PickerArrivedNoAction"/> event for
