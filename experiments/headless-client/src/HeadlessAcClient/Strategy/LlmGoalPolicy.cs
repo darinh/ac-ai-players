@@ -2384,7 +2384,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.BookText
              or EventKind.PickerActivityStarted
              or EventKind.PickerArrivedNoAction
-             or EventKind.CombatFeedback;
+             or EventKind.CombatFeedback
+             or EventKind.SelfProgressChanged;
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
     {
