@@ -547,6 +547,25 @@ internal sealed class HandshakeDriver : IDisposable
         const double         CombatStickSettleSec = 2.0;
         uint?                combatServerStickTarget = null;
         DateTime?            combatServerStickAt = null;
+        // Phase 7f.2 — server auto-repeat quiescence gate. AC1 melee is a
+        // server-side loop: one TargetedMeleeAttack starts it and the server
+        // auto-repeats Attack() at weapon cadence. While that loop is mid-swing
+        // the server is IsBusy, so a re-sent TargetedMeleeAttack is rejected
+        // with WeenieError.YoureTooBusy (0x1D) and the server then fires
+        // GameEventAttackDone(ActionCancelled), NULLING its own MeleeTarget —
+        // killing the loop. Against a near-instant mob (Chicken) the fight ends
+        // before any re-send; against a longer-lived mob the loop-keeper's
+        // re-sends cancel the server loop every cadence → the fight stalls after
+        // the first landed hit. Track the most recent SERVER signal that its
+        // loop is ALIVE (a normal AttackDone(None) between-swings power-refill,
+        // or a target health update) and suppress the loop-keeper until that
+        // observation is older than CombatActivityQuiescenceSec — i.e. the loop
+        // has genuinely dropped (target stepped out and back, LOS broke/restored)
+        // and needs a real nudge. Must exceed the slowest weapon swing cadence
+        // (a slow two-hander is ~3s) so a normal between-swings gap is not
+        // mistaken for a dropped loop.
+        const double         CombatActivityQuiescenceSec = 4.0;
+        DateTime?            lastServerCombatActivityAt = null;
         const double         AbandonOnNoDamageSec   = 60.0;
         // Phase 7f.D — reactive low-health disengage (self-preservation
         // reflex). Break off combat when our OWN health is at or below
@@ -1650,6 +1669,11 @@ internal sealed class HandshakeDriver : IDisposable
                                         updHealth.HealthFraction < prevHF - 0.0001f)
                                     {
                                         lastDamageAt = DateTime.UtcNow;
+                                        // Damage landed → the server loop is
+                                        // alive and connecting. Refresh the
+                                        // quiescence clock (see
+                                        // CombatActivityQuiescenceSec).
+                                        lastServerCombatActivityAt = DateTime.UtcNow;
                                     }
                                     lastObservedTargetHealthFraction = updHealth.HealthFraction;
                                     if (updHealth.HealthFraction <= 0.0001f)
@@ -1757,6 +1781,21 @@ internal sealed class HandshakeDriver : IDisposable
                                         ErrorLabel = attackLabel,
                                     });
                                 }
+                                else if (combatTargetGuid is not null)
+                                {
+                                    // errCode == 0 (None) is the normal
+                                    // between-swings AttackDone the server
+                                    // sends while its auto-repeat loop is
+                                    // running (power meter refilling for the
+                                    // next swing). It is a positive signal the
+                                    // server loop is ALIVE — refresh the
+                                    // quiescence clock so the loop-keeper stays
+                                    // silent and lets the server keep swinging.
+                                    // ActionCancelled (handled above) is the
+                                    // OPPOSITE (loop dropped) and must NOT
+                                    // refresh this.
+                                    lastServerCombatActivityAt = DateTime.UtcNow;
+                                }
                             }
                             // combat-damage-output — swing-outcome tracking.
                             // AttackerNotification (0x01B1) = a swing LANDED
@@ -1787,6 +1826,15 @@ internal sealed class HandshakeDriver : IDisposable
                                     combatTargetName = null;
                                     combatStatsForGuid = cnTarget;
                                 }
+
+                                // A landed/evaded swing notification means the
+                                // server's auto-repeat loop just RESOLVED a swing
+                                // against our target — the loop is alive. Refresh
+                                // the quiescence clock (mirrors the AttackDone(None)
+                                // keep-alive) so the loop-keeper defers to the
+                                // server loop.
+                                if (cnTarget == combatTargetGuid)
+                                    lastServerCombatActivityAt = DateTime.UtcNow;
 
                                 if (ge.Payload?.AttackerNotification is { } atkHit)
                                 {
@@ -2761,7 +2809,11 @@ internal sealed class HandshakeDriver : IDisposable
                         (combatServerStickTarget == ffCtg && combatServerStickAt is DateTime ffSat)
                             ? (DateTime.UtcNow - ffSat).TotalSeconds
                             : (double?)null,
-                        CombatStickSettleSec) &&
+                        CombatStickSettleSec,
+                        (lastServerCombatActivityAt is DateTime ffAct)
+                            ? (DateTime.UtcNow - ffAct).TotalSeconds
+                            : (double?)null,
+                        CombatActivityQuiescenceSec) &&
                     worldState.Self is WorldObjectSnapshot ffSelf &&
                     worldState.TryGet(ffCtg) is WorldObjectSnapshot ffTarget &&
                     WorldDistance.TrySquaredDistance(ffSelf, ffTarget, out var ffD2) &&
@@ -5534,6 +5586,10 @@ internal sealed class HandshakeDriver : IDisposable
                             combatStartedAt  = DateTime.UtcNow;
                             lastDamageAt     = DateTime.UtcNow;
                             lastObservedTargetHealthFraction = null;
+                            // Fresh target — no server combat-loop activity has
+                            // been observed yet; clear any prior fight's clock so
+                            // it cannot suppress this fight's loop-keeper.
+                            lastServerCombatActivityAt = null;
                             // Fresh target — drop any stale cancel request
                             // carried over from a previous engagement.
                             combatFastRetryRequested = false;

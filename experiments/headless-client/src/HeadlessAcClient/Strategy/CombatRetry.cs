@@ -74,13 +74,35 @@ internal static class CombatRetry
     /// How long after a server stick-to-target the re-send stays
     /// suppressed.
     /// </param>
+    /// <param name="secondsSinceServerCombatActivity">
+    /// Seconds since the most recent SERVER signal that its auto-repeat
+    /// swing loop is ALIVE for the active target — a normal
+    /// GameEventAttackDone(None) (the between-swings power-refill signal)
+    /// or an UpdateHealth for the target. Null if no such signal has been
+    /// observed for this engagement. While this is within
+    /// <paramref name="activityQuiescenceSec"/> the server is actively
+    /// swinging, so a re-sent TargetedMeleeAttack is REJECTED with
+    /// WeenieError.YoureTooBusy and the server cancels its own loop
+    /// (GameEventAttackDone(ActionCancelled)) — the dominant cause of a
+    /// stalled fight against a longer-lived target. Suppress the re-send
+    /// until the loop has gone quiescent (genuinely dropped). Negative
+    /// values (clock skew) are treated as not-active.
+    /// </param>
+    /// <param name="activityQuiescenceSec">
+    /// How long the server auto-repeat loop must be SILENT (no normal
+    /// AttackDone / no target health update) before the loop-keeper
+    /// re-sends. Should exceed the slowest weapon swing cadence so a
+    /// normal between-swings gap is not mistaken for a dropped loop.
+    /// </param>
     public static bool ShouldReattack(
         double secondsSinceLastAttack,
         bool cancelRetryRequested,
         double normalIntervalSec,
         double fastMinIntervalSec,
         double? secondsSinceServerStick = null,
-        double stickSettleSec = 0.0)
+        double stickSettleSec = 0.0,
+        double? secondsSinceServerCombatActivity = null,
+        double activityQuiescenceSec = 0.0)
     {
         if (secondsSinceLastAttack < 0)
             return false;
@@ -88,6 +110,12 @@ internal static class CombatRetry
         // into melee range). Re-sending TargetedMeleeAttack now would
         // cancel that move-to and restart it; wait for it to settle.
         if (secondsSinceServerStick is double s && s >= 0 && s < stickSettleSec)
+            return false;
+        // The server's auto-repeat swing loop is demonstrably ALIVE
+        // (recent normal AttackDone / target health update). A re-send now
+        // is rejected YoureTooBusy and CANCELS the server loop — so let the
+        // server keep swinging and only nudge once the loop is quiescent.
+        if (secondsSinceServerCombatActivity is double a && a >= 0 && a < activityQuiescenceSec)
             return false;
         if (secondsSinceLastAttack >= normalIntervalSec)
             return true;
