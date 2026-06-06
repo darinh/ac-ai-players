@@ -44,6 +44,7 @@ internal enum GameActionType : uint
     TargetedMeleeAttack = 0x0008,
     TargetedMissileAttack = 0x000A,
     GetAndWieldItem     = 0x001A,
+    RaiseAttribute      = 0x0045,
     ChangeCombatMode    = 0x0053,
     QueryHealth         = 0x01BF,
     GiveObjectRequest   = 0x00CD,
@@ -276,6 +277,45 @@ internal static class GameActionUseWithTargetMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.UseWithTarget, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), sourceGuid); cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// RaiseAttribute (0x0045). Spends accumulated experience to raise one of
+/// the six primary attributes. The server handler
+/// (GameActionRaiseAttribute.cs) reads u32 attributeId then u32 xpSpent and
+/// calls Player.HandleActionRaiseAttribute, which accepts ANY
+/// amount &lt;= AvailableExperience (it accumulates ExperienceSpent and
+/// recomputes the rank — there is no exact per-rank cost), so the client may
+/// spend any clamped chunk. On success the server emits a private attribute
+/// update (and, for Endurance, a Health vital update — perceivable as a
+/// higher max HP); on failure it sends a "Your attempt to raise X has
+/// failed." chat and no update.
+///
+/// attributeId is the raw PropertyAttribute wire enum (Strength=1,
+/// Endurance=2, Quickness=3, Coordination=4, Focus=5, Self=6). The motor
+/// only maps the LLM-named attribute to this id and sends the chunk the LLM
+/// asked for; it makes NO decision about WHICH attribute or HOW MUCH — that
+/// is the Strategy layer's job. No game-content knowledge (e.g. an
+/// attribute's in-game effect) lives here.
+///
+/// Payload after the 12B GameAction header:
+///   u32 attributeId
+///   u32 xpSpent
+/// </summary>
+internal static class GameActionRaiseAttributeMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 8;  // 20 bytes
+
+    public static int Pack(Span<byte> dest, uint attributeId, uint xpSpent, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.RaiseAttribute, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), attributeId); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), xpSpent); cursor += 4;
         return cursor;
     }
 }
