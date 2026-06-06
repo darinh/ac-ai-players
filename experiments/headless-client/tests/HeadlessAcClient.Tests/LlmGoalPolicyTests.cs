@@ -5732,6 +5732,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("town-stuck", p);
         Assert.Contains("HUNT EXCURSION", p);
         Assert.Contains("KEEP emitting it", p);
+        // tapped-out: corrected leveling steer (cp-2270) — prefer beatable, no "tougher for XP"
+        Assert.Contains("monsters you can DEFEAT", p);
+        Assert.Contains("do NOT chase `tougher` monsters for more XP", p);
         // blocked targets, transitions, pursue-unseen, server precedence
         Assert.Contains("BLOCKED targets", p);
         Assert.Contains("PURSUE UNSEEN OBJECTIVES", p);
