@@ -123,6 +123,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // after the bot crosses a seam (dwell resets to 0), reverting to Talk and
     // pathing back — an infinite ping-pong between two adjacent safe zones.
     private bool _isEgressing;
+    // The bot's OWN self-level captured when it entered the current dwell
+    // landblock (snapshotted in UpdateDwellTracking; lazily filled if level
+    // was not yet observed at entry). Compared against the current level to
+    // surface a "hunt tapped out" perception fact: combat-ready + dwelled
+    // past the threshold + no level gained here = this area no longer levels
+    // the bot, so it should travel for tougher monsters. Own-progress signal
+    // only — no monster type/level judgement, audit-safe.
+    private int? _levelAtCurrentLandblockEntry;
 
     // Sticky LLM-objective (call-volume reduction). _lastLlmGoal holds
     // the most-recent LLM-authored goal so the policy can RE-DRIVE it
@@ -500,6 +508,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsEgressOverridableVerb(GoalKind kind)
         => kind == GoalKind.Talk || kind == GoalKind.Give;
 
+    // Pure "hunt tapped out" perception signal. Returns a raw self-progress
+    // fact string to surface to the LLM when the bot, combat-ready, has
+    // dwelled in its current landblock past the threshold WITHOUT gaining a
+    // level since it arrived. Returns null when not tapped out or when level
+    // is unknown. The string reports ONLY the bot's own data (its own level,
+    // its own dwell time, +0 levels gained); it encodes no monster type/level,
+    // name, wcid, landblock, conclusion, or action directive — audit-safe.
+    // The LLM owns the decision; the matching RULES bullet tells it how to act.
+    internal static string? HuntTappedOutFact(
+        bool combatReady, int? currentLevel, int? levelAtLandblockEntry,
+        double? dwellMinutes, double dwellThresholdMinutes)
+    {
+        if (!combatReady) return null;
+        if (currentLevel is not int lvl) return null;
+        if (levelAtLandblockEntry is not int entryLvl) return null;
+        if (dwellMinutes is not double dm || dm < dwellThresholdMinutes) return null;
+        // Gained at least one level here → the area is still productive.
+        if (lvl > entryLvl) return null;
+        return $"tapped out: level {lvl}, {dm:F0} min in this area with +0 levels gained since arriving";
+    }
+
     private Goal? ProposeGoalCore(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var nowUtc = DateTimeOffset.UtcNow;
@@ -508,7 +537,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // so the `minutes in current landblock` prompt signal reflects the
         // latest observation regardless of which path this tick takes
         // (in-flight poll, backoff, coalesce, fallback). See field docs.
-        UpdateDwellTracking(world.Self.Landblock, events, nowUtc);
+        UpdateDwellTracking(world.Self.Landblock, world.Self.Level, events, nowUtc);
 
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
@@ -834,7 +863,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -1991,7 +2020,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-landblock changes, on first observation, or when a session
     // gap (disconnect/reconnect) is detected. Mechanical only — keyed on
     // a wire-derived landblock id, no game knowledge.
-    private void UpdateDwellTracking(uint? currentLandblock, EventStream events, DateTimeOffset nowUtc)
+    private void UpdateDwellTracking(uint? currentLandblock, int? currentLevel, EventStream events, DateTimeOffset nowUtc)
     {
         // Unknown landblock this tick (pre-enter-world, or a disconnect/
         // reconnect gap): keep the prior stamp AND do NOT advance the tick
@@ -2028,7 +2057,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     entry = match.Utc;
             }
             _dwellEntryUtc = entry;
+            // Snapshot the bot's own level at landblock entry (may be null
+            // if not yet observed; lazily filled below). Reset per landblock
+            // so the "tapped out" signal is scoped to THIS area's farming and
+            // never carries stale stall state across a seam.
+            _levelAtCurrentLandblockEntry = currentLevel;
         }
+
+        // Lazy fill: if level was unknown at entry but is known now (still in
+        // the same dwell landblock), anchor the entry level to the first known
+        // value so the tapped-out comparison has a baseline.
+        if (_levelAtCurrentLandblockEntry is null && currentLevel is not null)
+            _levelAtCurrentLandblockEntry = currentLevel;
     }
 
     // The durable entry time to hand the prompt builder, but ONLY when it
@@ -2061,7 +2101,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         PickerActivity? pickerActivity,
         IReadOnlyList<ExplorationCandidate>? explorationCandidates,
         DateTimeOffset? dwellEntryUtc = null,
-        IReadOnlyList<SightedRecallProjection>? recentSightings = null)
+        IReadOnlyList<SightedRecallProjection>? recentSightings = null,
+        int? levelAtLandblockEntry = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -2161,6 +2202,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
+        sb.AppendLine("- TAPPED OUT means MOVE ON: if `Combat readiness` shows a `tapped out` line, the monsters here no longer level you. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area for tougher monsters — do this EVEN IF trivial monsters are still visible here; re-killing them is wasted time. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
         sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
@@ -2401,6 +2443,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine($"- weapon: {weaponLine}");
         if (world.Self.HealthFraction is float crHf)
             sb.AppendLine($"- health: {crHf:P0}");
+        // coldstart hunt discovery — surface a "tapped out" fact when the bot
+        // is combat-ready and has farmed this landblock past the dwell
+        // threshold without leveling, so the LLM knows to travel for tougher
+        // monsters even while trivial mobs remain in view. Own-progress signal
+        // only (level + dwell), no monster-type judgement — see HuntTappedOutFact.
+        var armedForHunt = meleeWeaponWielded || missileWeaponWielded;
+        double? dwellMinForHunt = dwellEntryUtc is DateTimeOffset hutDwellEntry
+            ? Math.Max(0.0, (DateTimeOffset.UtcNow - hutDwellEntry).TotalMinutes)
+            : (double?)null;
+        if (HuntTappedOutFact(armedForHunt, world.Self.Level, levelAtLandblockEntry,
+                dwellMinForHunt, EgressDwellMinutes) is string tappedOutFact)
+            sb.AppendLine($"- {tappedOutFact}");
         if (bagWeapon is not null)
             sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
         if (groundWeapon is not null)
