@@ -149,6 +149,10 @@ internal sealed record SelfProjection
     [JsonPropertyName("position_y")] public float PositionY { get; init; }
     [JsonPropertyName("position_z")] public float PositionZ { get; init; }
     [JsonPropertyName("level")]   public int? Level { get; init; }
+    /// <summary>Lifetime total experience (PropertyInt64 TotalExperience). i64: lifetime XP exceeds 2^31.</summary>
+    [JsonPropertyName("total_experience")] public long? TotalExperience { get; init; }
+    /// <summary>Unspent experience available to raise skills/attributes (PropertyInt64 AvailableExperience).</summary>
+    [JsonPropertyName("unassigned_experience")] public long? AvailableExperience { get; init; }
     [JsonPropertyName("health_fraction")] public float? HealthFraction { get; init; }
 
     // Raw self-health perception facts (current HP is wire-authoritative;
@@ -372,6 +376,16 @@ internal sealed record WorldStateProjection
             if (props.TryGetValue(20u, out var cv)) coinValue = cv;
         }
 
+        long? totalXp = null;
+        long? availXp = null;
+        if (self.PropertyInt64s is { } props64)
+        {
+            // PropertyInt64 ids: see ACE-bots Source/ACE.Entity/Enum/Properties/PropertyInt64.cs
+            //   1 = TotalExperience (lifetime), 2 = AvailableExperience (unspent)
+            if (props64.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var tx)) totalXp = tx;
+            if (props64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var ax)) availXp = ax;
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -384,6 +398,8 @@ internal sealed record WorldStateProjection
                 PositionY = self.Position.Y,
                 PositionZ = self.Position.Z,
                 Level = level,
+                TotalExperience = totalXp,
+                AvailableExperience = availXp,
                 HealthFraction = hfrac,
                 HealthCurrent = hcurOut,
                 HealthObservedPeak = hpeakOut,

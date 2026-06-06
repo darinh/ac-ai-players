@@ -94,6 +94,13 @@ internal sealed class WorldObjectSnapshot
     // receiving session). Keyed by PropertyInt enum value.
     public Dictionary<uint, int>? PropertyInts { get; internal set; }
 
+    // i64 property bag — only populated for the bot's own player
+    // (PrivateUpdatePropertyInt64 is implicitly scoped to the
+    // receiving session, like PropertyInts). Keyed by PropertyInt64
+    // enum value; carries player XP (TotalExperience=1,
+    // AvailableExperience=2). Null until the first 0x02CF arrives.
+    public Dictionary<uint, long>? PropertyInt64s { get; internal set; }
+
     // Self HEALTH vital — only populated for the bot's own player
     // (PrivateUpdateVital is implicitly scoped to the receiving
     // session, like PropertyInts). HealthCurrent is the latest

@@ -2082,6 +2082,10 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt: {pup.PropertyName} = {pup.Value} (seq={pup.Sequence})");
                             break;
+                        case PrivateUpdatePropertyInt64Message pup64:
+                            Console.WriteLine(
+                                $"[observe]   -> PrivateUpdatePropertyInt64: {pup64.PropertyName} = {pup64.Value} (seq={pup64.Sequence})");
+                            break;
                         case PrivateUpdateVitalMessage puv:
                             // Surface the bot's own health changes. Only
                             // the health vital feeds self-health state;
