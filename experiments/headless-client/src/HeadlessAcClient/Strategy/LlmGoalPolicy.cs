@@ -2749,6 +2749,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine($"- landblock: 0x{world.Self.Landblock ?? 0:X4}");
         sb.AppendLine($"- pos: ({world.Self.PositionX:F1}, {world.Self.PositionY:F1}, {world.Self.PositionZ:F1})");
         if (world.Self.Level is int lv) sb.AppendLine($"- level: {lv}");
+        if (world.Self.TotalExperience is long txp)
+        {
+            var avail = world.Self.AvailableExperience is long axp
+                ? $", {axp} unspent"
+                : string.Empty;
+            sb.AppendLine($"- experience: {txp} total{avail}");
+        }
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string selfHealthLine)
             sb.AppendLine(selfHealthLine);
         if (world.Self.NumDeaths is int nd) sb.AppendLine($"- deaths (server-tracked): {nd}");

@@ -12,6 +12,12 @@ internal enum GameMessageOpcode : uint
 {
     // Phase 2/3 server → client
     PrivateUpdatePropertyInt = 0x02CD,
+    // Self i64-valued property update (no guid; implicitly the bot's
+    // own player, like PrivateUpdatePropertyInt). Carries player XP
+    // totals (PropertyInt64 TotalExperience=1, AvailableExperience=2);
+    // 64-bit because lifetime XP exceeds 2^31. See
+    // GameMessagePrivateUpdatePropertyInt64.
+    PrivateUpdatePropertyInt64 = 0x02CF,
     // Self vital FULL DESCRIPTOR update (Ranks/StartingValue/ExpSpent/
     // Current). "Private" = sent only to the receiving session, so it is
     // implicitly about the bot's own player (no guid on the wire), like

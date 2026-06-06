@@ -76,8 +76,11 @@ internal sealed record PrivateUpdatePropertyIntMessage(
         { 6,    "ItemsCapacity" },
         { 7,    "ContainersCapacity" },
         { 20,   "CoinValue" },
-        { 21,   "TotalExperience" },
-        { 24,   "AvailableExperience" },
+        // 21/24 are the 32-bit slots; player XP is sent via the i64
+        // PrivateUpdatePropertyInt64 path (TotalExperience=1,
+        // AvailableExperience=2), NOT here. 24 is AvailableSkillCredits.
+        { 21,   "TotalExperience(int32)" },
+        { 24,   "AvailableSkillCredits" },
         { 25,   "Level" },
 
         // Combat / vitals

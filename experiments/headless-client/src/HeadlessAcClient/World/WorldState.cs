@@ -99,6 +99,20 @@ internal sealed class WorldState
     private byte? _selfPropertyByteSeq;
 
     /// <summary>
+    /// Per-(Int64 property) byte-sequence high-water marks. UNLIKE the
+    /// 32-bit path's single <see cref="_selfPropertyByteSeq"/>, the
+    /// server keys the Int64 sequence by
+    /// (SequenceType.UpdatePropertyInt64, property) — so TotalExperience
+    /// and AvailableExperience advance INDEPENDENT counters (e.g.
+    /// spending XP advances AvailableExperience without TotalExperience).
+    /// Gating all Int64 properties against one shared max would falsely
+    /// drop a valid update whenever the two counters diverge, so we key
+    /// the high-water mark by property. Values nullable because 0 is a
+    /// valid sequence; absent key = never seen.
+    /// </summary>
+    private readonly Dictionary<uint, byte> _selfPropertyInt64ByteSeq = new();
+
+    /// <summary>
     /// Highest byte-sequence seen on PrivateUpdateVital for the HEALTH
     /// vital. This is a SEPARATE counter from _selfPropertyByteSeq: the
     /// vital update uses a per-(type,vital) UpdateAttribute2ndLevel
@@ -229,6 +243,7 @@ internal sealed class WorldState
             MotionMessage mm                  => ApplyMotion(mm),
             SetStateMessage ss                => ApplySetState(ss),
             PrivateUpdatePropertyIntMessage p => ApplyPrivatePropertyInt(p),
+            PrivateUpdatePropertyInt64Message p64 => ApplyPrivatePropertyInt64(p64),
             PrivateUpdateVitalMessage v       => ApplyPrivateVital(v),
             PrivateUpdateAttribute2ndLevelMessage a => ApplyPrivateVitalLevel(a),
             PlayerCreateMessage pc            => ApplyPlayerCreate(pc),
@@ -463,6 +478,38 @@ internal sealed class WorldState
         var snap = GetOrCreateSnapshot(selfGuid);
         snap.PropertyInts ??= new Dictionary<uint, int>();
         snap.PropertyInts[pup.Property] = pup.Value;
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a PrivateUpdatePropertyInt64 (0x02CF). Like
+    /// PrivateUpdatePropertyInt it has no guid and is implicitly scoped
+    /// to the receiving session's player; carries player XP totals
+    /// (TotalExperience=1, AvailableExperience=2). Stale-gated PER
+    /// PROPERTY (see <see cref="_selfPropertyInt64ByteSeq"/>) because the
+    /// server uses an independent ByteSequence per Int64 property.
+    /// </summary>
+    private bool ApplyPrivatePropertyInt64(PrivateUpdatePropertyInt64Message pup)
+    {
+        if (SelfGuid is not uint selfGuid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] PrivateUpdatePropertyInt64 before SelfGuid known: " +
+                $"prop={pup.PropertyName} val={pup.Value} (dropped)");
+            return false;
+        }
+
+        byte? prevSeq = _selfPropertyInt64ByteSeq.TryGetValue(pup.Property, out var s)
+            ? s
+            : (byte?)null;
+        if (!SequenceCompare.IsCurrentOrNewer(pup.Sequence, prevSeq))
+            return false;
+        _selfPropertyInt64ByteSeq[pup.Property] = pup.Sequence;
+
+        var snap = GetOrCreateSnapshot(selfGuid);
+        snap.PropertyInt64s ??= new Dictionary<uint, long>();
+        snap.PropertyInt64s[pup.Property] = pup.Value;
         snap.Touch();
         return true;
     }
