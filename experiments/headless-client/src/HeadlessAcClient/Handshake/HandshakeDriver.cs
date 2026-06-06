@@ -3143,7 +3143,14 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else
                     {
-                    actionsCompleted++;
+                    // A barren no-lock idle reset (motionTarget == null, cp-2262)
+                    // is not a completed action — don't burn the per-session
+                    // action budget (MaxActionsPerSession) on it. Every existing
+                    // path into this cascade has a non-null motionTarget (the
+                    // interact block requires it to set useSent), so this guard
+                    // only affects the new null-target recovery path.
+                    if (motionTarget is not null)
+                        actionsCompleted++;
                     // Only flag visited for non-combat targets. The
                     // combat-state machine owns the visited add for
                     // golems (on death or timeout) so we re-target
@@ -5850,6 +5857,31 @@ internal sealed class HandshakeDriver : IDisposable
                             ErrorCode = 0xFFFE,
                             ErrorLabel = "Unreachable",
                         });
+                    }
+                    else
+                    {
+                        // Barren no-lock idle motion (cp-2262). The schema
+                        // picker found no named target within range, so
+                        // motionTarget is null. The interact block below — the
+                        // ONLY place useSent is set — requires motionTarget !=
+                        // null, so for a null target useSent is never set and the
+                        // useSent-gated post-action reset cascade never runs. That
+                        // leaves autonomousPositionSent stuck true; both the LLM
+                        // deliberation gate and the schema picker require
+                        // !autonomousPositionSent, so the bot wedges permanently
+                        // (observed: 1 establishment call -> 1 no-lock probe ->
+                        // 30s timeout -> zero further activity for the whole run).
+                        // Mark useSent here so the reset cascade reopens the gates
+                        // on the next packet, exactly like a completed action.
+                        // This is the walk-tick (tick-path) site, so recovery does
+                        // NOT depend on the packet-path PHASE5B STOP block having
+                        // fired. Pure motor-state bookkeeping — no target is
+                        // interacted with and no game knowledge is used.
+                        useSent = true;
+                        useSentAt = DateTime.UtcNow;
+                        Console.WriteLine(
+                            "[motion] walk-tick: no-lock idle motion timed out (no target) — " +
+                            "resetting motion state to re-deliberate");
                     }
                 }
 
