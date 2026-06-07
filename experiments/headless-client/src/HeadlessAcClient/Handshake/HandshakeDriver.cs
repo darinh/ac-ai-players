@@ -649,6 +649,17 @@ internal sealed class HandshakeDriver : IDisposable
         // shortly after the attacker dies/disengages. Refreshed on every
         // defender notification (re-stamps the name's UTC).
         const double         ObservedHostileTtlSeconds = 12.0;
+        // active-combat-telemetry: a short rolling window of inbound hits the
+        // bot has TAKEN (landed DefenderNotification 0x01B2). Pruned by TTL and
+        // summarized into worldState.RecentInboundDamage before each projection
+        // build. Lock-independent so the "recent inbound damage" prompt line
+        // survives a flee (when ClearCombatFightStats nulls CurrentFight) — the
+        // decisive moment when the LLM must weigh disengage/Recall. Cleared on
+        // landblock change (a new landblock is a fresh combat context). The
+        // window length is an eviction TTL (bookkeeping), aligned to the
+        // observed-hostile horizon so both lines describe the same recency.
+        var                  recentInboundHits = new List<InboundHit>();
+        const double         InboundDamageWindowSeconds = ObservedHostileTtlSeconds;
         // cold-start egress: stable kind-keys (CombatFeelLedger.KeyOf) of
         // monster kinds the bot has KILLED since entering the current
         // landblock. Cleared on landblock change; published to
@@ -2218,6 +2229,20 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastCombatFoe = (dnFoe.Wcid, dnFoe.Name, hostileNow);
                                     }
                                 }
+
+                                // active-combat-telemetry: a LANDED inbound swing
+                                // (DefenderNotification 0x01B2) is damage the bot
+                                // TOOK. Append it to the rolling window with the
+                                // current UTC time; pruned + summarized into
+                                // worldState.RecentInboundDamage before each
+                                // projection build. EvasionDefenderNotification
+                                // (0x01B4) is an inbound MISS (the bot evaded) —
+                                // no damage, so it is not recorded. Raw bookkeeping
+                                // independent of the combat lock (so it survives a
+                                // flee); the LLM owns the fight-vs-flee/Recall call.
+                                if (ge.Payload?.DefenderNotification is { } inboundHit)
+                                    recentInboundHits.Add(
+                                        new InboundHit(DateTime.UtcNow, inboundHit.Damage));
                             }
                             // M1.5 — surface WeenieErrorWithString
                             // to the EventStream as an ActionRejected
@@ -2703,6 +2728,11 @@ internal sealed class HandshakeDriver : IDisposable
                             // explicit clear avoids a brief post-transition
                             // false positive).
                             recentHostileAt.Clear();
+                            // active-combat-telemetry: a landblock change is a
+                            // fresh combat context — inbound damage taken in the
+                            // prior area must not bleed into the new one's "recent
+                            // inbound damage" line.
+                            recentInboundHits.Clear();
                             // cold-start egress: a new landblock is a fresh hunt
                             // zone — the per-dwell killed-kind set must not carry
                             // across the seam (mirrors the dwell/level reset in
@@ -3863,6 +3893,14 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.RecentHostileNames = recentHostileAt.Count > 0
                         ? new HashSet<string>(recentHostileAt.Keys, StringComparer.Ordinal)
                         : null;
+                    // active-combat-telemetry: prune the inbound-damage window by
+                    // TTL and publish the summary (or null when nothing recent),
+                    // here — right before every projection build — so expiry is
+                    // evaluated each perception tick, NOT only when a new defender
+                    // notification happens to arrive. Pure bookkeeping; the LLM
+                    // owns the fight-vs-flee/Recall decision.
+                    worldState.RecentInboundDamage = InboundDamageWindow.PruneAndSummarize(
+                        recentInboundHits, DateTime.UtcNow, InboundDamageWindowSeconds);
                     // cold-start egress: publish the per-landblock killed-kind
                     // set so the projection (and the hunt-egress override that
                     // reads it) sees which kinds the bot has already farmed here.

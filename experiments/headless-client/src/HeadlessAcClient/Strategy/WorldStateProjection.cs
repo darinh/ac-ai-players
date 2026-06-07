@@ -235,6 +235,16 @@ internal sealed record WorldStateProjection
     public CombatFightStatus? CurrentFight { get; init; }
 
     /// <summary>
+    /// active-combat-telemetry: rolling-window summary of recent inbound
+    /// damage the bot has TAKEN. Copied straight from
+    /// <see cref="WorldState.RecentInboundDamage"/>. Surfaced to the LLM as
+    /// raw perception so it can judge whether it is losing a fight and decide
+    /// to disengage or Recall; source never makes that decision.
+    /// </summary>
+    [JsonPropertyName("recent_inbound_damage")]
+    public RecentInboundDamage? RecentInboundDamage { get; init; }
+
+    /// <summary>
     /// combat-feel: per-mob-identity summary of the bot's own observed
     /// combat outcomes this session (kills/deaths/near-deaths). Copied
     /// from <see cref="WorldState.CombatHistory"/>. Surfaced as raw
@@ -488,6 +498,7 @@ internal sealed record WorldStateProjection
             Inventory = inv,
             Visible = visible,
             CurrentFight = world.CurrentFight,
+            RecentInboundDamage = world.RecentInboundDamage,
             CombatHistory = world.CombatHistory,
             KilledKindsThisDwell = world.KilledKindsThisDwell,
             MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,

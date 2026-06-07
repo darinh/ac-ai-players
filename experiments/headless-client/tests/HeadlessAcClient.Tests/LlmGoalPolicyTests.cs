@@ -3072,6 +3072,75 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_RecentInboundDamage_RendersRawHitsAndDamage()
+    {
+        // active-combat-telemetry: the rolling inbound-damage summary is
+        // surfaced verbatim so the LLM can judge how fast it is taking damage
+        // and decide to disengage/Recall. RAW counts only.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 0.05f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            RecentInboundDamage = new RecentInboundDamage(4, 23u, 12.0),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains(
+            "recent inbound damage: 4 hits taking 23 damage in the last ~12s",
+            prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_RecentInboundDamage_SingularHit()
+    {
+        // One hit reads "1 hit" (singular), not "1 hits".
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 0.5f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            RecentInboundDamage = new RecentInboundDamage(1, 7u, 12.0),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("recent inbound damage: 1 hit taking 7 damage", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_NoRecentInboundDamage_OmitsLine()
+    {
+        // No recent inbound damage → no line (zero static-floor cost).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            RecentInboundDamage = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("recent inbound damage:", prompt);
+    }
+
+    [Fact]
+    public void FormatRecentInboundDamage_NullOrZeroHits_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.FormatRecentInboundDamage(null));
+        Assert.Null(LlmGoalPolicy.FormatRecentInboundDamage(
+            new RecentInboundDamage(0, 0u, 12.0)));
+    }
+
+    [Fact]
     public void IsSalientKind_IncludesCombatFeedback()
     {
         // The CombatFeedback "all swings evaded" event must wake the LLM so
