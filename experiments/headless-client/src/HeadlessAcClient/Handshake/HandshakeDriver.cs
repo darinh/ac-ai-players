@@ -940,6 +940,26 @@ internal sealed class HandshakeDriver : IDisposable
         uint?                prevSelfCellBeforeAp = null;
         float                prevExpectedStepLen = 0f;
         int                  consecutiveBlockedTicks = 0;
+        // immobile-stuck telemetry: aggregate count of full block-stops
+        // (each = BlockedConsecutiveTicks consecutive zero-progress walk
+        // ticks) that have fired WITHOUT the bot's self-position changing
+        // since the previous one. UNLIKE consecutiveBlockedTicks (per motion
+        // lock; reset on every new goal/lock at 2913/3484/6958), this
+        // persists across goal/lock changes so it captures "the bot keeps
+        // re-targeting and re-trying but never actually moves" — a physical
+        // wedge (boxed in / on a ledge where every reachable bearing is a
+        // cliff the server rejects). Reset ONLY when the bot really moves
+        // (a healthy walk tick, or any observed self-position change at
+        // projection-build time). Pure own-movement bookkeeping; surfaced as
+        // raw "## Movement" prompt telemetry — the LLM decides how to react.
+        int                  movementBlockStopsSinceSelfMoved = 0;
+        (float Gx, float Gy, float Z)? immobileAnchor = null;
+        // Two block-stops count as "the same spot" when the bot's global
+        // position differs by less than this on every axis. A real walk step
+        // is ~1.25u and a server-rejected step is ~0u, so 1.0u cleanly
+        // separates "did not move" from "moved". Pure geometry, no game
+        // knowledge.
+        const float          ImmobileSamePositionEpsilonUnits = 1.0f;
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
@@ -3742,6 +3762,27 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.KilledKindsThisDwell = killedKindsThisLandblock.Count > 0
                         ? new HashSet<string>(killedKindsThisLandblock, StringComparer.Ordinal)
                         : null;
+
+                    // immobile-stuck telemetry: if the bot has moved away
+                    // from the wedge anchor by ANY cause (walk progress,
+                    // teleport, server reposition) since the last block-stop,
+                    // clear the aggregate so the rendered "position unchanged"
+                    // claim stays truthful. Then publish the raw count for the
+                    // "## Movement" projection section.
+                    if (immobileAnchor is { } pubAnchor
+                        && worldState.Self is WorldObjectSnapshot pubSelf
+                        && pubSelf.CellId is uint pubCell)
+                    {
+                        var (pubGx, pubGy) = Strategy.AcCoords.ToGlobalXY(pubCell, pubSelf.Position);
+                        if (MathF.Abs(pubGx - pubAnchor.Gx) > ImmobileSamePositionEpsilonUnits
+                            || MathF.Abs(pubGy - pubAnchor.Gy) > ImmobileSamePositionEpsilonUnits
+                            || MathF.Abs(pubSelf.Position.Z - pubAnchor.Z) > ImmobileSamePositionEpsilonUnits)
+                        {
+                            movementBlockStopsSinceSelfMoved = 0;
+                            immobileAnchor = null;
+                        }
+                    }
+                    worldState.MovementBlockStopsSinceSelfMoved = movementBlockStopsSinceSelfMoved;
 
                     var projection = WorldStateProjection.FromWorldState(
                         worldState, weenies, visibleRadius: 120f, maxVisible: 48);
@@ -6992,6 +7033,33 @@ internal sealed class HandshakeDriver : IDisposable
                                         ErrorCode = 0xFFFD,
                                         ErrorLabel = "Blocked",
                                     });
+
+                                    // immobile-stuck telemetry: a full
+                                    // block-stop just fired. immobileAnchor is
+                                    // the position where THIS wedge episode
+                                    // began; it is deliberately NOT refreshed
+                                    // on same-spot stops so the count means
+                                    // "N block-stops without leaving the spot
+                                    // where the bot first got stuck". If the
+                                    // bot is still within epsilon of that
+                                    // anchor, climb the count; otherwise it has
+                                    // relocated (cumulative drift > epsilon, or
+                                    // a fresh wedge elsewhere), so start a new
+                                    // episode anchored here at count 1.
+                                    var (immGx, immGy) = Strategy.AcCoords.ToGlobalXY(walkCell, walkSelf.Position);
+                                    var immZ = walkSelf.Position.Z;
+                                    if (immobileAnchor is { } ima
+                                        && MathF.Abs(immGx - ima.Gx) <= ImmobileSamePositionEpsilonUnits
+                                        && MathF.Abs(immGy - ima.Gy) <= ImmobileSamePositionEpsilonUnits
+                                        && MathF.Abs(immZ - ima.Z) <= ImmobileSamePositionEpsilonUnits)
+                                    {
+                                        movementBlockStopsSinceSelfMoved++;
+                                    }
+                                    else
+                                    {
+                                        movementBlockStopsSinceSelfMoved = 1;
+                                        immobileAnchor = (immGx, immGy, immZ);
+                                    }
                                     }
                                 }
                             }
@@ -6999,6 +7067,11 @@ internal sealed class HandshakeDriver : IDisposable
                             {
                                 // Healthy progress — reset the counter.
                                 consecutiveBlockedTicks = 0;
+                                // Real movement happened, so the bot is not
+                                // physically wedged: clear the immobile-stuck
+                                // aggregate and its position anchor.
+                                movementBlockStopsSinceSelfMoved = 0;
+                                immobileAnchor = null;
                             }
                         }
 

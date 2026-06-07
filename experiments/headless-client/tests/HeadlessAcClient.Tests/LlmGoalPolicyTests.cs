@@ -2701,6 +2701,56 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("melee weapon wielded", prompt);
     }
 
+    // ── immobile-stuck telemetry ("## Movement" section) ─────────────────
+    private static WorldStateProjection BuildImmobileWorld(int blockStops) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 6.71f, PositionY = 66.30f, PositionZ = 66.52f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        MovementBlockStopsSinceSelfMoved = blockStops,
+    };
+
+    [Fact]
+    public void Movement_NoBlockStops_SectionOmitted()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);
+        Assert.DoesNotContain("## Movement", prompt);
+    }
+
+    [Fact]
+    public void Movement_SingleBlockStop_RendersRawFact()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(1), new EventStream(), null);
+        Assert.Contains("## Movement", prompt);
+        Assert.Contains("1 consecutive move attempt(s) made no progress", prompt);
+    }
+
+    [Fact]
+    public void Movement_RepeatedBlockStops_RendersTheRawCount()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(7), new EventStream(), null);
+        Assert.Contains("## Movement", prompt);
+        // The raw count is surfaced verbatim; source asserts no urgency label.
+        Assert.Contains("7 consecutive move attempt(s) made no progress", prompt);
+        Assert.Contains("same position each time", prompt);
+    }
+
+    [Fact]
+    public void Movement_ProjectionCarriesRawCount_FromWorldState()
+    {
+        // The mutable WorldState field flows into the immutable projection
+        // unchanged (the driver publishes it before each projection build).
+        var world = new HeadlessAcClient.World.WorldState();
+        world.MovementBlockStopsSinceSelfMoved = 4;
+        Assert.Equal(4, world.MovementBlockStopsSinceSelfMoved);
+        var proj = BuildImmobileWorld(4);
+        Assert.Equal(4, proj.MovementBlockStopsSinceSelfMoved);
+    }
+
     [Fact]
     public void CombatReadiness_UnwieldedBagWeapon_SurfacesWieldAffordance()
     {
