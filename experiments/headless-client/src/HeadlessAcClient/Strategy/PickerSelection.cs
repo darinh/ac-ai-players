@@ -41,12 +41,22 @@
 //           with the bot's own CellId. Without this filter the
 //           pure-distance picker would lock onto the wielded item
 //           at d=0u and brick (sliceW01 run-02 lesson).
-//   - Drop pickups whose Name has already been picked up at least
-//     once. Visited-by-GUID exclusion (applied UPSTREAM by the
-//     caller) does not catch respawns that get a fresh GUID with
-//     the same Name. Without this filter the bot would farm the
-//     same chair / apple / loot bag forever after the server
-//     respawns it.
+//
+// REMOVED (picker-name-respawn-audit) — the per-Name "anti-respawn"
+// pickup filter. It dropped any pickup-eligible candidate whose Name
+// had been picked up >=1 time before (keyed on a Dictionary<Name,int>).
+// That was a STRATEGIC valuation ("one copy of this named pickup is
+// enough; duplicates aren't worth re-collecting") smuggled into the
+// Motor — a real player may legitimately want several of the same
+// consumable, and which loot is worth picking is the LLM's call. It
+// also silently HID those items from the "## Exploration candidates"
+// surface, so the LLM could not override. The pickup count is now
+// surfaced to the LLM as a factual `picked_name_count=N` annotation on
+// each candidate (ExplorationCandidate.PickedNameCount); the LLM
+// decides whether to re-pick. The autonomous picker no longer dispatches
+// Pickup at all (Slice W.3 goal-gating: a picker auto-lock without an
+// LLM verb goal is an arrival-no-op), so removing this filter cannot
+// reintroduce an autonomous same-name pickup loop.
 //
 // FORBIDDEN BUMPS REMOVED (game knowledge — must NEVER come back):
 //   - "NPC > corpse > door > pickup > else" priority ladder.
@@ -87,30 +97,16 @@ internal static class PickerSelection
     /// Bot character GUID. Used to drop items physically attached
     /// to the bot — ContainerGuid (bagged) or WielderGuid (wielded).
     /// </param>
-    /// <param name="pickupCountByName">
-    /// Per-Name pickup counter. Any pickup-eligible candidate with
-    /// count &gt; 0 is dropped (anti-respawn).
-    /// </param>
-    /// <param name="pickupItemTypeMask">
-    /// ItemType bitmask of pickup-eligible types. Used to identify
-    /// pickup-class candidates for the pickedBefore filter; passed
-    /// in (rather than hardcoded) so production HandshakeDriver and
-    /// tests share one source of truth.
-    /// </param>
     public static WorldObjectSnapshot? PickNearest(
         IEnumerable<WorldObjectSnapshot> inRange,
         WorldObjectSnapshot self,
-        uint selfGuid,
-        IReadOnlyDictionary<string, int> pickupCountByName,
-        uint pickupItemTypeMask)
+        uint selfGuid)
     {
         if (inRange is null) throw new ArgumentNullException(nameof(inRange));
         if (self is null) throw new ArgumentNullException(nameof(self));
-        if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
 
         return inRange
             .Where(s => !IsAttachedToSelf(s, selfGuid))
-            .Where(s => !IsRespawnOfPickedItem(s, pickupCountByName, pickupItemTypeMask))
             .Select(s =>
             {
                 WorldDistance.TrySelectionSquaredDistance(self, s, out var d2);
@@ -124,24 +120,6 @@ internal static class PickerSelection
     private static bool IsAttachedToSelf(WorldObjectSnapshot s, uint selfGuid)
         => (s.ContainerGuid is uint cg && cg == selfGuid)
         || (s.WielderGuid is uint wg && wg == selfGuid);
-
-    private static bool IsRespawnOfPickedItem(
-        WorldObjectSnapshot s,
-        IReadOnlyDictionary<string, int> pickupCountByName,
-        uint pickupItemTypeMask)
-    {
-        var descFlags = s.ObjectDescriptionFlags ?? 0u;
-        var isStuck = (descFlags & (uint)ObjectDescriptionFlag.Stuck) != 0;
-        var isPortal = (descFlags & (uint)ObjectDescriptionFlag.Portal) != 0;
-        var isWritable = s.ItemType is uint wt && (wt & 0x00002000u) != 0;
-        var isBookPickup = isWritable && !isStuck;
-        var isSign = isWritable && isStuck;
-        var isPickup =
-            (s.ItemType is uint it && (it & pickupItemTypeMask) != 0 && !isPortal && !isSign)
-            || isBookPickup;
-        if (!isPickup) return false;
-        return pickupCountByName.TryGetValue(s.Name ?? string.Empty, out var pc) && pc > 0;
-    }
 
     /// <summary>
     /// W.2 — fallback picker for exploration when the in-range queue
@@ -158,8 +136,6 @@ internal static class PickerSelection
     ///     door is the LLM's job now, not the picker's).
     ///   - drop satisfied weenie classes (caller-applied).
     ///   - drop ContainerGuid==self / WielderGuid==self.
-    ///   - drop pickup-eligible respawns whose Name we've picked
-    ///     up at least once (anti-respawn).
     ///   - drop objects whose CellId is not in the bot's current
     ///     landblock (high-16-bits match). Reaching a different
     ///     landblock requires server-side cell hand-off; chasing
@@ -183,22 +159,16 @@ internal static class PickerSelection
     /// <param name="selfLandblock">High-16-bits of bot's current
     /// CellId (the "landblock"). Candidates with CellId in a
     /// different landblock are excluded.</param>
-    /// <param name="pickupCountByName">Per-Name pickup counter.</param>
-    /// <param name="pickupItemTypeMask">ItemType bitmask for pickup
-    /// classification (anti-respawn filter).</param>
     public static WorldObjectSnapshot? PickNearestFallback(
         IEnumerable<WorldObjectSnapshot> known,
         WorldObjectSnapshot self,
         uint selfGuid,
-        uint selfLandblock,
-        IReadOnlyDictionary<string, int> pickupCountByName,
-        uint pickupItemTypeMask)
+        uint selfLandblock)
     {
         if (known is null) throw new ArgumentNullException(nameof(known));
         if (self is null) throw new ArgumentNullException(nameof(self));
-        if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
 
-        return EnumerateFallbackCandidates(known, self, selfGuid, selfLandblock, pickupCountByName, pickupItemTypeMask)
+        return EnumerateFallbackCandidates(known, self, selfGuid, selfLandblock)
             .Select(t => t.snap)
             .FirstOrDefault();
     }
@@ -213,19 +183,15 @@ internal static class PickerSelection
         IEnumerable<WorldObjectSnapshot> known,
         WorldObjectSnapshot self,
         uint selfGuid,
-        uint selfLandblock,
-        IReadOnlyDictionary<string, int> pickupCountByName,
-        uint pickupItemTypeMask)
+        uint selfLandblock)
     {
         if (known is null) throw new ArgumentNullException(nameof(known));
         if (self is null) throw new ArgumentNullException(nameof(self));
-        if (pickupCountByName is null) throw new ArgumentNullException(nameof(pickupCountByName));
 
         return known
             .Where(s => s.Guid != selfGuid)
             .Where(s => !string.IsNullOrEmpty(s.Name))
             .Where(s => !IsAttachedToSelf(s, selfGuid))
-            .Where(s => !IsRespawnOfPickedItem(s, pickupCountByName, pickupItemTypeMask))
             .Where(s => s.CellId is uint sc && sc != 0u && (sc & 0xFFFF0000u) == (selfLandblock & 0xFFFF0000u))
             .Select(s =>
             {

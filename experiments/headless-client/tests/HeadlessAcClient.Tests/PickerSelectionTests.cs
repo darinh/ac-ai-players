@@ -4,10 +4,11 @@
 // Audit-safe INVARIANT tests (per rubber-duck #7): we don't assert
 // "NPCs beat doors" or any other strategic ordering. We assert:
 //   - Distance is the only ordering signal (no type bumps).
-//   - Self-bag items are excluded.
-//   - Already-picked-by-name pickups are excluded (anti-respawn).
-//   - Non-pickup repeats are NOT excluded (e.g. a door we've been
-//     near isn't "picked-up" — visited-by-GUID is the caller's job).
+//   - Self-bag / self-wielded items are excluded (loop-prevention).
+//   - Duplicate-name pickups remain ELIGIBLE (picker-name-respawn-
+//     audit removed the source-side anti-respawn filter — whether a
+//     duplicate-named pickup is worth re-collecting is the LLM's
+//     call now, surfaced via ExplorationCandidate.PickedNameCount).
 //   - The schema-only picker NEVER prefers an NPC over a closer
 //     door (the FORBIDDEN ladder is gone).
 //   - The schema-only picker NEVER prefers a corpse over a closer
@@ -27,18 +28,14 @@ public class PickerSelectionTests
 {
     private const uint SelfGuid = 0x50000005;
     private const uint CellId = 0x12340001;
-    private const uint PickupItemTypeMask = 0xD96F;
 
     // ItemType bits (mirrors enum values used in HandshakeDriver).
     private const uint ItemTypeCreature = 0x00000010;
     private const uint ItemTypeMeleeWeapon = 0x00000001;
-    private const uint ItemTypeWritable = 0x00002000;
 
     // ObjectDescriptionFlag bits.
     private const uint FlagDoor = (uint)ObjectDescriptionFlag.Door;
-    private const uint FlagPortal = (uint)ObjectDescriptionFlag.Portal;
     private const uint FlagCorpse = (uint)ObjectDescriptionFlag.Corpse;
-    private const uint FlagStuck = (uint)ObjectDescriptionFlag.Stuck;
 
     private static WorldObjectSnapshot Self() =>
         new(SelfGuid) { CellId = CellId, Position = Vector3.Zero, Name = "Bot" };
@@ -64,9 +61,7 @@ public class PickerSelectionTests
     {
         var picked = PickerSelection.PickNearest(
             new List<WorldObjectSnapshot>(),
-            Self(), SelfGuid,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid);
         Assert.Null(picked);
     }
 
@@ -78,8 +73,7 @@ public class PickerSelectionTests
         var c = Snap(0x102, "Close", x: 3f);
 
         var picked = PickerSelection.PickNearest(
-            new[] { a, b, c }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { a, b, c }, Self(), SelfGuid);
         Assert.NotNull(picked);
         Assert.Equal(0x102u, picked!.Guid);
     }
@@ -92,8 +86,7 @@ public class PickerSelectionTests
         var npc  = Snap(0x200, "Greeter", x: 20f, itemType: ItemTypeCreature);
         var door = Snap(0x201, "Door",    x: 5f,  descFlags: FlagDoor);
         var picked = PickerSelection.PickNearest(
-            new[] { npc, door }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { npc, door }, Self(), SelfGuid);
         Assert.Equal(0x201u, picked!.Guid);
     }
 
@@ -105,8 +98,7 @@ public class PickerSelectionTests
         var corpse = Snap(0x300, "Corpse of Golem", x: 25f, descFlags: FlagCorpse);
         var apple  = Snap(0x301, "Apple",           x: 4f,  itemType: ItemTypeMeleeWeapon);
         var picked = PickerSelection.PickNearest(
-            new[] { corpse, apple }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { corpse, apple }, Self(), SelfGuid);
         Assert.Equal(0x301u, picked!.Guid);
     }
 
@@ -121,93 +113,27 @@ public class PickerSelectionTests
         var farNpc = Snap(0x401, "Greeter", x: 50f,
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearest(
-            new[] { inBag, farNpc }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { inBag, farNpc }, Self(), SelfGuid);
         Assert.Equal(0x401u, picked!.Guid);
     }
 
     [Fact]
-    public void ExcludesPickupsAlreadyPickedByName_AntiRespawn()
+    public void DuplicateNamePickup_StillEligible()
     {
-        // Same Name, different GUID — visited-by-GUID upstream
-        // filter wouldn't catch this. The pickedBefore filter
-        // (anti-respawn) must.
+        // picker-name-respawn-audit: the source-side anti-respawn
+        // filter is GONE. A pickup whose Name was picked before is no
+        // longer dropped by the Motor — it's the nearest eligible
+        // candidate and the picker returns it. "Is a duplicate worth
+        // re-collecting?" is the LLM's call now (surfaced as
+        // picked_name_count). Inverse of the old ...AntiRespawn test.
         var freshApple = Snap(0x500, "Apple", x: 3f,
             itemType: ItemTypeMeleeWeapon);
         var npc = Snap(0x501, "Greeter", x: 10f,
             itemType: ItemTypeCreature);
-        var counts = new Dictionary<string, int> { ["Apple"] = 1 };
         var picked = PickerSelection.PickNearest(
-            new[] { freshApple, npc }, Self(), SelfGuid,
-            counts, PickupItemTypeMask);
-        // Apple is closer but excluded because pickedBefore > 0.
-        // Greeter wins despite being farther.
-        Assert.Equal(0x501u, picked!.Guid);
-    }
-
-    [Fact]
-    public void DoesNotExcludeNonPickupRepeats()
-    {
-        // A door's Name appearing in pickupCountByName must NOT
-        // exclude it — pickedBefore is about pickup-respawns,
-        // not about Names in general. (Caller is responsible for
-        // door-visit dedup via visited-GUID set, not via name
-        // counts.)
-        var door = Snap(0x600, "Door", x: 5f, descFlags: FlagDoor);
-        var counts = new Dictionary<string, int> { ["Door"] = 99 };
-        var picked = PickerSelection.PickNearest(
-            new[] { door }, Self(), SelfGuid,
-            counts, PickupItemTypeMask);
-        Assert.Equal(0x600u, picked!.Guid);
-    }
-
-    [Fact]
-    public void BookPickedBefore_Excluded()
-    {
-        // Writable + NOT Stuck = book (Pickup-able). After picking
-        // one copy, a re-spawn must be excluded.
-        var book = Snap(0x700, "Magic Tips", x: 3f,
-            itemType: ItemTypeWritable);
-        var npc  = Snap(0x701, "Greeter", x: 10f,
-            itemType: ItemTypeCreature);
-        var counts = new Dictionary<string, int> { ["Magic Tips"] = 1 };
-        var picked = PickerSelection.PickNearest(
-            new[] { book, npc }, Self(), SelfGuid,
-            counts, PickupItemTypeMask);
-        Assert.Equal(0x701u, picked!.Guid);
-    }
-
-    [Fact]
-    public void SignPickedBeforeNotExcluded()
-    {
-        // Writable + Stuck = sign (USE-to-read). pickedBefore
-        // tracks Names of items the bot put in its bag. A sign
-        // can be USEd many times — the picker shouldn't exclude
-        // it based on the name counter.
-        var sign = Snap(0x800, "Tutorial Sign", x: 3f,
-            itemType: ItemTypeWritable, descFlags: FlagStuck);
-        var counts = new Dictionary<string, int> { ["Tutorial Sign"] = 5 };
-        var picked = PickerSelection.PickNearest(
-            new[] { sign }, Self(), SelfGuid,
-            counts, PickupItemTypeMask);
-        Assert.NotNull(picked);
-        Assert.Equal(0x800u, picked!.Guid);
-    }
-
-    [Fact]
-    public void PortalPickedBeforeNotExcluded()
-    {
-        // Portals carry the Portal description flag, which masks
-        // them out of isPickup even though some carry ItemType bits
-        // that overlap PickupItemTypeMask.
-        var portal = Snap(0x900, "Academy Exit", x: 3f,
-            itemType: ItemTypeMeleeWeapon, descFlags: FlagPortal);
-        var counts = new Dictionary<string, int> { ["Academy Exit"] = 9 };
-        var picked = PickerSelection.PickNearest(
-            new[] { portal }, Self(), SelfGuid,
-            counts, PickupItemTypeMask);
-        Assert.NotNull(picked);
-        Assert.Equal(0x900u, picked!.Guid);
+            new[] { freshApple, npc }, Self(), SelfGuid);
+        // Apple is closer and is no longer excluded — it wins.
+        Assert.Equal(0x500u, picked!.Guid);
     }
 
     [Fact]
@@ -225,8 +151,7 @@ public class PickerSelectionTests
         var farNpc  = Snap(0xA01, "Greeter", x: 50f,
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearest(
-            new[] { wielded, farNpc }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { wielded, farNpc }, Self(), SelfGuid);
         Assert.NotNull(picked);
         Assert.Equal(0xA01u, picked!.Guid);
     }
@@ -243,8 +168,7 @@ public class PickerSelectionTests
         var farNpc = Snap(0xB01, "Greeter", x: 30f,
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearest(
-            new[] { theirSword, farNpc }, Self(), SelfGuid,
-            new Dictionary<string, int>(), PickupItemTypeMask);
+            new[] { theirSword, farNpc }, Self(), SelfGuid);
         Assert.NotNull(picked);
         Assert.Equal(0xB00u, picked!.Guid);
     }
@@ -274,9 +198,7 @@ public class PickerSelectionTests
     {
         var picked = PickerSelection.PickNearestFallback(
             new List<WorldObjectSnapshot>(),
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Null(picked);
     }
 
@@ -290,9 +212,7 @@ public class PickerSelectionTests
         var pickup = Snap(0x102, "Apple", x: 12f, itemType: ItemTypeMeleeWeapon);
         var picked = PickerSelection.PickNearestFallback(
             new[] { npc, door, pickup },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.NotNull(picked);
         Assert.Equal(0x101u, picked!.Guid);
     }
@@ -309,9 +229,7 @@ public class PickerSelectionTests
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearestFallback(
             new[] { inBag, farNpc },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Equal(0x201u, picked!.Guid);
     }
 
@@ -328,27 +246,24 @@ public class PickerSelectionTests
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearestFallback(
             new[] { wielded, farNpc },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Equal(0x301u, picked!.Guid);
     }
 
     [Fact]
-    public void Fallback_ExcludesPickupRespawns()
+    public void Fallback_DuplicateNamePickup_StillEligible()
     {
-        // Anti-respawn: a pickup whose Name has been picked once
-        // is dropped even at d=0.
+        // picker-name-respawn-audit: the fallback no longer drops a
+        // pickup whose Name was picked before. The nearest Apple wins;
+        // the LLM decides via picked_name_count whether to re-pick.
         var freshApple = Snap(0x400, "Apple", x: 3f,
             itemType: ItemTypeMeleeWeapon);
         var npc = Snap(0x401, "Greeter", x: 10f,
             itemType: ItemTypeCreature);
-        var counts = new Dictionary<string, int> { ["Apple"] = 1 };
         var picked = PickerSelection.PickNearestFallback(
             new[] { freshApple, npc },
-            Self(), SelfGuid, SelfLandblock,
-            counts, PickupItemTypeMask);
-        Assert.Equal(0x401u, picked!.Guid);
+            Self(), SelfGuid, SelfLandblock);
+        Assert.Equal(0x400u, picked!.Guid);
     }
 
     [Fact]
@@ -366,9 +281,7 @@ public class PickerSelectionTests
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearestFallback(
             new[] { nearButOff, farInLandblock },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.NotNull(picked);
         Assert.Equal(0x501u, picked!.Guid);
     }
@@ -384,9 +297,7 @@ public class PickerSelectionTests
             itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearestFallback(
             new[] { noCell, realObj },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Equal(0x601u, picked!.Guid);
     }
 
@@ -403,9 +314,7 @@ public class PickerSelectionTests
 
         var listed = PickerSelection.EnumerateFallbackCandidates(
             new[] { far, mid, near },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask).ToList();
+            Self(), SelfGuid, SelfLandblock).ToList();
 
         Assert.Equal(3, listed.Count);
         Assert.Equal(0x702u, listed[0].snap.Guid);
@@ -428,9 +337,7 @@ public class PickerSelectionTests
         var nearNpc  = Snap(0x801, "Greeter", x: 4f,  itemType: ItemTypeCreature);
         var picked = PickerSelection.PickNearestFallback(
             new[] { farDoor, nearNpc },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Equal(0x801u, picked!.Guid);
     }
 
@@ -443,9 +350,7 @@ public class PickerSelectionTests
         var nearPickup = Snap(0x901, "Apple", x: 3f, itemType: ItemTypeMeleeWeapon);
         var picked = PickerSelection.PickNearestFallback(
             new[] { farCorpse, nearPickup },
-            Self(), SelfGuid, SelfLandblock,
-            new Dictionary<string, int>(),
-            PickupItemTypeMask);
+            Self(), SelfGuid, SelfLandblock);
         Assert.Equal(0x901u, picked!.Guid);
     }
 }
