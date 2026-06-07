@@ -223,6 +223,18 @@ internal sealed class WorldState
     /// </summary>
     public IReadOnlySet<string>? KilledKindsThisDwell { get; set; }
 
+    /// <summary>
+    /// immobile-stuck telemetry: how many consecutive full movement
+    /// block-stops (each = several server-rejected zero-progress walk ticks)
+    /// have fired without the bot's self-position changing. 0 when the bot
+    /// last moved normally. Published by HandshakeDriver before each
+    /// projection build and surfaced as raw movement-failure facts in the
+    /// "## Movement" prompt section so the LLM can recognise a physical wedge
+    /// (boxed in / on a ledge) and choose a different action. Source assigns
+    /// no urgency — it only counts its own failed-movement bookkeeping.
+    /// </summary>
+    public int MovementBlockStopsSinceSelfMoved { get; set; }
+
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;
 

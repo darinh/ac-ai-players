@@ -255,6 +255,16 @@ internal sealed record WorldStateProjection
     [JsonIgnore]
     public IReadOnlySet<string>? KilledKindsThisDwell { get; init; }
 
+    /// <summary>
+    /// immobile-stuck telemetry: consecutive full movement block-stops with
+    /// no self-position change (copied from
+    /// <see cref="WorldState.MovementBlockStopsSinceSelfMoved"/>). Rendered as
+    /// raw facts in the "## Movement" prompt section; the LLM decides whether
+    /// the bot is wedged and what to do. 0 ⇒ the section is omitted.
+    /// </summary>
+    [JsonPropertyName("movement_block_stops")]
+    public int MovementBlockStopsSinceSelfMoved { get; init; }
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -480,6 +490,7 @@ internal sealed record WorldStateProjection
             CurrentFight = world.CurrentFight,
             CombatHistory = world.CombatHistory,
             KilledKindsThisDwell = world.KilledKindsThisDwell,
+            MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,
         };
     }
 

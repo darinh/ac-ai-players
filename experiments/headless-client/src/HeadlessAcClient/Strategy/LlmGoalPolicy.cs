@@ -3732,6 +3732,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- target {goalProgress.TargetLabel}: {trend} over {goalProgress.SpanSeconds:F0}s (net {sign}{net:F1}u, {d.Count} samples)");
         }
 
+        // ── ## Movement (immobile-stuck telemetry) ───────────────────────
+        // Raw own-movement bookkeeping: how many times in a row the bot
+        // tried to move and the server held it in place WITHOUT its position
+        // changing. Conditional (omitted at 0) → zero static-floor cost.
+        // Pure mechanical fact; no game knowledge, no advice — the LLM
+        // decides whether it is wedged and what to do instead.
+        if (world.MovementBlockStopsSinceSelfMoved >= 1)
+        {
+            var n = world.MovementBlockStopsSinceSelfMoved;
+            sb.AppendLine("## Movement");
+            sb.AppendLine(
+                $"- {n} consecutive move attempt(s) made no progress: the server held the bot " +
+                $"at the same position each time, so the current targets are not reachable by " +
+                $"walking from here (possible physical obstruction — e.g. boxed in or on a ledge).");
+        }
+
         return sb.ToString();
     }
 
