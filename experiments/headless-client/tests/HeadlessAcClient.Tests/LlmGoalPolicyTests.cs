@@ -1198,7 +1198,9 @@ public class LlmGoalPolicyTests
         // and died. The fix surfaces the FULL attribute->effect mechanics as
         // FACTS so the LLM can balance, and drops the single endurance-anchoring
         // worked example. These assertions lock that in.
-        var world = BuildExitTokenWorld();
+        // unspent XP > 0 so the (now unspent-gated) SPEND XP rule renders; this
+        // test guards the rule's CONTENT, not its render condition.
+        var world = BuildXpWorld(69296, 5475);
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
 
@@ -7085,6 +7087,27 @@ public class LlmGoalPolicyTests
         Assert.Contains("SPEND XP is a FIRST-CLASS action", prompt);
         // Spending stays OPTIONAL — danger still outranks it.
         Assert.Contains("no `HOSTILE` is on you", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_OmittedWhenNoUnspentXp()
+    {
+        // Unspent XP == 0: the ~1.1KB SPEND XP rule is inapplicable (nothing to
+        // invest), so it is gated out to trim the prompt and stop it burying the
+        // combat rules. The rule still renders when unspent > 0 (covered above).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("SPEND XP is a FIRST-CLASS action", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
+    {
+        // The priority-band phrase tracks the same unspent>0 gate as the rule and
+        // the `## Self` cue, so a zero-unspent prompt carries no dangling
+        // "invest unspent XP" reference to a rule that is no longer rendered.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("invest unspent XP", prompt);
+        Assert.Contains("5-6 fight/loot;", prompt);
     }
 
     [Fact]
