@@ -4370,11 +4370,7 @@ internal sealed class HandshakeDriver : IDisposable
                             // chose as the excursion's goalpost). Typed/intent
                             // signals only — no English rationale parsing.
                             var huntBiasAuthorized =
-                                intentStack.Top is { } huntTop &&
-                                (string.Equals(huntTop.Kind, "Hunt", StringComparison.Ordinal) ||
-                                 string.Equals(huntTop.Kind, "hunt-excursion", StringComparison.Ordinal) ||
-                                 (huntTop.Completion is Strategy.Intent.VisibleTagPredicate huntVtp &&
-                                  string.Equals(huntVtp.Tag, "monster", StringComparison.OrdinalIgnoreCase)));
+                                Strategy.Intent.HuntAuthorization.IsHuntCommitment(intentStack.Top);
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
                                 frontierCellCooldownUntil, huntBiasAuthorized, out var outdoorPathCells);
@@ -5467,6 +5463,38 @@ internal sealed class HandshakeDriver : IDisposable
                             })
                             .ToList();
                         llmPolicyForPickerSurface.SetRecentSightings(recall);
+                    }
+
+                    // Phase C (picker-hunt-suppress) — while an LLM/operator
+                    // HUNT commitment is active on the IntentStack, the
+                    // autonomous picker must NOT walk the bot to the nearest
+                    // inert object: doing so captures the bot away from the
+                    // hunt (live-fire: the bot kept re-Using a town Well /
+                    // Collector instead of leaving Holtburg to find monsters).
+                    // Drop ONLY an autonomously-picked candidate (the in-range
+                    // nearest pick or the landblock fallback — both set
+                    // pickerSourceForActivity); NEVER a combat lock or an
+                    // explicit LLM name override (both leave it null). Motion
+                    // during the hunt comes from the outdoor frontier (the
+                    // Explore actuation above); the AP keepalive below still
+                    // fires every tick (candidate==null -> "no lock" AP), and
+                    // the suppression self-lifts when the hunt intent
+                    // completes (a monster enters view -> visible_tag:monster)
+                    // or its deadline elapses (CheckTopForCompletion pops it
+                    // before this point). No source-side target priority is
+                    // introduced — the WHAT stays with the LLM.
+                    if (candidate is not null &&
+                        pickerSourceForActivity is not null &&
+                        Strategy.Intent.HuntAuthorization.IsActiveHunt(intentStack.Top))
+                    {
+                        Console.WriteLine(
+                            $"[motion] HUNT-ACTIVE picker suppression — dropping autonomous " +
+                            $"{pickerSourceForActivity} pick guid=0x{candidate.Guid:X8} " +
+                            $"name='{candidate.Name}' (active hunt intent '{intentStack.Top!.Kind}'); " +
+                            $"deferring motion to the outdoor frontier");
+                        candidate = null;
+                        pickerSourceForActivity = null;
+                        pickerReasonForActivity = null;
                     }
 
                     // Slice V (#86) — publish autonomous picker
