@@ -602,6 +602,17 @@ internal sealed class HandshakeDriver : IDisposable
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
         var                  combatAvoidUntil = new Dictionary<uint, DateTime>();
+        // interact-unreachable cooldown: guids the SERVER refused as
+        // out-of-reach (interactOutOfReach branch below). tactics.ResolveTarget
+        // resolves an LLM-named interaction goal to the nearest matching guid
+        // and does NOT consult visitedTargetGuids, so without this a chest on a
+        // ledge (XY-arrivable but 3D-unreachable) is re-resolved every goal
+        // cycle → lock→fail loop (live: 5x on one chest). TTL'd, not permanent:
+        // out-of-reach proves "not reachable from here/now", so the guid is
+        // retried after the cooldown (a later approach from a different cell may
+        // succeed). Mechanical nav bookkeeping; no game knowledge.
+        var                  interactUnreachableCooldown = TimeSpan.FromSeconds(60);
+        var                  interactUnreachable = new HeadlessAcClient.World.InteractUnreachableTracker();
         // Set by the low-health attack-suppression dispatch guard so the
         // post-action reset cascade does NOT permanently add a suppressed
         // hostile to visitedTargetGuids (suppression is TEMPORARY — the
@@ -3752,11 +3763,19 @@ internal sealed class HandshakeDriver : IDisposable
                     if (motionTarget is not null && !motionIsFrontierProbe && lockOwnsCurrentGoal)
                     {
                         if (interactOutOfReach)
+                        {
+                            // Record this guid as server-refused out-of-reach so
+                            // the LLM-goal resolver (tactics.ResolveTarget, which
+                            // bypasses visitedTargetGuids) stops re-locking the
+                            // same terrain-unreachable target every cycle. TTL'd.
+                            interactUnreachable.MarkUnreachable(
+                                motionTarget.Guid, DateTime.UtcNow, interactUnreachableCooldown);
                             tactics.Fail(
                                 $"interaction target out of reach: server walked us toward " +
                                 $"'{motionTarget.Name}' after the use instead of completing it " +
                                 $"(likely a different elevation or footing)",
                                 eventStream);
+                        }
                         else
                             tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
                     }
@@ -5205,6 +5224,27 @@ internal sealed class HandshakeDriver : IDisposable
                     {
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
                         var combatDeferredAttack = false;
+                        // interact-unreachable guard: if the server recently
+                        // refused this exact guid as out-of-reach (recorded at the
+                        // interactOutOfReach branch above), treat it as unresolved
+                        // so the bot does not re-lock a terrain-unreachable target
+                        // every cycle — tactics.ResolveTarget bypasses the picker's
+                        // visitedTargetGuids filter, so this is the only place the
+                        // refusal can take effect on an LLM-named goal. Scoped to
+                        // non-Attack interaction verbs (Attack owns combatAvoidUntil
+                        // + re-engage hysteresis). TTL'd, so a later approach from a
+                        // different cell retries. Mirrors the combat-suppression
+                        // unresolved precedent below. Mechanical bookkeeping; no
+                        // game knowledge.
+                        if (targetSnap is not null && goal.Kind != GoalKind.Attack &&
+                            interactUnreachable.IsSuppressed(targetSnap.Guid, DateTime.UtcNow))
+                        {
+                            Console.WriteLine(
+                                $"[motion] UNREACHABLE-GUARD: '{targetSnap.Name}' 0x{targetSnap.Guid:X8} " +
+                                $"was refused out-of-reach recently — treating as unresolved " +
+                                $"(steer elsewhere; retry allowed after cooldown)");
+                            targetSnap = null;
+                        }
                         // Phase 7f.D — refuse to LOCK a walk toward a hostile
                         // while we're too hurt to safely engage (self-health
                         // below the re-engage hysteresis threshold) OR the
