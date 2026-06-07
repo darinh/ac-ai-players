@@ -6417,19 +6417,21 @@ public class LlmGoalPolicyTests
     }
 
     // Prompt-size cap: in object-dense areas the `## Visible nearby` body
-    // must stay bounded. Every TAGGED object (carries an affordance/state
-    // tag) is preserved; only PLAIN rows (name/wcid/distance only) are
-    // truncated, nearest-first, with an explicit omitted-count summary.
+    // must stay bounded.
+    // The `## Visible nearby` body is bounded and NEUTRAL: rows are included
+    // NEAREST-FIRST (pure distance) up to a soft cap, with NO per-type
+    // priority. A far tagged object is dropped in favor of nearer objects of
+    // any kind; the dropped set is summarized factually by decoded flag.
     [Fact]
-    public void AppendVisibleNearby_PreservesAllTagged_AndCapsPlainByDistance()
+    public void AppendVisibleNearby_IncludesNearestFirst_AndSummarizesOmitted()
     {
         var list = new System.Collections.Generic.List<VisibleObjectProjection>();
-        // Three tagged objects, deliberately far away so a naive distance
-        // cap would drop them.
+        // Three tagged objects, deliberately far away. Under nearest-first they
+        // are NOT privileged over nearer plain rows — they get omitted.
         list.Add(new VisibleObjectProjection { Guid = 0x1001u, Name = "FarGolem", Wcid = 1u, ItemType = 0x10u, Distance = 95f, IsCreature = true, IsMonster = true });
         list.Add(new VisibleObjectProjection { Guid = 0x1002u, Name = "FarDoor", Wcid = 2u, ItemType = 0x10u, Distance = 90f, IsDoor = true });
         list.Add(new VisibleObjectProjection { Guid = 0x1003u, Name = "FarGreeter", Wcid = 3u, ItemType = 0x10u, Distance = 85f, IsCreature = true });
-        // 120 plain (untagged) objects at increasing distance.
+        // 120 plain (untagged) objects at increasing distance 1..120.
         for (int i = 0; i < 120; i++)
             list.Add(new VisibleObjectProjection { Guid = (uint)(0x2000 + i), Name = $"Plain{i:D3}", Wcid = (uint)(1000 + i), ItemType = 0x4u, Distance = i + 1f });
 
@@ -6437,21 +6439,27 @@ public class LlmGoalPolicyTests
         LlmGoalPolicy.AppendVisibleNearby(sb, list);
         var text = sb.ToString();
 
-        // All tagged rows survive truncation regardless of distance.
-        Assert.Contains("FarGolem", text);
-        Assert.Contains("FarDoor", text);
-        Assert.Contains("FarGreeter", text);
-        // Nearest plain rows present; far plain rows truncated (cap=50).
+        // Nearest rows present; far rows (plain OR tagged) truncated (cap=50).
         Assert.Contains("Plain000", text);
         Assert.DoesNotContain("Plain119", text);
-        // Omitted plain count is summarized (120 - 50 = 70).
-        Assert.Contains("+70 more distant plain objects not shown", text);
+        // No type-priority: the far tagged objects are NOT rescued over nearer
+        // plain rows — distance alone decides.
+        Assert.DoesNotContain("FarGolem", text);
+        Assert.DoesNotContain("FarDoor", text);
+        Assert.DoesNotContain("FarGreeter", text);
+        // 123 objects, 50 shown -> 73 omitted, summarized by decoded flag:
+        // the 3 tagged (monster/door/npc) + 70 plain ("other").
+        Assert.Contains("+73 more distant objects not shown due to prompt budget", text);
+        Assert.Contains("monster=1", text);
+        Assert.Contains("door=1", text);
+        Assert.Contains("npc=1", text);
+        Assert.Contains("other=70", text);
     }
 
-    // Backstop: even if TAGGED objects alone are numerous, the section must
-    // stay within budget by truncating tagged rows too, summarized by kind.
+    // Backstop: even when objects are numerous, the section stays within
+    // budget by truncating nearest-first, summarized by decoded flag.
     [Fact]
-    public void AppendVisibleNearby_TaggedBackstop_BoundsSectionAndSummarizesKinds()
+    public void AppendVisibleNearby_NearestFirstBackstop_BoundsSectionAndSummarizesKinds()
     {
         var list = new System.Collections.Generic.List<VisibleObjectProjection>();
         for (int i = 0; i < 600; i++)
@@ -6461,15 +6469,14 @@ public class LlmGoalPolicyTests
         LlmGoalPolicy.AppendVisibleNearby(sb, list);
         var text = sb.ToString();
 
-        // Section is strictly bounded: rows fit within budget minus summary
-        // headroom, so even with the summary line the total stays under the
-        // 10000-char budget (600 uncapped rows would be ~18KB+).
+        // Section is strictly bounded (600 uncapped rows would be ~18KB+).
         Assert.True(text.Length <= 10000, $"section was {text.Length} chars");
-        Assert.Contains("more tagged objects not shown due to prompt budget: monster=", text);
+        Assert.Contains("more distant objects not shown due to prompt budget", text);
+        Assert.Contains("monster=", text);
     }
 
     // A single pathologically long row (e.g. a huge object name) must not
-    // blow the budget: the always-emit-first-tagged-row guarantee clamps the
+    // blow the budget: the always-emit-the-nearest-row guarantee clamps the
     // row so the section stays bounded.
     [Fact]
     public void AppendVisibleNearby_PathologicalRow_IsClampedAndBounded()
