@@ -4987,6 +4987,63 @@ internal sealed class HandshakeDriver : IDisposable
                                                     $"node 0x{boundaryA.CellId:X8} (inert approach, Attack re-locks " +
                                                     $"when target re-enters view)");
                                             }
+                                            else if (planA.Kind == RouteWaypointKind.NoRoute &&
+                                                     CrossLandblockChasePolicy.ShouldStraightSteerOutdoor(
+                                                         tacticsSelfCell, farA.CellId))
+                                            {
+                                                // No explored navgraph route to the
+                                                // neighbour landblock yet, but both the
+                                                // bot and the sighting are OUTDOOR and in
+                                                // adjacent landblocks. Outdoors a player
+                                                // just heads straight toward a monster
+                                                // visible across the seam — the route-prefix
+                                                // requirement is an indoor portal/door
+                                                // assumption that does not apply here. Steer
+                                                // STRAIGHT to the remembered ABSOLUTE coords
+                                                // (the motor's yaw is landblock-offset aware
+                                                // via WorldHeading.DeltaXY), mirroring the
+                                                // same-landblock memory tier above. Reactive
+                                                // cliff/stuck detection still guards the walk.
+                                                var destFarA = new WorldObjectSnapshot(0u)
+                                                {
+                                                    Name = farA.Name,
+                                                    CellId = farA.CellId,
+                                                    Position = farA.Position,
+                                                };
+                                                bool destFarResolvedA =
+                                                    WorldDistance.TrySquaredDistance(
+                                                        tacticsSelf, destFarA, out var d2farA);
+                                                var farStopRadiusA = MotorStopRadius.For(destFarA);
+                                                if (destFarResolvedA &&
+                                                    d2farA <= farStopRadiusA * farStopRadiusA)
+                                                {
+                                                    // Already effectively on the remembered
+                                                    // coords but the entity still isn't in
+                                                    // view (moved/despawned across the seam);
+                                                    // cool down + fall through to geometric
+                                                    // frontier rather than spin in place.
+                                                    rememberedSightedCooldownUntil[farA.Id] =
+                                                        nowWallA + rememberedSightedRevisitCooldown;
+                                                    Console.WriteLine(
+                                                        $"[strategy] LLM-GOAL Attack{{target}} cross-landblock " +
+                                                        $"outdoor memory hit '{farA.Name}' already at bot position " +
+                                                        $"but entity not in view (moved/despawned); cooling down " +
+                                                        $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s");
+                                                }
+                                                else
+                                                {
+                                                    motionRememberedSightingId = farA.Id;
+                                                    rememberedSightedCooldownUntil[farA.Id] =
+                                                        nowWallA + rememberedSightedRevisitCooldown;
+                                                    frontier = destFarA;
+                                                    Console.WriteLine(
+                                                        $"[strategy] LLM-GOAL Attack{{target}} '{farA.Name}' is " +
+                                                        $"cross-landblock (lb 0x{(farA.CellId >> 16):X4}); {planA.Kind} " +
+                                                        $"(no on-foot route prefix) but both cells outdoor + adjacent; " +
+                                                        $"steering STRAIGHT to remembered coords across the seam (inert " +
+                                                        $"approach, Attack re-locks when target re-enters view)");
+                                                }
+                                            }
                                             else
                                             {
                                                 rememberedSightedCooldownUntil[farA.Id] =
