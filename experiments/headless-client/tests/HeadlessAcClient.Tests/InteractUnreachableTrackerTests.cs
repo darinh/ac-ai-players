@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using HeadlessAcClient.World;
 using Xunit;
 
@@ -81,5 +82,39 @@ public class InteractUnreachableTrackerTests
         Assert.False(t.IsSuppressed(ChestGuid, T0.Add(Ttl)));        // expired + evicted
         t.MarkUnreachable(ChestGuid, T0.AddSeconds(120), Ttl);       // refused again later
         Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(150)));
+    }
+
+    [Fact]
+    public void SnapshotSuppressed_Empty_WhenNothingMarked()
+    {
+        var t = new InteractUnreachableTracker();
+        Assert.Empty(t.SnapshotSuppressed(T0));
+    }
+
+    [Fact]
+    public void SnapshotSuppressed_ReturnsLiveEntries_WithUntil()
+    {
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl);
+        t.MarkUnreachable(DoorGuid, T0, Ttl);
+        var snap = t.SnapshotSuppressed(T0.AddSeconds(10));
+        Assert.Equal(2, snap.Count);
+        var byGuid = snap.ToDictionary(kv => kv.Key, kv => kv.Value);
+        Assert.Equal(T0.Add(Ttl), byGuid[ChestGuid]);
+        Assert.Equal(T0.Add(Ttl), byGuid[DoorGuid]);
+    }
+
+    [Fact]
+    public void SnapshotSuppressed_OmitsAndEvictsExpired()
+    {
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl);                       // expires T0+60
+        t.MarkUnreachable(DoorGuid, T0.AddSeconds(40), Ttl);         // expires T0+100
+        // At T0+70 the chest has expired, the door is still live.
+        var snap = t.SnapshotSuppressed(T0.AddSeconds(70));
+        Assert.Single(snap);
+        Assert.Equal(DoorGuid, snap[0].Key);
+        // The expired chest entry was lazily evicted by the snapshot.
+        Assert.Equal(1, t.Count);
     }
 }

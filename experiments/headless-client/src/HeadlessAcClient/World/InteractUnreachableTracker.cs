@@ -55,4 +55,30 @@ public sealed class InteractUnreachableTracker
 
     /// <summary>Active (non-evicted) entry count — for tests/diagnostics.</summary>
     public int Count => _until.Count;
+
+    /// <summary>
+    /// Snapshot the currently-suppressed guids (those still within their
+    /// cooldown at <paramref name="now"/>) as (guid, until) pairs, lazily
+    /// evicting any that have already expired. Used to project the
+    /// suppression set into the prompt so the LLM is not blind to which
+    /// guids the Motor will currently drop. Keys only on guid + expiry —
+    /// no name, type, wcid, or landblock (the caller looks up any display
+    /// name from its own world projection).
+    /// </summary>
+    public IReadOnlyList<KeyValuePair<uint, DateTime>> SnapshotSuppressed(DateTime now)
+    {
+        List<KeyValuePair<uint, DateTime>>? live = null;
+        List<uint>? expired = null;
+        foreach (var kv in _until)
+        {
+            if (now < kv.Value)
+                (live ??= new()).Add(kv);
+            else
+                (expired ??= new()).Add(kv.Key);
+        }
+        if (expired is not null)
+            foreach (var g in expired)
+                _until.Remove(g);
+        return live ?? (IReadOnlyList<KeyValuePair<uint, DateTime>>)System.Array.Empty<KeyValuePair<uint, DateTime>>();
+    }
 }
