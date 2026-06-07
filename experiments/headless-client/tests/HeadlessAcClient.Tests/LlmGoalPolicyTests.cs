@@ -6128,6 +6128,211 @@ public class LlmGoalPolicyTests
         Assert.Contains("action cycle done on 'The Chicken'", prompt);
     }
 
+    // ---- Current goal progress telemetry (cp-2300) ----
+    //
+    // Neutral own-geometry bookkeeping: surface the bot-to-target distance
+    // trend of the active goal's pursued object so the LLM can judge whether to
+    // continue the pursuit. The section renders raw numbers only — no judgment
+    // label, no object-type knowledge, no autonomous behavior change.
+
+    [Theory]
+    [InlineData((int)GoalKind.Give, true)]
+    [InlineData((int)GoalKind.Use, true)]
+    [InlineData((int)GoalKind.Attack, true)]
+    [InlineData((int)GoalKind.Pickup, true)]
+    [InlineData((int)GoalKind.Wield, true)]
+    [InlineData((int)GoalKind.GoTo, true)]
+    [InlineData((int)GoalKind.Talk, true)]
+    [InlineData((int)GoalKind.Wait, false)]
+    [InlineData((int)GoalKind.Explore, false)]
+    [InlineData((int)GoalKind.RaiseAttribute, false)]
+    [InlineData((int)GoalKind.RaiseVital, false)]
+    [InlineData((int)GoalKind.RaiseSkill, false)]
+    [InlineData((int)GoalKind.Unknown, false)]
+    public void IsObjectPursuitKind_OnlyTrueForWorldObjectPursuitVerbs(int kind, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.IsObjectPursuitKind((GoalKind)kind));
+    }
+
+    [Fact]
+    public async Task ProposeGoal_DoesNotTrackProgress_ForExploreGoalMatchingVisibleObject()
+    {
+        // Regression (correctness review): Explore/Raise* carry a non-empty
+        // target selector, so an IsEmpty-only gate would wrongly track them.
+        // An Explore goal whose target name matches a visible object must NOT
+        // produce a distance trend.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = JsonSerializer.Serialize(new
+        {
+            goal_id = Guid.NewGuid().ToString(), kind = "Wait",
+            target = new { name = "self" }, rationale = "stub", priority = 5,
+        });
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        VisibleObjectProjection Anywhere(float dist) => new()
+        {
+            Guid = 0x0000B001u, Name = "anywhere", Wcid = 1u, ItemType = 0x10u, Distance = dist,
+        };
+        // Explore goal whose target name collides with a visible object name.
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
+        var events = new EventStream();
+
+        policy.ProposeGoal(BuildExitTokenWorld() with { Visible = new[] { Anywhere(40f) } }, events, goal);
+        await policy.WaitForInFlightAsync();
+        policy.ProposeGoal(BuildExitTokenWorld() with { Visible = new[] { Anywhere(40f) } }, events, goal);
+
+        await Task.Delay(1700);
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "Someone: hi",
+        });
+        policy.ProposeGoal(BuildExitTokenWorld() with { Visible = new[] { Anywhere(45f) } }, events, goal);
+        await policy.WaitForInFlightAsync();
+
+        Assert.NotEmpty(requestBodies);
+        Assert.DoesNotContain("## Current goal progress", requestBodies[^1]);
+    }
+
+
+    [Fact]
+    public void BuildUserPrompt_RendersCurrentGoalProgress_IncreasingTrendPositiveNet()
+    {
+        var snap = new GoalProgressSnapshot("Chicken (guid=0x00009001)", new[] { 40f, 42f, 45f }, 12.0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null,
+            stack: null, pickerActivity: null, explorationCandidates: null, goalProgress: snap);
+
+        Assert.Contains("## Current goal progress", prompt);
+        Assert.Contains("40.0u -> 42.0u -> 45.0u", prompt);
+        Assert.Contains("net +5.0u", prompt);
+        Assert.Contains("3 samples", prompt);
+        Assert.Contains("Chicken (guid=0x00009001)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CurrentGoalProgress_DecreasingTrendNegativeNet()
+    {
+        var snap = new GoalProgressSnapshot("Drudge (guid=0x0000A001)", new[] { 30f, 20f, 10f }, 8.0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null,
+            stack: null, pickerActivity: null, explorationCandidates: null, goalProgress: snap);
+
+        Assert.Contains("## Current goal progress", prompt);
+        Assert.Contains("30.0u -> 20.0u -> 10.0u", prompt);
+        Assert.Contains("net -20.0u", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsCurrentGoalProgress_WhenNull()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("## Current goal progress", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsCurrentGoalProgress_WhenFewerThanTwoSamples()
+    {
+        // A single sample is not a trend — the section must stay hidden so it
+        // adds zero prompt cost until a real trend exists.
+        var snap = new GoalProgressSnapshot("X (guid=0x00000001)", new[] { 40f }, 0.0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null,
+            stack: null, pickerActivity: null, explorationCandidates: null, goalProgress: snap);
+        Assert.DoesNotContain("## Current goal progress", prompt);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_SamplesGoalTargetDistance_AcrossTicks_RendersTrend()
+    {
+        // End-to-end: two ProposeGoal ticks on an Attack goal whose target
+        // moves 40u -> 45u away across a >1.5s sampling window must render the
+        // distance trend in the next LLM prompt. Validates the full wire-up
+        // (per-tick sampling -> guid-lock -> snapshot -> render).
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = JsonSerializer.Serialize(new
+        {
+            goal_id = Guid.NewGuid().ToString(),
+            kind = "Wait",
+            target = new { name = "self" },
+            rationale = "stub",
+            priority = 5,
+        });
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        const uint chickenGuid = 0x00009001u;
+        VisibleObjectProjection Chicken(float dist) => new()
+        {
+            Guid = chickenGuid, Name = "Chicken", Wcid = 24937u, ItemType = 0x10u,
+            Distance = dist, IsCreature = true, IsMonster = true, ObservedHostile = false,
+        };
+        var goal = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Chicken" } };
+
+        var events = new EventStream();
+        var world40 = BuildExitTokenWorld() with { Visible = new[] { Chicken(40f) } };
+
+        // Tick 1 kicks the first LLM call; only one distance sample exists so
+        // far, so body 1 has NO progress section yet.
+        policy.ProposeGoal(world40, events, goal);
+        await policy.WaitForInFlightAsync();
+        policy.ProposeGoal(world40, events, goal); // consume call-1 result
+        Assert.Single(requestBodies);
+        Assert.DoesNotContain("## Current goal progress", requestBodies[0]);
+
+        await Task.Delay(1700); // exceed GoalProgressMinSampleInterval (1.5s)
+
+        // Tick 2: salient event wakes the LLM; target now 45u away -> 2nd
+        // sample -> body 2 renders the trend. Same Attack goal is passed so the
+        // tracking key (and the guid lock) stays stable across ticks.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "Someone: hi",
+        });
+        var world45 = BuildExitTokenWorld() with { Visible = new[] { Chicken(45f) } };
+        policy.ProposeGoal(world45, events, goal);
+        await policy.WaitForInFlightAsync();
+
+        Assert.Equal(2, requestBodies.Count);
+        // The captured body is JSON, so ">" and "+" are unicode-escaped; assert
+        // on the unescaped substrings (both distances, label, sample count).
+        var prompt = requestBodies[^1];
+        Assert.Contains("## Current goal progress", prompt);
+        Assert.Contains("40.0u", prompt);
+        Assert.Contains("45.0u", prompt);
+        Assert.Contains("2 samples", prompt);
+        Assert.Contains("Chicken (guid=0x00009001)", prompt);
+    }
+
     // RAW per-kind counts only — NO danger/safe label, NO avoidance advice
     // baked in by source (the LLM owns the avoidance decision via the
     // COMBAT SAFETY rule). It renders nothing when there is no history.

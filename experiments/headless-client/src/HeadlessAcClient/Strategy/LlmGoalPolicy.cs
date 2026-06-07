@@ -33,6 +33,16 @@ using HeadlessAcClient.World;
 
 namespace HeadlessAcClient.Strategy;
 
+/// <summary>
+/// Render-ready snapshot of the bot-to-target distance trend for the active
+/// goal's pursued object. Pure own-geometry bookkeeping the prompt surfaces so
+/// the LLM can judge whether an unproductive pursuit is worth continuing.
+/// </summary>
+internal sealed record GoalProgressSnapshot(
+    string TargetLabel,
+    IReadOnlyList<float> Distances,
+    double SpanSeconds);
+
 internal sealed class LlmGoalPolicy : IGoalPolicy
 {
     private readonly LlmGoalClient _client;
@@ -179,6 +189,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // outcome + a timer — no game content. Mirrors _egressLastObservedLevel.
     private int? _lastObservedDeaths;
     private DateTimeOffset? _lastOwnDeathUtc;
+
+    // Current-goal progress telemetry (cp-2300). Samples the bot-to-target
+    // distance of the ACTIVE goal's resolved target across recent ProposeGoal
+    // ticks so the prompt can surface a raw distance trend ("41u -> 45u over
+    // 12s"). Pure own-bookkeeping: it tracks the geometry of a pursuit the LLM
+    // already chose, never decides anything. The LLM reads the trend and
+    // decides whether to continue the pursuit — source renders only numbers,
+    // no judgment, no object-type knowledge.
+    // _goalProgressKey is the tracked Selector identity (resets the buffer when
+    // the goal target changes); _goalProgressGuid locks onto one matched object
+    // so multiple same-name objects cannot cross-contaminate the trend.
+    private string? _goalProgressKey;
+    private uint? _goalProgressGuid;
+    private string? _goalProgressLabel;
+    private DateTimeOffset _goalProgressLastSampleUtc;
+    private readonly System.Collections.Generic.List<(DateTimeOffset Utc, float Distance)> _goalProgressSamples = new();
+    private static readonly TimeSpan GoalProgressMinSampleInterval = TimeSpan.FromSeconds(1.5);
+    private const int GoalProgressMaxSamples = 8;
+
     // Fresh-directive tracking (paired with FreshDirectiveGrace above).
     // _egressLastDirectiveSeqSeen is the high-water event sequence already
     // examined (so each tick scans only NEW events — idempotent + cheap).
@@ -1079,6 +1108,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (in-flight poll, backoff, coalesce, fallback). See field docs.
         UpdateDwellTracking(world.Self.Landblock, world.Self.Level, events, nowUtc);
         UpdateDeathRecencyTracking(world.Self.NumDeaths, nowUtc);
+        UpdateGoalProgressTracking(world, currentGoal, nowUtc);
 
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
@@ -1404,7 +1434,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc));
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot());
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -2723,6 +2753,105 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             ? Math.Max(0, (int)(nowUtc - d).TotalSeconds)
             : (int?)null;
 
+    // Sample the bot-to-target distance of the active goal's target each tick.
+    // Tracks ONE locked guid for the current goal-target selector so a chase
+    // produces a coherent distance trend; resets when the LLM switches target.
+    // Own-geometry bookkeeping only — no game knowledge, no behavior change.
+    private void UpdateGoalProgressTracking(WorldStateProjection world, Goal? currentGoal, DateTimeOffset nowUtc)
+    {
+        // Only goals that pursue a concrete world object have a meaningful
+        // distance trend. Wait/Explore/Raise* carry a NON-empty target selector
+        // by schema (e.g. "anywhere", "health", "war magic") but never chase a
+        // world object, so gate on the verb kind — not just Target.IsEmpty — so
+        // a visible object that happens to match such a selector name cannot
+        // produce a bogus trend.
+        if (currentGoal is null || currentGoal.Target.IsEmpty || !IsObjectPursuitKind(currentGoal.Kind))
+        {
+            ResetGoalProgress();
+            return;
+        }
+
+        var key = currentGoal.Target.ToString();
+        if (!string.Equals(key, _goalProgressKey, StringComparison.Ordinal))
+        {
+            ResetGoalProgress();
+            _goalProgressKey = key;
+        }
+
+        // Lock onto a specific matched guid the first time the selector resolves
+        // to a visible object, then keep sampling THAT guid so two same-named
+        // mobs cannot blend into one bogus trend (rubber-duck guidance). If the
+        // locked object is no longer visible, do not silently re-lock onto a
+        // different same-name object — wait for it to come back or for the goal
+        // to change.
+        VisibleObjectProjection? tracked = null;
+        if (_goalProgressGuid is uint g)
+            tracked = world.Visible.FirstOrDefault(v => v.Guid == g);
+        if (tracked is null && _goalProgressGuid is null)
+        {
+            tracked = world.Visible
+                .Where(v => v.Distance is not null && VisibleMatchesSelector(currentGoal.Target, v))
+                .OrderBy(v => v.Distance!.Value)
+                .FirstOrDefault();
+            if (tracked is not null)
+            {
+                _goalProgressGuid = tracked.Guid;
+                _goalProgressLabel = FormatGoalProgressLabel(tracked);
+            }
+        }
+
+        // Target not in view this tick: keep any prior samples (a chase that
+        // just lost line-of-sight still shows its last trend) but add nothing.
+        if (tracked?.Distance is not float dist) return;
+
+        // Throttle so a high tick rate doesn't fill the buffer with near-
+        // duplicate samples spanning a fraction of a second.
+        if (_goalProgressSamples.Count > 0 &&
+            nowUtc - _goalProgressLastSampleUtc < GoalProgressMinSampleInterval)
+            return;
+
+        _goalProgressSamples.Add((nowUtc, dist));
+        _goalProgressLastSampleUtc = nowUtc;
+        if (_goalProgressSamples.Count > GoalProgressMaxSamples)
+            _goalProgressSamples.RemoveAt(0);
+    }
+
+    private void ResetGoalProgress()
+    {
+        _goalProgressKey = null;
+        _goalProgressGuid = null;
+        _goalProgressLabel = null;
+        _goalProgressSamples.Clear();
+    }
+
+    // Goal verbs whose execution is "walk to a concrete world object and act on
+    // it" — the only kinds for which a bot-to-target distance trend is
+    // meaningful. Wait/Explore/Raise*/Unknown do not pursue a world object
+    // (their target selector, when present, names a place or an attribute, not
+    // an object to approach). Verb taxonomy is the bot's own, not game content.
+    internal static bool IsObjectPursuitKind(GoalKind kind) => kind switch
+    {
+        GoalKind.Give or GoalKind.Use or GoalKind.Attack or GoalKind.Pickup
+            or GoalKind.Wield or GoalKind.GoTo or GoalKind.Talk => true,
+        _ => false,
+    };
+
+    private static string FormatGoalProgressLabel(VisibleObjectProjection v)
+    {
+        var name = string.IsNullOrEmpty(v.Name) ? "(unnamed)" : v.Name;
+        return $"{name} (guid=0x{v.Guid:X8})";
+    }
+
+    // Build a render-ready snapshot of the current distance trend, or null when
+    // there are too few samples to show a trend (need at least two points).
+    private GoalProgressSnapshot? BuildGoalProgressSnapshot()
+    {
+        if (_goalProgressSamples.Count < 2 || _goalProgressLabel is null) return null;
+        var dists = _goalProgressSamples.Select(s => s.Distance).ToList();
+        var span = (_goalProgressSamples[^1].Utc - _goalProgressSamples[0].Utc).TotalSeconds;
+        return new GoalProgressSnapshot(_goalProgressLabel, dists, span);
+    }
+
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
@@ -2747,7 +2876,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         DateTimeOffset? dwellEntryUtc = null,
         IReadOnlyList<SightedRecallProjection>? recentSightings = null,
         int? levelAtLandblockEntry = null,
-        int? secondsSinceLastDeath = null)
+        int? secondsSinceLastDeath = null,
+        GoalProgressSnapshot? goalProgress = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -3534,6 +3664,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- {currentGoal}");
             sb.AppendLine();
             sb.AppendLine("Keep it if it still looks right; replace if observation says otherwise.");
+        }
+
+        if (goalProgress is not null && goalProgress.Distances.Count >= 2)
+        {
+            var d = goalProgress.Distances;
+            var trend = string.Join(" -> ", d.Select(x => $"{x:F1}u"));
+            var net = d[^1] - d[0];
+            var sign = net >= 0 ? "+" : "";
+            sb.AppendLine();
+            sb.AppendLine("## Current goal progress (raw bot-to-target distance over recent ticks)");
+            sb.AppendLine($"- target {goalProgress.TargetLabel}: {trend} over {goalProgress.SpanSeconds:F0}s (net {sign}{net:F1}u, {d.Count} samples)");
         }
 
         return sb.ToString();
