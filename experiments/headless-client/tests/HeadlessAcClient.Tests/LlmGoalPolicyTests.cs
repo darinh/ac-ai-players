@@ -5562,6 +5562,102 @@ public class LlmGoalPolicyTests
             combatReady: true, tappedOut: true, hostileInView: true));
     }
 
+    // --- silent-NPC Talk-loop early egress (cp-2328) ------------------------
+    // A combat-ready bot in a monster-free safe zone Talk-loops a SILENT NPC
+    // (no dialog) for minutes because the actual Explore that physically moves
+    // it is gated behind a 5-min tapped-out clock. ShouldEarlyEscapeTalkLoop
+    // breaks the loop the instant the stationary fixation is proven (Talk loop
+    // kind only), and IsTalkLoopEgressActive keeps substituting the re-emitted
+    // Talk/Give with Explore until the bot actually leaves the landblock.
+
+    [Fact]
+    public void EarlyTalkLoopEgress_FiresForTalkLoopWhenSafe()
+    {
+        Assert.True(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
+            loopKind: "NPC Talk", hostileInView: false, freshDirective: false));
+    }
+
+    [Fact]
+    public void EarlyTalkLoopEgress_SuppressedForOtherLoopKinds()
+    {
+        // A world-object Use loop may be genuine early-zone progress — it keeps
+        // the dwell-gated path, so only the Talk loop kind early-escapes.
+        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
+            loopKind: "Use", hostileInView: false, freshDirective: false));
+    }
+
+    [Fact]
+    public void EarlyTalkLoopEgress_SuppressedWhenHostileInView()
+    {
+        // An attacker is present — defend or flee, never turn away to wander.
+        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
+            loopKind: "NPC Talk", hostileInView: true, freshDirective: false));
+    }
+
+    [Fact]
+    public void EarlyTalkLoopEgress_SuppressedWhenFreshDirective()
+    {
+        // The server is actively guiding the bot — let it follow the directive.
+        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
+            loopKind: "NPC Talk", hostileInView: false, freshDirective: true));
+    }
+
+    [Fact]
+    public void TalkLoopEgressActive_WhileInWindowAndSameLandblock()
+    {
+        var now = DateTimeOffset.UtcNow;
+        Assert.True(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: now.AddSeconds(30),
+            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
+            hostileInView: false, freshDirective: false));
+    }
+
+    [Fact]
+    public void TalkLoopEgressActive_InactiveAfterTimeout()
+    {
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: now.AddSeconds(-1),
+            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
+            hostileInView: false, freshDirective: false));
+    }
+
+    [Fact]
+    public void TalkLoopEgressActive_InactiveWhenLandblockChanged()
+    {
+        // Leaving the landblock means the loop is already broken — stop overriding.
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: now.AddSeconds(30),
+            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B2u,
+            hostileInView: false, freshDirective: false));
+    }
+
+    [Fact]
+    public void TalkLoopEgressActive_InactiveWhenHostileOrDirective()
+    {
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: now.AddSeconds(30),
+            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
+            hostileInView: true, freshDirective: false));
+        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: now.AddSeconds(30),
+            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
+            hostileInView: false, freshDirective: true));
+    }
+
+    [Fact]
+    public void TalkLoopEgressActive_InactiveWhenNoLatchRecorded()
+    {
+        // Default state (no loop ever detected) never reports active.
+        var now = DateTimeOffset.UtcNow;
+        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
+            nowUtc: now, until: DateTimeOffset.MinValue,
+            latchLandblock: null, currentLandblock: 0xA9B4u,
+            hostileInView: false, freshDirective: false));
+    }
+
     [Fact]
     public void HuntEgress_SuppressedBeforeDwellThreshold()
     {
@@ -7620,6 +7716,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("NPC REPEAT EXHAUSTION", prompt);
         // keys off the existing neutral repeated-count telemetry, not a name/wcid
         Assert.Contains("tags an NPC's dialog `repeated xN`", prompt);
+        // cp-2328: also cites the recency Talk-emission signal so a SILENT NPC
+        // (which emits no dialog, so `repeated xN` can never fire) is covered
+        Assert.Contains("recent Talk emissions: <that NPC> xN", prompt);
         // the pivot must NOT be satisfied by re-Talking the same NPC
         Assert.Contains("Re-Talking the same NPC is NEVER", prompt);
         // Attack is an allowed pivot, but only AFTER exhaustion

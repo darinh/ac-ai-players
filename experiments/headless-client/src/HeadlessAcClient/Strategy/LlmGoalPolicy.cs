@@ -400,6 +400,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // stationary no-progress streak.
     private const int InteractFixationThreshold = 4;
 
+    // Early Talk-loop egress (2026-06-07). A PROVEN stationary NPC Talk
+    // fixation (IsExhaustedNpcTalkRepeat — 4 same-NPC Talks with no movement
+    // and no inventory change) is time-INDEPENDENT dead-end evidence: re-Talking
+    // it can never make progress. The general hunt-egress only breaks such a
+    // loop once dwell passes EgressDwellMinutes (5 min), so a bot in a monster-
+    // free safe zone wastes ~5 min Talk-looping a silent NPC the picker keeps
+    // re-parking it at (live-observed: a Pathwarden Talk-looped ~8x for ~5 min).
+    // This breaks the loop the moment the fixation is proven, WITHOUT the dwell/
+    // tapped-out gate, as long as no hostile is in view (defend/flee that) and
+    // the server is not actively guiding the bot with a fresh directive. A short
+    // latch stops the picker re-parking on the same dead NPC the next tick (the
+    // first Explore step moves the bot, which resets the per-emission fixation
+    // counter, so without the latch the loop would just re-accrue). The "loop
+    // kind" tag is the bot's OWN goal verb (Talk), NOT any NPC identity; the
+    // substitute is a generic Explore{anywhere}. No NPC names/wcids/priorities —
+    // own-signal mechanical loop recovery, audit-safe.
+    private const string NpcTalkLoopKind = "NPC Talk";
+    private DateTimeOffset _talkLoopEgressUntilUtc = DateTimeOffset.MinValue;
+    private uint? _talkLoopEgressLandblock;
+    private static readonly TimeSpan TalkLoopEgressDuration = TimeSpan.FromSeconds(90);
+
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
     // activity" block in the prompt. Set by the driver each tick
@@ -565,6 +586,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (_egressLastObservedLevel is int egPrevLvl && egLvlNow > egPrevLvl)
                 _egressLastProgressUtc = nowUtc;
             _egressLastObservedLevel = egLvlNow;
+        }
+
+        // Early Talk-loop egress sustain: while the talk-loop latch is active
+        // (still in the same landblock, no hostile, no fresh server directive),
+        // keep substituting the social dwell-extending verbs the LLM loops on
+        // (Talk/Give) with Explore so the bot actually walks OUT instead of the
+        // picker re-parking it on the dead NPC every tick. The latch self-clears
+        // on a landblock change (loop broken — bot left), a hostile appearing, a
+        // fresh directive, or timeout. Non-social verbs (the bot's own Explore/
+        // Pickup/Attack) pass through and themselves break the loop.
+        if (IsTalkLoopEgressActive(
+                nowUtc, _talkLoopEgressUntilUtc, _talkLoopEgressLandblock, lb,
+                AnyHostileInView(world), RecentFreshDirective(events, nowUtc)))
+        {
+            if (IsEgressOverridableVerb(goal.Kind))
+            {
+                Console.WriteLine(
+                    $"[llm-override] talk-loop egress (sustained): substituting {goal.Kind} " +
+                    $"target={goal.Target} with Explore{{anywhere}} until the bot leaves the loop.");
+                return MakeEgressExploreGoal(
+                    nowUtc, "override:talk-loop-egress",
+                    "mechanical talk-loop egress (sustained): still in the dead-end " +
+                    "conversation landblock; leaving to break the loop");
+            }
+        }
+        else if (_talkLoopEgressLandblock is not null)
+        {
+            // Latch lapsed (timed out, left the landblock, hostile / directive
+            // appeared) — clear the recorded landblock so it cannot match later.
+            _talkLoopEgressLandblock = null;
         }
 
         var dwellEntry = DwellEntryForPrompt(lb);
@@ -762,8 +813,55 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"mechanical stuck-loop egress: tapped-out, looping {loopKind} with no " +
                 "progress; leaving to find monsters (enforces the LOOP-BREAK rules)");
         }
+        // Early Talk-loop egress: a PROVEN stationary NPC Talk fixation is a
+        // dead end regardless of dwell time, so break it now (before the 5-min
+        // tapped-out gate the general egress needs) unless a hostile is in view
+        // (defend/flee that) or the server is actively guiding the bot. Latch it
+        // briefly so the picker cannot re-park on the same dead NPC next tick.
+        if (ShouldEarlyEscapeTalkLoop(
+                loopKind, AnyHostileInView(world), RecentFreshDirective(events, nowUtc)))
+        {
+            _talkLoopEgressUntilUtc = nowUtc + TalkLoopEgressDuration;
+            _talkLoopEgressLandblock = world.Self.Landblock;
+            Console.WriteLine(
+                "[llm-override] talk-loop egress: proven stationary NPC Talk fixation, " +
+                "no hostile in view — substituting Explore{anywhere} " +
+                $"(latched {TalkLoopEgressDuration.TotalSeconds:F0}s) to break the loop.");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:talk-loop-egress",
+                "mechanical talk-loop egress: proven stationary NPC Talk fixation with no " +
+                "hostile in view; leaving to break the dead-end conversation loop");
+        }
         return _fallback.ProposeGoal(world, events, currentGoal);
     }
+
+    // True iff the bot has any non-corpse monster in view that is actively
+    // hostile (attacking it). Own-perception wire flags only — no game content.
+    private static bool AnyHostileInView(WorldStateProjection world)
+        => world.Visible.Any(v => v.IsMonster && !v.IsCorpse && v.ObservedHostile);
+
+    // Pure decision: a freshly PROVEN stationary NPC Talk fixation should break
+    // the loop immediately (early egress) when no hostile is in view and the
+    // server is not actively guiding the bot with a fresh directive. Scoped to
+    // the Talk loop kind ONLY — a world-object Use loop may be a genuine
+    // early-zone progress attempt, so it keeps the dwell-gated path. Extracted
+    // for deterministic unit testing; own-signal only, no game content.
+    internal static bool ShouldEarlyEscapeTalkLoop(
+        string loopKind, bool hostileInView, bool freshDirective)
+        => loopKind == NpcTalkLoopKind && !hostileInView && !freshDirective;
+
+    // Pure decision: the early Talk-loop egress latch is still ACTIVE this tick.
+    // Active while within the latch window AND still in the same landblock the
+    // loop was detected in (leaving the landblock means the loop is broken) AND
+    // no hostile has appeared AND the server is not freshly guiding the bot.
+    // Extracted for deterministic unit testing; own-signal only, no game content.
+    internal static bool IsTalkLoopEgressActive(
+        DateTimeOffset nowUtc, DateTimeOffset until, uint? latchLandblock,
+        uint? currentLandblock, bool hostileInView, bool freshDirective)
+        => nowUtc < until
+           && latchLandblock is uint lb && currentLandblock is uint cur && lb == cur
+           && !hostileInView
+           && !freshDirective;
 
     // Returns true while a FRESH, distinct server tutorial/instruction popup is
     // within FreshDirectiveGrace — the signal that the bot is actively being
@@ -1793,7 +1891,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary NPC Talk repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress NPC Talk loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "NPC Talk");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
@@ -3036,7 +3134,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         sb.AppendLine("- NON-HOSTILE IS NOT NON-TARGET: a visible `monster` is a valid XP target whether or not it has attacked you — `0 attacking you now` means none are on you YET, NOT \"nothing to fight\". If `Combat readiness` lists a `nearest monster`, you ALREADY have a target, so do NOT emit `Explore` \"to find monsters\" while `monsters in view` is above 0 — `Attack` a killable/nearest `monster` instead (per COMBAT SAFETY: prefer a KIND you can defeat and skip one that has already beaten you; low `health`, a fresh `corpse` to loot, or an explicit server/quest directive still take priority).");
-        sb.AppendLine("- NPC REPEAT EXHAUSTION — a repeating conversation is not progress: when `## Server hints` tags an NPC's dialog `repeated xN` (the count it shows) with N>=3, OR the SAME NPC keeps producing recent lines that add no new item, hint, inventory, location, or change, that conversation is EXHAUSTED — re-`Talk`ing it will NOT advance anything even if it alternates 2-3 canned lines, so do NOT keep Talking just because the latest line looks new. PIVOT to a DIFFERENT verb/target: if the dialog named a concrete next action, follow it with a NON-Talk verb (`Use` the object it pointed at, `Give` a held item, `Pickup` visible loot, or `Talk` a DIFFERENT not-yet-talked NPC); else `Explore` away. Re-Talking the same NPC is NEVER how you follow an exhausted directive. If killable `monster`s are in view and no concrete non-Talk action is actionable, `Attack` one for XP instead — but only AFTER the conversation is exhausted; an NPC with genuinely NEW dialog still takes priority.");
+        sb.AppendLine("- NPC REPEAT EXHAUSTION — a repeating conversation is not progress: when `## Server hints` tags an NPC's dialog `repeated xN` (the count it shows) with N>=3, OR the recency note shows `recent Talk emissions: <that NPC> xN` with N>=3 (this ALSO covers a SILENT NPC that returns no dialog), OR the SAME NPC keeps producing recent lines that add no new item, hint, inventory, location, or change, that conversation is EXHAUSTED — re-`Talk`ing it will NOT advance anything even if it alternates 2-3 canned lines, so do NOT keep Talking just because the latest line looks new. PIVOT to a DIFFERENT verb/target: if the dialog named a concrete next action, follow it with a NON-Talk verb (`Use` the object it pointed at, `Give` a held item, `Pickup` visible loot, or `Talk` a DIFFERENT not-yet-talked NPC); else `Explore` away. Re-Talking the same NPC is NEVER how you follow an exhausted directive. If killable `monster`s are in view and no concrete non-Talk action is actionable, `Attack` one for XP instead — but only AFTER the conversation is exhausted; an NPC with genuinely NEW dialog still takes priority.");
         sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (use a name from `trained skills` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength and coordination drive MELEE offense (how hard and how often your swings land); quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH. Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` or 0 damage `landed`, melee offense (strength/coordination) is the limit; if you fight with spells, raise magic attributes/skills. E.g. raise coordination/strength when melee swings miss or barely hurt; raise endurance/health when low max HP is killing you.");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
         sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `recent inbound damage` line shows hits you have TAKEN and total damage in the last few seconds — if it climbs while your absolute `health` is low you are losing: disengage (`Explore`) or `Recall` rather than fight to 0 HP. The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
