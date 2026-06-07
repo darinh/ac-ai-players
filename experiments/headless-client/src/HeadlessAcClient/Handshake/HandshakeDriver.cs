@@ -2249,8 +2249,54 @@ internal sealed class HandshakeDriver : IDisposable
                                 // independent of the combat lock (so it survives a
                                 // flee); the LLM owns the fight-vs-flee/Recall call.
                                 if (ge.Payload?.DefenderNotification is { } inboundHit)
+                                {
+                                    // inbound-damage-onset-wake: record the hit,
+                                    // then wake the LLM ONCE per inbound-damage
+                                    // episode (first hit, or first after a
+                                    // >= window-TTL lull) so it re-reads the
+                                    // `## Combat readiness` inbound-damage line
+                                    // the MOMENT it starts taking damage. The
+                                    // offensive CombatFeedback one-shot fires on
+                                    // our first SWING (too early — still healthy),
+                                    // so without this the LLM never re-decides
+                                    // while losing and the cp-2310 Recall / Explore
+                                    // disengage verbs go unused. The previous-hit
+                                    // time is read from the rolling window BEFORE
+                                    // the add; the window is cleared on landblock
+                                    // change so a fresh area re-arms. Episode dedup
+                                    // is a hit-lull gate, NOT an HP/damage threshold
+                                    // (cp-2280) — the fight-vs-flee/Recall call
+                                    // stays the LLM's.
+                                    var inboundHitUtc = DateTime.UtcNow;
+                                    DateTime? prevInboundHitUtc =
+                                        recentInboundHits.Count > 0
+                                            ? recentInboundHits[^1].At
+                                            : (DateTime?)null;
                                     recentInboundHits.Add(
-                                        new InboundHit(DateTime.UtcNow, inboundHit.Damage));
+                                        new InboundHit(inboundHitUtc, inboundHit.Damage));
+                                    if (InboundDamageWindow.BeginsNewInboundEpisode(
+                                            prevInboundHitUtc, inboundHitUtc,
+                                            InboundDamageWindowSeconds))
+                                    {
+                                        var inboundFromName =
+                                            string.IsNullOrEmpty(hostileName)
+                                                ? "an attacker" : hostileName;
+                                        eventStream.Append(new StreamEvent
+                                        {
+                                            Sequence = 0,
+                                            Utc = DateTimeOffset.UtcNow,
+                                            Kind = EventKind.InboundDamageTaken,
+                                            Name = hostileName,
+                                            Text = $"Inbound hit landed on you " +
+                                                   $"({inboundHit.Damage} damage) " +
+                                                   $"from \"{inboundFromName}\".",
+                                        });
+                                        Console.WriteLine(
+                                            $"[combat] InboundDamageTaken: hit for " +
+                                            $"{inboundHit.Damage} from \"{inboundFromName}\" " +
+                                            $"— waking LLM.");
+                                    }
+                                }
                             }
                             // M1.5 — surface WeenieErrorWithString
                             // to the EventStream as an ActionRejected

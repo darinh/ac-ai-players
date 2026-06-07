@@ -49,4 +49,24 @@ internal static class InboundDamageWindow
             total += h.Damage;
         return new RecentInboundDamage(hits.Count, total, windowSeconds);
     }
+
+    /// <summary>
+    /// inbound-damage-onset-wake: decide whether a newly-landed inbound hit at
+    /// <paramref name="hitUtc"/> BEGINS a new inbound-damage episode that
+    /// warrants one structural LLM wake. An episode begins on the first hit
+    /// ever (<paramref name="previousHitUtc"/> is <c>null</c>) or on the first
+    /// hit after a lull of at least <paramref name="windowSeconds"/> since the
+    /// previous inbound hit. Within a continuous fight (hits closer together
+    /// than the window) only the first hit begins an episode, so the Motor
+    /// wakes the LLM exactly once per episode. This is a hit-lull bookkeeping
+    /// gate, NOT an HP/damage magnitude threshold — source assigns no
+    /// materiality band (cp-2280); WHAT to do about the damage stays the LLM's
+    /// call. <paramref name="previousHitUtc"/> is the time of the most recent
+    /// prior inbound hit still tracked in the rolling window (the window is
+    /// cleared on landblock change, so a fresh area re-arms naturally).
+    /// </summary>
+    internal static bool BeginsNewInboundEpisode(
+        DateTime? previousHitUtc, DateTime hitUtc, double windowSeconds)
+        => previousHitUtc is not DateTime prev
+           || (hitUtc - prev).TotalSeconds >= windowSeconds;
 }
