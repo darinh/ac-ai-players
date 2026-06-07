@@ -1007,6 +1007,17 @@ internal sealed class HandshakeDriver : IDisposable
         // a "no opcode sent" arrival as an interaction. Reset in the same
         // cascade as useSent.
         bool                 worldInteractDispatched = false;
+        // interact-out-of-reach-fail: when the server answers our Use/
+        // Pickup dispatch with a MoveToObject for OUR OWN guid toward the
+        // interaction target, the target sat outside the server's use
+        // cylinder — e.g. a chest ~20u directly below a ledge whose XY is
+        // within 1u, which the XY-only arrival check falsely reports as
+        // "arrived". Record the target guid + time so the cycle-completion
+        // classifier can mark the goal FAILED (not a completed visit) when
+        // this "walk-you-to-it" reply lands AFTER our dispatch. Pure
+        // server-protocol evidence; no game knowledge, no Z-magnitude rule.
+        uint?                lastSelfMoveToObjectGuid = null;
+        DateTime?            lastSelfMoveToObjectAt   = null;
         // Phase 3.1 — indoor-nav path-following state. Once per motion
         // lock we attempt to plan a collision-aware path through the
         // static indoor mesh; if that succeeds, the walk-tick steps
@@ -2464,6 +2475,19 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (stickyGuid == combatTargetGuid)
                                     combatFastRetryRequested = false;
                             }
+                            // interact-out-of-reach-fail: a server-issued
+                            // MoveToObject for OUR OWN guid means "you are not
+                            // in range; I am walking you to the target". Record
+                            // the target + time so a post-dispatch occurrence
+                            // can reclassify a falsely-"arrived" Use/Pickup as
+                            // FAILED. Mechanical; keys only on our own guid and
+                            // the server's stated target guid.
+                            if (mm.Guid == worldState.SelfGuid &&
+                                mm.Body?.MoveToObject is { } selfMoveTo)
+                            {
+                                lastSelfMoveToObjectGuid = selfMoveTo.TargetGuid;
+                                lastSelfMoveToObjectAt   = DateTime.UtcNow;
+                            }
                             break;
                         case SetStateMessage ss:
                             Console.WriteLine(
@@ -3115,6 +3139,8 @@ internal sealed class HandshakeDriver : IDisposable
                     useSent = false;
                     worldInteractDispatched = false;
                     useSentAt = null;
+                    lastSelfMoveToObjectGuid = null;
+                    lastSelfMoveToObjectAt = null;
                     lastSentWaypointPos = null;
                     lastSentWaypointGlobalXY = null;
                     walkTickAps = 0;
@@ -3599,8 +3625,34 @@ internal sealed class HandshakeDriver : IDisposable
                         motionLockedGoalId is Guid lockedGoalId &&
                         tactics.CurrentGoal is not null &&
                         tactics.CurrentGoal.Id == lockedGoalId;
+                    // interact-out-of-reach-fail: detect a Use/Pickup the server
+                    // refused as out-of-range. After our dispatch the server
+                    // replied with a MoveToObject for our OWN guid toward this
+                    // very target (it sat outside the use cylinder — e.g. a chest
+                    // directly below a ledge that the XY-only arrival check
+                    // reported as "arrived" at distXY~1u). That is a FAILED
+                    // interaction, not a completed visit; surfacing it via
+                    // GoalFailed lets the LLM (## Recent goal outcomes) stop
+                    // re-picking an unreachable target instead of looping. The
+                    // `>= useSentAt` gate scopes the signal to AFTER our dispatch.
+                    var interactOutOfReach =
+                        HeadlessAcClient.World.InteractReachClassifier.IsOutOfReach(
+                            worldInteractDispatched,
+                            motionTarget?.Guid,
+                            lastSelfMoveToObjectGuid,
+                            useSentAt,
+                            lastSelfMoveToObjectAt);
                     if (motionTarget is not null && !motionIsFrontierProbe && lockOwnsCurrentGoal)
-                        tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
+                    {
+                        if (interactOutOfReach)
+                            tactics.Fail(
+                                $"interaction target out of reach: server walked us toward " +
+                                $"'{motionTarget.Name}' after the use instead of completing it " +
+                                $"(likely a different elevation or footing)",
+                                eventStream);
+                        else
+                            tactics.Clear($"action cycle done on '{motionTarget.Name}'", eventStream);
+                    }
                     else if (motionIsFrontierProbe)
                         Console.WriteLine(
                             "[strategy] frontier probe arrived; LLM goal preserved " +
@@ -3682,6 +3734,8 @@ internal sealed class HandshakeDriver : IDisposable
                     motionDone = false;
                     useSent = false;
                     useSentAt = null;
+                    lastSelfMoveToObjectGuid = null;
+                    lastSelfMoveToObjectAt = null;
                     lastSentWaypointPos = null;
                     lastSentWaypointGlobalXY = null;
                     walkTickAps = 0;
