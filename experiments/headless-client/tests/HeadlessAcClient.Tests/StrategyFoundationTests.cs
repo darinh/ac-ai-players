@@ -422,6 +422,50 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void WorldStateProjection_FromWorldState_DecodesDoorOpenClosedFromEtherealBit()
+    {
+        // Door open/closed is decoded ONLY for Door-flagged objects from the
+        // PhysicsState Ethereal bit (0x4): OPEN door => Ethereal set, CLOSED
+        // door => Ethereal clear (Source/ACE.Server/WorldObjects/Door.cs).
+        // Non-doors never carry IsDoorOpen; a door with unknown physics state
+        // is null (we never assert "closed" without evidence).
+        const uint OpenDoorGuid   = 0x71000001;
+        const uint ClosedDoorGuid = 0x71000002;
+        const uint UnknownDoorGuid = 0x71000003;
+        const uint EtherealNonDoorGuid = 0x71000004;
+        const uint Ethereal = 0x00000004u;
+        const uint SomeOtherBit = 0x00000400u; // Gravity bit, not Ethereal
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        // Open door: Ethereal set (plus an unrelated bit to prove masking).
+        SeedSnapshot(ws, OpenDoorGuid, "Training Area", wcid: 200u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Door | (uint)ObjectDescriptionFlag.Openable,
+            physicsState: Ethereal | SomeOtherBit);
+        // Closed door: physics state present, Ethereal clear.
+        SeedSnapshot(ws, ClosedDoorGuid, "Iron Gate", wcid: 201u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Door | (uint)ObjectDescriptionFlag.Openable,
+            physicsState: SomeOtherBit);
+        // Door with unknown physics state => IsDoorOpen null.
+        SeedSnapshot(ws, UnknownDoorGuid, "Mystery Door", wcid: 202u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Door | (uint)ObjectDescriptionFlag.Openable,
+            physicsState: null);
+        // Non-door that happens to be Ethereal => IsDoorOpen null (doors only).
+        SeedSnapshot(ws, EtherealNonDoorGuid, "Ghostly Mote", wcid: 203u, itemType: 0x0u, cellId: 0x86020001u,
+            objectDescriptionFlags: 0u, physicsState: Ethereal);
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        var byGuid = proj!.Visible.ToDictionary(v => v.Guid);
+
+        Assert.True(byGuid[OpenDoorGuid].IsDoorOpen);
+        Assert.False(byGuid[ClosedDoorGuid].IsDoorOpen);
+        Assert.Null(byGuid[UnknownDoorGuid].IsDoorOpen);
+        Assert.Null(byGuid[EtherealNonDoorGuid].IsDoorOpen);
+    }
+
+    [Fact]
     public void WorldStateProjection_ObservedHostile_SetFromRecentHostileNames()
     {
         // observed-hostile perception: a visible creature whose normalized
@@ -716,16 +760,14 @@ public class StrategyFoundationTests
         uint? containerGuid = null,
         uint? objectDescriptionFlags = null,
         uint? weenieFlags = null,
-        Vector3? position = null)
+        Vector3? position = null,
+        uint? physicsState = null)
     {
         // WorldState lacks a public seed helper. The most direct path
         // without reflection is to mutate via internal setters on a
         // freshly-created snapshot, then attach it via the internal
-        // GetOrCreate path. Since WorldState has no public Add, we
-        // mimic an ObjectCreate using the public API: a minimal
-        // ObjectCreateMessage would require a fixture file. Instead,
-        // we use the SnapshotSeeding test seam (defined below).
-        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags, weenieFlags, position);
+        // GetOrCreate path. We use the SnapshotSeeding test seam.
+        SnapshotSeeding.Seed(ws, guid, name, wcid, itemType, cellId, containerGuid, objectDescriptionFlags, weenieFlags, position, physicsState);
     }
 
     private sealed class FakeWeenieRepo : IWeenieRepository
@@ -2513,7 +2555,8 @@ internal static class SnapshotSeeding
         uint? containerGuid,
         uint? objectDescriptionFlags = null,
         uint? weenieFlags = null,
-        Vector3? position = null)
+        Vector3? position = null,
+        uint? physicsState = null)
     {
         var snap = new WorldObjectSnapshot(guid)
         {
@@ -2524,6 +2567,7 @@ internal static class SnapshotSeeding
             ContainerGuid = containerGuid,
             ObjectDescriptionFlags = objectDescriptionFlags,
             WeenieFlags = weenieFlags,
+            PhysicsState = physicsState,
             Position = position ?? new Vector3(0, 0, 0),
         };
         // Reach the underlying dictionary via reflection. The field

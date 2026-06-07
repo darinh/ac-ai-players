@@ -4633,6 +4633,70 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(goal, world, es));
     }
 
+    [Fact]
+    public void BuildUserPrompt_VisibleDoor_RendersClosedState()
+    {
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x71000001u, Name = "Training Area", Wcid = 200u,
+            ItemType = 0x0u, Distance = 3.3f, IsDoor = true, IsOpenable = true,
+            IsDoorOpen = false,
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        // Anchor on the row signature (wcid=200) — the RULES text also
+        // mentions "door open"/"door closed" generically, so assert on the row.
+        Assert.Contains("(wcid=200 door closed", prompt);
+        Assert.DoesNotContain("(wcid=200 door open", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_VisibleDoor_RendersOpenState()
+    {
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x71000001u, Name = "Training Area", Wcid = 200u,
+            ItemType = 0x0u, Distance = 3.3f, IsDoor = true, IsOpenable = true,
+            IsDoorOpen = true,
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("(wcid=200 door open", prompt);
+        Assert.DoesNotContain("(wcid=200 door closed", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_VisibleDoor_UnknownState_RendersNeitherOpenNorClosed()
+    {
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x71000001u, Name = "Mystery Door", Wcid = 200u,
+            ItemType = 0x0u, Distance = 3.3f, IsDoor = true, IsOpenable = true,
+            IsDoorOpen = null,
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        // Row reads "... door open openable d=..." when open; the unknown row
+        // reads "... door openable ..." (no open/closed token). "door openable"
+        // contains "door open" as a substring, so anchor on the trailing space.
+        Assert.Contains("(wcid=200 door openable", prompt);
+        Assert.DoesNotContain("(wcid=200 door open openable", prompt);
+        Assert.DoesNotContain("(wcid=200 door open d=", prompt);
+        Assert.DoesNotContain("(wcid=200 door closed", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NonDoorOpenable_NeverRendersDoorState()
+    {
+        // A chest with IsDoorOpen erroneously set must never read as a door.
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x71000005u, Name = "Treasure Chest", Wcid = 9000u,
+            ItemType = 0x200u, Distance = 4f, IsOpenable = true, IsChest = true,
+            IsDoor = false, IsDoorOpen = true,
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("(wcid=9000 door", prompt);
+        Assert.DoesNotContain("door open", prompt[(prompt.IndexOf("wcid=9000", StringComparison.Ordinal))..]);
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
@@ -6793,14 +6857,19 @@ public class LlmGoalPolicyTests
     // unspent-XP "invest NOW" cue. All are intentional, reviewed additions,
     // not silent regrowth; the delta does not move the runtime 413 risk, which
     // is driven by dense per-tick WORLD/visible sections, not the static floor.
+    // Bumped 16000 -> 17000 (door-open-state-projection) for the CLOSED DOORS
+    // ARE BARRIERS rule: live evidence showed the LLM pursuing a Talk{Agent}
+    // directive behind a closed door it never opened (0 Use{Door} in a run); the
+    // rule pairs with a new wire-decoded `door open`/`door closed` row token so
+    // the LLM connects "named target unreachable + closed door here -> Use door".
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 16000,
-            $"static prompt floor grew to {prompt.Length} chars (budget 16000)");
+        Assert.True(prompt.Length <= 17000,
+            $"static prompt floor grew to {prompt.Length} chars (budget 17000)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----

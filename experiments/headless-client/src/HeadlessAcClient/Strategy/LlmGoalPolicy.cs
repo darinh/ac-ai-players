@@ -3057,6 +3057,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- TRANSITIONS — doors and portals: `door`/`portal`-tagged objects are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). When parked at a door/portal with no better verb, `Use` it — that's how the bot moves between rooms/buildings/landblocks. If a door rejects Use as Locked and you hold an item whose `short_desc`/name says key, retry `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
         sb.AppendLine("- EXPLORATION CANDIDATES: when `## Exploration candidates` is present, the in-range queue is empty and the fallback walks to the nearest off-screen object; the TOP entry is the default. Each line shows `kind=mob|npc|object` (raw perception; `object`=non-creature). To pick a DIFFERENT one (e.g. an off-screen `mob` to hunt, backtrack through a visited door, or skip a distant pickup for a closer visited NPC), emit `Explore{target: {guid: \"0x...\"}}` (guid is the most reliable selector) or `{name: \"...\"}`.");
         sb.AppendLine("- PURSUE UNSEEN OBJECTIVES: when dialog or a hint tells you to find/reach/talk-to someone NOT in `Visible nearby` (e.g. \"talk to the trainer in the next room\", \"find the captain\"), emit a goal NAMING it — `Talk`/`Give`/`Explore{target: {name: \"<role-or-name>\"}}` — even though it is not yet visible; the bot walks through rooms to discover it. A role phrase (\"the guard\", \"the trainer\") is a valid target name when no proper name is given. Do NOT keep re-talking an NPC whose dialog you already got — pursue the objective that dialog gave you. With no named objective and nothing useful visible, emit `Explore{target: {name: \"anywhere\"}}`.");
+        sb.AppendLine("- CLOSED DOORS ARE BARRIERS: a `door closed` row in `Visible nearby` is shut and blocks the rooms beyond it. If you are pursuing a target you cannot see or reach (e.g. the search-progress note says a named target is still not visible after several moves) and a `door closed` is nearby, `Use{target: name=\"<door>\"}` to open it, THEN `Explore` to travel through — a closed door is the usual reason the next room's occupant never appears. A `door open` row is already passable (just `Explore` through it); do not Use it again.");
         sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: `## Server hints` text that tells you how to LEAVE, EXIT, PROCEED PAST, or ADVANCE BEYOND the area — especially naming a person/place or warning the step is irreversible — OUTRANKS repeating a local interaction you already observed (re-picking an item you hold, re-talking an NPC who gave no new dialog, re-using an object that didn't change). When such an instruction is present and unacted, emit a `Talk`/`Use`/`Explore` toward the named target (even if not visible) INSTEAD of looping completed steps.");
         sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: if you hold an item the server gave you for an unfinished objective (\"take this and bring it back\", \"give X to Y\", \"use this to leave\"), completing it OUTRANKS incidental looting/exploration — return to the NAMED npc/object and `Give`/`Use` it. Treat an unused objective item as an open task, not as done.");
         sb.AppendLine("- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot/invest unspent XP; 3-4 explore.");
@@ -4000,7 +4001,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             else             sb.Append(" npc");
         }
         if (v.IsPortal)   sb.Append(" portal");
-        if (v.IsDoor)     sb.Append(" door");
+        if (v.IsDoor)
+        {
+            sb.Append(" door");
+            // Door open/closed affordance (wire-decoded Ethereal bit). A
+            // CLOSED door is a barrier the LLM can Use{door} to open (e.g.
+            // to reach a target in the next room); an OPEN door is already
+            // passable. Omitted when the door's physics state is unknown so
+            // we never assert a state without evidence. Pure observation —
+            // no priority/urgency; the LLM decides whether to open it.
+            if (v.IsDoorOpen is bool doorOpen)
+                sb.Append(doorOpen ? " open" : " closed");
+        }
         if (v.IsCorpse)   sb.Append(" corpse");
         if (v.IsChest)    sb.Append(" chest");
         if (v.IsBook)     sb.Append(" book");
