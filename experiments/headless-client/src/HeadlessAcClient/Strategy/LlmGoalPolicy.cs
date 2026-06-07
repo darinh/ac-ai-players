@@ -3319,8 +3319,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     EntityKind.NPC => "npc",
                     _ => "object",
                 };
+                // picker-name-respawn-audit: factual per-Name pickup tally,
+                // shown only when the bot has already picked one. The LLM
+                // decides whether a duplicate is worth re-collecting; no
+                // recommendation or "skip" wording (that valuation is its call).
+                var pickedCount = c.PickedNameCount > 0 ? $" picked_name_count={c.PickedNameCount}" : "";
                 sb.AppendLine(
-                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8} kind={kind}{vis}");
+                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8} kind={kind}{pickedCount}{vis}");
             }
             sb.AppendLine(
                 "- NOTE: the in-range queue is empty. The fallback picker will walk to the TOP " +

@@ -8287,6 +8287,53 @@ public class LlmGoalPolicyTests
         Assert.Contains("EXPLORATION CANDIDATES", p);
     }
 
+    [Fact]
+    public void BuildUserPrompt_ExplorationCandidate_RendersPickedNameCountWhenPositive()
+    {
+        // picker-name-respawn-audit: a candidate the bot has picked
+        // before surfaces the factual tally so the LLM (not the Motor)
+        // decides whether to re-collect a duplicate.
+        var candidates = new List<ExplorationCandidate>
+        {
+            new()
+            {
+                Guid = 0x80000200u,
+                Name = "Apple",
+                Distance = 5.0f,
+                CellId = 0x86020100u,
+                Visited = false,
+                PickedNameCount = 3,
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: candidates);
+        Assert.Contains("picked_name_count=3", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExplorationCandidate_OmitsPickedNameCountWhenZero()
+    {
+        // Never-picked candidate: the annotation is absent (no
+        // `picked_name_count=0` noise on every fresh object).
+        var candidates = new List<ExplorationCandidate>
+        {
+            new()
+            {
+                Guid = 0x80000201u,
+                Name = "Distant Door",
+                Distance = 42.0f,
+                CellId = 0x86020100u,
+                Visited = false,
+                PickedNameCount = 0,
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: candidates);
+        Assert.DoesNotContain("picked_name_count", p);
+    }
+
     // ---- Intent-stack completion-predicate schema accuracy ----
     // The prompt teaches the LLM the JSON shape of completion predicates.
     // It MUST match the actual System.Text.Json polymorphic contract on

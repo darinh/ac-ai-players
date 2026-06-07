@@ -493,11 +493,11 @@ internal sealed class HandshakeDriver : IDisposable
         // Phase 6n — anti-starvation: after an item is successfully
         // wielded, mark its weenie-class as "satisfied" so we stop
         // chasing duplicate quest-reward copies. Also count successful
-        // pickups per name; after 1, deprioritize that name so we
-        // don't pick a third Bruised Apple just because the academy
-        // gifted us another one. Without this, the bot loops on
-        // apples/armor reward respawns and never reaches NPCs or
-        // doors.
+        // pickups per name; this count is TELEMETRY ONLY — surfaced to
+        // the LLM as `picked_name_count=N` on each exploration candidate
+        // (picker-name-respawn-audit). The picker no longer drops items
+        // by name; whether a duplicate is worth re-collecting is the
+        // LLM's call.
         var                  satisfiedEquipSlots = new HashSet<uint>();
         var                  satisfiedWeenieClasses = new HashSet<uint>();
         var                  pickupCountByName = new Dictionary<string, int>();
@@ -1142,16 +1142,6 @@ internal sealed class HandshakeDriver : IDisposable
         // fallback (post-picker), this prevents the "idle at corner"
         // dead state observed in phase7f4-headless20-fullrun.log.
         const float          MotionSearchRadius = 60f;
-        // Phase 6f: discriminate pickup-eligible items from interact-
-        // only objects via the ItemType bitmask
-        // (ACE.Entity.Enum.ItemType). Pickup mask covers MeleeWeapon
-        // (0x1) | Armor (0x2) | Clothing (0x4) | Jewelry (0x8) | Food
-        // (0x20) | Money (0x40) | MissileWeapon (0x100) | Gem (0x800)
-        // | SpellComponents (0x1000) | Key (0x4000) | Caster (0x8000).
-        // Misc (0x80) is deliberately EXCLUDED — doors carry Misc but
-        // are not pickup-able. Creatures, Portals, LifeStones, etc.
-        // fall through to the Use action.
-        const uint           PickupItemTypeMask = 0xD96F;
         const int            WalkTickIntervalMs = 250;
         // Phase 7e — switch from WalkForward to RunForward. Bot now
         // moves at ~5 u/s instead of 2.5 u/s. Server gates run-speed
@@ -1785,9 +1775,10 @@ internal sealed class HandshakeDriver : IDisposable
                                     putSnap.WielderGuid = null;
                                     putSnap.CurrentWieldedLocation = 0;
                                 }
-                                // Phase 6n — count this pickup so the
-                                // picker doesn't keep chasing identical
-                                // quest-reward respawns of the same name.
+                                // Phase 6n — count this pickup per name.
+                                // TELEMETRY ONLY: surfaced to the LLM as
+                                // picked_name_count=N (picker-name-respawn-
+                                // audit). No longer used to filter the picker.
                                 var pickedSnap = worldState.TryGet(putAck.ItemGuid);
                                 if (pickedSnap is not null && !string.IsNullOrEmpty(pickedSnap.Name))
                                 {
@@ -6098,11 +6089,12 @@ internal sealed class HandshakeDriver : IDisposable
                         // Phase 6n — anti-starvation: skip duplicate
                         // quest reward respawns. If we've already
                         // wielded a wearable from this weenie class
-                        // (same wcid), don't chase the next copy. If a
-                        // non-wearable name has been picked up >=1x,
-                        // deprioritize it (handled in sort below; the
+                        // (same wcid), don't chase the next copy. The
                         // hard filter below only drops EXACT duplicates
-                        // of a satisfied weenie class).
+                        // of a satisfied weenie class. Duplicate-by-name
+                        // is no longer filtered here (picker-name-respawn-
+                        // audit) — that valuation is the LLM's via
+                        // picked_name_count=N.
                         .Where(s => !(s.WeenieClassId is uint wcSat && satisfiedWeenieClasses.Contains(wcSat)))
                         .ToList();
 
@@ -6156,8 +6148,6 @@ internal sealed class HandshakeDriver : IDisposable
                         // Additional MECHANICAL filters in PickerSelection
                         // (loop-prevention only, NOT priority):
                         //   - drop ContainerGuid==self (item in our bag)
-                        //   - drop pickup-eligible items whose Name has
-                        //     already been picked once (anti-respawn)
                         //
                         // No type-based bumps. No corpse-loot bump. No
                         // door preference. No wearable preference. Those
@@ -6165,9 +6155,7 @@ internal sealed class HandshakeDriver : IDisposable
                         candidate = PickerSelection.PickNearest(
                             inRange,
                             self,
-                            chosenCharacterGuid,
-                            pickupCountByName,
-                            PickupItemTypeMask);
+                            chosenCharacterGuid);
                         if (candidate is not null)
                         {
                             pickerSourceForActivity = "in-range";
@@ -6197,8 +6185,6 @@ internal sealed class HandshakeDriver : IDisposable
                     //     backtrack via Explore{target=visited})
                     //   - drop satisfied weenie classes
                     //   - drop ContainerGuid==self / WielderGuid==self
-                    //   - drop pickup respawns whose Name has been
-                    //     picked once (anti-respawn)
                     //   - drop objects with no CellId
                     //   - drop objects in a different landblock
                     //     (addressability — the bot can't walk
@@ -6239,9 +6225,7 @@ internal sealed class HandshakeDriver : IDisposable
                             fallbackPool,
                             self,
                             chosenCharacterGuid,
-                            selfLandblock,
-                            pickupCountByName,
-                            PickupItemTypeMask).ToList();
+                            selfLandblock).ToList();
 
                         // gate-nearest-named-picker-fallback: BEFORE the
                         // autonomous nearest-known-object pick (the picker
@@ -6324,6 +6308,12 @@ internal sealed class HandshakeDriver : IDisposable
                                     t.snap.ItemType ?? 0u,
                                     t.snap.ObjectDescriptionFlags ?? 0u,
                                     t.snap.WeenieFlags ?? 0u),
+                                // picker-name-respawn-audit: surface the per-Name
+                                // pickup tally as a fact so the LLM (not the Motor)
+                                // decides whether a duplicate-named pickup is worth
+                                // collecting. 0 when never picked. No preference here.
+                                PickedNameCount = (t.snap.Name is { Length: > 0 } nm &&
+                                    pickupCountByName.TryGetValue(nm, out var pnc)) ? pnc : 0,
                             }).ToList();
                             explorationCandidatesForLlm = top;
                         }

@@ -66,4 +66,14 @@ internal sealed record ExplorationCandidate
     /// that don't classify (e.g. tests) compile unchanged; the live
     /// candidate-build site sets the real kind.</summary>
     public EntityKind Kind { get; init; } = EntityKind.Unknown;
+
+    /// <summary>How many times the bot has already successfully
+    /// picked up an item with this <see cref="Name"/> (from the
+    /// Motor's per-Name pickup tally). Factual telemetry surfaced to
+    /// the LLM as `picked_name_count=N` so it can decide whether a
+    /// duplicate-named pickup is still worth collecting — the Motor
+    /// no longer makes that call (picker-name-respawn-audit removed
+    /// the source-side anti-respawn filter). 0 = never picked one;
+    /// renders only when &gt; 0. No preference assigned here.</summary>
+    public int PickedNameCount { get; init; }
 }
