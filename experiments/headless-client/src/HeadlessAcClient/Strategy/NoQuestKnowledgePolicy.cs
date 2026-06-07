@@ -109,6 +109,30 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Select(e => e.ItemGuid!.Value)
             .ToHashSet();
 
+        // Is an externally-authorised hunt commitment currently on top
+        // of the stack? Computed once, up front, because several steps
+        // below adjust their posture while a hunt is active. Reads ONLY
+        // the typed, LLM/operator-authored intent label
+        // (HuntAuthorization.IsActiveHunt — the SAME predicate the Motor
+        // picker uses; covers Kind "Hunt"/"hunt-excursion" and a typed
+        // visible_tag:monster completion, all Status==Active). It
+        // originates no strategy, names no content, and assigns no
+        // object-type urgency.
+        var huntActive = _intentStack?.Top is Intent.Intent huntTop
+            && HuntAuthorization.IsActiveHunt(huntTop);
+
+        // No-detour adjacency envelope for OPTIONAL Use targets while a
+        // hunt is active (steps 5b/5c/5d). Same radius the Motor already
+        // uses to decide it is "at" a container for post-open looting
+        // (HandshakeDriver LootContainerProximityRadius). The point is
+        // geometry, not value: during a hunt the fallback does not
+        // autonomously WALK to a distant optional Use target (that is an
+        // off-intent detour); it only Uses one it is already standing
+        // next to (e.g. the corpse of a kill it just made). Corpses,
+        // chests, lifestones and portals are treated IDENTICALLY — only
+        // proximity matters, so this adds no object-type judgment.
+        const float HuntActiveUseNoDetourRadiusUnits = 5.0f;
+
         // NOTE: this fallback deliberately does NOT gate on a
         // hardcoded self-health threshold. A "flee/rest when wounded
         // below X%" rule is a rule-of-thumb the LLM must own, not
@@ -256,6 +280,11 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => v.IsOpenable && !v.IsDoor)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            // While hunting, only Use an openable we are essentially
+            // already standing next to (own-kill corpse), never a far
+            // detour off the hunt (see HuntActiveUseNoDetourRadiusUnits).
+            .Where(v => !huntActive
+                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (openable is not null)
@@ -284,6 +313,9 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => v.IsLifestone)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            // No far detour to a lifestone while hunting (see step 5b).
+            .Where(v => !huntActive
+                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (lifestone is not null)
@@ -325,6 +357,9 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => v.IsPortal)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            // No far detour to a portal while hunting (see step 5b).
+            .Where(v => !huntActive
+                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (portal is not null)
@@ -346,13 +381,9 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // fallback drove an operator AC_BOTS_INITIAL_INTENT=Hunt). So when
         // a hunt is authorised we SUPPRESS the autonomous civilian Talk
         // and fall through to the hunt-decompose / Explore-egress steps.
-        // This reads ONLY the typed, LLM/operator-authored hunt-intent
-        // label (HuntAuthorization.IsActiveHunt — same predicate the Motor
-        // picker uses) to AVOID an off-intent autonomous interaction; it
-        // originates no strategy, names no content, and assigns no
-        // object-type urgency.
-        var huntActive = _intentStack?.Top is Intent.Intent huntTop
-            && HuntAuthorization.IsActiveHunt(huntTop);
+        // `huntActive` is computed once near the top of ProposeGoal (it
+        // also gates the optional Use steps 5b/5c/5d); the same typed,
+        // LLM/operator-authored hunt-intent label drives both.
 
         // 6) Talk to nearest NPC creature (non-hostile, non-monster
         //    creature with name) — talking emits PopupString,
