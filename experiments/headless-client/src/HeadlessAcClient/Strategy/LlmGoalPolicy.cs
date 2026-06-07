@@ -489,6 +489,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetUnreachableTargets(IReadOnlyList<UnreachableTargetProjection>? targets)
         => _currentUnreachableTargets = targets;
 
+    // cp-2342 — recent measured self→target distance history for the
+    // interaction target the bot most recently locked a goal on. Surfaced as
+    // the "## Approach distance history" prompt block so the LLM can see,
+    // across ticks, whether its repeated selections of the SAME target are
+    // actually reducing the distance. When repeated locks on one target fail
+    // to close the distance, the LLM has no prompt-visible signal of that.
+    // Pushed by the driver each tick
+    // before ProposeGoal. Null = nothing to surface (no recent fixation, or
+    // the target is already within the Motor's arrival radius).
+    private ApproachDistanceProjection? _currentApproachDistance;
+
+    /// <summary>
+    /// Driver-driven setter for the approach-distance-history block. Called
+    /// before ProposeGoal with the most-recently-locked interaction target's
+    /// recent distance samples (already gated by the driver on freshness,
+    /// sample count, and still-outside-arrival-radius). Null = nothing to
+    /// surface.
+    /// </summary>
+    public void SetApproachDistanceHistory(ApproachDistanceProjection? approach)
+        => _currentApproachDistance = approach;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -1575,7 +1596,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -3050,7 +3071,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int? levelAtLandblockEntry = null,
         int? secondsSinceLastDeath = null,
         GoalProgressSnapshot? goalProgress = null,
-        IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null)
+        IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null,
+        ApproachDistanceProjection? approachDistance = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4227,6 +4249,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "server as out-of-reach; the resolver currently returns unresolved for any goal " +
                     $"that resolves to it. Suppression expires in about {secs}s.");
             }
+            sb.AppendLine(
+                "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
+                "Explore all remain executable right now. Your call.");
+        }
+
+        // ── ## Approach distance history (end-of-prompt salience capsule) ─
+        // The Motor measures the self→target distance every time it locks an
+        // interaction goal, but that number is Motor-only and the LLM cannot
+        // tell, across ticks, whether its repeated selections of the SAME
+        // target are reducing the distance. When repeated locks on one target
+        // fail to close the distance there is otherwise no prompt-visible
+        // fact showing the approach is flat. Surface the raw recent distance
+        // samples (oldest→newest) in the decision-proximate slot so the LLM
+        // can read the trend itself. The driver already gated this on
+        // freshness, a >=2-sample data-availability floor, and the latest
+        // sample still exceeding the Motor's mechanical arrival radius — so an
+        // already-arrived target is never surfaced here. RAW measurements + a
+        // not-a-recommendation disclaimer; NO "stuck"/"blocked"/"unreachable"/
+        // "not closing"/"plateau" wording, no instruction to pivot. No game
+        // knowledge; perception of the Motor's own measurements. Guid-only
+        // when the name has left the projection.
+        if (approachDistance is { DistanceSamplesUnits.Count: >= 2 } ad)
+        {
+            var label = string.IsNullOrEmpty(ad.Name)
+                ? $"guid=0x{ad.Guid:X8}"
+                : $"{ad.Name} (guid=0x{ad.Guid:X8})";
+            var samples = string.Join(", ", ad.DistanceSamplesUnits.Select(d => $"{d:F1}u"));
+            sb.AppendLine();
+            sb.AppendLine("## Approach distance history");
+            sb.AppendLine(
+                $"- measured straight-line distance to {label} at each of your last " +
+                $"{ad.DistanceSamplesUnits.Count} interaction locks on it (oldest to newest): {samples}.");
             sb.AppendLine(
                 "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
                 "Explore all remain executable right now. Your call.");

@@ -613,6 +613,14 @@ internal sealed class HandshakeDriver : IDisposable
         // succeed). Mechanical nav bookkeeping; no game knowledge.
         var                  interactUnreachableCooldown = TimeSpan.FromSeconds(60);
         var                  interactUnreachable = new HeadlessAcClient.World.InteractUnreachableTracker();
+        // cp-2342 — records the self→target distance at each interaction goal
+        // lock, keyed by guid, keeping a short rolling history per target. The
+        // most-recent target's history is projected into the prompt's
+        // "## Approach distance history" capsule so the LLM can see whether
+        // its repeated selections of the same target are reducing the
+        // distance. Mechanical distance bookkeeping; no game knowledge.
+        var                  approachDistance = new HeadlessAcClient.World.ApproachDistanceTracker();
+        var                  approachDistanceFreshness = TimeSpan.FromSeconds(30);
         // Set by the low-health attack-suppression dispatch guard so the
         // post-action reset cascade does NOT permanently add a suppressed
         // hostile to visitedTargetGuids (suppression is TEMPORARY — the
@@ -5912,6 +5920,14 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (WorldDistance.TrySquaredDistance(tacticsSelf, targetSnap!, out var d2lock))
                                     motionInitialDistance = (float)Math.Sqrt(d2lock);
 
+                                // cp-2342 — record this lock's measured distance
+                                // to the target so the prompt can surface the
+                                // recent approach-distance history. Mechanical
+                                // bookkeeping; the guid + distance only.
+                                if (motionInitialDistance is float midLock)
+                                    approachDistance.Record(
+                                        targetSnap!.Guid, targetSnap.Name, midLock, DateTime.UtcNow);
+
                                 autonomousPositionSent = true;
                                 autonomousPositionPacketIndex = count;
 
@@ -6382,6 +6398,42 @@ internal sealed class HandshakeDriver : IDisposable
                                 })
                                 .ToList();
                         llmPolicyForPickerSurface.SetUnreachableTargets(unreachProj);
+                    }
+
+                    // cp-2342 — publish the most-recently-locked interaction
+                    // target's recent self→target distance history so the LLM
+                    // can see, across ticks, whether its repeated selections of
+                    // the same target are reducing the distance. Gated on: a
+                    // >=2-sample data-availability floor (need ≥2 points to
+                    // show a history), freshness (the fixation is recent, not a
+                    // target the bot has since moved on from), and the latest
+                    // measured distance still EXCEEDING the Motor's mechanical
+                    // arrival radius for that target (an already-arrived target
+                    // is not an approach in progress — this also keeps the
+                    // capsule scoped to physical approach, not adjacent-target
+                    // dialog churn). Published or cleared every tick so a stale
+                    // history never misleads. Pure perception of the Motor's
+                    // own measurements; no game knowledge.
+                    if (llmPolicyForPickerSurface is not null)
+                    {
+                        var nowAppr = DateTime.UtcNow;
+                        ApproachDistanceProjection? apProj = null;
+                        if (approachDistance.TryGetMostRecent(
+                                nowAppr, approachDistanceFreshness, minSamples: 2,
+                                out var apGuid, out var apName, out var apSamples))
+                        {
+                            var apTarget = worldState.TryGet(apGuid);
+                            var apArrival = MotorStopRadius.For(apTarget);
+                            var apLatest = apSamples[apSamples.Count - 1];
+                            if (apLatest > apArrival)
+                                apProj = new ApproachDistanceProjection
+                                {
+                                    Guid                 = apGuid,
+                                    Name                 = apName ?? apTarget?.Name,
+                                    DistanceSamplesUnits = apSamples,
+                                };
+                        }
+                        llmPolicyForPickerSurface.SetApproachDistanceHistory(apProj);
                     }
 
                     // Phase C (picker-hunt-suppress) — while an LLM/operator
