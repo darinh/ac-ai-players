@@ -18,13 +18,17 @@
 //   When the optional `actor` snapshot is non-null and has a
 //   populated CellId, world-space candidates (those without a
 //   ContainerGuid, i.e. not in someone's inventory) are restricted
-//   to actor's current landblock (top 16 bits of CellId). This
-//   prevents stale snapshots from prior landblocks (e.g. the
-//   academy Society Greeter after a Free Ride teleport to
-//   Holtburg) from resolving for a bot that has since moved away
-//   — the server doesn't always emit ObjectDelete for objects
-//   that fall out of broadcast range, so WorldState accumulates
-//   them indefinitely.
+//   to actor's current OR an adjacent landblock (Chebyshev <= 1 on
+//   the landblock X/Y bytes). The adjacency tolerance lets a target
+//   physically next to the actor resolve when it sits one landblock
+//   over after a freshly-crossed seam (e.g. the corpse of a mob
+//   killed at the boundary). This prevents stale snapshots from
+//   FAR landblocks (e.g. the academy Society Greeter after a Free
+//   Ride teleport to Holtburg — many landblocks away, still
+//   rejected) from resolving for a bot that has since moved away —
+//   the server doesn't always emit ObjectDelete for objects that
+//   fall out of broadcast range, so WorldState accumulates them
+//   indefinitely.
 //
 // Per the architecture rule, this resolver does NOT bake game
 // content. It only matches what was observed at runtime.
@@ -74,7 +78,7 @@ internal static class SelectorResolver
         if (referencePoint is null) return all[0];
 
         return all
-            .Select(o => (o, ok: WorldDistance.TrySquaredDistance(referencePoint, o, out var d2), d2))
+            .Select(o => (o, ok: WorldDistance.TrySelectionSquaredDistance(referencePoint, o, out var d2), d2))
             .OrderBy(t => t.ok ? t.d2 : double.MaxValue)
             .First().o;
     }
@@ -123,10 +127,20 @@ internal static class SelectorResolver
         // so they are always "local" to whoever carries them.
         if (o.ContainerGuid is uint c && c != 0u) return true;
 
-        // World-space object: require same landblock (top 16 bits).
-        // Objects with no CellId yet (just-created, partial info) are
-        // accepted; the next snapshot update will populate the cell.
+        // World-space object: require the SAME or an ADJACENT landblock
+        // (Chebyshev distance <= 1 on the landblock X/Y bytes). A target
+        // that is physically next to the actor can sit one landblock over
+        // when the actor has just crossed a seam (the corpse of a mob
+        // killed at the boundary, an NPC across the street). The strict
+        // same-landblock rule rejected those even at ~1 unit, so an
+        // explicit LLM Use/Talk/Attack goal resolved to MISS and the bot
+        // could not loot its own kill across the seam. Same-or-adjacent
+        // mirrors the cp-2295/2296 cross-landblock sighting precedent and
+        // still rejects the stale post-TELEPORT case the filter exists for
+        // (e.g. academy 0x8602 lingering after a Free Ride to Holtburg
+        // 0xAAB5/0xA9B4 — not adjacent, still dropped). Pure wire-coordinate
+        // geometry, no game knowledge.
         if (o.CellId is not uint oCell || oCell == 0u) return true;
-        return (oCell & 0xFFFF0000u) == (actorCell & 0xFFFF0000u);
+        return WorldDistance.IsSameOrAdjacentLandblock(oCell, actorCell);
     }
 }

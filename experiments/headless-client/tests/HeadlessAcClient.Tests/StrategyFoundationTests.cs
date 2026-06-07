@@ -264,6 +264,109 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void SelectorResolver_ResolvesObjectInAdjacentLandblock_AcrossSeam()
+    {
+        // loot-resolver-adjacent-seam: a mob killed at a landblock boundary
+        // leaves a corpse one landblock over from where the bot ends up after
+        // crossing the seam. The corpse is physically ~1u away but in an
+        // ADJACENT landblock. The locality filter must resolve it so an
+        // explicit LLM Use{Corpse} goal can loot the bot's own kill across the
+        // seam (previously rejected -> MISS -> never looted under Hunt).
+        const uint ActorCellId  = 0xAAB50003u; // landblock 0xAAB5 (X=0xAA, Y=0xB5)
+        const uint CorpseCellId = 0xA9B5003Bu; // landblock 0xA9B5 (X=0xA9) — west neighbour
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: ActorCellId);
+        SeedSnapshot(ws, MobGuid, "Corpse of Chicken", wcid: 21u, itemType: 0x200u, cellId: CorpseCellId);
+
+        var self = ws.TryGet(SelfGuid);
+        Assert.NotNull(self);
+
+        var resolved = SelectorResolver.Resolve(
+            new Selector { Name = "Corpse of Chicken" }, ws, weenies: null, actor: self);
+        Assert.Single(resolved);
+        Assert.Equal(MobGuid, resolved[0].Guid);
+
+        var nearest = SelectorResolver.ResolveSingleNearest(
+            new Selector { Name = "Corpse of Chicken" }, ws, referencePoint: self);
+        Assert.NotNull(nearest);
+        Assert.Equal(MobGuid, nearest!.Guid);
+    }
+
+    [Theory]
+    [InlineData(0xA9B50003u)] // X-1, Y same  (west)
+    [InlineData(0xABB50003u)] // X+1, Y same  (east)
+    [InlineData(0xAAB40003u)] // X same, Y-1  (south)
+    [InlineData(0xAAB60003u)] // X same, Y+1  (north)
+    [InlineData(0xA9B40003u)] // X-1, Y-1     (diagonal)
+    public void SelectorResolver_ResolvesObjectInEachAdjacentLandblock(uint corpseCellId)
+    {
+        // Guard the signed landblock-delta on every seam direction (the
+        // Chebyshev <= 1 check must hold for negative AND positive X/Y deltas).
+        const uint ActorCellId = 0xAAB50003u; // landblock 0xAAB5
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: ActorCellId);
+        SeedSnapshot(ws, MobGuid, "Corpse of Chicken", wcid: 21u, itemType: 0x200u, cellId: corpseCellId);
+
+        var self = ws.TryGet(SelfGuid);
+        var resolved = SelectorResolver.Resolve(
+            new Selector { Name = "Corpse of Chicken" }, ws, weenies: null, actor: self);
+        Assert.Single(resolved);
+    }
+
+    [Fact]
+    public void SelectorResolver_RejectsObjectTwoLandblocksAway()
+    {
+        // The adjacency tolerance is exactly one landblock. A world object two
+        // landblocks away (Chebyshev distance 2) is still rejected, preserving
+        // the stale-snapshot guard the locality filter exists for.
+        const uint ActorCellId  = 0xAAB50003u; // landblock 0xAAB5
+        const uint FarCellId    = 0xACB50003u; // landblock 0xACB5 (X+2)
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: ActorCellId);
+        SeedSnapshot(ws, NpcGuid, "Society Greeter", wcid: 30991u, itemType: 0x10u, cellId: FarCellId);
+
+        var self = ws.TryGet(SelfGuid);
+        var resolved = SelectorResolver.Resolve(
+            new Selector { Name = "Society Greeter" }, ws, weenies: null, actor: self);
+        Assert.Empty(resolved);
+    }
+
+    [Fact]
+    public void SelectorResolver_Nearest_PrefersSeamNearOverFarSameLandblock()
+    {
+        // When two matching objects exist — one just across the seam in the
+        // adjacent landblock and one far away in the actor's own landblock —
+        // ResolveSingleNearest must return the physically nearer (seam) one.
+        // worldX = landblockX * 192 + localX, so an object at localX=190 in the
+        // west-neighbour landblock sits ~7u from an actor at localX=5.
+        const uint ActorCellId      = 0xAAB50003u; // landblock 0xAAB5
+        const uint SeamNearCellId   = 0xA9B50031u; // landblock 0xA9B5 (west neighbour)
+        const uint FarSameLbCellId  = 0xAAB50099u; // same landblock 0xAAB5, far cell
+
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: ActorCellId,
+            position: new Vector3(5f, 96f, 0f));
+        // Seam-near corpse: near the shared edge of the west neighbour.
+        SeedSnapshot(ws, MobGuid, "Corpse of Chicken", wcid: 21u, itemType: 0x200u, cellId: SeamNearCellId,
+            position: new Vector3(190f, 96f, 0f));
+        // Far corpse: same landblock as the actor but ~150u away in X.
+        SeedSnapshot(ws, ItemGuid, "Corpse of Chicken", wcid: 21u, itemType: 0x200u, cellId: FarSameLbCellId,
+            position: new Vector3(160f, 96f, 0f));
+
+        var self = ws.TryGet(SelfGuid);
+        var nearest = SelectorResolver.ResolveSingleNearest(
+            new Selector { Name = "Corpse of Chicken" }, ws, referencePoint: self);
+        Assert.NotNull(nearest);
+        Assert.Equal(MobGuid, nearest!.Guid);
+    }
+
+    [Fact]
     public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
     {
         // De-hardcoding contract: the projection sees IsDoor / IsPortal /
