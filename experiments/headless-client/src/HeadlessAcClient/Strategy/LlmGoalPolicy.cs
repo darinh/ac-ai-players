@@ -3756,7 +3756,99 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"walking from here (possible physical obstruction — e.g. boxed in or on a ledge).");
         }
 
-        return sb.ToString();
+        return FitPromptToCeiling(sb.ToString());
+    }
+
+    // Some GitHub Models endpoints reject an over-large request body with
+    // HTTP 413 Payload Too Large. Measured cliff (gpt-4.1-mini, this
+    // project): a user prompt up to ~27600 chars succeeds, ~28400 fails;
+    // a fixed ~2.5KB system prompt + JSON overhead rides on top. A 413
+    // drops the bot into the knowledge-free fallback for the rest of the
+    // run, so we keep the assembled user prompt under a ceiling below the
+    // cliff. This is request-size management, NOT strategy: rows are shed
+    // by section and by the nearest-first / newest-first / out-of-view
+    // order the sections already render in — no row is kept or dropped by
+    // its in-game type.
+    private const int HardUserPromptCeilingChars = 26000;
+
+    // Lowest-value variable row-sections first. Out-of-view sightings are
+    // the least actionable, then historical events, then the FAR end of
+    // the nearest-first visible list. This order keeps the most actionable
+    // content (nearest visible objects, and every fixed section such as
+    // `## Combat readiness`) intact longest.
+    private static readonly string[] PromptTrimOrder =
+    {
+        "## Recently sighted (out of view)",
+        "## Recent events (newest first)",
+        "## Visible nearby",
+    };
+
+    internal static string FitPromptToCeiling(string prompt, int ceiling = HardUserPromptCeilingChars)
+    {
+        if (prompt.Length <= ceiling)
+            return prompt;
+        var nl = prompt.Contains("\r\n") ? "\r\n" : "\n";
+        var lines = new List<string>(prompt.Split(new[] { nl }, StringSplitOptions.None));
+        foreach (var header in PromptTrimOrder)
+        {
+            if (JoinLen(lines, nl) <= ceiling)
+                break;
+            TrimSectionTrailingRows(lines, header, nl, ceiling);
+        }
+        var result = string.Join(nl, lines);
+        if (result.Length > ceiling)
+        {
+            // Defensive backstop so the ceiling is an UNCONDITIONAL
+            // invariant. With the current ~19KB fixed preamble + bounded
+            // sections the cascade above always fits, so this only fires if
+            // the trimmable sections are absent AND the fixed content alone
+            // exceeds the ceiling (e.g. a future preamble growth) — better a
+            // truncated prompt than an HTTP 413 + brainless fallback.
+            const string suffix = "\n\u2026 (prompt hard-truncated to fit request budget)";
+            var cut = Math.Max(0, ceiling - suffix.Length);
+            result = result[..cut] + suffix;
+        }
+        return result;
+    }
+
+    private static int JoinLen(List<string> lines, string nl) =>
+        lines.Count == 0 ? 0 : lines.Sum(l => l.Length) + nl.Length * (lines.Count - 1);
+
+    // Drop trailing rows of the named section (keeping the header line),
+    // keeping as MANY rows as still fit under the ceiling; if even an
+    // empty section doesn't fit, drop them all and let the caller cascade
+    // to the next section. A single compact marker replaces the dropped
+    // rows. Section bounds are line-anchored (header line .. next `## `
+    // line); absent sections are a no-op.
+    private static void TrimSectionTrailingRows(List<string> lines, string header, string nl, int ceiling)
+    {
+        int start = lines.FindIndex(l => l == header);
+        if (start < 0)
+            return;
+        int end = lines.FindIndex(start + 1, l => l.StartsWith("## ", StringComparison.Ordinal));
+        if (end < 0)
+            end = lines.Count;
+        int bodyCount = end - (start + 1);
+        if (bodyCount <= 0)
+            return;
+
+        for (int keep = bodyCount; keep >= 0; keep--)
+        {
+            var trial = new List<string>(lines);
+            int removeFrom = start + 1 + keep;
+            int removeCount = end - removeFrom;
+            if (removeCount > 0)
+            {
+                trial.RemoveRange(removeFrom, removeCount);
+                trial.Insert(removeFrom, $"- (\u2026 {removeCount} farther row(s) omitted to fit prompt budget)");
+            }
+            if (keep == 0 || JoinLen(trial, nl) <= ceiling)
+            {
+                lines.Clear();
+                lines.AddRange(trial);
+                return;
+            }
+        }
     }
 
     private static string Truncate(string? s, int n) =>

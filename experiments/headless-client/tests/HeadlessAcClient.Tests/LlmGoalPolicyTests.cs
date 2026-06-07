@@ -8145,4 +8145,96 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
             AttackGoal(new Selector { Name = "Rat" }), world, tappedOut: true));
     }
+
+    // ---- FitPromptToCeiling (request-size ceiling; prevents HTTP 413) ----
+
+    [Fact]
+    public void FitPromptToCeiling_UnderCeiling_ReturnsUnchanged()
+    {
+        var p = "PREAMBLE\n## Visible nearby\n- nearest\n- farther\n## Combat readiness\n- ready\n";
+        Assert.Equal(p, LlmGoalPolicy.FitPromptToCeiling(p, ceiling: 10_000));
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_TrimsVisibleTail_KeepsNearest_LaterSectionsIntact()
+    {
+        var sb = new StringBuilder();
+        sb.Append("PREAMBLE-FIXED\n");
+        sb.Append("## Visible nearby\n");
+        for (int i = 0; i < 200; i++)
+            sb.Append("- obj").Append(i).Append(" dist=").Append(i).Append("u\n");
+        sb.Append("## Combat readiness\n- monsters in view: 0\n");
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(sb.ToString(), ceiling: 1_000);
+
+        Assert.True(result.Length <= 1_000, $"len={result.Length}");
+        Assert.Contains("- obj0 dist=0u", result);            // nearest retained
+        Assert.DoesNotContain("- obj199 dist=199u", result);  // farthest dropped
+        Assert.Contains("omitted to fit prompt budget", result);
+        Assert.Contains("## Combat readiness", result);        // section after the trim intact
+        Assert.Contains("- monsters in view: 0", result);
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_OverageExceedsVisible_CascadesThroughSightingsAndEvents()
+    {
+        // Regression for the rubber-duck blocking issue: when the overage is
+        // larger than the whole `## Visible nearby` section, trimming Visible
+        // alone cannot fit — the cascade must also shed the lower-value
+        // `## Recently sighted` and `## Recent events` row-sections while
+        // leaving the fixed sections intact.
+        var sb = new StringBuilder();
+        sb.Append("PREAMBLE-FIXED-KEEP\n");
+        sb.Append("## Recently sighted (out of view)\n");
+        for (int i = 0; i < 100; i++) sb.Append("- sight").Append(i).Append('\n');
+        sb.Append("## Visible nearby\n- vis0\n- vis1\n");
+        sb.Append("## Combat readiness\n- ready-line\n");
+        sb.Append("## Recent events (newest first)\n");
+        for (int i = 0; i < 100; i++) sb.Append("- event").Append(i).Append('\n');
+        sb.Append("## Recent rejections\n- keep-this\n");
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(sb.ToString(), ceiling: 400);
+
+        Assert.True(result.Length <= 400, $"len={result.Length}");
+        Assert.Contains("PREAMBLE-FIXED-KEEP", result);   // fixed preamble intact
+        Assert.Contains("## Combat readiness", result);   // fixed section intact
+        Assert.Contains("- ready-line", result);
+        Assert.Contains("- keep-this", result);           // section after events intact
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_HandlesCrlf_AndAbsentTrimSections()
+    {
+        var sb = new StringBuilder();
+        sb.Append("PREAMBLE-FIXED\r\n");
+        sb.Append("## Visible nearby\r\n");
+        for (int i = 0; i < 200; i++)
+            sb.Append("- obj").Append(i).Append("\r\n");
+        sb.Append("## Combat readiness\r\n- ready\r\n");
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(sb.ToString(), ceiling: 1_000);
+
+        Assert.True(result.Length <= 1_000, $"len={result.Length}");
+        Assert.Contains("\r\n", result);                  // CRLF preserved
+        Assert.Contains("- obj0\r\n", result);
+        Assert.Contains("omitted to fit prompt budget", result);
+        Assert.Contains("## Combat readiness", result);
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_NoTrimmableSections_StillHardCappedByBackstop()
+    {
+        // Pathological: over ceiling but NONE of the cascade headers are
+        // present. The defensive backstop must still guarantee <= ceiling.
+        var sb = new StringBuilder();
+        sb.Append("## Self\n");
+        for (int i = 0; i < 5_000; i++) sb.Append("fixed-content-line\n");
+        var prompt = sb.ToString();
+        Assert.True(prompt.Length > 2_000);
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(prompt, ceiling: 2_000);
+
+        Assert.True(result.Length <= 2_000, $"len={result.Length}");
+        Assert.Contains("hard-truncated to fit request budget", result);
+    }
 }
