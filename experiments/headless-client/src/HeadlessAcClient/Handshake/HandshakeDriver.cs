@@ -6356,6 +6356,34 @@ internal sealed class HandshakeDriver : IDisposable
                         llmPolicyForPickerSurface.SetRecentSightings(recall);
                     }
 
+                    // cp-2340 — publish the Motor's own server-refused
+                    // (out-of-reach) suppression set so the LLM is not blind
+                    // to which interaction-target guids the resolver will
+                    // currently drop (the cp-2338 InteractUnreachableTracker
+                    // is otherwise Motor-only). Project the live entries to
+                    // the current display name (looked up from the world
+                    // projection; guid-only when the object has left view) and
+                    // the remaining cooldown seconds, for the prompt's
+                    // "## Server-refused interaction targets" capsule.
+                    // Published (or cleared) every tick so a stale set never
+                    // misleads the LLM. Pure perception of the Motor's state.
+                    if (llmPolicyForPickerSurface is not null)
+                    {
+                        var nowUnreach = DateTime.UtcNow;
+                        var suppressed = interactUnreachable.SnapshotSuppressed(nowUnreach);
+                        var unreachProj = suppressed.Count == 0
+                            ? null
+                            : suppressed
+                                .Select(kv => new UnreachableTargetProjection
+                                {
+                                    Guid                     = kv.Key,
+                                    Name                     = worldState.TryGet(kv.Key)?.Name,
+                                    RemainingCooldownSeconds = Math.Max(0.0, (kv.Value - nowUnreach).TotalSeconds),
+                                })
+                                .ToList();
+                        llmPolicyForPickerSurface.SetUnreachableTargets(unreachProj);
+                    }
+
                     // Phase C (picker-hunt-suppress) — while an LLM/operator
                     // HUNT commitment is active on the IntentStack, the
                     // autonomous picker must NOT walk the bot to the nearest

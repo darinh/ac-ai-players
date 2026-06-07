@@ -8334,6 +8334,83 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("picked_name_count", p);
     }
 
+    // ---- Server-refused interaction targets end-capsule (cp-2340) ----
+    // The cp-2338 InteractUnreachableTracker is a Motor-only guard; the LLM
+    // was blind to which interaction-target guids the resolver currently
+    // drops, so it kept re-emitting a goal that resolved only to a suppressed
+    // target. This capsule surfaces the SAME suppression set in the
+    // decision-proximate end slot. Rendered whenever any guid is suppressed
+    // (raw-presence gate); facts only, no valuation.
+
+    [Fact]
+    public void BuildUserPrompt_UnreachableTargetsEndcap_RendersWhenSuppressed()
+    {
+        var targets = new List<UnreachableTargetProjection>
+        {
+            new() { Guid = 0x7A9B401Cu, Name = "Door", RemainingCooldownSeconds = 42.4 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            unreachableTargets: targets);
+        Assert.Contains("## Server-refused interaction targets", p);
+        Assert.Contains("Door (guid=0x7A9B401C)", p);
+        Assert.Contains("refused by the server as out-of-reach", p);
+        Assert.Contains("expires in about 42s", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnreachableTargetsEndcap_GuidOnlyWhenNameMissing()
+    {
+        // Object left the world projection -> render the guid alone (the
+        // mechanical fact still applies; never store a name in the tracker).
+        var targets = new List<UnreachableTargetProjection>
+        {
+            new() { Guid = 0x7A9B401Cu, Name = null, RemainingCooldownSeconds = 10 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            unreachableTargets: targets);
+        Assert.Contains("## Server-refused interaction targets", p);
+        Assert.Contains("- guid=0x7A9B401C:", p);
+        Assert.DoesNotContain("(guid=0x7A9B401C)", p); // no "name (guid=...)" form
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnreachableTargetsEndcap_OmittedWhenNoneOrNull()
+    {
+        // Empty list and null both omit the capsule (a stale set must never
+        // mislead the LLM; the driver publishes/clears it every tick).
+        var pEmpty = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            unreachableTargets: new List<UnreachableTargetProjection>());
+        Assert.DoesNotContain("## Server-refused interaction targets", pEmpty);
+
+        var pNull = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            unreachableTargets: null);
+        Assert.DoesNotContain("## Server-refused interaction targets", pNull);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnreachableTargetsEndcap_RendersAtEndAfterVisibleSection()
+    {
+        var targets = new List<UnreachableTargetProjection>
+        {
+            new() { Guid = 0x7A9B401Cu, Name = "Door", RemainingCooldownSeconds = 30 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            unreachableTargets: targets);
+        var capsuleIdx = p.IndexOf("## Server-refused interaction targets", System.StringComparison.Ordinal);
+        var selfIdx = p.IndexOf("## Self", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx > selfIdx && selfIdx >= 0, "capsule should render after ## Self");
+    }
+
     // ---- Intent-stack completion-predicate schema accuracy ----
     // The prompt teaches the LLM the JSON shape of completion predicates.
     // It MUST match the actual System.Text.Json polymorphic contract on

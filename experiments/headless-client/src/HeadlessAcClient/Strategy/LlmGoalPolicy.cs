@@ -471,6 +471,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetRecentSightings(IReadOnlyList<SightedRecallProjection>? sightings)
         => _currentRecentSightings = sightings;
 
+    // cp-2340 — interaction-target guids the server refused as out-of-reach
+    // and the Motor's InteractUnreachableTracker is currently suppressing.
+    // Surfaced as the "## Server-refused interaction targets" prompt block
+    // so the LLM is not blind to which guids the resolver will drop, and
+    // stops re-emitting an interaction goal that resolves only to a
+    // suppressed target. Pushed by the driver each tick before ProposeGoal.
+    // Null / empty = nothing currently suppressed.
+    private IReadOnlyList<UnreachableTargetProjection>? _currentUnreachableTargets;
+
+    /// <summary>
+    /// Driver-driven setter for the server-refused (out-of-reach)
+    /// suppression set. Called before ProposeGoal with the live entries of
+    /// the Motor's <c>InteractUnreachableTracker</c> projected to display
+    /// names + remaining cooldown. Null / empty = nothing to surface.
+    /// </summary>
+    public void SetUnreachableTargets(IReadOnlyList<UnreachableTargetProjection>? targets)
+        => _currentUnreachableTargets = targets;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -1557,7 +1575,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot());
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -3031,7 +3049,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlyList<SightedRecallProjection>? recentSightings = null,
         int? levelAtLandblockEntry = null,
         int? secondsSinceLastDeath = null,
-        GoalProgressSnapshot? goalProgress = null)
+        GoalProgressSnapshot? goalProgress = null,
+        IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4103,6 +4122,46 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
                 "Explore all remain executable right now. See `## Location & recency` above. Your call.");
+        }
+
+        // ── ## Server-refused interaction targets (end-of-prompt capsule) ─
+        // The cp-2338 InteractUnreachableTracker is a Motor-only guard: when
+        // the server refuses an interaction as out-of-reach, the Motor marks
+        // that guid and treats any goal that resolves to it as unresolved for
+        // a TTL cooldown — but nothing tells the LLM. Live runs show the LLM,
+        // blind to the suppression, re-emitting the SAME interaction goal
+        // (e.g. Use{Door}), which the resolver re-resolves to the suppressed
+        // guid and the Motor drops every cycle (the sticky-objective re-emit
+        // burned ~3 cycles on one suppressed door before a real LLM call
+        // escaped). Surface the SAME suppression set the Motor is enforcing,
+        // in the decision-proximate slot, so the LLM stops targeting a refused
+        // guid and picks a reachable one. Rendered whenever any guid is
+        // currently suppressed (raw-presence gate, no source-side threshold).
+        // RAW facts only — the server's own refusal + the Motor's current
+        // resolver behavior + the cooldown's remaining time; no valuation, no
+        // "avoid"/"skip"/"prefer", no instruction. Showing a currently-
+        // suppressed guid hides nothing the Motor would act on: it already
+        // drops these until the cooldown elapses. No game knowledge;
+        // perception of the Motor's own state. Guid-only when the name is no
+        // longer in the world projection.
+        if (unreachableTargets is { Count: > 0 })
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Server-refused interaction targets");
+            foreach (var u in unreachableTargets)
+            {
+                var label = string.IsNullOrEmpty(u.Name)
+                    ? $"guid=0x{u.Guid:X8}"
+                    : $"{u.Name} (guid=0x{u.Guid:X8})";
+                var secs = (int)System.Math.Max(0, System.Math.Round(u.RemainingCooldownSeconds));
+                sb.AppendLine(
+                    $"- {label}: the last interaction attempt with this guid was refused by the " +
+                    "server as out-of-reach; the resolver currently returns unresolved for any goal " +
+                    $"that resolves to it. Suppression expires in about {secs}s.");
+            }
+            sb.AppendLine(
+                "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
+                "Explore all remain executable right now. Your call.");
         }
 
         return FitPromptToCeiling(sb.ToString());
