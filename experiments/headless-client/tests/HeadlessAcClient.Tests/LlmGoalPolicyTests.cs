@@ -87,6 +87,68 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_WieldItemOnly_ParsesWithoutTarget()
+    {
+        // The LLM legitimately emits a Wield with the weapon in `item` and a
+        // null/absent target (the prompt schema never directs target=self for
+        // Wield). The Motor's Wield dispatch reads goal.Item, so this must
+        // parse instead of being discarded to the heuristic fallback.
+        var json = """{"kind":"Wield","target":null,"item":{"name":"Acid Ken"},"rationale":"arm up","priority":10}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Wield, g!.Kind);
+        Assert.Equal("Acid Ken", g.Item!.Name);
+        // Target is normalized to a non-null empty selector so downstream
+        // `goal.Target.*` consumers never dereference null.
+        Assert.NotNull(g.Target);
+        Assert.True(g.Target.IsEmpty);
+    }
+
+    [Fact]
+    public void TryParseGoal_WieldItemOnly_OmittedTarget_Parses()
+    {
+        // Same as above but the target field is omitted entirely (not explicit
+        // null) — the canonical model output shape.
+        var json = """{"kind":"Wield","item":{"name":"Shortbow"},"rationale":"arm up","priority":9}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Wield, g!.Kind);
+        Assert.Equal("Shortbow", g.Item!.Name);
+    }
+
+    [Fact]
+    public void TryParseGoal_WieldWithEmptyTargetAndNoItem_Rejected()
+    {
+        // A Wield carrying neither a target nor an item has nothing to wield —
+        // still rejected.
+        var json = """{"kind":"Wield","target":{},"item":null,"rationale":"x","priority":5}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_WieldWithTargetOnly_StillParses()
+    {
+        // The canonical fallback shape (target=self/weapon, item null) must keep
+        // working — the relaxation only ADDS the item-only path.
+        var json = """{"kind":"Wield","target":{"name":"self"},"item":null,"rationale":"x","priority":6}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Wield, g!.Kind);
+    }
+
+    [Fact]
+    public void TryParseGoal_NonWieldItemOnly_StillRejected()
+    {
+        // The item-only relaxation is Wield-scoped: a Use/Attack/Talk/Pickup
+        // with an item but no target is still rejected (their primary object is
+        // the target, not the item).
+        foreach (var kind in new[] { "Use", "Attack", "Talk", "Pickup" })
+        {
+            var json = $$"""{"kind":"{{kind}}","target":null,"item":{"name":"Acid Ken"},"rationale":"x","priority":4}""";
+            Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err), $"{kind} item-only should reject");
+            Assert.Contains("target", err);
+        }
+    }
+
+    [Fact]
     public void BuildUserPrompt_SchemaAndRules_AdvertiseRecallVerb()
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);

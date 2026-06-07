@@ -4319,11 +4319,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
             var parsed = JsonSerializer.Deserialize<Goal>(json, opts);
             if (parsed is null) { error = "deserialized to null"; return false; }
-            if (parsed.Kind != GoalKind.Recall &&
-                (parsed.Target is null || parsed.Target.IsEmpty))
+            // An explicit `"target": null` in the LLM JSON deserializes the
+            // non-nullable Goal.Target to null. Normalize it back to an empty
+            // (non-null) Selector so the emptiness checks below and every
+            // downstream `goal.Target.*` consumer stay NPE-safe.
+            if (parsed.Target is null)
             {
-                error = "target selector missing or empty";
-                return false;
+                parsed = parsed with { Target = new Selector() };
+            }
+            if (parsed.Kind != GoalKind.Recall && parsed.Target.IsEmpty)
+            {
+                // Wield's wielded object is logically the `item`, not the
+                // `target`: the Motor's Wield dispatch reads goal.Item (or an
+                // in-bag target) and already tolerates an empty target. The
+                // prompt schema lists both fields but never directs the LLM to
+                // set target=self for Wield, so the model legitimately emits the
+                // weapon in `item` with target=null. Accept an item-only Wield
+                // instead of discarding the LLM's decision to the heuristic
+                // fallback. All other verbs still require a target.
+                bool wieldHasItem =
+                    parsed.Kind == GoalKind.Wield &&
+                    parsed.Item is not null && !parsed.Item.IsEmpty;
+                if (!wieldHasItem)
+                {
+                    error = "target selector missing or empty";
+                    return false;
+                }
             }
             if (parsed.Kind == GoalKind.Give && (parsed.Item is null || parsed.Item.IsEmpty))
             {
