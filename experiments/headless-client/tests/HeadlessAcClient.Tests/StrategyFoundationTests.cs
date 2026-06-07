@@ -2367,6 +2367,129 @@ public class StrategyFoundationTests
         Assert.Equal(GoalKind.Talk, goal!.Kind);
         Assert.Equal(NpcGuid, goal.Target.Guid);
     }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntActive_SkipsFarOpenable_ChoosesExplore()
+    {
+        // Active Hunt + only a FAR openable (decorative chest) in view:
+        // the fallback must NOT detour to it (off-intent), and with no
+        // monster to decompose to, it falls through to Explore egress.
+        // This is the cp-2308 fix for the chest-touring milling observed
+        // when the LLM was 429-rate-limited under AC_BOTS_INITIAL_INTENT=Hunt.
+        const uint ChestGuid = 0x7A9B4002;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = ChestGuid, Name = "Chest", Wcid = 143u,
+                    ItemType = 0x200u, Distance = 31f,
+                    IsOpenable = true, IsChest = true, IsCorpse = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.NotEqual(GoalKind.Use, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntActive_StillUsesAdjacentOpenable()
+    {
+        // Active Hunt + an ADJACENT openable (the corpse of a kill we just
+        // made, within the no-detour radius): the fallback must STILL Use
+        // it so own-kill loot is not lost during an outage hunt. The gate
+        // is geometry-only — corpses and chests are treated identically;
+        // only proximity matters.
+        const uint CorpseGuid = 0x7A9B4003;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = CorpseGuid, Name = "Corpse of Drudge", Wcid = 21u,
+                    ItemType = 0x200u, Distance = 3f,
+                    IsOpenable = true, IsCorpse = true, IsChest = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(CorpseGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_NoHunt_StillUsesFarOpenable()
+    {
+        // Regression guard: with NO hunt commitment in scope, the
+        // openable-Use step is UNCHANGED — a far chest is still Used
+        // (the no-detour gate only applies while a hunt is active).
+        const uint ChestGuid = 0x7A9B4004;
+        var policy = new NoQuestKnowledgePolicy(); // no stack -> no hunt
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = ChestGuid, Name = "Chest", Wcid = 143u,
+                    ItemType = 0x200u, Distance = 31f,
+                    IsOpenable = true, IsChest = true, IsCorpse = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(ChestGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntActive_FarOpenablePresent_AttacksVisibleMonster()
+    {
+        // Active Hunt + a FAR openable AND a visible monster + melee
+        // wielded: with the far openable suppressed, the decomposer must
+        // win — the bot attacks the monster instead of touring the chest.
+        const uint ChestGuid   = 0x7A9B4005;
+        const uint MonsterGuid = 0x80000090;
+        const uint WeaponGuid  = 0x80000091;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = ChestGuid, Name = "Chest", Wcid = 143u,
+                    ItemType = 0x200u, Distance = 31f,
+                    IsOpenable = true, IsChest = true, IsCorpse = false,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = MonsterGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 5f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(MonsterGuid, goal.Target.Guid);
+    }
 }
 
 /// <summary>
