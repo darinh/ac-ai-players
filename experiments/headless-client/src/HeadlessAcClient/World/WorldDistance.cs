@@ -114,6 +114,31 @@ internal static class WorldDistance
     public static bool IsOutdoor(uint cellId) => (cellId & 0xFFFFu) < 0x100u;
 
     /// <summary>
+    /// True when two cell-ids lie in the SAME landblock or in
+    /// horizontally / vertically / diagonally ADJACENT landblocks
+    /// (Chebyshev distance &lt;= 1 on the 8-bit LandblockX = (c &gt;&gt; 24) &amp; 0xFF
+    /// and LandblockY = (c &gt;&gt; 16) &amp; 0xFF grid). Pure wire-coordinate
+    /// geometry: it decodes only the landblock bytes and IGNORES the
+    /// low-16-bit cell index, so two cells in the same landblock are
+    /// always adjacent regardless of their cell indices.
+    ///
+    /// Used to decide whether a freshly-sighted entity is near enough to
+    /// remember as a navigable target: a monster seen one landblock away
+    /// is reachable on foot and feeds the cross-landblock sighting
+    /// resolver, whereas a far/disconnected landblock (e.g. a stale
+    /// ObjectCreate from a teleport destination) is not adjacent and is
+    /// rejected.
+    /// </summary>
+    public static bool IsSameOrAdjacentLandblock(uint cellA, uint cellB)
+    {
+        var lxA = (int)((cellA >> 24) & 0xFF);
+        var lyA = (int)((cellA >> 16) & 0xFF);
+        var lxB = (int)((cellB >> 24) & 0xFF);
+        var lyB = (int)((cellB >> 16) & 0xFF);
+        return Math.Abs(lxA - lxB) <= 1 && Math.Abs(lyA - lyB) <= 1;
+    }
+
+    /// <summary>
     /// Try to compute squared distance between two snapshots. Returns
     /// false (and sets distance to NaN) if either snapshot lacks a
     /// CellId (no spatial state yet — pre-ObjectCreate observation).
