@@ -286,6 +286,25 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("movement_block_stops")]
     public int MovementBlockStopsSinceSelfMoved { get; init; }
 
+    /// <summary>
+    /// named-target frontier-search telemetry (copied from
+    /// <see cref="WorldState.NamedSearchTargetName"/> et al.). When the bot is
+    /// pursuing a named target it cannot see, these carry the current search run's
+    /// target name, probe count, and distinct-cells-tried so the "## Search
+    /// progress" prompt section can surface a stalled/repeating discovery search.
+    /// Null/0 ⇒ not currently searching ⇒ the section is omitted.
+    /// </summary>
+    [JsonPropertyName("named_search_target")]
+    public string? NamedSearchTargetName { get; init; }
+
+    /// <summary>Consecutive discovery probes on the current named-target search.</summary>
+    [JsonPropertyName("named_search_probes")]
+    public int NamedSearchProbeCount { get; init; }
+
+    /// <summary>Distinct frontier cells tried during the current named-target search.</summary>
+    [JsonPropertyName("named_search_distinct_cells")]
+    public int NamedSearchDistinctCells { get; init; }
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -514,6 +533,9 @@ internal sealed record WorldStateProjection
             CombatHistory = world.CombatHistory,
             KilledKindsThisDwell = world.KilledKindsThisDwell,
             MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,
+            NamedSearchTargetName = world.NamedSearchTargetName,
+            NamedSearchProbeCount = world.NamedSearchProbeCount,
+            NamedSearchDistinctCells = world.NamedSearchDistinctCells,
         };
     }
 

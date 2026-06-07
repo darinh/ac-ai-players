@@ -3805,6 +3805,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"walking from here (possible physical obstruction — e.g. boxed in or on a ledge).");
         }
 
+        // ── ## Search progress (named-target frontier search) ────────────
+        // Raw own-bookkeeping: when the bot pursues a NAMED target that is
+        // not visible, the Motor walks toward unexplored cells to discover
+        // it. Surface how many discovery probes the current search has spent
+        // and whether they are repeating cells already tried (probes >
+        // distinct cells ⇒ walking is not reaching new ground = a stalled
+        // search). Gated to >= 3 probes so a normal short walk-to-discover
+        // does not render. Pure facts; no advice, no game knowledge — the LLM
+        // decides whether the target is unreachable this way and what to do
+        // instead (e.g. open a Door, choose a different objective).
+        if (world.NamedSearchProbeCount >= 3 &&
+            !string.IsNullOrEmpty(world.NamedSearchTargetName))
+        {
+            var rawName = world.NamedSearchTargetName!;
+            var name = rawName.Length > 60 ? rawName.Substring(0, 60) : rawName;
+            sb.AppendLine("## Search progress");
+            var line =
+                $"- the named target '{name}' is still not visible after " +
+                $"{world.NamedSearchProbeCount} discovery move(s) toward unexplored cells " +
+                $"({world.NamedSearchDistinctCells} distinct cell(s) tried)";
+            if (world.NamedSearchProbeCount > world.NamedSearchDistinctCells)
+                line += "; the discovery moves are repeating cells already tried, so " +
+                        "walking is not reaching new ground";
+            line += ".";
+            sb.AppendLine(line);
+        }
+
         return FitPromptToCeiling(sb.ToString());
     }
 
