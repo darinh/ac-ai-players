@@ -7548,8 +7548,11 @@ public class LlmGoalPolicyTests
     [Fact]
     public void FormatThreatSummary_SingleNonHostile()
     {
+        // Non-hostile monsters are still valid XP targets; the line reads
+        // "0 attacking you now" (a neutral count) rather than the old
+        // "none currently hostile" which the LLM mis-read as "no target".
         Assert.Equal(
-            "- monsters in view: 1 (none currently hostile)",
+            "- monsters in view: 1 (0 attacking you now)",
             LlmGoalPolicy.FormatThreatSummary(1, 0));
     }
 
@@ -7569,6 +7572,32 @@ public class LlmGoalPolicyTests
         Assert.Equal(
             "- monsters in view: 1 (1 actively HOSTILE (attacking you now))",
             LlmGoalPolicy.FormatThreatSummary(1, 1));
+    }
+
+    [Fact]
+    public void FormatThreatSummary_MultipleNonHostile_ReadsZeroAttacking()
+    {
+        // The academy Sparring-Golem case (cp-2326): several non-hostile
+        // monsters in view must render "0 attacking you now", never the
+        // old reassuring "none currently hostile" wording.
+        Assert.Equal(
+            "- monsters in view: 7 (0 attacking you now)",
+            LlmGoalPolicy.FormatThreatSummary(7, 0));
+        Assert.DoesNotContain(
+            "none currently hostile",
+            LlmGoalPolicy.FormatThreatSummary(7, 0));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_StaticPreamble_CarriesNonHostileIsNotNonTargetRule()
+    {
+        // cp-2326: the prompt must explicitly tell the LLM that a visible
+        // non-hostile monster is still a valid XP target, so it stops
+        // exploring "to find monsters" while monsters are already in view.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null);
+        Assert.Contains("NON-HOSTILE IS NOT NON-TARGET", prompt);
+        Assert.Contains("0 attacking you now", prompt);
     }
 
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
