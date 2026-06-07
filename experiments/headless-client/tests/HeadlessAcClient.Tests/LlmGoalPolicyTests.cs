@@ -1126,6 +1126,44 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void LlmGoalPolicy_Prompt_SpendXpRuleCarriesFullAttributeMechanics()
+    {
+        // Regression guard for the spend-xp-attribute-balance slice. Live
+        // evidence (a level-9 bot at strength 10 / endurance 49 / everything
+        // else 10) showed the LLM pouring ALL its XP into endurance — the only
+        // attribute the old SPEND XP rule explained or exemplified — leaving it
+        // tanky but unable to land melee hits, so it lost fights of attrition
+        // and died. The fix surfaces the FULL attribute->effect mechanics as
+        // FACTS so the LLM can balance, and drops the single endurance-anchoring
+        // worked example. These assertions lock that in.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+
+        // The SPEND XP rule is still present with all three raise verbs.
+        Assert.Contains("SPEND XP", prompt);
+        Assert.Contains("RaiseAttribute", prompt);
+        Assert.Contains("RaiseVital", prompt);
+        Assert.Contains("RaiseSkill", prompt);
+
+        // Offensive + utility mechanics are now stated as facts, not just the
+        // defensive endurance->MAX HEALTH mechanic.
+        Assert.Contains("strength and coordination drive MELEE offense", prompt);
+        Assert.Contains("focus and self power magic", prompt);
+        Assert.Contains("quickness aids defense and missile play", prompt);
+        Assert.Contains("endurance and health raise MAX HEALTH", prompt);
+
+        // Anti-tunnel-vision + adaptive-allocation guidance (no fixed build).
+        Assert.Contains("there is NO fixed build", prompt);
+        Assert.Contains("Do NOT pour every point into ONE attribute", prompt);
+
+        // The single endurance-anchoring worked example is gone: the
+        // RaiseAttribute verb now uses a neutral <attribute> placeholder.
+        Assert.Contains("RaiseAttribute{target: {name: \"<attribute>\"}", prompt);
+        Assert.DoesNotContain("RaiseAttribute{target: {name: \"endurance\"}", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {
         // Deliberation-race regression guard. A fresh L1 bot in an
@@ -6486,18 +6524,23 @@ public class LlmGoalPolicyTests
     // points the LLM at the new `monsters in view` cluster signal. Bumped
     // 13500 -> 14500 (recall-lifestone-escape-verb) for the STUCK ESCAPE rule
     // (+ the `Recall` schema enum entry in both kind blocks) that gives the LLM
-    // a lifestone-recall verb to escape a physical-immobilization wedge. All
-    // are intentional, reviewed additions, not silent regrowth; the delta does
-    // not move the runtime 413 risk, which is driven by dense per-tick
-    // WORLD/visible sections, not the static floor.
+    // a lifestone-recall verb to escape a physical-immobilization wedge. Bumped
+    // 14500 -> 15200 (spend-xp-attribute-balance) for the rewritten SPEND XP
+    // rule: live evidence showed the LLM dumping all XP into endurance (the only
+    // attribute the old rule explained), so the rule now states the FULL
+    // attribute->effect mechanics (strength/coordination melee, focus/self
+    // magic, quickness defense/missile, endurance/health max HP) plus an
+    // adaptive no-fixed-build caution. All are intentional, reviewed additions,
+    // not silent regrowth; the delta does not move the runtime 413 risk, which
+    // is driven by dense per-tick WORLD/visible sections, not the static floor.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 14500,
-            $"static prompt floor grew to {prompt.Length} chars (budget 14500)");
+        Assert.True(prompt.Length <= 15200,
+            $"static prompt floor grew to {prompt.Length} chars (budget 15200)");
     }
 
     // ---- Recent goal outcomes section (cp-2299) ----
