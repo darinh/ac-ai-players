@@ -3036,7 +3036,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         sb.AppendLine("- SPEND XP: `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested — raise an attribute with `RaiseAttribute{target: {name: \"endurance\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), a vital pool with `RaiseVital{target: {name: \"health\"}, amount: <XP>}` (names: health, stamina, mana), or a trained skill with `RaiseSkill{target: {name: \"war magic\"}, amount: <XP>}` (use a name from `trained skills` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Endurance/health raise MAX HEALTH. Invest a chunk when max HP is low.");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
-        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
+        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `recent inbound damage` line shows hits you have TAKEN and total damage in the last few seconds — if it climbs while your absolute `health` is low you are losing: disengage (`Explore`) or `Recall` rather than fight to 0 HP. The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
@@ -3430,6 +3430,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"- current fight vs \"{cfName}\": swings landed {cf.SwingsLanded}, " +
                 $"evaded {cf.SwingsEvaded}, damage dealt {cf.DamageDealt}");
         }
+        // active-combat-telemetry: surface how much damage the bot has TAKEN
+        // recently. Lock-independent (a rolling TTL window in the Motor), so
+        // unlike the `current fight` line above it persists through a flee —
+        // the decisive moment when the LLM must weigh disengage/Recall vs
+        // fighting to 0 HP. RAW counts only; the LLM owns the decision.
+        if (FormatRecentInboundDamage(world.RecentInboundDamage) is string inboundDmgLine)
+            sb.AppendLine(inboundDmgLine);
         // combat-feel: surface the bot's own recorded outcomes per monster
         // KIND this session (kills / deaths / near-deaths). RAW counts
         // only — no danger label, no advice. The COMBAT SAFETY rule tells
@@ -4023,6 +4030,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             ? $"{hostilesInView} actively HOSTILE (attacking you now)"
             : "none currently hostile";
         return $"- monsters in view: {monstersInView} ({hostilePart})";
+    }
+
+    /// <summary>
+    /// Render the raw "recent inbound damage" line for `## Combat readiness`:
+    /// how many hits the bot has TAKEN and the total damage within the rolling
+    /// window. RAW facts only — no danger label, no advice; the COMBAT SAFETY
+    /// rule and the LLM own the fight-vs-flee/Recall interpretation. Returns
+    /// null when there is no recent inbound damage to report (so the line is
+    /// omitted and costs nothing when the bot is not under attack).
+    /// </summary>
+    internal static string? FormatRecentInboundDamage(RecentInboundDamage? damage)
+    {
+        if (damage is not { } d || d.Hits <= 0) return null;
+        var window = d.WindowSeconds.ToString("0.#");
+        var hitWord = d.Hits == 1 ? "hit" : "hits";
+        return $"- recent inbound damage: {d.Hits} {hitWord} taking {d.TotalDamage} " +
+               $"damage in the last ~{window}s";
     }
 
     internal static void AppendRecentSightings(

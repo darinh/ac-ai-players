@@ -54,6 +54,21 @@ internal sealed record CombatFightStatus(
     uint DamageDealt);
 
 /// <summary>
+/// active-combat-telemetry: a rolling-window summary of recent INBOUND
+/// damage the bot has TAKEN (landed DefenderNotification hits), surfaced to
+/// the LLM as raw perception in the "## Combat readiness" prompt section.
+/// Independent of the combat lock, so it persists through a flee when
+/// <see cref="CombatFightStatus"/> is cleared at the disengage reflex —
+/// which is exactly when the LLM needs the "I am still being hurt, this
+/// fast" trajectory to decide to disengage or Recall. Counts and sums only;
+/// source assigns no danger label and makes no fight-vs-flee decision.
+/// </summary>
+/// <param name="Hits">Inbound hits that landed on the bot within the window.</param>
+/// <param name="TotalDamage">Cumulative damage taken from those hits.</param>
+/// <param name="WindowSeconds">Length of the rolling window the counts cover.</param>
+internal sealed record RecentInboundDamage(int Hits, uint TotalDamage, double WindowSeconds);
+
+/// <summary>
 /// combat-feel ledger: a per-mob-identity summary of the bot's OWN
 /// observed combat outcomes against that kind of monster this session
 /// (kills, deaths, near-deaths). Surfaced to the LLM as raw recorded
@@ -185,6 +200,17 @@ internal sealed class WorldState
     /// — source never makes that decision itself.
     /// </summary>
     public CombatFightStatus? CurrentFight { get; set; }
+
+    /// <summary>
+    /// active-combat-telemetry: rolling-window summary of recent inbound
+    /// damage the bot has TAKEN, set/cleared by HandshakeDriver before each
+    /// projection build from a short TTL window of landed DefenderNotification
+    /// hits. Null when the bot has taken no damage recently. Lock-independent
+    /// so it survives a flee (when <see cref="CurrentFight"/> clears).
+    /// Surfaced as RAW perception in "## Combat readiness"; source makes no
+    /// fight-vs-flee decision.
+    /// </summary>
+    public RecentInboundDamage? RecentInboundDamage { get; set; }
 
     /// <summary>
     /// combat-feel ledger: per-mob-identity summary of the bot's own
