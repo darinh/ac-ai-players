@@ -79,6 +79,17 @@ internal sealed record VisibleObjectProjection
     [JsonPropertyName("is_openable")] public bool IsOpenable { get; init; }
 
     /// <summary>
+    /// For a Door-flagged object only: true if the door is currently OPEN,
+    /// false if CLOSED, null if its physics state is not yet known. Decoded
+    /// from the PhysicsState <c>Ethereal</c> bit (0x4): an ACE door becomes
+    /// Ethereal when open (so players pass through) and non-Ethereal when
+    /// closed (Source/ACE.Server/WorldObjects/Door.cs broadcasts this via
+    /// SetState 0xF74B). Pure wire-bit decode — no game knowledge; the LLM
+    /// decides whether a closed door is worth opening. null for non-doors.
+    /// </summary>
+    [JsonPropertyName("is_door_open")] public bool? IsDoorOpen { get; init; }
+
+    /// <summary>
     /// Slice U — true if this is a non-corpse, non-door openable Container
     /// (treasure chest, bookshelf, coffer, lockbox). Composite of
     /// ItemType.Container (0x200) AND ObjectDescriptionFlag.Openable (0x1)
@@ -305,6 +316,12 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("named_search_distinct_cells")]
     public int NamedSearchDistinctCells { get; init; }
 
+    /// <summary>
+    /// PhysicsState <c>Ethereal</c> bit (Source/ACE.Entity/Enum/PhysicsState.cs).
+    /// An ACE door is Ethereal when open and non-Ethereal when closed.
+    /// </summary>
+    private const uint PhysicsStateEthereal = 0x00000004u;
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -387,6 +404,16 @@ internal sealed record WorldStateProjection
                 var isStuck     = (descFlags & (uint)ObjectDescriptionFlag.Stuck)     != 0;
                 var isAttackable = (descFlags & (uint)ObjectDescriptionFlag.Attackable) != 0;
 
+                // Door open/closed affordance — decoded ONLY for Door-flagged
+                // objects from the PhysicsState Ethereal bit (0x4). An ACE door
+                // flips Ethereal on when open / off when closed and broadcasts
+                // it (Door.cs). null when the door's physics state is unknown
+                // (e.g. before the first ObjectCreate/SetState carries it) so we
+                // never assert "closed" without evidence. Mechanical wire decode.
+                bool? isDoorOpen = null;
+                if (isDoor && o.PhysicsState is uint ps)
+                    isDoorOpen = (ps & PhysicsStateEthereal) != 0;
+
                 // Slice U — composite predicates the LLM can read directly
                 // out of the visible-nearby projection. Building them here
                 // keeps the prompt rendering simple (just check the bool)
@@ -425,6 +452,7 @@ internal sealed record WorldStateProjection
                     IsVendor = isVendor,
                     IsHealer = isHealer,
                     IsOpenable = isOpenable,
+                    IsDoorOpen = isDoorOpen,
                     IsChest = isChest,
                     IsBook = isBook,
                     IsSign = isSign,
