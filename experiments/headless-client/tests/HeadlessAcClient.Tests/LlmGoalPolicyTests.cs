@@ -2278,6 +2278,138 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("NEVER skip an unopened chest", p);
     }
 
+    // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
+    // A bloated bag of duplicate quest items was rendered one-row-per-item and
+    // (being an early, non-trimmable section) pushed the later FIXED sections
+    // (`## Combat readiness`, `## Visible nearby`) past the hard ceiling, where
+    // the defensive cut deleted them — bricking the bot (it could not see it
+    // was armed and looped Wield). These lock the collapse + the bound.
+
+    private static WorldStateProjection BuildInventoryWorld(
+        InventoryItemProjection[] inventory, VisibleObjectProjection[]? visible = null)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B4u, CellId = 0xA9B40001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = inventory,
+            Visible = visible ?? System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+    private static InventoryItemProjection ListItem(uint guid) => new InventoryItemProjection
+    {
+        Guid = guid, Name = "A List of Items", Wcid = 30491u,
+        ShortDesc = "Worcer in Holtburg is requesting help retrieving these items from the Holtburg Redoubt.",
+    };
+
+    [Fact]
+    public void BuildUserPrompt_Inventory_CollapsesDuplicateStacksWithCount()
+    {
+        var inv = Enumerable.Range(0, 30).Select(i => ListItem(0x1000u + (uint)i)).ToArray();
+        var world = BuildInventoryWorld(inv);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        // One collapsed row with the count, not 30 separate rows.
+        Assert.Contains("- A List of Items (wcid=30491) x30", prompt);
+        // The item line renders exactly once (the xN replaces the repeats).
+        var rowOccurrences = System.Text.RegularExpressions.Regex.Matches(
+            prompt, @"- A List of Items \(wcid=30491\)").Count;
+        Assert.Equal(1, rowOccurrences);
+        // short_desc renders once for the group, not 30 times.
+        var sdOccurrences = System.Text.RegularExpressions.Regex.Matches(
+            prompt, "Holtburg Redoubt").Count;
+        Assert.Equal(1, sdOccurrences);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_Inventory_DistinctItems_NoCountSuffix()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection { Guid = 0x1u, Name = "Sack", Wcid = 166u },
+            new InventoryItemProjection { Guid = 0x2u, Name = "Pathwarden Supply Key", Wcid = 33608u },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+
+        Assert.Contains("- Sack (wcid=166)", prompt);
+        Assert.Contains("- Pathwarden Supply Key (wcid=33608)", prompt);
+        // No spurious xN count for singletons.
+        Assert.DoesNotContain("- Sack (wcid=166) x", prompt);
+        Assert.DoesNotContain("- Pathwarden Supply Key (wcid=33608) x", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_Inventory_WieldedAndBaggedSameItem_NotCollapsed()
+    {
+        // Same name+wcid but different wielded state are distinct facts and
+        // must render as separate rows (one wielded@, one bagged).
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Training Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u },
+            new InventoryItemProjection
+            { Guid = 0x2u, Name = "Training Spadone", Wcid = 1u, ItemType = 0x1u },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+
+        Assert.Contains("- Training Spadone (wcid=1, wielded@0x2000000)", prompt);
+        Assert.Contains("- Training Spadone (wcid=1)", prompt);
+        // Neither collapsed into the other (the count suffix form is ") xN").
+        Assert.DoesNotContain(") x2", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_BloatedInventory_FixedSectionsSurviveTruncation()
+    {
+        // THE regression: a bag flooded with duplicate quest notes plus a
+        // wielded melee weapon and a visible monster. After the build, the
+        // later FIXED sections MUST still be present and the whole prompt must
+        // honor the hard ceiling. Before the dedup+bound fix the inventory ate
+        // the budget and these were truncated away.
+        var inv = new System.Collections.Generic.List<InventoryItemProjection>();
+        for (uint i = 0; i < 60; i++) inv.Add(ListItem(0x1000u + i));
+        inv.Add(new InventoryItemProjection
+        { Guid = 0x9u, Name = "Training Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u });
+        var visible = new[]
+        {
+            new VisibleObjectProjection { Guid = 0x404u, Name = "Cow", Wcid = 24937u, Distance = 6f, IsMonster = true },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv.ToArray(), visible), new EventStream(), null);
+
+        Assert.True(prompt.Length <= 26000, $"prompt length {prompt.Length} exceeds ceiling");
+        Assert.Contains("## Combat readiness", prompt);
+        Assert.Contains("melee weapon wielded", prompt);
+        Assert.Contains("## Visible nearby", prompt);
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_TrimsInventoryBeforeGuillotiningFixedSections()
+    {
+        // Directly exercise the cascade addition: a huge `## Inventory` of
+        // DISTINCT rows (dedup can't help) followed by a FIXED section. The
+        // cascade must shed inventory trailing rows so the fixed section that
+        // renders AFTER it survives, rather than the hard-cut deleting it.
+        var sb = new StringBuilder();
+        sb.AppendLine("## Inventory");
+        for (int i = 0; i < 400; i++) sb.AppendLine($"- Unique Item {i} (wcid={1000 + i})");
+        sb.AppendLine("## Combat readiness");
+        sb.AppendLine("- weapon: melee weapon wielded");
+        var raw = sb.ToString();
+        Assert.True(raw.Length > 600);
+
+        var fitted = LlmGoalPolicy.FitPromptToCeiling(raw, ceiling: 600);
+
+        Assert.True(fitted.Length <= 600, $"fitted length {fitted.Length} exceeds ceiling");
+        Assert.Contains("## Combat readiness", fitted);
+        Assert.Contains("- weapon: melee weapon wielded", fitted);
+        Assert.Contains("## Inventory", fitted);
+        Assert.Contains("omitted to fit prompt budget", fitted);
+    }
+
+
     [Fact]
     public void BuildUserPrompt_RetainsEarlyExitPopup_UnderLaterPopupFlood()
     {

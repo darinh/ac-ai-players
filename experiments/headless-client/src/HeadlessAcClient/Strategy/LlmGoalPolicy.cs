@@ -3323,13 +3323,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         sb.AppendLine("## Inventory");
         if (world.Inventory.Count == 0) sb.AppendLine("- (empty)");
-        else foreach (var i in world.Inventory)
+        else
         {
-            sb.Append($"- {i.Name} (wcid={i.Wcid}");
-            if (i.WieldedAt is uint w && w != 0) sb.Append($", wielded@0x{w:X}");
-            sb.AppendLine(")");
-            if (!string.IsNullOrWhiteSpace(i.ShortDesc))
-                sb.AppendLine($"    short_desc: {i.ShortDesc}");
+            // Collapse identical inventory entries (same name, wcid, rendered
+            // short_desc, and wielded state) into ONE row carrying an `xN`
+            // count, preserving first-seen order. A bloated bag — e.g. dozens
+            // of duplicate quest notes or portal gems — otherwise floods this
+            // early section and shoves the later FIXED decision sections
+            // (`## Combat readiness`, `## Visible nearby`) past the hard prompt
+            // ceiling, where they are truncated away entirely. This is purely
+            // mechanical equality-counting of identical RENDERED facts (mirrors
+            // the deduped `(repeated xN)` server-hint surface): no name/wcid/
+            // type heuristic, no game knowledge. Goal resolution is unaffected
+            // — the picker matches against world.Inventory, not this text, and
+            // this section prints no per-item guid.
+            var invCounts = new Dictionary<(string Name, uint Wcid, string ShortDesc, uint Wielded), int>();
+            var invOrder = new List<(string Name, uint Wcid, string ShortDesc, uint Wielded)>();
+            foreach (var i in world.Inventory)
+            {
+                var sd = string.IsNullOrWhiteSpace(i.ShortDesc) ? "" : i.ShortDesc!.Trim();
+                var wielded = i.WieldedAt is uint iw ? iw : 0u;
+                var key = (i.Name, i.Wcid, sd, wielded);
+                if (invCounts.TryGetValue(key, out var c)) invCounts[key] = c + 1;
+                else { invCounts[key] = 1; invOrder.Add(key); }
+            }
+            foreach (var key in invOrder)
+            {
+                var n = invCounts[key];
+                sb.Append($"- {key.Name} (wcid={key.Wcid}");
+                if (key.Wielded != 0) sb.Append($", wielded@0x{key.Wielded:X}");
+                sb.Append(")");
+                if (n > 1) sb.Append($" x{n}");
+                sb.AppendLine();
+                if (key.ShortDesc.Length > 0)
+                    sb.AppendLine($"    short_desc: {key.ShortDesc}");
+            }
         }
         sb.AppendLine();
 
@@ -4010,12 +4038,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // the least actionable, then historical events, then the FAR end of
     // the nearest-first visible list. This order keeps the most actionable
     // content (nearest visible objects, and every fixed section such as
-    // `## Combat readiness`) intact longest.
+    // `## Combat readiness`) intact longest. `## Inventory` is last-resort
+    // trimmable: its rows are deduped (xN-collapsed) at render time so it is
+    // normally small, but a pathological bag of many DISTINCT items could
+    // still bloat it; trimming its trailing rows here is preferable to the
+    // defensive hard-cut guillotining the FIXED sections that render after
+    // it. Trimming is by trailing-row count only — no in-game-type priority.
     private static readonly string[] PromptTrimOrder =
     {
         "## Recently sighted (out of view)",
         "## Recent events (newest first)",
         "## Visible nearby",
+        "## Inventory",
     };
 
     internal static string FitPromptToCeiling(string prompt, int ceiling = HardUserPromptCeilingChars)
