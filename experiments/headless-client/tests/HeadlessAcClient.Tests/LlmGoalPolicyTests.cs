@@ -7979,15 +7979,32 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_StaticPreamble_CarriesNonHostileIsNotNonTargetRule()
+    public void BuildUserPrompt_NonHostileRule_RendersWhenMonsterVisible()
     {
         // cp-2326: the prompt must explicitly tell the LLM that a visible
         // non-hostile monster is still a valid XP target, so it stops
         // exploring "to find monsters" while monsters are already in view.
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            BuildExitTokenWorld(), new EventStream(), null);
+        // cp-2335: the rule renders ONLY when a monster is actually in view
+        // (the wire fact it references). A non-hostile Mob suffices.
+        var world = BuildExitTokenWorld() with
+        {
+            Visible = new[] { Mob(0x901u, "Black Rabbit", 2566u) },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("NON-HOSTILE IS NOT NON-TARGET", prompt);
         Assert.Contains("0 attacking you now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NonHostileRule_OmittedWhenNoMonsterVisible()
+    {
+        // cp-2335: with no monster (or observed-hostile) in view the rule
+        // references absent `nearest monster`/`monsters in view` telemetry,
+        // so it is omitted to shrink the static preamble. BuildExitTokenWorld
+        // shows only Jonathan (an npc, IsMonster unset).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("NON-HOSTILE IS NOT NON-TARGET", prompt);
     }
 
     [Fact]
