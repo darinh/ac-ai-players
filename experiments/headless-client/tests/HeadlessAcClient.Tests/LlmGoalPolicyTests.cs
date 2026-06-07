@@ -2985,6 +2985,92 @@ public class LlmGoalPolicyTests
         Assert.Equal(4, proj.MovementBlockStopsSinceSelfMoved);
     }
 
+    // ── named-target search telemetry ("## Search progress" section) ─────
+    private static WorldStateProjection BuildNamedSearchWorld(
+        string? targetName, int probes, int distinctCells) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u, CellId = 0x860201ADu,
+            PositionX = 1.0f, PositionY = 2.0f, PositionZ = 3.0f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        NamedSearchTargetName = targetName,
+        NamedSearchProbeCount = probes,
+        NamedSearchDistinctCells = distinctCells,
+    };
+
+    [Fact]
+    public void SearchProgress_BelowThreshold_SectionOmitted()
+    {
+        // A normal short walk-to-discover (1-2 probes) must not nag.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildNamedSearchWorld("Agent", 2, 2), new EventStream(), null);
+        Assert.DoesNotContain("## Search progress", prompt);
+    }
+
+    [Fact]
+    public void SearchProgress_NoTargetName_SectionOmitted()
+    {
+        // Probe count high but no named target ⇒ nothing to render.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildNamedSearchWorld(null, 9, 5), new EventStream(), null);
+        Assert.DoesNotContain("## Search progress", prompt);
+    }
+
+    [Fact]
+    public void SearchProgress_AtThreshold_RendersRawFacts()
+    {
+        // 3 probes over 3 distinct cells: searching, but NOT yet repeating.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildNamedSearchWorld("Agent", 3, 3), new EventStream(), null);
+        Assert.Contains("## Search progress", prompt);
+        Assert.Contains("the named target 'Agent' is still not visible after 3 discovery move(s)", prompt);
+        Assert.Contains("3 distinct cell(s) tried", prompt);
+        // probes == distinct ⇒ no "repeating cells" clause.
+        Assert.DoesNotContain("repeating cells already tried", prompt);
+    }
+
+    [Fact]
+    public void SearchProgress_RepeatingCells_RendersStalledClause()
+    {
+        // 28 probes but only 5 distinct cells: the search is revisiting ground
+        // (the live academy "Talk Agent" loop) — surface the stall.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildNamedSearchWorld("Agent", 28, 5), new EventStream(), null);
+        Assert.Contains("## Search progress", prompt);
+        Assert.Contains("after 28 discovery move(s)", prompt);
+        Assert.Contains("5 distinct cell(s) tried", prompt);
+        Assert.Contains("repeating cells already tried", prompt);
+        Assert.Contains("not reaching new ground", prompt);
+    }
+
+    [Fact]
+    public void SearchProgress_ProjectionCarriesFields_FromWorldState()
+    {
+        var world = new HeadlessAcClient.World.WorldState();
+        world.NamedSearchTargetName = "Agent";
+        world.NamedSearchProbeCount = 7;
+        world.NamedSearchDistinctCells = 4;
+        Assert.Equal("Agent", world.NamedSearchTargetName);
+        var proj = BuildNamedSearchWorld("Agent", 7, 4);
+        Assert.Equal("Agent", proj.NamedSearchTargetName);
+        Assert.Equal(7, proj.NamedSearchProbeCount);
+        Assert.Equal(4, proj.NamedSearchDistinctCells);
+    }
+
+    [Fact]
+    public void SearchProgress_LongTargetName_Truncated()
+    {
+        var longName = new string('x', 100);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildNamedSearchWorld(longName, 5, 5), new EventStream(), null);
+        Assert.Contains("## Search progress", prompt);
+        Assert.Contains(new string('x', 60), prompt);
+        Assert.DoesNotContain(new string('x', 61), prompt);
+    }
+
     [Fact]
     public void CombatReadiness_UnwieldedBagWeapon_SurfacesWieldAffordance()
     {

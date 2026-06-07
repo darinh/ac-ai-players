@@ -277,6 +277,31 @@ internal sealed class WorldState
     /// </summary>
     public int MovementBlockStopsSinceSelfMoved { get; set; }
 
+    /// <summary>
+    /// named-target frontier-search telemetry: when an LLM goal names a target
+    /// that is not currently visible, the Motor drives inert "frontier probes"
+    /// (walks toward unexplored cells) to discover it. These three fields record
+    /// the CURRENT consecutive search run — its target name, how many discovery
+    /// probes it has launched, and how many DISTINCT frontier cells it has tried
+    /// — so the prompt can surface a stalled/repeating search (probes &gt; distinct
+    /// cells ⇒ the bot is revisiting ground it already covered without finding the
+    /// target). Published by HandshakeDriver before each projection build and reset
+    /// when the bot locks a real (resolved) target or the search key changes
+    /// (different goal kind / target name / landblock). Pure own-bookkeeping; the
+    /// LLM decides whether the target is unreachable this way and what to do
+    /// instead (e.g. open a Door, pick a different objective). Source assigns no
+    /// urgency and takes no autonomous action.
+    /// </summary>
+    public string? NamedSearchTargetName { get; set; }
+
+    /// <summary>Consecutive discovery probes spent on the current named-target
+    /// search (see <see cref="NamedSearchTargetName"/>). 0 when not searching.</summary>
+    public int NamedSearchProbeCount { get; set; }
+
+    /// <summary>Distinct frontier cells tried during the current named-target
+    /// search (see <see cref="NamedSearchTargetName"/>).</summary>
+    public int NamedSearchDistinctCells { get; set; }
+
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;
 

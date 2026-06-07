@@ -900,6 +900,17 @@ internal sealed class HandshakeDriver : IDisposable
         // completed — the goal's named target becomes perceivable once the
         // probed room loads, so the selector must re-resolve it next tick.
         bool                 motionIsFrontierProbe = false;
+        // Named-target frontier-search telemetry: when an LLM goal names a
+        // target that is not visible, the Motor frontier-probes to discover it
+        // (see ~5592). Track the CURRENT consecutive search run keyed by
+        // kind|normalized-name|landblock so the LLM re-emitting the same
+        // Talk{X} with a fresh goal id does NOT reset the count. Published to
+        // WorldState each projection build and surfaced as raw "## Search
+        // progress" facts; reset when a real target locks or the key changes.
+        string?              namedSearchKey   = null;
+        string?              namedSearchName  = null;
+        int                  namedSearchProbes = 0;
+        var                  namedSearchCells = new HashSet<uint>();
         // Deliberation-race guard (road-to-endgame Phase A1): the Goal.Id
         // this motion lock was created to EXECUTE, or null for locks that
         // own no tactics goal (auto-loot, picker no-op arrival, frontier
@@ -4050,6 +4061,27 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     worldState.MovementBlockStopsSinceSelfMoved = movementBlockStopsSinceSelfMoved;
 
+                    // Named-target search telemetry: if the bot has crossed into
+                    // a different landblock since the search started, the old
+                    // search run is stale (its frontier cells belonged to the
+                    // prior landblock) — clear it so the prompt does not show a
+                    // search that is no longer happening here. (A real-target
+                    // lock and a search-key change also reset it elsewhere.)
+                    if (namedSearchKey is not null && worldState.Self?.CellId is uint nsSelfCell)
+                    {
+                        var nsCurLb = $"{((nsSelfCell >> 16) & 0xFFFF):X4}";
+                        if (!namedSearchKey.EndsWith("|" + nsCurLb, StringComparison.Ordinal))
+                        {
+                            namedSearchKey    = null;
+                            namedSearchName   = null;
+                            namedSearchProbes = 0;
+                            namedSearchCells.Clear();
+                        }
+                    }
+                    worldState.NamedSearchTargetName    = namedSearchName;
+                    worldState.NamedSearchProbeCount    = namedSearchProbes;
+                    worldState.NamedSearchDistinctCells = namedSearchCells.Count;
+
                     var projection = WorldStateProjection.FromWorldState(
                         worldState, weenies, visibleRadius: 120f, maxVisible: 48);
                     // Slice R wiring — pump lifetime stat counters and
@@ -4129,6 +4161,41 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
+
+                    // Named-target search continuity: the search telemetry
+                    // belongs to ONE LLM pursuit (its goal kind + target name).
+                    // If the current goal is no longer that same named pursuit
+                    // — the LLM switched to Explore/picker/another target, the
+                    // goal cleared, or an unresolved goal fell through — the
+                    // search run is over, so clear the counters here (once per
+                    // decision) before any branch renders stale "## Search
+                    // progress". A continuing same-name pursuit (re-emitted with
+                    // a fresh goal id, or preserved across a probe walk) keeps
+                    // its count; the frontier-probe branch re-keys/increments it.
+                    // Skip while a frontier probe is in flight: during the
+                    // multi-tick walk toward an unexplored cell, tactics may
+                    // momentarily yield no goal even though the search IS still
+                    // ongoing — clearing then would wipe the count every probe.
+                    if (namedSearchKey is not null && !motionIsFrontierProbe)
+                    {
+                        string? curKindName =
+                            (goal is not null && goal.Kind != GoalKind.Explore &&
+                             !string.IsNullOrWhiteSpace(goal.Target.Name))
+                                ? $"{goal.Kind}|{goal.Target.Name!.Trim().ToLowerInvariant()}"
+                                : null;
+                        var sepIdx = namedSearchKey.LastIndexOf('|');
+                        var storedKindName = sepIdx > 0
+                            ? namedSearchKey.Substring(0, sepIdx)
+                            : namedSearchKey;
+                        if (curKindName is null || !string.Equals(
+                                curKindName, storedKindName, StringComparison.Ordinal))
+                        {
+                            namedSearchKey    = null;
+                            namedSearchName   = null;
+                            namedSearchProbes = 0;
+                            namedSearchCells.Clear();
+                        }
+                    }
 
                     // Lifestone-recall quiescence — computed HERE, before any
                     // goal-dispatch branch can send a movement/AP, so the whole
@@ -5603,6 +5670,31 @@ internal sealed class HandshakeDriver : IDisposable
                                     if (WorldDistance.TrySquaredDistance(tacticsSelf, frontier, out var d2fr))
                                         motionInitialDistance = (float)Math.Sqrt(d2fr);
 
+                                    // Named-target search telemetry: this probe
+                                    // is a discovery step for an unresolved,
+                                    // not-yet-visible named target. Count it
+                                    // against a stable kind|name|landblock key
+                                    // (Explore's own purpose IS reaching new
+                                    // cells, so it is excluded — it is not a
+                                    // failed search for a named target).
+                                    if (goal.Kind != GoalKind.Explore &&
+                                        !string.IsNullOrWhiteSpace(goal.Target?.Name))
+                                    {
+                                        var nsLb   = (tacticsSelfCell >> 16) & 0xFFFF;
+                                        var nsNorm = goal.Target!.Name!.Trim().ToLowerInvariant();
+                                        var nsKey  = $"{goal.Kind}|{nsNorm}|{nsLb:X4}";
+                                        if (nsKey != namedSearchKey)
+                                        {
+                                            namedSearchKey    = nsKey;
+                                            namedSearchName   = goal.Target!.Name!.Trim();
+                                            namedSearchProbes = 0;
+                                            namedSearchCells.Clear();
+                                        }
+                                        namedSearchProbes++;
+                                        if (frontier.CellId is uint nsCell)
+                                            namedSearchCells.Add(nsCell);
+                                    }
+
                                     autonomousPositionSent = true;
                                     autonomousPositionPacketIndex = count;
 
@@ -5666,6 +5758,15 @@ internal sealed class HandshakeDriver : IDisposable
 
                                 motionTarget   = targetSnap;
                                 motionRotation = rot;
+                                // Named-target search resolved: the target the
+                                // bot was frontier-searching for is now a live,
+                                // locked object, so the discovery-search run is
+                                // over. Clear the telemetry so the "## Search
+                                // progress" line stops rendering.
+                                namedSearchKey    = null;
+                                namedSearchName   = null;
+                                namedSearchProbes = 0;
+                                namedSearchCells.Clear();
                                 // Snapshot the goal kind at lock time
                                 // so the action-send branch dispatches
                                 // the correct verb even if Tactics
