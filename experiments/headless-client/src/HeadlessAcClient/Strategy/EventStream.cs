@@ -113,18 +113,20 @@ internal enum EventKind
     // Name = the defender's
     // display name, Text = the raw "landed N / evaded M" summary.
     CombatFeedback          = 18,
-    // self-progress wake (cp-2280): the bot's unspent experience (the
-    // spendable self-progress resource, PropertyInt64 AvailableExperience)
-    // first became KNOWN or crossed a coarse order-of-magnitude band. The
-    // Motor emits ONE deduped event (per band) carrying RAW self facts
-    // (unspent XP, lifetime total, current/peak HP, level). Structural
-    // salience wake ONLY — a direct analogue of CombatFeedback: it makes
-    // the LLM re-read `## Self` early instead of discovering an XP balance
-    // only by diffing successive projections. Source assigns NO urgency,
-    // names NO attribute/skill, and says NOTHING about spending — WHAT to
-    // do with the XP is owned entirely by the prompt RULES (SPEND XP). The
-    // band is a generic magnitude-visibility bucket (log10), NOT an
-    // attribute/skill XP cost. Text = the raw self-fact summary.
+    // self-progress wake (cp-2280, generalized to a value-edge): the bot's
+    // unspent experience (the spendable self-progress resource, PropertyInt64
+    // AvailableExperience) took a NEW value — either first became KNOWN or
+    // differs from the last observed value. The Motor emits ONE deduped event
+    // (consecutive value-edge) carrying RAW self facts (unspent XP, lifetime
+    // total, current/peak HP, level). Structural salience wake ONLY — a
+    // direct analogue of CombatFeedback: it makes the LLM re-read `## Self`
+    // (e.g. after an instant XP-spend, which emits no external salient event)
+    // instead of discovering an XP balance only by diffing successive
+    // projections. Source assigns NO urgency, names NO attribute/skill, and
+    // says NOTHING about spending — WHAT to do with the XP is owned entirely
+    // by the prompt RULES (SPEND XP). Dedup is an exact value-edge, NOT a
+    // magnitude band — no judgement about how much XP change is material.
+    // Text = the raw self-fact summary.
     SelfProgressChanged     = 19,
     // visible-recent-interaction (2026-06-06): the Motor just completed
     // a SPATIAL interact (Use without an item, or Pickup) against a world

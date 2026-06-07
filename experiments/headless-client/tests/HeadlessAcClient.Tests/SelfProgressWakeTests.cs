@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Tests for the SelfProgressChanged structural wake (cp-2280): a one-shot,
-// per-connection salience nudge fired the FIRST time the bot's unspent XP
-// is known. A direct analogue of the CombatFeedback wake — it surfaces RAW
-// self facts (unspent XP, total, current/peak HP, level), assigns no
-// urgency, names no attribute, applies no magnitude judgment, and says
-// nothing about spending, so the prompt RULES stay the sole owner of WHAT
-// to do.
+// Tests for the SelfProgressChanged structural wake (cp-2280, generalized to
+// a consecutive value-edge): a per-connection salience nudge fired the FIRST
+// time the bot's unspent XP is known AND whenever the decoded unspent-XP value
+// changes. A direct analogue of the CombatFeedback wake — it surfaces RAW
+// self facts (unspent XP, total, current/peak HP, level), assigns no urgency,
+// names no attribute, applies no magnitude judgment, and says nothing about
+// spending, so the prompt RULES stay the sole owner of WHAT to do.
 
 using HeadlessAcClient.Protocol;
 using HeadlessAcClient.Strategy;
@@ -16,15 +16,15 @@ namespace HeadlessAcClient.Tests;
 public class SelfProgressWakeTests
 {
     [Fact]
-    public void TryBuild_FirstKnownXp_EmitsAndSetsOneShot()
+    public void TryBuild_FirstKnownXp_EmitsAndStampsValue()
     {
-        bool sent = false;
+        long? last = null;
         var built = HandshakeDriver.TryBuildSelfProgressEvent(
             unspentXp: 82659, totalXp: 84199, level: 10,
-            hpCurrent: 3, hpMax: 5, ref sent, out var ev, out var log);
+            hpCurrent: 3, hpMax: 5, ref last, out var ev, out var log);
 
         Assert.True(built);
-        Assert.True(sent);
+        Assert.Equal(82659, last);
         Assert.Equal(EventKind.SelfProgressChanged, ev.Kind);
         Assert.Contains("82659 unspent experience", ev.Text);
         Assert.Contains("84199 total", ev.Text);
@@ -36,9 +36,9 @@ public class SelfProgressWakeTests
     [Fact]
     public void TryBuild_TextHasNoDirectiveOrAttribute()
     {
-        bool sent = false;
+        long? last = null;
         HandshakeDriver.TryBuildSelfProgressEvent(
-            82659, 84199, 10, 3, 5, ref sent, out var ev, out _);
+            82659, 84199, 10, 3, 5, ref last, out var ev, out _);
 
         // Raw facts only: never tell the LLM WHAT to do or WHICH attribute.
         var text = ev.Text!.ToLowerInvariant();
@@ -51,41 +51,62 @@ public class SelfProgressWakeTests
     }
 
     [Fact]
-    public void TryBuild_SecondCall_IsSuppressedOneShot()
+    public void TryBuild_SameValueAgain_IsSuppressed()
     {
-        bool sent = false;
+        long? last = null;
         Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
-            82659, 84199, 10, 3, 5, ref sent, out _, out _));
+            82659, 84199, 10, 3, 5, ref last, out _, out _));
 
-        // Once fired, no later reading re-emits — even a large change. The
-        // ## Self line and the SPEND XP prompt rule own ongoing reaction.
+        // Unchanged unspent-XP value (even with other facts moving) does not
+        // re-emit — only a value-edge wakes the LLM.
         Assert.False(HandshakeDriver.TryBuildSelfProgressEvent(
-            150000, 160000, 11, 8, 12, ref sent, out _, out _));
-        Assert.True(sent);
+            82659, 90000, 11, 8, 12, ref last, out _, out _));
+        Assert.Equal(82659, last);
     }
 
     [Fact]
-    public void TryBuild_UnknownXp_DoesNotEmitOrTripOneShot()
+    public void TryBuild_ChangedValue_ReEmits()
     {
-        bool sent = false;
+        long? last = null;
+        Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
+            82659, 84199, 10, 3, 5, ref last, out _, out _));
+
+        // A NEW unspent-XP value (e.g. after an instant XP-spend) re-emits so
+        // the LLM wakes to re-read ## Self instead of idling to the stuck
+        // timeout. This is the post-spend tempo fix.
+        Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
+            81659, 84199, 10, 3, 5, ref last, out var ev, out _));
+        Assert.Contains("81659 unspent experience", ev.Text);
+        Assert.Equal(81659, last);
+
+        // And a further distinct change re-emits again.
+        Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
+            80659, 84199, 10, 3, 5, ref last, out _, out _));
+        Assert.Equal(80659, last);
+    }
+
+    [Fact]
+    public void TryBuild_UnknownXp_DoesNotEmitOrStamp()
+    {
+        long? last = null;
         Assert.False(HandshakeDriver.TryBuildSelfProgressEvent(
             unspentXp: null, totalXp: null, level: null,
-            hpCurrent: null, hpMax: null, ref sent, out _, out _));
-        // One-shot NOT tripped: a later known reading must still be able to
-        // fire (login may surface XP after some null-XP messages).
-        Assert.False(sent);
+            hpCurrent: null, hpMax: null, ref last, out _, out _));
+        // Stamp NOT set: a later known reading must still be able to fire
+        // (login may surface XP after some null-XP messages).
+        Assert.Null(last);
         Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
-            500, null, null, null, null, ref sent, out _, out _));
-        Assert.True(sent);
+            500, null, null, null, null, ref last, out _, out _));
+        Assert.Equal(500, last);
     }
 
     [Fact]
     public void TryBuild_MissingOptionalFacts_RendersUnknownPlaceholders()
     {
-        bool sent = false;
+        long? last = null;
         var built = HandshakeDriver.TryBuildSelfProgressEvent(
             unspentXp: 500, totalXp: null, level: null,
-            hpCurrent: null, hpMax: null, ref sent, out var ev, out _);
+            hpCurrent: null, hpMax: null, ref last, out var ev, out _);
 
         Assert.True(built);
         Assert.Contains("500 unspent experience", ev.Text);
@@ -95,15 +116,17 @@ public class SelfProgressWakeTests
     }
 
     [Fact]
-    public void TryBuild_ZeroXpIsKnown_EmitsOnce()
+    public void TryBuild_ZeroXpIsKnown_EmitsOnceThenSuppressesSameValue()
     {
-        bool sent = false;
-        // 0 is a valid known balance — surface it once, then suppress.
+        long? last = null;
+        // 0 is a valid known balance — surface it once, then suppress the
+        // same value.
         Assert.True(HandshakeDriver.TryBuildSelfProgressEvent(
-            0, 0, 1, 10, 10, ref sent, out var ev, out _));
+            0, 0, 1, 10, 10, ref last, out var ev, out _));
         Assert.Contains("0 unspent experience", ev.Text);
+        Assert.Equal(0, last);
         Assert.False(HandshakeDriver.TryBuildSelfProgressEvent(
-            0, 0, 1, 10, 10, ref sent, out _, out _));
+            0, 0, 1, 10, 10, ref last, out _, out _));
     }
 
     [Fact]
