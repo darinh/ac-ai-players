@@ -1158,6 +1158,14 @@ internal sealed class HandshakeDriver : IDisposable
         CharacterErrorMessage? lastCharacterError = null;
         uint chosenCharacterGuid = 0;
         var  recentlyOpenedContainers = new Dictionary<uint, (DateTime OpenedAt, Vector3 OpenedAtPos)>();
+        // loot bookkeeping (telemetry-only): GUID -> time the bot last opened
+        // this corpse/container. SEPARATE from recentlyOpenedContainers (which
+        // drives loot mechanics and is removed when a corpse is reported empty);
+        // this one is NEVER removed on empty, only TTL-evicted, so the
+        // "opened by bot recently" annotation surfaced to the LLM stays truthful
+        // for the corpse's visible lifetime instead of falsely flipping back to
+        // "not opened" the moment the corpse is emptied.
+        var  corpseOpenedByBotAt = new Dictionary<uint, DateTime>();
 
         // Multi-fragment messages (ObjectCreate for players with active
         // motion, LoginCompletion GameEvent, etc.) split across multiple
@@ -3901,6 +3909,19 @@ internal sealed class HandshakeDriver : IDisposable
                     // owns the fight-vs-flee/Recall decision.
                     worldState.RecentInboundDamage = InboundDamageWindow.PruneAndSummarize(
                         recentInboundHits, DateTime.UtcNow, InboundDamageWindowSeconds);
+                    // loot bookkeeping: TTL-evict the opened-corpse telemetry set
+                    // (NOT removed on empty, only aged out) and publish the GUID
+                    // snapshot so the projection can annotate visible corpse rows
+                    // with whether the bot has already opened them. Pure own-action
+                    // bookkeeping; the LLM owns whether to loot.
+                    var openedCorpseCutoff = DateTime.UtcNow.AddSeconds(-LootContainerTtlSec);
+                    foreach (var staleCorpse in corpseOpenedByBotAt
+                                 .Where(kv => kv.Value < openedCorpseCutoff)
+                                 .Select(kv => kv.Key).ToList())
+                        corpseOpenedByBotAt.Remove(staleCorpse);
+                    worldState.OpenedCorpseGuids = corpseOpenedByBotAt.Count > 0
+                        ? new HashSet<uint>(corpseOpenedByBotAt.Keys)
+                        : null;
                     // cold-start egress: publish the per-landblock killed-kind
                     // set so the projection (and the hunt-egress override that
                     // reads it) sees which kinds the bot has already farmed here.
@@ -6823,6 +6844,7 @@ internal sealed class HandshakeDriver : IDisposable
                         {
                             recentlyOpenedContainers[motionTarget.Guid] =
                                 (DateTime.UtcNow, useCorpseSelf.Position);
+                            corpseOpenedByBotAt[motionTarget.Guid] = DateTime.UtcNow;
                             if (useIsCorpse) botStats.IncrementCorpsesOpened();
                             var sliceTag = useIsCorpse ? "Q" : "U";
                             var kindTag  = useIsCorpse ? "corpse" : "container";

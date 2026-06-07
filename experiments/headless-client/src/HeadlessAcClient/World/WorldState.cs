@@ -236,6 +236,22 @@ internal sealed class WorldState
     public IReadOnlySet<string>? RecentHostileNames { get; set; }
 
     /// <summary>
+    /// loot bookkeeping: the set of corpse/container GUIDs the bot has
+    /// itself opened within the loot-tracking TTL window, set/pruned by
+    /// HandshakeDriver before each projection build. Pure own-action
+    /// bookkeeping the LLM cannot reconstruct from wire flags alone (the
+    /// wire IsCorpse flag does not say "I already opened this one"). A
+    /// visible corpse whose GUID is in this set is annotated to the LLM as
+    /// already opened so it does not re-pick a corpse it has already
+    /// looted; absence means the bot has not opened it recently. Unlike
+    /// the loot-mechanics tracker this set is NOT removed when a corpse is
+    /// reported empty — it ages out by TTL only, so the "opened by bot"
+    /// claim stays truthful for the corpse's visible lifetime. Empty/null
+    /// when the bot has opened nothing recently.
+    /// </summary>
+    public IReadOnlySet<uint>? OpenedCorpseGuids { get; set; }
+
+    /// <summary>
     /// cold-start egress: stable kind-keys (in <see
     /// cref="HeadlessAcClient.Strategy.CombatFeelLedger.KeyOf"/> form —
     /// <c>w:wcid</c> or <c>n:name</c>) of monster KINDS the bot has KILLED

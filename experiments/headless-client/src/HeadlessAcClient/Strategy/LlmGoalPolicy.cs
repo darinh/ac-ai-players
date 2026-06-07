@@ -3297,7 +3297,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         sb.AppendLine("## Visible nearby");
-        AppendVisibleNearby(sb, world.Visible, world.CombatHistory);
+        AppendVisibleNearby(sb, world.Visible, world.CombatHistory, world.OpenedCorpseGuids);
         sb.AppendLine();
 
         // Slice H — Combat readiness summary. Surfaces the state the
@@ -3819,7 +3819,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     private static string RenderVisibleRow(
         VisibleObjectProjection v,
-        IReadOnlyList<CombatHistoryEntry>? combatHistory = null)
+        IReadOnlyList<CombatHistoryEntry>? combatHistory = null,
+        IReadOnlySet<uint>? openedCorpseGuids = null)
     {
         var sb = new StringBuilder();
         sb.Append($"- {v.Name}");
@@ -3848,6 +3849,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (v.ObservedHostile) sb.Append(" HOSTILE");
         if (v.Distance is float d) sb.Append($" d={d:F1}");
         sb.Append(')');
+        // loot bookkeeping: annotate a CORPSE row with whether the bot has
+        // itself already opened it this session (cp-2314 follow-up). The wire
+        // IsCorpse flag cannot say "I already looted this one"; the
+        // openedCorpseGuids set is pure own-action bookkeeping (a corpse the
+        // bot opened, TTL-bounded, NOT cleared when emptied so the claim stays
+        // truthful). Lets the LLM avoid re-picking a corpse it already looted
+        // and weigh an un-opened own kill it might otherwise walk past. No
+        // priority/urgency — the LLM decides whether to Use{corpse}.
+        if (v.IsCorpse)
+            sb.Append(openedCorpseGuids is not null && openedCorpseGuids.Contains(v.Guid)
+                ? " opened_by_bot_recently=yes"
+                : " opened_by_bot_recently=no");
         // combat-feel: annotate a MONSTER row with the bot's own recorded
         // outcomes against that monster KIND this session (cp-2311/2312
         // feed the ledger; cp-2289 classifies the IsMonster wire flag).
@@ -4154,7 +4167,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static void AppendVisibleNearby(
         StringBuilder sb,
         IReadOnlyList<VisibleObjectProjection> visible,
-        IReadOnlyList<CombatHistoryEntry>? combatHistory = null)
+        IReadOnlyList<CombatHistoryEntry>? combatHistory = null,
+        IReadOnlySet<uint>? openedCorpseGuids = null)
     {
         if (visible.Count == 0) { sb.AppendLine("- (nothing)"); return; }
 
@@ -4170,7 +4184,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int taggedShown = 0;
         foreach (var v in tagged)
         {
-            var row = ClampRow(RenderVisibleRow(v, combatHistory));
+            var row = ClampRow(RenderVisibleRow(v, combatHistory, openedCorpseGuids));
             int cost = row.Length + 1; // include the newline AppendLine adds
             // Always render at least one tagged row (clamped); otherwise stop
             // once the next row would exceed the row budget so the section
@@ -4190,7 +4204,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var v in plain)
         {
             if (plainShown >= VisiblePlainSoftCap) break;
-            var row = ClampRow(RenderVisibleRow(v, combatHistory));
+            var row = ClampRow(RenderVisibleRow(v, combatHistory, openedCorpseGuids));
             int cost = row.Length + 1;
             if (chars + cost > rowBudget) break;
             sb.AppendLine(row);

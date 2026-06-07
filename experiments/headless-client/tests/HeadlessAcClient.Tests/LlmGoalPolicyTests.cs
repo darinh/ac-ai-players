@@ -3141,6 +3141,109 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void VisibleCorpse_OpenedByBot_AnnotatedYes()
+    {
+        // loot bookkeeping: a corpse the bot has itself opened is annotated
+        // so the LLM does not re-pick it. Own-action bookkeeping; LLM decides.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x404u, Name = "Corpse of a Drudge", Wcid = 21u, Distance = 2f,
+                  IsCorpse = true, IsMonster = false },
+            },
+            OpenedCorpseGuids = new HashSet<uint> { 0x404u },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("Corpse of a Drudge", prompt);
+        Assert.Contains("opened_by_bot_recently=yes", prompt);
+        Assert.DoesNotContain("opened_by_bot_recently=no", prompt);
+    }
+
+    [Fact]
+    public void VisibleCorpse_NotOpenedByBot_AnnotatedNo()
+    {
+        // A corpse the bot has NOT opened (null set) reads =no, so an un-looted
+        // own kill the LLM might otherwise walk past is visible as such.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x404u, Name = "Corpse of a Drudge", Wcid = 21u, Distance = 2f,
+                  IsCorpse = true, IsMonster = false },
+            },
+            OpenedCorpseGuids = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("opened_by_bot_recently=no", prompt);
+    }
+
+    [Fact]
+    public void VisibleCorpse_DifferentGuidOpened_AnnotatedNo()
+    {
+        // The annotation is per-GUID: a set that contains a DIFFERENT corpse's
+        // GUID must not mark this corpse as opened.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x404u, Name = "Corpse of a Drudge", Wcid = 21u, Distance = 2f,
+                  IsCorpse = true, IsMonster = false },
+            },
+            OpenedCorpseGuids = new HashSet<uint> { 0x999u },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("opened_by_bot_recently=no", prompt);
+    }
+
+    [Fact]
+    public void VisibleMonster_NeverGetsOpenedCorpseAnnotation()
+    {
+        // The annotation is corpse-only: a live monster row never carries
+        // opened_by_bot_recently even if its GUID happens to be in the set.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B6u, CellId = 0xA9B60001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x401u, Name = "Drudge Skulker", Wcid = 19257u, Distance = 8f,
+                  IsAttackable = true, HasRadarBlipColor = false, IsMonster = true },
+            },
+            OpenedCorpseGuids = new HashSet<uint> { 0x401u },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("Drudge Skulker", prompt);
+        Assert.DoesNotContain("opened_by_bot_recently", prompt);
+    }
+
+    [Fact]
     public void IsSalientKind_IncludesCombatFeedback()
     {
         // The CombatFeedback "all swings evaded" event must wake the LLM so
