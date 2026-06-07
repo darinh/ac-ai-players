@@ -6862,14 +6862,21 @@ public class LlmGoalPolicyTests
     // directive behind a closed door it never opened (0 Use{Door} in a run); the
     // rule pairs with a new wire-decoded `door open`/`door closed` row token so
     // the LLM connects "named target unreachable + closed door here -> Use door".
+    // Bumped 17000 -> 18000 (npc-repeat-exhaustion-pivot) for the NPC REPEAT
+    // EXHAUSTION rule: live evidence showed a level-1 bot that killed one monster
+    // then Talk-looped an NPC (which rotated 2-3 canned lines, defeating the
+    // identical-repeat Motor loop-break) ~8x while killable monsters stayed in
+    // view; the rule keys off the existing neutral `(repeated xN)` telemetry and
+    // tells the LLM to pivot to a NON-Talk verb (Attack a visible monster only
+    // after exhaustion, else Use/Give/Pickup/Explore).
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 17000,
-            $"static prompt floor grew to {prompt.Length} chars (budget 17000)");
+        Assert.True(prompt.Length <= 18000,
+            $"static prompt floor grew to {prompt.Length} chars (budget 18000)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
@@ -7600,6 +7607,25 @@ public class LlmGoalPolicyTests
         Assert.Contains("0 attacking you now", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_StaticPreamble_CarriesNpcRepeatExhaustionRule()
+    {
+        // post-cp-2326: a level-1 bot that killed one monster then Talk-looped
+        // an NPC (which rotated 2-3 canned lines) ~8x while killable monsters
+        // stayed in view. The prompt must tell the LLM that a repeating/rotating
+        // conversation is exhausted and to pivot to a NON-Talk verb (Attack a
+        // visible monster, Use/Give/Pickup, or Explore) rather than re-Talking.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), null);
+        Assert.Contains("NPC REPEAT EXHAUSTION", prompt);
+        // keys off the existing neutral repeated-count telemetry, not a name/wcid
+        Assert.Contains("tags an NPC's dialog `repeated xN`", prompt);
+        // the pivot must NOT be satisfied by re-Talking the same NPC
+        Assert.Contains("Re-Talking the same NPC is NEVER", prompt);
+        // Attack is an allowed pivot, but only AFTER exhaustion
+        Assert.Contains("only AFTER the conversation is exhausted", prompt);
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
@@ -7639,6 +7665,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("PASSAGE-OPENED is not progress", p);
         // loop-break + town-stuck + hunt excursion
         Assert.Contains("LOOP-BREAK", p);
+        // npc repeat exhaustion: a rotating/repeating conversation is a dead end (post-cp-2326)
+        Assert.Contains("NPC REPEAT EXHAUSTION", p);
+        Assert.Contains("Re-Talking the same NPC is NEVER", p);
         // (b) inventory-USE must keep its post-break fallback action ladder
         Assert.Contains("not-yet-talked visible NPC", p);
         // (c) world-object USE must keep the concrete "what changed" exceptions
