@@ -629,13 +629,13 @@ internal sealed class HandshakeDriver : IDisposable
         bool                 combatFeedbackSent = false;
         string?              combatTargetName = null;
         uint?                combatStatsForGuid = null;
-        // self-progress wake dedup (cp-2280): one-shot guard — true once a
-        // SelfProgressChanged event has been emitted this connection. A
-        // pure structural one-shot (mirror of combatFeedbackSent): surface
-        // the unspent-XP balance ONCE the first time it is known; no
-        // magnitude judgment. Reset naturally per login (fresh handler
-        // scope). See MaybeEmitSelfProgress.
-        bool                 selfProgressWakeSent = false;
+        // self-progress wake dedup (cp-2280, generalized to a value-edge):
+        // last observed unspent-XP value (null = never observed). A
+        // SelfProgressChanged event is emitted on the first known value and
+        // again whenever the decoded value differs from this one — a
+        // consecutive value-edge, no magnitude judgment. Reset naturally per
+        // login (fresh handler scope). See MaybeEmitSelfProgress.
+        long?                lastObservedUnspentXp = null;
         // observed-hostile perception: NORMALIZED attacker name -> last UTC
         // the server reported that creature attacking the bot (decoded from
         // DefenderNotification 0x01B2 / EvasionDefenderNotification 0x01B4).
@@ -1537,7 +1537,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"{(seededAttrs ? "" : "(skip)")} " +
                                     $"skills={pdesc.Skills?.Count ?? 0}" +
                                     $"{(seededSkills ? "" : "(skip)")}");
-                                MaybeEmitSelfProgress(ref selfProgressWakeSent, worldState, eventStream);
+                                MaybeEmitSelfProgress(ref lastObservedUnspentXp, worldState, eventStream);
                             }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh
@@ -2196,7 +2196,7 @@ internal sealed class HandshakeDriver : IDisposable
                         case PrivateUpdatePropertyInt64Message pup64:
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt64: {pup64.PropertyName} = {pup64.Value} (seq={pup64.Sequence})");
-                            MaybeEmitSelfProgress(ref selfProgressWakeSent, worldState, eventStream);
+                            MaybeEmitSelfProgress(ref lastObservedUnspentXp, worldState, eventStream);
                             break;
                         case PrivateUpdateVitalMessage puv:
                             // Surface the bot's own health changes. Only
@@ -8096,37 +8096,44 @@ internal sealed class HandshakeDriver : IDisposable
 
     public void Dispose() => _socket?.Dispose();
 
-    // ---- self-progress wake (cp-2280) ------------------------------------
-    // Structural salience nudge: the FIRST time the bot's unspent experience
-    // (the spendable self-progress resource) becomes known, append ONE
-    // SelfProgressChanged event so the LLM re-reads `## Self` early. Direct
-    // analogue of the CombatFeedback wake — a one-shot per connection, the
-    // same shape as combatFeedbackSent. Source surfaces RAW self facts only
-    // (unspent XP, lifetime total, current/peak HP, level); it assigns NO
-    // urgency, names NO attribute/skill, applies NO magnitude/materiality
-    // judgment, and says nothing about spending — WHAT to do with the XP is
-    // owned entirely by the prompt RULES. Pure bookkeeping + wire-fact
-    // rendering, no game-knowledge.
+    // ---- self-progress wake (cp-2280, generalized to a value-edge) -------
+    // Structural salience nudge: whenever the bot's unspent experience (the
+    // spendable self-progress resource decoded from PropertyInt64
+    // AvailableExperience) takes a NEW value, append ONE SelfProgressChanged
+    // event so the LLM re-reads `## Self`. Direct analogue of the
+    // CombatFeedback wake. Dedup is a consecutive value-edge: emit on the
+    // first known value, then again only when the decoded value DIFFERS from
+    // the last one observed (no magnitude/materiality band — that judgement
+    // was deliberately removed in cp-2280 after audit). This wakes the LLM
+    // after an instant XP-spend (RaiseAttribute/RaiseVital/RaiseSkill), which
+    // otherwise emits no external salient event and left the bot idle until
+    // the 30s stuck-timeout. Source surfaces RAW self facts only (unspent XP,
+    // lifetime total, current/peak HP, level); it assigns NO urgency, names
+    // NO attribute/skill, applies NO magnitude/materiality judgment, and says
+    // nothing about spending — WHAT to do with the XP is owned entirely by
+    // the prompt RULES. Pure bookkeeping + wire-fact rendering, no
+    // game-knowledge.
 
     /// <summary>
-    /// Build a SelfProgressChanged event from raw self facts the first time
-    /// unspent XP is known (one-shot: <paramref name="alreadySent"/> is set
-    /// on emit and suppresses all later calls). Returns false (and emits
-    /// nothing) when already sent or unspent XP is unknown. The event Text
-    /// is raw facts only — no directive, no attribute name, no urgency, no
+    /// Build a SelfProgressChanged event from raw self facts whenever unspent
+    /// XP takes a NEW value. <paramref name="lastUnspentXp"/> carries the last
+    /// observed unspent-XP value across calls (null = never observed); it is
+    /// updated on emit. Returns false (and emits nothing) when unspent XP is
+    /// unknown or unchanged from the last observed value. The event Text is
+    /// raw facts only — no directive, no attribute name, no urgency, no
     /// magnitude judgment.
     /// </summary>
     internal static bool TryBuildSelfProgressEvent(
         long? unspentXp, long? totalXp, int? level, uint? hpCurrent, uint? hpMax,
-        ref bool alreadySent, out StreamEvent ev, out string logLine)
+        ref long? lastUnspentXp, out StreamEvent ev, out string logLine)
     {
         ev = null!;
         logLine = string.Empty;
-        if (alreadySent)
-            return false;
         if (unspentXp is not long unspent)
             return false;
-        alreadySent = true;
+        if (lastUnspentXp is long last && last == unspent)
+            return false;
+        lastUnspentXp = unspent;
 
         var hp = hpCurrent is uint hc && hpMax is uint hm && hm > 0
             ? $"{hc}/{hm} HP"
@@ -8144,21 +8151,19 @@ internal sealed class HandshakeDriver : IDisposable
         logLine =
             $"[self-progress] SelfProgressChanged: unspent={unspent} " +
             $"total={totalXp?.ToString() ?? "?"} level={level?.ToString() ?? "?"} " +
-            $"hp={hp} — waking LLM (one-shot).";
+            $"hp={hp} — waking LLM (unspent-XP value-edge).";
         return true;
     }
 
     /// <summary>
     /// Read the bot's current self facts from <paramref name="worldState"/>
-    /// and, the first time unspent XP is known, append a SelfProgressChanged
-    /// event to <paramref name="eventStream"/>. No-op when self/XP is
-    /// unknown or the one-shot has already fired this connection.
+    /// and, whenever unspent XP takes a new value, append a SelfProgressChanged
+    /// event to <paramref name="eventStream"/>. No-op when self/XP is unknown
+    /// or unspent XP is unchanged from the last observed value.
     /// </summary>
     private static void MaybeEmitSelfProgress(
-        ref bool alreadySent, WorldState worldState, EventStream eventStream)
+        ref long? lastUnspentXp, WorldState worldState, EventStream eventStream)
     {
-        if (alreadySent)
-            return;
         var self = worldState.Self;
         if (self is null)
             return;
@@ -8176,7 +8181,7 @@ internal sealed class HandshakeDriver : IDisposable
 
         if (TryBuildSelfProgressEvent(
                 unspent, total, level, self.HealthCurrent, self.HealthMax,
-                ref alreadySent, out var ev, out var logLine))
+                ref lastUnspentXp, out var ev, out var logLine))
         {
             eventStream.Append(ev);
             Console.WriteLine(logLine);
