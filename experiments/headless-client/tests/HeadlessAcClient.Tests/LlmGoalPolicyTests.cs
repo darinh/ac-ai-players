@@ -7880,7 +7880,68 @@ public class LlmGoalPolicyTests
         Assert.Contains("PURSUE UNSEEN OBJECTIVES", p);
         Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", p);
         Assert.Contains("FINISH MULTI-STEP DIRECTIVES", p);
+        // NOTE: the AUTONOMOUS PICKER and EXPLORATION CANDIDATES rules are now
+        // conditional — they render only when their `## ...` section is present
+        // (BuildExitTokenWorld supplies neither), so they are intentionally NOT
+        // asserted in this always-on canary. Their present/absent rendering is
+        // covered by the dedicated tests below.
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AutonomousPickerRule_OmittedWhenNoPickerActivity()
+    {
+        // With no picker activity the section is absent, so the rule that
+        // explains it carries no information and must be omitted (prompt-size +
+        // salience). BuildExitTokenWorld supplies a null pickerActivity.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("AUTONOMOUS PICKER", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AutonomousPickerRule_PresentWhenPickerActivity()
+    {
+        var activity = new PickerActivity
+        {
+            TargetGuid = 0x80000099u,
+            TargetName = "Some Object",
+            Source = "in-range",
+            Reason = "test",
+            StartedAtUtc = DateTimeOffset.UtcNow.AddSeconds(-3),
+            Arrived = false,
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: activity);
         Assert.Contains("AUTONOMOUS PICKER", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExplorationCandidatesRule_OmittedWhenNone()
+    {
+        // No exploration candidates -> no `## Exploration candidates` section ->
+        // omit the rule that explains it.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("EXPLORATION CANDIDATES", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExplorationCandidatesRule_PresentWhenCandidates()
+    {
+        var candidates = new List<ExplorationCandidate>
+        {
+            new()
+            {
+                Guid = 0x80000123u,
+                Name = "Distant Door",
+                Distance = 42.0f,
+                CellId = 0x86020100u,
+                Visited = false,
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: candidates);
+        Assert.Contains("EXPLORATION CANDIDATES", p);
     }
 
     // ---- Intent-stack completion-predicate schema accuracy ----
