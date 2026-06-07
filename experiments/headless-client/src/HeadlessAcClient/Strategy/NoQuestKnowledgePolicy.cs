@@ -336,6 +336,24 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"portal visible {portal.Name} at d={portal.Distance:F1}");
         }
 
+        // While an ACTIVE hunt commitment is on top of the stack,
+        // chatting up civilian NPCs is OFF-INTENT: it does not advance
+        // the hunt and, in a town full of NPCs, the Talk steps below
+        // (6 / 6b) would win every deliberation and starve the
+        // hunt-decompose (6c) and Explore-egress (7) steps — leaving the
+        // bot milling among townsfolk instead of heading out to hunt
+        // (observed live when the LLM was 429-rate-limited and the
+        // fallback drove an operator AC_BOTS_INITIAL_INTENT=Hunt). So when
+        // a hunt is authorised we SUPPRESS the autonomous civilian Talk
+        // and fall through to the hunt-decompose / Explore-egress steps.
+        // This reads ONLY the typed, LLM/operator-authored hunt-intent
+        // label (HuntAuthorization.IsActiveHunt — same predicate the Motor
+        // picker uses) to AVOID an off-intent autonomous interaction; it
+        // originates no strategy, names no content, and assigns no
+        // object-type urgency.
+        var huntActive = _intentStack?.Top is Intent.Intent huntTop
+            && HuntAuthorization.IsActiveHunt(huntTop);
+
         // 6) Talk to nearest NPC creature (non-hostile, non-monster
         //    creature with name) — talking emits PopupString,
         //    feeding the LLM next round. The !IsMonster filter is
@@ -345,8 +363,8 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    keeps the Talk step on its actual surface (vendors,
         //    greeters, quest-givers) and avoids competing with the
         //    Hunt-intent decomposer (step 6c) for the same wire
-        //    objects.
-        var npc = world.Visible
+        //    objects. Skipped entirely under an active hunt (see above).
+        var npc = huntActive ? null : world.Visible
             .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -367,7 +385,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     window and try again. Without this we'd starve the
         //     fallback in a small room. Same !IsMonster filter as
         //     step 6.
-        if (_recentProposedGuids.Count > 0)
+        if (!huntActive && _recentProposedGuids.Count > 0)
         {
             _recentProposedGuids.Clear();
             var npcRetry = world.Visible
@@ -419,15 +437,18 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     not a Hunt commitment.
         //
         //     Wire-bit gating only:
-        //       - stack.Top.Kind == "Hunt" (strategic authorisation)
+        //       - an active hunt commitment on top (HuntAuthorization.
+        //         IsActiveHunt — the same typed predicate that suppresses
+        //         the civilian Talk above; covers Kind "Hunt"/"hunt-
+        //         excursion" and a typed visible_tag:monster completion,
+        //         all LLM/operator-authored — never English parsing)
         //       - any inventory item with WieldedAt != 0 AND the
         //         ItemTypeMasks.MeleeWeapon bit set (mechanical
         //         precondition for GameActionTargetedMeleeAttack)
         //       - any visible IsMonster (Slice H composite of
         //         Creature+Attackable+!RadarBlipColor+!Vendor+!Healer
         //         +!Corpse — corpse exclusion shipped this slice)
-        if (_intentStack?.Top is Intent.Intent topIntent &&
-            string.Equals(topIntent.Kind, "Hunt", StringComparison.Ordinal))
+        if (huntActive && _intentStack?.Top is Intent.Intent topIntent)
         {
             var hasMeleeWielded = world.Inventory.Any(i =>
                 i.WieldedAt is uint w && w != 0 &&
