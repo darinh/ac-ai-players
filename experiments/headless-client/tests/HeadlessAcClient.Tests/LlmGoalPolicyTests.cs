@@ -5650,6 +5650,127 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCalls()); // budget exhausted → LLM called
     }
 
+    // break-sticky-on-self-interact: a policy whose LLM always returns the
+    // same Use{Door guid=56528} goal. Same wiring as MakeStickyPolicy but a
+    // spatial Use verb whose Target matches a WorldObjectInteracted echo.
+    private static (LlmGoalPolicy Policy, Func<int> HttpCalls) MakeStickyUseDoorPolicy()
+    {
+        var goalJson = """
+        {
+          "goal_id": "99999999-8888-7777-6666-555555555555",
+          "kind": "Use",
+          "target": { "guid": 56528, "name": "Door" },
+          "priority": 6,
+          "rationale": "open the door"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var count = 0;
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            Interlocked.Increment(ref count);
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+            MaxStickyReEmits = 3,
+        };
+        return (policy, () => count);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_SelfInteractedWithGoalTarget_BreaksReEmit_AndCallsLlm()
+    {
+        // cp-2304 live loop: the LLM picked Use{Door}; the door opened in
+        // place (server UseDone(ok)) with NO external salient event, so the
+        // sticky gate re-drove the same Use{Door} for free. The Motor's own
+        // WorldObjectInteracted echo proves the objective was ALREADY
+        // attempted, so a real LLM call must fire (it then re-reads the
+        // `## Recently interacted objects` telemetry and picks differently).
+        var (policy, httpCalls) = MakeStickyUseDoorPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // The Motor dispatched the Use opcode against the door (guid 56528,
+        // name "Door") and the action cycle completed — a self-emitted,
+        // NON-salient, NON-external echo.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.WorldObjectInteracted,
+            ItemGuid = 56528u, Name = "Door",
+        });
+
+        var next = policy.ProposeGoal(world, events, null);
+        // No free sticky re-emit — a fresh LLM call fired instead.
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_SelfInteractedWithDifferentObject_StillReEmitsForFree()
+    {
+        // The self-interaction echo must NOT break the sticky gate when it
+        // is a DIFFERENT object than the goal target (selector AND semantics:
+        // guid and name both diverge). Re-driving the unfinished objective
+        // for free is still correct.
+        var (policy, httpCalls) = MakeStickyUseDoorPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        var firstGoal = await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // Interacted with a different object (guid + name both mismatch).
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.WorldObjectInteracted,
+            ItemGuid = 4242u, Name = "Chest",
+        });
+
+        var reEmitted = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(reEmitted);
+        Assert.Equal(GoalKind.Use, reEmitted!.Kind);
+        Assert.Equal("Door", reEmitted.Target?.Name);
+        Assert.Equal(1, httpCalls()); // free re-emit, no new call
+        Assert.NotEqual(firstGoal.Id, reEmitted.Id);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_Sticky_SelfInteractedNameMatchGuidMismatch_BreaksReEmit()
+    {
+        // Selector AND semantics with a partial identity: the goal target has
+        // BOTH guid and name. A respawned/re-id'd door with the SAME name but
+        // a DIFFERENT guid must NOT count as the same object — the populated
+        // guid field diverges, so the sticky gate still re-drives for free.
+        var (policy, httpCalls) = MakeStickyUseDoorPolicy();
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.WorldObjectInteracted,
+            ItemGuid = 7777u, Name = "Door", // name matches, guid does not
+        });
+
+        var reEmitted = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(reEmitted);   // guid mismatch ⇒ not the same object ⇒ free re-emit
+        Assert.Equal(1, httpCalls());
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_Sticky_ActionRejected_SuppressesReEmit_AndCallsLlm()
     {

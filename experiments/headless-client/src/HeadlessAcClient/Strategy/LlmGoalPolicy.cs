@@ -1366,6 +1366,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // LLM goal. The budget resets when a new LLM goal is consumed
         // (see ConsumeResult). This carries NO game knowledge — it is
         // pure event-kind + goal-provenance bookkeeping.
+        // break-sticky-on-self-interact: a spatial Use/Pickup whose target the
+        // Motor ALREADY interacted with since the last LLM look must NOT be
+        // free-re-driven. Live loop (cp-2304): the LLM picked Use{Door}; using
+        // the door returns server UseDone(ok) but moves the bot nowhere and
+        // emits NO external salient event, so this gate re-drove the same
+        // Use{Door} 3x for free (~18s) while the picker kept re-arriving at it.
+        // The Motor's own once-per-cycle WorldObjectInteracted echo (the same
+        // signal that feeds the `## Recently interacted objects` prompt section,
+        // cp-2291) proves the objective was already ATTEMPTED; force a real LLM
+        // call so the model re-reads that telemetry and picks differently. This
+        // does NOT claim the objective semantically SUCCEEDED — only that it was
+        // attempted without an external change, so a free retry is pointless.
+        // Pure identity bookkeeping (guid/name/wcid match, selector AND
+        // semantics); no game knowledge.
+        var stickyAlreadyAttempted = _lastLlmGoal is not null
+            && SelfAlreadyInteractedWithGoalTarget(events, _lastLlmGoal);
+        if (currentGoal is null && stickyAlreadyAttempted
+            && !hasNonPickerExternal && !pickerArrived && !pickerStartWake)
+        {
+            Console.WriteLine(
+                $"[strategy] sticky re-emit broken: self already interacted with " +
+                $"{_lastLlmGoal!.Kind} target={_lastLlmGoal.Target} since last LLM look " +
+                "— forcing fresh LLM decision (recently-interacted telemetry)");
+        }
         if (currentGoal is null
             && _lastLlmGoal is not null
             && !stuck
@@ -1373,7 +1397,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && _stickyReEmitCount < MaxStickyReEmits
             && !hasNonPickerExternal
             && !pickerArrived
-            && !pickerStartWake)
+            && !pickerStartWake
+            && !stickyAlreadyAttempted)
         {
             // Call-volume reduction (aimless path). Live evidence: a fresh
             // L1 bot is dominantly aimless (currentGoal == null) in an
@@ -2666,6 +2691,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         kind is EventKind.GoalCompleted
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
+
+    // break-sticky-on-self-interact: true iff the Motor emitted a
+    // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
+    // last LLM look whose identity is selector-compatible with the spatial
+    // goal's Target. Used to stop the sticky-objective gate from free-re-driving
+    // an interaction the bot already attempted but that produced no external
+    // change (e.g. a door that opened in place). Only Use/Pickup goals qualify;
+    // WorldObjectInteracted is never emitted for other verbs. Match uses
+    // Selector AND semantics over the identity fields the event carries
+    // (Guid/Name/Wcid): every populated comparable field must match and at least
+    // one comparable field must be present. NameContains/ItemTypeMask/
+    // ShortDescContains are ignored (the event carries no data to evaluate them).
+    private bool SelfAlreadyInteractedWithGoalTarget(EventStream events, Goal goal)
+    {
+        if (goal.Kind is not (GoalKind.Use or GoalKind.Pickup)) return false;
+        var t = goal.Target;
+        var hasComparable = t.Guid is not null
+            || !string.IsNullOrWhiteSpace(t.Name)
+            || t.Wcid is not null;
+        if (!hasComparable) return false;
+
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Where(e => e.Kind == EventKind.WorldObjectInteracted)
+            .Any(e =>
+                (t.Guid is null || (e.ItemGuid is uint g && g == t.Guid))
+                && (string.IsNullOrWhiteSpace(t.Name)
+                    || string.Equals(e.Name, t.Name, StringComparison.OrdinalIgnoreCase))
+                && (t.Wcid is null || (e.Wcid is uint w && w == t.Wcid)));
+    }
 
     // Durable landblock-dwell bookkeeping. Called at the top of every
     // ProposeGoal tick. Stamps _dwellEntryUtc whenever the observed
