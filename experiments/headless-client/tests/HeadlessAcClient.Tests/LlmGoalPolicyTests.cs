@@ -7289,6 +7289,46 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_RendersWhenUnspentPositive()
+    {
+        // cp-2336: re-surface the unspent-XP fact in the most decision-proximate
+        // slot (end of prompt) so the Raise* verbs compete with the parked local
+        // affordance. Facts only; the amount is echoed and the verbs named.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains("5475 unspent experience available this tick", prompt);
+        Assert.Contains("RaiseAttribute, RaiseVital, and RaiseSkill are executable right now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OmittedWhenNoUnspent()
+    {
+        // unspent == 0: the verbs are not executable, so the capsule is omitted
+        // (same mechanical gate as the SPEND XP rule).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Unspent XP", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_RendersAtEndAfterVisibleSection()
+    {
+        // The salience value depends on the capsule being the LAST thing the LLM
+        // reads (after the bulky preamble + dynamic world sections). Assert it
+        // appears after `## Self` and after the Visible-nearby section so it sits
+        // in the decision-proximate end slot.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            Visible = new[] { new VisibleObjectProjection { Guid = 0x701u, Name = "Jonathan", Wcid = 1u, ItemType = 0x10u, Distance = 3f, IsCreature = true } },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
+        var selfIdx = prompt.IndexOf("## Self", System.StringComparison.Ordinal);
+        var visibleIdx = prompt.IndexOf("## Visible nearby", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx > selfIdx && selfIdx >= 0, "capsule should render after ## Self");
+        Assert.True(capsuleIdx > visibleIdx && visibleIdx >= 0, "capsule should render after ## Visible nearby");
+    }
+
+    [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
         // The priority-band phrase tracks the same unspent>0 gate as the rule and
