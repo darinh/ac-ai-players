@@ -8525,6 +8525,92 @@ public class LlmGoalPolicyTests
         Assert.True(capsuleIdx > selfIdx && selfIdx >= 0, "capsule should render after ## Self");
     }
 
+    // ---- Approach-distance-history salience end-capsule (cp-2342) ----
+    // The Motor measures self->target distance at every interaction lock, but
+    // the LLM cannot tell across ticks whether its repeated selections of the
+    // SAME target are reducing the distance (live repro: nine Talk locks at a
+    // constant 27.47u). This capsule re-surfaces the recent raw distance
+    // samples in the decision-proximate end slot. Rendered whenever the
+    // driver supplies a projection with >=2 samples (data-availability gate,
+    // the driver already applied the freshness + still-outside-arrival-radius
+    // gates); raw measurements only, no valuation.
+
+    [Fact]
+    public void BuildUserPrompt_ApproachDistanceEndcap_RendersWhenSamplesPresent()
+    {
+        var ap = new ApproachDistanceProjection
+        {
+            Guid = 0x80003068u,
+            Name = "Worcer",
+            DistanceSamplesUnits = new[] { 99.7, 27.5, 27.5, 27.5 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            approachDistance: ap);
+        Assert.Contains("## Approach distance history", p);
+        Assert.Contains("Worcer (guid=0x80003068)", p);
+        Assert.Contains("99.7u, 27.5u, 27.5u, 27.5u", p);
+        Assert.Contains("last 4 interaction locks", p);
+        Assert.Contains("raw fact, not a recommendation", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ApproachDistanceEndcap_GuidOnlyWhenNameMissing()
+    {
+        var ap = new ApproachDistanceProjection
+        {
+            Guid = 0x80003068u,
+            Name = null,
+            DistanceSamplesUnits = new[] { 27.5, 27.5 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            approachDistance: ap);
+        Assert.Contains("## Approach distance history", p);
+        Assert.Contains("guid=0x80003068", p);
+        Assert.DoesNotContain("(guid=0x80003068)", p); // no "name (guid=...)" form
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ApproachDistanceEndcap_OmittedWhenNullOrSingleSample()
+    {
+        var pNull = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            approachDistance: null);
+        Assert.DoesNotContain("## Approach distance history", pNull);
+
+        // A single sample is below the >=2 data-availability floor: omitted.
+        var pOne = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            approachDistance: new ApproachDistanceProjection
+            {
+                Guid = 0x80003068u, Name = "Worcer", DistanceSamplesUnits = new[] { 27.5 },
+            });
+        Assert.DoesNotContain("## Approach distance history", pOne);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ApproachDistanceEndcap_RendersAtEndAfterSelf()
+    {
+        var ap = new ApproachDistanceProjection
+        {
+            Guid = 0x80003068u,
+            Name = "Worcer",
+            DistanceSamplesUnits = new[] { 30.0, 27.5 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            approachDistance: ap);
+        var capsuleIdx = p.IndexOf("## Approach distance history", System.StringComparison.Ordinal);
+        var selfIdx = p.IndexOf("## Self", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx > selfIdx && selfIdx >= 0, "capsule should render after ## Self");
+    }
+
     // ---- Intent-stack completion-predicate schema accuracy ----
     // The prompt teaches the LLM the JSON shape of completion predicates.
     // It MUST match the actual System.Text.Json polymorphic contract on
