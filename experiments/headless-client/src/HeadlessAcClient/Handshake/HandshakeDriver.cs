@@ -676,6 +676,16 @@ internal sealed class HandshakeDriver : IDisposable
         int autonomousPositionPacketIndex = -1;
         const int PostLoginCompleteGracePackets = 30;
         const int PostAutonomousPositionGracePackets = 30;
+        // cut-movement-ap-deadwait: the packet-count grace above stalls
+        // 22-32s before motion starts on a quiet pre-walk link — while
+        // the bot stands still the server only emits ~1 idle packet/sec,
+        // so reaching 30 inbound packets takes tens of seconds. The grace
+        // only needs to let the server APPLY the AutonomousPosition before
+        // motion layers on top, which is a sub-second wall-clock concern,
+        // not a packet-volume one. Cap the wait with a wall-clock ceiling
+        // so MoveToState START fires promptly regardless of link chatter.
+        const int PostAutonomousPositionGraceMaxMs = 750;
+        DateTime? autonomousPositionGraceStartUtc = null;
 
         // Phase 7g — mid-session teleport recovery. When the bot
         // teleports cross-landblock (e.g. Academy Calling Stone →
@@ -2877,6 +2887,7 @@ internal sealed class HandshakeDriver : IDisposable
                     //    post-action reset cascade) so the flee lock starts
                     //    fresh and Phase 5b START re-fires cleanly.
                     autonomousPositionSent = false;
+                    autonomousPositionGraceStartUtc = null;
                     moveToStateStartSent = false;
                     moveToStateStopSent = false;
                     motionTarget = null;
@@ -3428,7 +3439,10 @@ internal sealed class HandshakeDriver : IDisposable
                         var tNow = DateTime.UtcNow;
                         var totalMs = (tNow - tLock).TotalMilliseconds;
                         var stopStr = motionStoppedAt is DateTime tStop
-                            ? $"lock->stop {(tStop - tLock).TotalMilliseconds:F0}ms, " +
+                            ? $"lock->stop {(tStop - tLock).TotalMilliseconds:F0}ms " +
+                              $"[lock->MSstart {(motionStartedAt is DateTime tMs1 ? (tMs1 - tLock).TotalMilliseconds : double.NaN):F0}ms, " +
+                              $"MSstart->stop {(motionStartedAt is DateTime tMs2 ? (tStop - tMs2).TotalMilliseconds : double.NaN):F0}ms, " +
+                              $"walkticks {walkTickAps}], " +
                               $"stop->dispatch {(useSentAt is DateTime ud ? (ud - tStop).TotalMilliseconds : double.NaN):F0}ms"
                             : "stop not stamped";
                         var dispatchStr = useSentAt is DateTime us
@@ -3440,6 +3454,7 @@ internal sealed class HandshakeDriver : IDisposable
 
                     // Reset every per-action gate.
                     autonomousPositionSent = false;
+                    autonomousPositionGraceStartUtc = null;
                     moveToStateStartSent = false;
                     moveToStateStopSent = false;
                     motionTarget = null;
@@ -5766,7 +5781,16 @@ internal sealed class HandshakeDriver : IDisposable
                 if (autonomousPositionSent &&
                     !moveToStateStartSent &&
                     autonomousPositionPacketIndex >= 0 &&
-                    (count - autonomousPositionPacketIndex) >= PostAutonomousPositionGracePackets &&
+                    autonomousPositionGraceStartUtc is null)
+                    autonomousPositionGraceStartUtc = DateTime.UtcNow;
+                var apGraceElapsedMs = autonomousPositionGraceStartUtc is DateTime apGraceTs
+                    ? (DateTime.UtcNow - apGraceTs).TotalMilliseconds
+                    : 0;
+                if (autonomousPositionSent &&
+                    !moveToStateStartSent &&
+                    autonomousPositionPacketIndex >= 0 &&
+                    ((count - autonomousPositionPacketIndex) >= PostAutonomousPositionGracePackets ||
+                     apGraceElapsedMs >= PostAutonomousPositionGraceMaxMs) &&
                     worldState.Self is WorldObjectSnapshot moveSelf &&
                     moveSelf.CellId is uint moveCell &&
                     moveCell != 0)
