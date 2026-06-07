@@ -7423,6 +7423,120 @@ public class LlmGoalPolicyTests
         Assert.Contains("Town Guard (guid=0x80000BBB) x1", capsule);
     }
 
+    // ---- Recent-Use salience end-capsule (recent-use-endcap, cp-2341) ----
+    //
+    // Live mistral runs showed the bot re-Using the SAME world object (a
+    // "Portal to Town Network") 5 times with rationales that never mention
+    // the repeat ("Use the portal to move to a new area") even though each
+    // Use teleported it back to a landblock it just left. The per-target Use
+    // counts render mid-prompt in `## Location & recency` but are out-competed
+    // by the parked local affordance, the same burial pattern the `## Unspent
+    // XP` and `## Recent Talk` capsules fixed. This re-surfaces the SAME
+    // counts at the decision-proximate end slot whenever any recent Use
+    // exists (no source-side significance threshold — the LLM judges).
+    private static EventStream BuildUseStream(string targetSelector, int times)
+    {
+        var events = new EventStream();
+        for (var i = 0; i < times; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(times - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Use target={targetSelector} item= source=llm:test",
+            });
+        }
+        return events;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_RendersWhenUsePresent()
+    {
+        // Any recent Use re-surfaces the count facts-only in the
+        // decision-proximate slot (no significance threshold in source).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildUseStream("name=\"Portal to Town Network\"", 5), null);
+        Assert.Contains("## Recent Use", prompt);
+        Assert.Contains("in your last 10 emitted goals you emitted Use on: Portal to Town Network x5", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_RendersForSingleUse()
+    {
+        // No threshold: even a single recent Use renders the raw count.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildUseStream("name=\"Old Wooden Door\"", 1), null);
+        Assert.Contains("## Recent Use", prompt);
+        Assert.Contains("Old Wooden Door x1", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_OmittedWhenNoUse()
+    {
+        // No Use emissions at all: capsule omitted (nothing to re-surface).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Recent Use", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_RendersAtEndAfterLocationRecency()
+    {
+        // The salience value depends on the capsule sitting AFTER the mid-prompt
+        // `## Location & recency` section where the same counts first render.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildUseStream("name=\"Portal to Town Network\"", 4), null);
+        var capsuleIdx = prompt.IndexOf("## Recent Use", System.StringComparison.Ordinal);
+        var lrIdx = prompt.IndexOf("## Location & recency", System.StringComparison.Ordinal);
+        Assert.True(lrIdx >= 0, "## Location & recency section missing");
+        Assert.True(capsuleIdx > lrIdx, "capsule should render after ## Location & recency");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_PrefersNameWhenGuidPresent()
+    {
+        // A picker-resolved Use goal reads `target=guid=0x.. name="X"`; the
+        // capsule keys identity by the guid but DISPLAYS the human name.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildUseStream("guid=0x7A9B4080 name=\"Portal to Town Network\"", 5), null);
+        var capsuleIdx = prompt.IndexOf("## Recent Use", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx >= 0, "capsule missing");
+        var capsule = prompt.Substring(capsuleIdx);
+        Assert.Contains("Portal to Town Network x5", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentUseEndcap_DisambiguatesSameNameDifferentGuid()
+    {
+        // Two DISTINCT objects sharing a display name (different guids) must NOT
+        // collapse to one indistinguishable label — each gets a guid suffix,
+        // mirroring the `## Recent Talk` and `## Location & recency` renders.
+        var events = new EventStream();
+        foreach (var (guid, n) in new[] { ("0x80000AAA", 2), ("0x80000BBB", 1) })
+        {
+            for (var i = 0; i < n; i++)
+            {
+                events.Append(new StreamEvent
+                {
+                    Sequence = 0,
+                    Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5),
+                    Kind = EventKind.GoalEmitted,
+                    GoalId = Guid.NewGuid(),
+                    Text = $"Use target=guid={guid} name=\"Old Wooden Door\" item= source=llm:test",
+                });
+            }
+        }
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), events, null);
+        var capsuleIdx = prompt.IndexOf("## Recent Use", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx >= 0, "capsule missing");
+        var capsule = prompt.Substring(capsuleIdx);
+        Assert.Contains("Old Wooden Door (guid=0x80000AAA) x2", capsule);
+        Assert.Contains("Old Wooden Door (guid=0x80000BBB) x1", capsule);
+    }
+
     [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
