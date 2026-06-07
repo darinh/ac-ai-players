@@ -2215,6 +2215,158 @@ public class StrategyFoundationTests
         Assert.Equal(GoalKind.Pickup, goal!.Kind);
         Assert.Equal(LootGuid, goal.Target.Guid);
     }
+
+    // ---- fallback-hunt-skip-civilian-talk ----
+    // Under an ACTIVE hunt commitment the fallback must NOT mill among
+    // civilian NPCs (Talk steps 6/6b); it should fall through to the
+    // hunt-decompose (6c, Attack a visible monster) or Explore egress (7)
+    // so an LLM-outage bot still heads out to hunt. Reads only the typed
+    // HuntAuthorization.IsActiveHunt label — no content, no urgency.
+
+    private static HeadlessAcClient.Strategy.Intent.IntentStack MakeStackWithHuntKind(string kind)
+    {
+        var stack = new HeadlessAcClient.Strategy.Intent.IntentStack();
+        var events = new EventStream();
+        var proj = MakeHuntProjection(
+            Array.Empty<InventoryItemProjection>(),
+            Array.Empty<VisibleObjectProjection>());
+        var baseline = HeadlessAcClient.Strategy.Intent.IntentBaseline.Capture(
+            proj, events, DateTime.UtcNow, stats: null);
+        var hunt = new HeadlessAcClient.Strategy.Intent.Intent
+        {
+            Id = "test-hunt-kind",
+            Kind = kind,
+            Rationale = "test push",
+            Completion = new HeadlessAcClient.Strategy.Intent.AlwaysFalsePredicate(),
+            Baseline = baseline,
+            Status = HeadlessAcClient.Strategy.Intent.IntentLifecycle.Active,
+        };
+        Assert.Equal(HeadlessAcClient.Strategy.Intent.StackOpResult.Ok, stack.TryPush(hunt));
+        return stack;
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntActive_SkipsCivilianTalk_ChoosesExplore()
+    {
+        // Active Hunt + only civilian NPCs in view (no monster, no melee):
+        // the fallback must skip Talk and fall through to Explore egress.
+        const uint NpcAGuid = 0x80000080;
+        const uint NpcBGuid = 0x80000081;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcAGuid, Name = "Pathwarden Thorolf", Wcid = 1u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = NpcBGuid, Name = "Alcott", Wcid = 2u,
+                    ItemType = 0x10u, Distance = 6f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.NotEqual(GoalKind.Talk, goal.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntActive_StillAttacksVisibleMonster_NotTalk()
+    {
+        // Active Hunt + a civilian NPC AND a visible monster + melee
+        // wielded: the suppressed Talk must not block the decomposer —
+        // the bot attacks the monster, not chats the NPC.
+        const uint NpcGuid     = 0x80000082;
+        const uint MonsterGuid = 0x80000083;
+        const uint WeaponGuid  = 0x80000084;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0,
+                    WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Pathwarden Thorolf", Wcid = 1u,
+                    ItemType = 0x10u, Distance = 2f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = MonsterGuid, Name = "Sparring Golem", Wcid = 12698u,
+                    ItemType = 0x10u, Distance = 5f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(MonsterGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntExcursionActive_SkipsCivilianTalk()
+    {
+        // The broadened predicate: an LLM-authored "hunt-excursion" (not
+        // just operator "Hunt") also suppresses civilian Talk.
+        const uint NpcGuid = 0x80000085;
+        var stack = MakeStackWithHuntKind("hunt-excursion");
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Alcott", Wcid = 2u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_NoHunt_StillTalksToNpc()
+    {
+        // Regression guard: with NO hunt commitment in scope (e.g. academy
+        // onboarding), the civilian Talk step is UNCHANGED — the bot still
+        // talks to a nearby NPC to surface dialog.
+        const uint NpcGuid = 0x80000086;
+        var policy = new NoQuestKnowledgePolicy(); // no stack -> no hunt
+        var proj = MakeHuntProjection(
+            inventory: Array.Empty<InventoryItemProjection>(),
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = NpcGuid, Name = "Jonathan", Wcid = 29324u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                },
+            });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal(NpcGuid, goal.Target.Guid);
+    }
 }
 
 /// <summary>
