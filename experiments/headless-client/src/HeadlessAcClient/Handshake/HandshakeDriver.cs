@@ -5520,7 +5520,51 @@ internal sealed class HandshakeDriver : IDisposable
                             pickupCountByName,
                             PickupItemTypeMask).ToList();
 
-                        if (ranked.Count > 0)
+                        // gate-nearest-named-picker-fallback: BEFORE the
+                        // autonomous nearest-known-object pick (the picker
+                        // deciding ON ITS OWN to walk the bot to a concrete
+                        // object the LLM never named — the AGENTS.md-forbidden
+                        // autonomous interaction), prefer a geometry-only
+                        // OUTDOOR FRONTIER probe: steer toward unexplored ground
+                        // so new objects (and whatever lives there) become
+                        // perceivable, WITHOUT selecting any object or verb.
+                        // This is the surface analogue of the Explore-GOAL
+                        // frontier actuation; it runs only in this aimless
+                        // else-if(!llmBusyNow) branch — mutually exclusive with
+                        // the goal-handling branch that drives the Explore-goal
+                        // frontier — so it cannot double-drive motion.
+                        // Domain-general spatial search: reads only navmesh
+                        // geometry + the bot's OWN visited cells (huntBias OFF —
+                        // no remembered-sighting bias without an LLM hunt). The
+                        // synthetic destination is locked as an INERT Explore
+                        // motion target (lockedGoalKind=Explore => arrival sends
+                        // NO opcode, only re-perception — see the Slice L
+                        // short-circuit) and is NOT published as picker activity
+                        // (pickerSourceForActivity stays null). The
+                        // nearest-known-object pick remains ONLY as a last resort
+                        // when no frontier exists (indoors / cells exhausted), so
+                        // the bot never goes inert.
+                        var aimlessFrontier = TryChooseOutdoorFrontierDest(
+                            self.CellId ?? 0u, self.Position, navGraph,
+                            frontierCellCooldownUntil, huntBiasAuthorized: false,
+                            out var aimlessFrontierCells);
+                        if (aimlessFrontier is not null)
+                        {
+                            candidate = aimlessFrontier;
+                            motionRememberedDest = aimlessFrontier;
+                            motionIndoorPathCells = aimlessFrontierCells;
+                            motionIndoorPathAttempted = true;
+                            motionIsOutdoorFrontierProbe = true;
+                            lockedGoalKind = GoalKind.Explore;
+                            motionLockedGoalId = null;
+                            Console.WriteLine(
+                                $"[motion] AIMLESS FRONTIER — no LLM goal + no candidate in " +
+                                $"{MotionSearchRadius}u; geometry-only outdoor frontier probe to " +
+                                $"cell 0x{(aimlessFrontier.CellId ?? 0):X8} " +
+                                $"pos=({aimlessFrontier.Position.X:F1},{aimlessFrontier.Position.Y:F1}) " +
+                                $"via {aimlessFrontierCells?.Count ?? 0} cells (no object selected)");
+                        }
+                        else if (ranked.Count > 0)
                         {
                             candidate = ranked[0].snap;
                             pickerSourceForActivity = "fallback";
