@@ -4028,6 +4028,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(line);
         }
 
+        // ── ## Unspent XP (end-of-prompt salience capsule) ───────────────
+        // The unspent-XP fact + the SPEND XP rule already render up in
+        // `## Self` and the RULES preamble, yet live runs show the LLM
+        // hoarding tens of thousands of XP for many decisions in a row
+        // because the parked local affordance (Talk/Use the nearby object)
+        // out-competes a fact buried ~22KB earlier. Re-surface the SAME
+        // observed fact in the most decision-proximate slot — the very END
+        // of the prompt, right before the model answers — so the Raise*
+        // verbs sit on equal footing with Talk/Use/Pickup/Attack/Explore at
+        // the decision point. Gated on the mechanical executability of those
+        // verbs (unspent > 0), mirroring the SPEND XP rule gate. RAW fact +
+        // an explicit not-a-recommendation disclaimer — no urgency wording,
+        // no attribute priority, no "you should": the LLM decides whether,
+        // how much, and which to raise (it reads attributes/skills in
+        // `## Self` and the mechanics in the SPEND XP rule). No game
+        // knowledge; perception re-positioned for salience.
+        if (world.Self.AvailableExperience is long endcapUnspent && endcapUnspent > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Unspent XP");
+            sb.AppendLine(
+                $"- you have {endcapUnspent} unspent experience available this tick; the goal " +
+                "verbs RaiseAttribute, RaiseVital, and RaiseSkill are executable right now, the " +
+                "same as Talk/Use/Pickup/Attack/Explore.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: see `## Self` above for your current attribute " +
+                "values and trained skills, and the SPEND XP rule for what each verb does. Whether, " +
+                "how much, and which to raise is your call.");
+        }
+
         return FitPromptToCeiling(sb.ToString());
     }
 
