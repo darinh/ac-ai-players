@@ -1412,8 +1412,7 @@ internal sealed class HandshakeDriver : IDisposable
                             if (oc.Physics.Position is { } lmPos &&
                                 !string.IsNullOrEmpty(oc.Weenie.Name) &&
                                 lastVisitNodeId != Guid.Empty &&
-                                lastObservedSelfLandblock is uint selfLb &&
-                                (lmPos.LandblockId & 0xFFFF0000u) == selfLb)
+                                lastObservedSelfLandblock is uint selfLb)
                             {
                                 var sightedPos = new System.Numerics.Vector3(lmPos.X, lmPos.Y, lmPos.Z);
                                 // Wire-derived coarse kind (Mob / NPC / Unknown)
@@ -1426,26 +1425,57 @@ internal sealed class HandshakeDriver : IDisposable
                                     oc.Weenie.ItemType,
                                     (uint)oc.Weenie.DescriptionFlags,
                                     (uint)oc.Weenie.Flags);
-                                navGraph.RecordObservation(
-                                    lastVisitNodeId,
-                                    oc.Weenie.WeenieClassId,
-                                    oc.Weenie.Name!,
-                                    sightedPos,
-                                    sightedKind,
-                                    DateTimeOffset.UtcNow);
+
+                                // Decide which sighting memories to write
+                                // based purely on landblock distance — see
+                                // SightingRecordPolicy for the per-memory
+                                // coordinate-frame rationale.
+                                var sightingDecision = SightingRecordPolicy.Decide(
+                                    lmPos.LandblockId, selfLb);
+
+                                // RecordObservation stores the entity position
+                                // RELATIVE to the anchor node (rel =
+                                // entityPosition - node.Position) for semantic
+                                // recall — valid only in the bot's same
+                                // landblock-LOCAL frame, so it is gated to an
+                                // exact same-landblock sighting.
+                                if (sightingDecision.RecordObservation)
+                                    navGraph.RecordObservation(
+                                        lastVisitNodeId,
+                                        oc.Weenie.WeenieClassId,
+                                        oc.Weenie.Name!,
+                                        sightedPos,
+                                        sightedKind,
+                                        DateTimeOffset.UtcNow);
+
                                 // FOV discovery: remember WHERE the entity is
                                 // (its own cell + absolute coords) as a sighted
                                 // location, so the bot can later navigate toward
                                 // it. This is location memory, not a walkable
-                                // node — see NavGraph.RecordSightedLocation.
-                                navGraph.RecordSightedLocation(
-                                    lmPos.LandblockId,
-                                    sightedPos,
-                                    oc.Weenie.WeenieClassId,
-                                    oc.Weenie.Name!,
-                                    sightedKind,
-                                    lastVisitNodeId,
-                                    DateTimeOffset.UtcNow);
+                                // node — see NavGraph.RecordSightedLocation. It
+                                // stores ABSOLUTE cell+pos (landblock-offset aware
+                                // via AcCoords), so a same-OR-adjacent landblock
+                                // sighting is stored correctly — and the cross-
+                                // landblock Attack/Explore resolver (cp-2271)
+                                // NEEDS adjacent sightings to route toward a
+                                // monster seen one landblock away. A far/
+                                // disconnected landblock (e.g. a stale post-
+                                // teleport ObjectCreate) is not adjacent and is
+                                // still dropped. The observer node is provenance
+                                // only; for a non-same-landblock sighting it is in
+                                // a different landblock frame, so no observer node
+                                // is anchored.
+                                if (sightingDecision.RecordSightedLocation)
+                                    navGraph.RecordSightedLocation(
+                                        lmPos.LandblockId,
+                                        sightedPos,
+                                        oc.Weenie.WeenieClassId,
+                                        oc.Weenie.Name!,
+                                        sightedKind,
+                                        sightingDecision.AnchorObserverNode
+                                            ? lastVisitNodeId
+                                            : (Guid?)null,
+                                        DateTimeOffset.UtcNow);
                             }
                             break;
                         case GameEventMessage ge:

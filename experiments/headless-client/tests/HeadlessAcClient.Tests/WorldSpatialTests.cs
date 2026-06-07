@@ -39,6 +39,67 @@ public class WorldSpatialTests
     private const uint CellLB1233_Cell1 = 0x12330001; // one south of LB1234
     private const uint CellLB1335_Cell1 = 0x13350001; // NE
 
+    // ---- WorldDistance.IsSameOrAdjacentLandblock ----
+
+    [Fact]
+    public void Adjacency_SameLandblock_IsTrue()
+    {
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            CellLB1234_Cell1, CellLB1234_Cell1));
+    }
+
+    [Fact]
+    public void Adjacency_SameLandblock_IgnoresCellIndex()
+    {
+        // Different low-16 cell indices in the same landblock must not
+        // affect adjacency — the helper decodes only the landblock bytes.
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            CellLB1234_Cell1, CellLB1234_Cell2));
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            0x12340001u, 0x12340140u)); // outdoor cell vs indoor cell index
+    }
+
+    [Theory]
+    [InlineData(CellLB1334_Cell1)] // E
+    [InlineData(CellLB1134_Cell1)] // W
+    [InlineData(CellLB1235_Cell1)] // N
+    [InlineData(CellLB1233_Cell1)] // S
+    [InlineData(CellLB1335_Cell1)] // NE
+    [InlineData(0x11350001u)]      // NW
+    [InlineData(0x13330001u)]      // SE
+    [InlineData(0x11330001u)]      // SW
+    public void Adjacency_EightNeighbors_AreTrue(uint neighborCell)
+    {
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            CellLB1234_Cell1, neighborCell));
+        // Symmetric.
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            neighborCell, CellLB1234_Cell1));
+    }
+
+    [Theory]
+    [InlineData(0x14340001u)] // two east  (X+2)
+    [InlineData(0x10340001u)] // two west  (X-2)
+    [InlineData(0x12360001u)] // two north (Y+2)
+    [InlineData(0x12320001u)] // two south (Y-2)
+    [InlineData(0x14360001u)] // two diagonal (X+2,Y+2)
+    [InlineData(0xA8B40001u)] // far/unrelated landblock
+    public void Adjacency_TwoOrMoreAway_IsFalse(uint farCell)
+    {
+        Assert.False(WorldDistance.IsSameOrAdjacentLandblock(
+            CellLB1234_Cell1, farCell));
+    }
+
+    [Fact]
+    public void Adjacency_LiveEvidenceCase_DrudgeOneLandblockNorth_IsTrue()
+    {
+        // Live-observed gap: bot in landblock 0xA8B4, Drudge Skulker
+        // sighted in 0xA8B5 (one landblock north). Must be adjacent so
+        // the cross-landblock resolver can route to it.
+        Assert.True(WorldDistance.IsSameOrAdjacentLandblock(
+            0xA8B4003Fu, 0xA8B5002Bu));
+    }
+
     // ---- WorldDistance.SquaredDistanceBetween ----
 
     [Fact]
