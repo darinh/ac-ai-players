@@ -1194,7 +1194,7 @@ internal sealed class HandshakeDriver : IDisposable
             if (selfDeathAttributed) return;
             selfDeathAttributed = true;
             if (lastCombatFoe is { } foe &&
-                (DateTime.UtcNow - foe.At) < TimeSpan.FromSeconds(12) &&
+                CombatDeathAttribution.IsFresh(foe.At, DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness) &&
                 CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name)) is not null)
             {
                 combatFeel.RecordDeath(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name));
@@ -2092,6 +2092,37 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"(landed={combatSwingsLanded} evaded={combatSwingsEvaded})");
                                 }
 
+                                // combat-feel: a server-driven swing outcome
+                                // against our locked target confirms we are STILL
+                                // fighting the foe we are tracking for death
+                                // attribution. Refresh that foe's freshness
+                                // timestamp (identity-gated, so a delayed
+                                // notification after a target switch cannot
+                                // re-stamp the wrong foe) — otherwise lastCombatFoe
+                                // is only stamped on our SPARSE outbound swings, and
+                                // a long evade-heavy fight (the server drives the
+                                // auto-repeat loop) lets the freshness window expire
+                                // before a flee-then-die death, dropping the
+                                // strongest learned-avoidance signal.
+                                //
+                                // Match on the notification's reported DefenderName
+                                // ONLY: that is the authoritative identity of the
+                                // foe this swing resolved against. The locked
+                                // target's wcid is NOT reliable here — a notification
+                                // delayed across an A->B target switch would carry
+                                // A's name while the lock already reads B, and
+                                // matching B's wcid would wrongly refresh B.
+                                var cnObservedName =
+                                    ge.Payload?.AttackerNotification?.DefenderName
+                                    ?? ge.Payload?.EvasionAttackerNotification?.DefenderName;
+                                if (lastCombatFoe is { } cnFoe &&
+                                    CombatDeathAttribution.SignalMatchesFoe(
+                                        cnFoe.Wcid, cnFoe.Name,
+                                        observedWcid: null, observedName: cnObservedName))
+                                {
+                                    lastCombatFoe = (cnFoe.Wcid, cnFoe.Name, DateTime.UtcNow);
+                                }
+
                                 // Surface the live fight outcome to the LLM
                                 // prompt (## Combat readiness reads this).
                                 worldState.CurrentFight = new CombatFightStatus(
@@ -2892,10 +2923,20 @@ internal sealed class HandshakeDriver : IDisposable
                     // are breaking off from, using the threat's identity
                     // BEFORE any combat-state clear below.
                     var dgFoe = worldState.TryGet(dgTarget);
-                    combatFeel.RecordNearDeath(new CombatFeelLedger.MobIdentity(
+                    var dgIdentity = new CombatFeelLedger.MobIdentity(
                         dgFoe?.WeenieClassId ?? lastCombatFoe?.Wcid,
-                        dgFoe?.Name ?? combatTargetName ?? lastCombatFoe?.Name));
+                        dgFoe?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
+                    combatFeel.RecordNearDeath(dgIdentity);
                     PublishCombatHistory();
+                    // combat-feel: the disengage is the last confirmed moment we
+                    // were fighting this foe. Anchor the death-attribution foe
+                    // (identity + fresh timestamp) here too, so a flee-then-die
+                    // death within the freshness window still attributes even if
+                    // the final swing notification was missing or arrived earlier.
+                    // Only when the identity resolves — never stamp an
+                    // unidentifiable foe (KeyOf null) that could mis-attribute.
+                    if (CombatFeelLedger.KeyOf(dgIdentity) is not null)
+                        lastCombatFoe = (dgIdentity.Wcid, dgIdentity.Name, DateTime.UtcNow);
 
                     // 1) Reset ALL combat state (incl. fast-retry) so the
                     //    Phase 7f.2 loop-keeper can't re-swing during flee.
