@@ -245,6 +245,17 @@ internal sealed record WorldStateProjection
     public RecentInboundDamage? RecentInboundDamage { get; init; }
 
     /// <summary>
+    /// loot bookkeeping: GUIDs of corpses/containers the bot has itself
+    /// opened recently. Copied straight from
+    /// <see cref="WorldState.OpenedCorpseGuids"/>. Used to annotate a
+    /// visible corpse row with <c>opened_by_bot_recently=yes|no</c> so the
+    /// LLM knows which corpses it has already looted; source never decides
+    /// to loot — the LLM owns that.
+    /// </summary>
+    [JsonPropertyName("opened_corpse_guids")]
+    public IReadOnlySet<uint>? OpenedCorpseGuids { get; init; }
+
+    /// <summary>
     /// combat-feel: per-mob-identity summary of the bot's own observed
     /// combat outcomes this session (kills/deaths/near-deaths). Copied
     /// from <see cref="WorldState.CombatHistory"/>. Surfaced as raw
@@ -499,6 +510,7 @@ internal sealed record WorldStateProjection
             Visible = visible,
             CurrentFight = world.CurrentFight,
             RecentInboundDamage = world.RecentInboundDamage,
+            OpenedCorpseGuids = world.OpenedCorpseGuids,
             CombatHistory = world.CombatHistory,
             KilledKindsThisDwell = world.KilledKindsThisDwell,
             MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,
