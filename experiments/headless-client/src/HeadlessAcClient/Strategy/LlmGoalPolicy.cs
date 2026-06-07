@@ -3597,32 +3597,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine("- minutes in current landblock: (no LandblockChanged event in retained window)");
             }
         }
-        // Per-NPC recent Talk emissions (last 10 GoalEmitted events
-        // of kind Talk). Tactics formats GoalEmitted Text as
-        // `<Kind> target=<Selector> item=<Selector> source=<src>`
-        // so we look for lines starting with "Talk target=name=\"X\"".
+        // Per-NPC recent Talk emissions (last 10 GoalEmitted events of
+        // kind Talk). Tactics formats GoalEmitted Text as
+        // `<Kind> target=<Selector> item=<Selector> source=<src>` and
+        // Selector.ToString() prints `guid=...` BEFORE `name="..."`, so a
+        // picker-resolved Talk goal reads `target=guid=0x.. name="X" item=`.
+        // We therefore extract the whole target selector (mirroring the
+        // recent-Use counter below) and key identity by the guid token when
+        // present (else the name token, else the verbatim selector) so
+        // re-Talks of the SAME NPC collapse to one count even when the
+        // selector carries a guid. A name-only regex silently missed every
+        // guid-bearing Talk goal, leaving the count empty during real loops.
+        // The DISPLAY prefers the human name; identical display labels across
+        // DISTINCT guids get a short guid disambiguator. Mechanical structural
+        // parse of the bot's own emission history — no server text, no game
+        // knowledge.
         var recentGoalEmits = hintPoolForRecency
             .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
             .Take(10)
             .ToList();
-        var talkCountByNpc = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var talkByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
         foreach (var ge in recentGoalEmits)
         {
             var txt = ge.Text!;
             if (!txt.StartsWith("Talk ", StringComparison.Ordinal)) continue;
-            var m = System.Text.RegularExpressions.Regex.Match(txt, "target=name=\"([^\"]+)\"");
-            if (m.Success)
+            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!sm.Success) continue;
+            var sel = sm.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            var display = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : sel);
+            if (talkByKey.TryGetValue(key, out var cur))
             {
-                var n = m.Groups[1].Value;
-                talkCountByNpc[n] = talkCountByNpc.TryGetValue(n, out var c) ? c + 1 : 1;
+                // Prefer a name-bearing display if we only had a guid before.
+                var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
+                    ? display : cur.Display;
+                talkByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null));
+            }
+            else
+            {
+                talkByKey[key] = (1, display, gm.Success ? gm.Value : null);
             }
         }
-        if (talkCountByNpc.Count > 0)
+        if (talkByKey.Count > 0)
         {
+            var dupDisplays = talkByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
             sb.AppendLine("- recent Talk emissions (last 10 goals):");
-            foreach (var kv in talkCountByNpc.OrderByDescending(p => p.Value))
+            foreach (var kv in talkByKey.OrderByDescending(p => p.Value.Count))
             {
-                sb.AppendLine($"    - {kv.Key}: x{kv.Value}");
+                var label = dupDisplays.Contains(kv.Value.Display) && kv.Value.Guid is not null
+                    ? $"{kv.Value.Display} ({kv.Value.Guid})"
+                    : kv.Value.Display;
+                sb.AppendLine($"    - {label}: x{kv.Value.Count}");
             }
         }
         else
