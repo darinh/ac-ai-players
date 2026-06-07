@@ -3036,7 +3036,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         sb.AppendLine("- SPEND XP: `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested — raise an attribute with `RaiseAttribute{target: {name: \"endurance\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), a vital pool with `RaiseVital{target: {name: \"health\"}, amount: <XP>}` (names: health, stamina, mana), or a trained skill with `RaiseSkill{target: {name: \"war magic\"}, amount: <XP>}` (use a name from `trained skills` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Endurance/health raise MAX HEALTH. Invest a chunk when max HP is low.");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
-        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
+        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
@@ -3297,7 +3297,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         sb.AppendLine("## Visible nearby");
-        AppendVisibleNearby(sb, world.Visible);
+        AppendVisibleNearby(sb, world.Visible, world.CombatHistory);
         sb.AppendLine();
 
         // Slice H — Combat readiness summary. Surfaces the state the
@@ -3810,7 +3810,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         || v.IsBook || v.IsSign || v.IsLifestone || v.IsVendor || v.IsHealer
         || v.IsOpenable || v.ObservedHostile;
 
-    private static string RenderVisibleRow(VisibleObjectProjection v)
+    private static string RenderVisibleRow(
+        VisibleObjectProjection v,
+        IReadOnlyList<CombatHistoryEntry>? combatHistory = null)
     {
         var sb = new StringBuilder();
         sb.Append($"- {v.Name}");
@@ -3839,6 +3841,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (v.ObservedHostile) sb.Append(" HOSTILE");
         if (v.Distance is float d) sb.Append($" d={d:F1}");
         sb.Append(')');
+        // combat-feel: annotate a MONSTER row with the bot's own recorded
+        // outcomes against that monster KIND this session (cp-2311/2312
+        // feed the ledger; cp-2289 classifies the IsMonster wire flag).
+        // This is the SAME inline annotation already shown on the
+        // `nearest monster` / `observed hostile` lines, extended to EVERY
+        // visible monster so the LLM sees "you have died to this kind" at
+        // the exact decision point instead of cross-referencing the
+        // aggregate `combat history` block. Monster rows only — never
+        // annotate an npc/object even if a same-name history row exists.
+        // Raw counts via the existing helper (empty string when no record);
+        // no danger label, no priority — the COMBAT SAFETY rule decides.
+        if (v.IsMonster)
+            sb.Append(FormatCombatRecordFor(combatHistory, v.Wcid, v.Name));
         return sb.ToString();
     }
 
@@ -4112,7 +4127,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return dirs[idx];
     }
 
-    internal static void AppendVisibleNearby(StringBuilder sb, IReadOnlyList<VisibleObjectProjection> visible)
+    internal static void AppendVisibleNearby(
+        StringBuilder sb,
+        IReadOnlyList<VisibleObjectProjection> visible,
+        IReadOnlyList<CombatHistoryEntry>? combatHistory = null)
     {
         if (visible.Count == 0) { sb.AppendLine("- (nothing)"); return; }
 
@@ -4128,7 +4146,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int taggedShown = 0;
         foreach (var v in tagged)
         {
-            var row = ClampRow(RenderVisibleRow(v));
+            var row = ClampRow(RenderVisibleRow(v, combatHistory));
             int cost = row.Length + 1; // include the newline AppendLine adds
             // Always render at least one tagged row (clamped); otherwise stop
             // once the next row would exceed the row budget so the section
@@ -4148,7 +4166,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var v in plain)
         {
             if (plainShown >= VisiblePlainSoftCap) break;
-            var row = ClampRow(RenderVisibleRow(v));
+            var row = ClampRow(RenderVisibleRow(v, combatHistory));
             int cost = row.Length + 1;
             if (chars + cost > rowBudget) break;
             sb.AppendLine(row);

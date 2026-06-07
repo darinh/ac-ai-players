@@ -6215,6 +6215,96 @@ public class LlmGoalPolicyTests
         Assert.Contains("\u2026", text); // ellipsis marks the clamp
     }
 
+    // cp-2313: a MONSTER row in `## Visible nearby` carries the bot's own
+    // recorded combat-feel outcomes against that KIND inline, so the LLM
+    // sees "you have died to this kind" at the decision point without
+    // cross-referencing the aggregate `combat history` block.
+    [Fact]
+    public void AppendVisibleNearby_MonsterRow_CarriesCombatRecordInline()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>
+        {
+            new VisibleObjectProjection { Guid = 0x5001u, Name = "Creeper Mosswart", Wcid = 19261u, ItemType = 0x10u, Distance = 12f, IsCreature = true, IsMonster = true },
+        };
+        var history = new System.Collections.Generic.List<CombatHistoryEntry>
+        {
+            new CombatHistoryEntry("Creeper Mosswart", 19261u, Kills: 0, Deaths: 1, NearDeaths: 0, Fights: 1, LastOutcome: "death"),
+        };
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list, history);
+        var text = sb.ToString();
+
+        Assert.Contains("Creeper Mosswart", text);
+        Assert.Contains("[your record:", text);
+        Assert.Contains("deaths 1", text);
+    }
+
+    // The inline record is gated on the MONSTER wire flag: an npc/object row
+    // is NEVER annotated, even if a same-name history row exists (the record
+    // is about combat KINDS, not arbitrary same-named objects).
+    [Fact]
+    public void AppendVisibleNearby_NonMonsterRow_IsNeverAnnotated()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>
+        {
+            // Same display name as a history row, but flagged as a civilian npc.
+            new VisibleObjectProjection { Guid = 0x5002u, Name = "Creeper Mosswart", Wcid = 19261u, ItemType = 0x10u, Distance = 5f, IsCreature = true, IsMonster = false },
+        };
+        var history = new System.Collections.Generic.List<CombatHistoryEntry>
+        {
+            new CombatHistoryEntry("Creeper Mosswart", 19261u, Kills: 0, Deaths: 1, NearDeaths: 0, Fights: 1, LastOutcome: "death"),
+        };
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list, history);
+        var text = sb.ToString();
+
+        Assert.Contains("npc", text);
+        Assert.DoesNotContain("[your record:", text);
+    }
+
+    // A monster with no matching history row gets NO annotation (the helper
+    // returns empty), so unfought kinds read cleanly.
+    [Fact]
+    public void AppendVisibleNearby_MonsterRow_NoHistory_NoAnnotation()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>
+        {
+            new VisibleObjectProjection { Guid = 0x5003u, Name = "Unknown Beast", Wcid = 40000u, ItemType = 0x10u, Distance = 8f, IsCreature = true, IsMonster = true },
+        };
+        var history = new System.Collections.Generic.List<CombatHistoryEntry>
+        {
+            new CombatHistoryEntry("Creeper Mosswart", 19261u, Kills: 0, Deaths: 1, NearDeaths: 0, Fights: 1, LastOutcome: "death"),
+        };
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list, history);
+        var text = sb.ToString();
+
+        Assert.Contains("Unknown Beast", text);
+        Assert.DoesNotContain("[your record:", text);
+    }
+
+    // The new optional combatHistory arg is null-safe: the 2-arg call (and a
+    // null history) must render monster rows with no annotation, unchanged.
+    [Fact]
+    public void AppendVisibleNearby_NullHistory_RendersMonsterRowUnannotated()
+    {
+        var list = new System.Collections.Generic.List<VisibleObjectProjection>
+        {
+            new VisibleObjectProjection { Guid = 0x5004u, Name = "Drudge Slinker", Wcid = 19258u, ItemType = 0x10u, Distance = 3f, IsCreature = true, IsMonster = true },
+        };
+
+        var sb = new StringBuilder();
+        LlmGoalPolicy.AppendVisibleNearby(sb, list); // 2-arg: combatHistory defaults null
+        var text = sb.ToString();
+
+        Assert.Contains("Drudge Slinker", text);
+        Assert.Contains("monster", text);
+        Assert.DoesNotContain("[your record:", text);
+    }
+
     // Prompt-floor compaction: the static RULES + schema text dominates the
     // user prompt and drives gpt-4.1-mini's http-413 in dense areas. Lock the
     // floor in with a near-empty world so it cannot SILENTLY regrow. Budget
