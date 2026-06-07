@@ -146,6 +146,22 @@ internal enum EventKind
     // prompt rendering. UNLIKE the inventory dedup, it drives NO
     // source-side goal drop; whether to re-interact stays the LLM's call.
     WorldObjectInteracted   = 20,
+    // inbound-damage-onset-wake: the bot just TOOK a landed inbound swing
+    // (GameEventDefenderNotification 0x01B2). The Motor emits ONE deduped
+    // event per inbound-damage EPISODE (the first hit, or the first hit after
+    // a >= window-TTL lull in inbound hits) carrying RAW facts (the damage
+    // amount and the attacker's display name). Structural salience wake ONLY,
+    // the DEFENSIVE analogue of CombatFeedback above: the offensive
+    // CombatFeedback one-shot fires on the bot's first SWING (early, still
+    // healthy), so it never coincides with the moment the bot STARTS taking
+    // damage. This wakes the LLM at that moment so it re-reads the
+    // `## Combat readiness` inbound-damage line (cp-2314) and decides whether
+    // to keep attacking, disengage (Explore), or Recall (cp-2310) — WHICH the
+    // source never decides. Episode dedup is a hit-lull bookkeeping gate, NOT
+    // an HP/damage magnitude threshold (cp-2280: salience must never encode a
+    // materiality band). Name = the attacker's display name, Text = the raw
+    // "inbound hit landed (N damage) from X" summary.
+    InboundDamageTaken      = 21,
 }
 
 /// <summary>
@@ -223,6 +239,7 @@ internal sealed record StreamEvent
         EventKind.InventoryItemUsed    => $"#{Sequence} InventoryUsed wcid={Wcid} name=\"{Name}\" guid=0x{ItemGuid ?? 0:X8}",
         EventKind.CombatFeedback       => $"#{Sequence} CombatFeedback target=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.SelfProgressChanged  => $"#{Sequence} SelfProgress  \"{Truncate(Text, 120)}\"",
+        EventKind.InboundDamageTaken   => $"#{Sequence} InboundDamage \"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 

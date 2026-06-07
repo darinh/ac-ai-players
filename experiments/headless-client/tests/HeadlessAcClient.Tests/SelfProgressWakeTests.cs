@@ -134,4 +134,13 @@ public class SelfProgressWakeTests
     {
         Assert.True(LlmGoalPolicy.IsSalientKind(EventKind.SelfProgressChanged));
     }
+
+    [Fact]
+    public void IsSalientKind_InboundDamageTaken_WakesLlm()
+    {
+        // inbound-damage-onset-wake: the defensive analogue of CombatFeedback
+        // must wake the LLM so it re-reads ## Combat readiness the moment it
+        // starts taking damage.
+        Assert.True(LlmGoalPolicy.IsSalientKind(EventKind.InboundDamageTaken));
+    }
 }

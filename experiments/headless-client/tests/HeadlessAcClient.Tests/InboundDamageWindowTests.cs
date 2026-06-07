@@ -86,4 +86,41 @@ public class InboundDamageWindowTests
         Assert.Equal(1, summary!.Hits);
         Assert.Equal(8u, summary.TotalDamage);
     }
+
+    // inbound-damage-onset-wake: episode-boundary detection for the one
+    // structural LLM wake per inbound-damage episode.
+
+    [Fact]
+    public void Episode_FirstHitEver_BeginsEpisode()
+    {
+        // previousHitUtc == null => the first inbound hit always begins one.
+        Assert.True(InboundDamageWindow.BeginsNewInboundEpisode(null, Now, 12.0));
+    }
+
+    [Fact]
+    public void Episode_HitWithinWindowOfPrevious_DoesNotBegin()
+    {
+        // A continuous fight: hits closer together than the window are the
+        // SAME episode, so only the first wakes the LLM.
+        var prev = Now.AddSeconds(-2);
+        Assert.False(InboundDamageWindow.BeginsNewInboundEpisode(prev, Now, 12.0));
+    }
+
+    [Fact]
+    public void Episode_HitAfterLull_BeginsNewEpisode()
+    {
+        // A lull of at least the window since the previous hit re-arms.
+        var prev = Now.AddSeconds(-13);
+        Assert.True(InboundDamageWindow.BeginsNewInboundEpisode(prev, Now, 12.0));
+    }
+
+    [Fact]
+    public void Episode_HitAtExactlyWindowGap_BeginsNewEpisode()
+    {
+        // gap == window is treated as a lull (>= boundary), re-arming the wake
+        // — symmetric with the LULL side, distinct from the retain-on-edge
+        // prune rule which keeps an exactly-window-old hit.
+        var prev = Now.AddSeconds(-12);
+        Assert.True(InboundDamageWindow.BeginsNewInboundEpisode(prev, Now, 12.0));
+    }
 }
