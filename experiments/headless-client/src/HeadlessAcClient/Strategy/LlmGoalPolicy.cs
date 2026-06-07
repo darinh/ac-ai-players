@@ -2851,7 +2851,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         sb.AppendLine("- SPEND XP: `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested — raise an attribute with `RaiseAttribute{target: {name: \"endurance\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), a vital pool with `RaiseVital{target: {name: \"health\"}, amount: <XP>}` (names: health, stamina, mana), or a trained skill with `RaiseSkill{target: {name: \"war magic\"}, amount: <XP>}` (use a name from `trained skills` in `## Self`; the server rejects untrained skills). A positive `amount` is REQUIRED. Endurance/health raise MAX HEALTH. Invest a chunk when max HP is low.");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
-        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly. Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
+        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — before engaging a visible monster, match its name there: prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths` and no kills (it has beaten you — pick a different, weaker monster or Explore on). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         sb.AppendLine("- Looting: a dead monster becomes a `corpse` (a container that DECAYS). `Use{target: name=\"<corpse>\"}` to open, then `Pickup{target: name=\"<item>\"}` items that appear. NEVER skip a fresh corpse to chase the next NPC.");
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
@@ -3170,7 +3170,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Where(v => v.IsMonster)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
-        var observedHostile = world.Visible.FirstOrDefault(v => v.ObservedHostile);
+        var observedHostile = world.Visible.FirstOrDefault(v => !v.IsCorpse && v.ObservedHostile);
+        // Threat counts for the cluster signal. A live combat threat is any
+        // non-corpse monster OR anything actively attacking you (ObservedHostile
+        // — e.g. a hostile flagged-as-npc creature), so the count never
+        // contradicts the "observed hostile" line above and hostilesInView is
+        // always a subset of monstersInView. Raw wire-flag counts only.
+        var monstersInView = world.Visible.Count(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
+        var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
         string weaponLine;
         if (meleeWeaponWielded)
@@ -3220,6 +3227,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 world.CombatHistory, observedHostile.Wcid, observedHostile.Name);
             sb.AppendLine($"- observed hostile: {observedHostile.Name}{recStr} (it has attacked you — fight back or flee)");
         }
+        // threat-count: how many monsters are clustered in view and how many
+        // are already attacking. Feeds the COMBAT SAFETY "pull singly" rule a
+        // crisp count so it doesn't have to infer one from the interleaved
+        // "## Visible nearby" list. RAW counts only — no priority/urgency.
+        if (FormatThreatSummary(monstersInView, hostilesInView) is string threatLine)
+            sb.AppendLine(threatLine);
         // combat-damage-output: surface the live outcome of the current
         // melee fight so the LLM can judge whether its swings are
         // actually connecting. RAW counts only — the LLM decides whether
@@ -3732,6 +3745,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.Append(')');
         }
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Render the raw threat-count line for `## Combat readiness`: how many
+    /// monsters are in view and how many of those are actively hostile
+    /// (already attacking). RAW counts only — no danger label, no advice.
+    /// The COMBAT SAFETY rule tells the LLM to pull clustered or
+    /// multiple-hostile mobs singly; this is the perception signal that rule
+    /// acts on, so it doesn't have to count rows in `## Visible nearby`
+    /// (which interleaves monsters with NPCs/objects). Corpses are excluded
+    /// by the caller. Returns null when no monsters are in view (the caller
+    /// already emits a "nearest monster: (none in view)" line).
+    /// </summary>
+    internal static string? FormatThreatSummary(int monstersInView, int hostilesInView)
+    {
+        if (monstersInView <= 0) return null;
+        var hostilePart = hostilesInView > 0
+            ? $"{hostilesInView} actively HOSTILE (attacking you now)"
+            : "none currently hostile";
+        return $"- monsters in view: {monstersInView} ({hostilePart})";
     }
 
     internal static void AppendRecentSightings(

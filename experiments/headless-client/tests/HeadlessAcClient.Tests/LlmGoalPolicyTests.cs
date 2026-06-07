@@ -2779,6 +2779,98 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_MultipleMonsters_RendersThreatCount()
+    {
+        // cp-2297: a cluster of monsters, two already attacking, must
+        // surface a crisp `monsters in view` count so the COMBAT SAFETY
+        // "pull singly" rule has a signal to act on (the bot previously
+        // walked into a 4-mob cluster and died — cp-2296).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x401u, Name = "Drudge Skulker", Wcid = 19257u, Distance = 8f,
+                  IsAttackable = true, HasRadarBlipColor = false, IsMonster = true, ObservedHostile = true },
+                new VisibleObjectProjection
+                { Guid = 0x402u, Name = "Drudge Slinker", Wcid = 19258u, Distance = 11f,
+                  IsAttackable = true, HasRadarBlipColor = false, IsMonster = true, ObservedHostile = true },
+                new VisibleObjectProjection
+                { Guid = 0x403u, Name = "Drudge Slinker", Wcid = 19258u, Distance = 15f,
+                  IsAttackable = true, HasRadarBlipColor = false, IsMonster = true, ObservedHostile = false },
+                // A corpse must NOT be counted as a live threat.
+                new VisibleObjectProjection
+                { Guid = 0x404u, Name = "Corpse of a Drudge", Wcid = 21u, Distance = 5f,
+                  IsCorpse = true, IsMonster = false },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("monsters in view: 3 (2 actively HOSTILE (attacking you now))", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_HostileNonMonster_ThreatLineAgreesWithObservedHostile()
+    {
+        // Coherence guard: a non-monster creature that is actively attacking
+        // (ObservedHostile but not flagged IsMonster — e.g. a hostile NPC) must
+        // still be counted as a threat so the "monsters in view" line never
+        // contradicts the "observed hostile" line. H must be >= 1 here.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x501u, Name = "Angry Townsperson", Wcid = 999u, Distance = 6f,
+                  IsMonster = false, ObservedHostile = true },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("observed hostile: Angry Townsperson", prompt);
+        Assert.Contains("monsters in view: 1 (1 actively HOSTILE (attacking you now))", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_HostileCorpse_NeitherObservedHostileNorThreatLine()
+    {
+        // Coherence guard, corpse edge: a corpse can still carry the
+        // ObservedHostile wire flag (set independently of corpse status). A
+        // corpse is not a live threat, so it must be excluded from BOTH the
+        // "observed hostile" line and the threat count — otherwise the two
+        // signals contradict (observed-hostile prints while H == 0).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x502u, Name = "Corpse of Drudge", Wcid = 999u, Distance = 4f,
+                  IsMonster = false, IsCorpse = true, ObservedHostile = true },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("observed hostile:", prompt);
+        Assert.DoesNotContain("monsters in view:", prompt);
+    }
+
+
+    [Fact]
     public void CombatReadiness_MissileWieldedAmmoLoaded_ReadsArmed()
     {
         // combat-missile-attack: a wielded missile weapon (atlatl/bow,
@@ -5923,18 +6015,20 @@ public class LlmGoalPolicyTests
     // user prompt and drives gpt-4.1-mini's http-413 in dense areas. Lock the
     // floor in with a near-empty world so it cannot SILENTLY regrow. Budget
     // bumped 13000 -> 13300 (cp-2282) for the third XP-spend advancement verb
-    // RaiseSkill (its schema enum entry + the inline SPEND XP example). This
-    // is an intentional, reviewed wire-verb addition, not silent regrowth; the
-    // ~130-char delta (~33 tokens) does not move the runtime 413 risk, which
-    // is driven by dense per-tick WORLD/visible sections, not the static floor.
+    // RaiseSkill (its schema enum entry + the inline SPEND XP example). Bumped
+    // 13300 -> 13500 (cp-2297) for the COMBAT SAFETY threat-count clause that
+    // points the LLM at the new `monsters in view` cluster signal. Both are
+    // intentional, reviewed additions, not silent regrowth; the ~90-char delta
+    // (~23 tokens) does not move the runtime 413 risk, which is driven by dense
+    // per-tick WORLD/visible sections, not the static floor.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 13300,
-            $"static prompt floor grew to {prompt.Length} chars (budget 13300)");
+        Assert.True(prompt.Length <= 13500,
+            $"static prompt floor grew to {prompt.Length} chars (budget 13500)");
     }
 
     // combat-feel: the "## Combat readiness" combat-history block renders
@@ -6248,6 +6342,39 @@ public class LlmGoalPolicyTests
     {
         var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
         Assert.Equal("", LlmGoalPolicy.FormatCombatRecordFor(hist, 7u, "Drudge Skulker"));
+    }
+
+    [Fact]
+    public void FormatThreatSummary_NullWhenNoMonsters()
+    {
+        Assert.Null(LlmGoalPolicy.FormatThreatSummary(0, 0));
+        Assert.Null(LlmGoalPolicy.FormatThreatSummary(-1, 0));
+    }
+
+    [Fact]
+    public void FormatThreatSummary_SingleNonHostile()
+    {
+        Assert.Equal(
+            "- monsters in view: 1 (none currently hostile)",
+            LlmGoalPolicy.FormatThreatSummary(1, 0));
+    }
+
+    [Fact]
+    public void FormatThreatSummary_ClusterWithHostiles()
+    {
+        // The cp-2296 death scenario: 4 monsters clustered, 3 already
+        // attacking. The LLM should read this as "swarmed -> disengage".
+        Assert.Equal(
+            "- monsters in view: 4 (3 actively HOSTILE (attacking you now))",
+            LlmGoalPolicy.FormatThreatSummary(4, 3));
+    }
+
+    [Fact]
+    public void FormatThreatSummary_SingleHostile()
+    {
+        Assert.Equal(
+            "- monsters in view: 1 (1 actively HOSTILE (attacking you now))",
+            LlmGoalPolicy.FormatThreatSummary(1, 1));
     }
 
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
