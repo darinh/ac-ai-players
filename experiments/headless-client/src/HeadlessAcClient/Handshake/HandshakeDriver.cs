@@ -836,6 +836,21 @@ internal sealed class HandshakeDriver : IDisposable
         // we don't re-emit InventoryItemAdded every tick. The
         // InventoryPutObjInContainer ack is the canonical signal.
         var observedInventoryAdds = new HashSet<uint>();
+        // One-shot latch: true once the initial login inventory
+        // firehose has flushed. The items the character already
+        // carries at login arrive as self-container ObjectCreates;
+        // we only treat a self-container ObjectCreate as a server
+        // GIVE (quest reward) AFTER this latches. It is intentionally
+        // NEVER reset on a teleport LoginComplete resend, so a give
+        // received right after a teleport still counts.
+        var initialInventorySettled = false;
+        // Packet index of the most recent applied self-container
+        // ObjectCreate (an item in OUR pack). Used to detect when the
+        // initial inventory firehose has gone QUIET: settle only after
+        // self-inventory creates have stopped for a grace window, so a
+        // firehose that runs longer than the raw post-login grace can't
+        // leak starter items as false gives. -1 until the first one.
+        var lastSelfInventoryCreatePacketIndex = -1;
         // Set by the LLM-driven pre-emptor when CurrentGoal.Kind ==
         // Give. Consumed by the action-send block (replaces USE with
         // GiveObjectRequest). Cleared by the cooldown-reset block.
@@ -1364,12 +1379,56 @@ internal sealed class HandshakeDriver : IDisposable
                     var preDeletePresent = decoded is ObjectDeleteMessage odPre
                         && worldState.TryGet(odPre.Guid) is not null;
 
+                    // Snapshot whether an ObjectCreate's guid was
+                    // already known BEFORE Apply runs. A server give
+                    // (quest reward placed directly in our pack) is a
+                    // genuinely new guid; a looted item's re-broadcast
+                    // ObjectCreate is already known (its acquisition was
+                    // already surfaced via the put-ack path), so this
+                    // lets us emit InventoryItemAdded for the former
+                    // without double-emitting the latter.
+                    var preCreateKnown = decoded is ObjectCreateMessage ocPre
+                        && worldState.TryGet(ocPre.Guid) is not null;
+
                     // Feed the world-state accumulator BEFORE the
                     // logging switch. Apply is a no-op for message
                     // types it doesn't recognize (CharacterList,
                     // ServerName, GameEvent envelopes, etc.) so it's
                     // safe to call unconditionally here.
                     var applied = worldState.Apply(decoded);
+
+                    // Track the most recent self-inventory ObjectCreate
+                    // so the settle latch below can wait for the initial
+                    // inventory burst to go quiet. Recorded for the
+                    // CURRENT packet BEFORE the settle check (see
+                    // ShouldMarkInventorySettled remarks): this is what
+                    // stops a fresh self-inventory create from flipping
+                    // the latch on its own packet and emitting itself as
+                    // a spurious give. Runs for every applied
+                    // self-container create (starter items AND, post-
+                    // settle, gives — harmless once latched).
+                    if (applied
+                        && decoded is ObjectCreateMessage ocInv
+                        && worldState.SelfGuid is uint invSelf
+                        && worldState.TryGet(ocInv.Guid)?.ContainerGuid == invSelf)
+                    {
+                        lastSelfInventoryCreatePacketIndex = count;
+                    }
+
+                    // Latch "initial inventory firehose flushed" once.
+                    // ONE-SHOT (never reset by a later teleport
+                    // LoginComplete resend) so post-teleport gives still
+                    // surface as acquisitions.
+                    if (!initialInventorySettled
+                        && InventoryGiveClassifier.ShouldMarkInventorySettled(
+                            loginCompleteSent,
+                            count,
+                            loginCompletePacketIndex,
+                            lastSelfInventoryCreatePacketIndex,
+                            PostLoginCompleteGracePackets))
+                    {
+                        initialInventorySettled = true;
+                    }
 
                     switch (decoded)
                     {
@@ -1481,6 +1540,42 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"itemType=0x{oc.Weenie.ItemType:X} name=\"{oc.Weenie.Name}\"" +
                                 $" wFlags=0x{(uint)oc.Weenie.Flags:X8}/0x{(uint)oc.Weenie.Flags2:X8}" +
                                 $" pFlags=0x{(uint)oc.Physics.DescriptionFlags:X6}{loc}");
+                            // Server-initiated GIVE detection. An NPC
+                            // quest reward / hand-off arrives as a fresh
+                            // ObjectCreate with ContainerGuid==self and,
+                            // unlike a loot PutItemInContainer ack,
+                            // produces no client-driven acquisition
+                            // event. Without surfacing it here an Intent
+                            // completion predicate that counts inventory
+                            // acquisitions (`+inv name~"...">=N`) never
+                            // fires for a give, so a quest:talk-to-X
+                            // intent never pops and the bot re-Talks the
+                            // NPC forever, hoarding duplicate rewards.
+                            // Decision is the pure InventoryGiveClassifier
+                            // (no game knowledge); the shared
+                            // observedInventoryAdds set dedups against the
+                            // put-ack path so a give that ALSO acks emits
+                            // exactly once.
+                            if (InventoryGiveClassifier.IsServerGive(
+                                    applied,
+                                    preCreateKnown,
+                                    initialInventorySettled,
+                                    worldState.SelfGuid,
+                                    worldState.TryGet(oc.Guid)?.ContainerGuid)
+                                && observedInventoryAdds.Add(oc.Guid))
+                            {
+                                var giftSnap = worldState.TryGet(oc.Guid);
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.InventoryItemAdded,
+                                    ItemGuid = oc.Guid,
+                                    Wcid = giftSnap?.WeenieClassId,
+                                    Name = giftSnap?.Name,
+                                    ItemType = giftSnap?.ItemType,
+                                });
+                            }
                             // Preload the weenie ShortDesc/LongDesc
                             // strings in the background. The next LLM
                             // call needs ShortDesc to reason about
@@ -1636,12 +1731,13 @@ internal sealed class HandshakeDriver : IDisposable
                             {
                                 // Surface to the EventStream so the LLM
                                 // policy re-deliberates when a new item
-                                // joins inventory. The ObjectCreate
-                                // path above ALSO fires for fresh
-                                // items, but InventoryPutObjInContainer
-                                // is the canonical "you now own this"
-                                // server signal (catches give-acks and
-                                // pickup-acks alike).
+                                // joins inventory via a client-driven
+                                // PutItemInContainer (loot/pickup). Server
+                                // GIVES are surfaced by the ObjectCreate
+                                // give-detection path above; both share
+                                // this observedInventoryAdds dedup set, so
+                                // whichever path sees a guid first emits
+                                // once and the other skips it.
                                 if (observedInventoryAdds.Add(putAck.ItemGuid))
                                 {
                                     var ackSnap = worldState.TryGet(putAck.ItemGuid);
