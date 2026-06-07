@@ -4058,6 +4058,48 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "how much, and which to raise is your call.");
         }
 
+        // ── ## Recent Talk (end-of-prompt salience capsule) ──────────────
+        // The per-NPC recent-Talk counts already render mid-prompt in
+        // `## Location & recency`, yet live runs show the LLM re-Talking the
+        // same NPC 6-7 times in a row with rationales that show ZERO
+        // awareness of the repeat count ("Wilomine HAS the directions") —
+        // the same burial pattern the `## Unspent XP` capsule fixed: a fact
+        // present ~20KB earlier is out-competed by the parked local
+        // affordance. Re-surface the SAME computed counts in the most
+        // decision-proximate slot so the repeat is visible right before the
+        // model answers. Rendered whenever any recent Talk exists (no
+        // source-side significance threshold — the raw counts are exposed and
+        // the LLM judges significance, mirroring the `## Unspent XP` capsule's
+        // any-positive gate). RAW counts + an explicit not-a-recommendation
+        // disclaimer — no urgency wording, no "stuck", no instruction to
+        // pivot: the LLM decides. No game knowledge; perception
+        // re-positioned for salience. Same-display/different-guid NPCs get a
+        // guid disambiguator, mirroring the `## Location & recency` render.
+        if (talkByKey.Count > 0)
+        {
+            var endcapDupDisplays = talkByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endcapTalkList = string.Join(", ", talkByKey
+                .OrderByDescending(p => p.Value.Count)
+                .Select(p =>
+                {
+                    var label = endcapDupDisplays.Contains(p.Value.Display) && p.Value.Guid is not null
+                        ? $"{p.Value.Display} ({p.Value.Guid})"
+                        : p.Value.Display;
+                    return $"{label} x{p.Value.Count}";
+                }));
+            sb.AppendLine();
+            sb.AppendLine("## Recent Talk");
+            sb.AppendLine(
+                $"- in your last 10 emitted goals you emitted Talk to: {endcapTalkList}.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
+                "Explore all remain executable right now. See `## Location & recency` above. Your call.");
+        }
+
         return FitPromptToCeiling(sb.ToString());
     }
 
