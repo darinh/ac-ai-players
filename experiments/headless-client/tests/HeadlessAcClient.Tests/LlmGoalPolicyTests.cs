@@ -6599,7 +6599,11 @@ public class LlmGoalPolicyTests
     // attribute the old rule explained), so the rule now states the FULL
     // attribute->effect mechanics (strength/coordination melee, focus/self
     // magic, quickness defense/missile, endurance/health max HP) plus an
-    // adaptive no-fixed-build caution. All are intentional, reviewed additions,
+    // adaptive no-fixed-build caution. Bumped 15200 -> 16000 (xp-spend-salience)
+    // for the SPEND XP action-selection lead-in (3 live gpt-4.1-mini runs showed
+    // the bot HOARDING thousands of unspent XP, 0 Raise verbs) + the
+    // fight/loot/invest-XP priority-band clause + the conditional `## Self`
+    // unspent-XP "invest NOW" cue. All are intentional, reviewed additions,
     // not silent regrowth; the delta does not move the runtime 413 risk, which
     // is driven by dense per-tick WORLD/visible sections, not the static floor.
     [Fact]
@@ -6608,8 +6612,60 @@ public class LlmGoalPolicyTests
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 15200,
-            $"static prompt floor grew to {prompt.Length} chars (budget 15200)");
+        Assert.True(prompt.Length <= 16000,
+            $"static prompt floor grew to {prompt.Length} chars (budget 16000)");
+    }
+
+    // ---- XP-spend salience (xp-spend-salience) ----
+    //
+    // Three live gpt-4.1-mini natural-play runs showed the bot HOARDING
+    // thousands of unspent XP and emitting 0 Raise* verbs even when the SPEND
+    // XP rule rendered correctly and outcome-evidence pointed at the fix. This
+    // slice raises XP-spend SALIENCE in the prompt (no source-side decision, no
+    // numeric threshold): a fight/loot/invest-XP priority-band clause, a
+    // first-class action-selection lead-in on the SPEND XP rule, and a
+    // conditional `## Self` "invest NOW" cue shown only when unspent XP > 0.
+    private static WorldStateProjection BuildXpWorld(long total, long unspent) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u, CellId = 0xA9B40019u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            Level = 9, TotalExperience = total, AvailableExperience = unspent,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+    };
+
+    [Fact]
+    public void BuildUserPrompt_PriorityBand_IncludesInvestUnspentXp()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("fight/loot/invest unspent XP", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_HasFirstClassActionLeadIn()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("SPEND XP is a FIRST-CLASS action", prompt);
+        // Spending stays OPTIONAL — danger still outranks it.
+        Assert.Contains("no `HOSTILE` is on you", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfLine_CuesInvestWhenUnspentPositive()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("5475 unspent (available to invest NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfLine_NoInvestCueWhenUnspentZero()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.Contains("0 unspent", prompt);
+        Assert.DoesNotContain("available to invest NOW", prompt);
     }
 
     // ---- Recent goal outcomes section (cp-2299) ----
