@@ -3498,6 +3498,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
+        // Distill the bot's OWN goal-lifecycle outcomes (GoalCompleted /
+        // GoalFailed) into a dedicated section. These already appear in the
+        // 25-event "## Recent events" tail, but in a busy area high-volume
+        // observe noise (Motion/UpdatePosition/ObjectCreate) evicts them long
+        // before the next decision — the same eviction problem that justified
+        // the "## Recent rejections" pull-out. Dedup by (kind, target) keeping
+        // the most recent of each (events are newest-first) so a repeatedly-
+        // failing engagement — e.g. an Attack on a fleeing/far mob that keeps
+        // timing out — surfaces once and clearly instead of either flooding
+        // the list or being lost. Pure echo of own bookkeeping the LLM
+        // generated; it decides whether to retry or pick a different target.
+        var goalOutcomes = events.Recent(120)
+            .Where(e => e.Kind == EventKind.GoalCompleted || e.Kind == EventKind.GoalFailed)
+            .GroupBy(e => (e.Kind, key: e.Name ?? e.Text ?? string.Empty))
+            .Select(g => g.First())
+            .Take(8)
+            .ToList();
+        if (goalOutcomes.Count > 0)
+        {
+            sb.AppendLine("## Recent goal outcomes (your own recent goals — don't keep repeating ones that keep failing)");
+            foreach (var o in goalOutcomes)
+            {
+                var verb = o.Kind == EventKind.GoalCompleted ? "[done]" : "[FAILED]";
+                var target = string.IsNullOrEmpty(o.Name) ? "" : $" target=\"{o.Name}\"";
+                var detail = string.IsNullOrEmpty(o.Text) ? "" : $": {Truncate(o.Text, 80)}";
+                sb.AppendLine($"- {verb}{target}{detail}");
+            }
+            sb.AppendLine();
+        }
+
         if (currentGoal is not null)
         {
             sb.AppendLine("## Current goal");
