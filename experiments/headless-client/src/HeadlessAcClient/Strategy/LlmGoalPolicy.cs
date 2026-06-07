@@ -3880,35 +3880,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Renders the `## Visible nearby` body. In object-dense areas (towns
     // with 100+ visible objects) an uncapped listing pushes the whole
     // prompt past some models' request-size limit (HTTP 413). To stay
-    // within budget we keep every higher-information row — any object whose
-    // wire-derived projection carries an affordance/state tag (creature/
-    // portal/door/corpse/chest/book/sign/lifestone/vendor/healer/openable/
-    // hostile) — and truncate only "plain" rows that expose nothing but
-    // name/wcid/distance, taking the NEAREST plain rows first (distance is
-    // geometric, not game knowledge). This is an information-budget
-    // decision, NOT a strategy decision: no per-type priority is assigned
-    // beyond "has any tag" vs "plain". The authoritative monster-presence
-    // signal the rules rely on lives in `## Combat readiness` (computed
-    // directly from world.Visible), not in this rendered text.
-    private const int VisiblePlainSoftCap = 50;
+    // within budget we include rows NEAREST-FIRST (pure geometry) up to a
+    // char budget + row soft cap, then summarize whatever was dropped. The
+    // source assigns NO per-type priority to which rows survive — distance
+    // alone decides, matching the cp-2316 prompt-ceiling trim that also
+    // sheds the far tail of nearest-first `## Visible nearby`. The dropped
+    // rows are summarized by decoded projection flag (a factual count, not a
+    // priority) so the LLM still knows a far interactable exists and can move
+    // toward it. The authoritative monster-presence signal the rules rely on
+    // lives in `## Combat readiness` (computed directly from world.Visible),
+    // not in this rendered text.
+    private const int VisibleRowSoftCap = 50;
     private const int VisibleSectionCharBudget = 10000;
     // Headroom reserved (out of the budget) for the two omission-summary
     // lines so the whole section stays <= VisibleSectionCharBudget even after
     // those lines are appended. Generous: at most ~12 "kind=NNNNNNN" pairs.
     private const int VisibleSummaryReserve = 400;
     // Hard clamp on a single rendered row so one pathological object name can
-    // never blow the budget (the always-emit-first-tagged-row guarantee).
+    // never blow the budget (the always-emit-the-nearest-row guarantee).
     private const int VisibleRowMaxChars = 400;
 
     private static string ClampRow(string row) =>
         row.Length <= VisibleRowMaxChars
             ? row
             : row.Substring(0, VisibleRowMaxChars - 1) + "\u2026";
-
-    private static bool IsTaggedVisible(VisibleObjectProjection v) =>
-        v.IsCreature || v.IsPortal || v.IsDoor || v.IsCorpse || v.IsChest
-        || v.IsBook || v.IsSign || v.IsLifestone || v.IsVendor || v.IsHealer
-        || v.IsOpenable || v.ObservedHostile;
 
     private static string RenderVisibleRow(
         VisibleObjectProjection v,
@@ -3973,20 +3968,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private static string SummarizeOmittedTags(IReadOnlyList<VisibleObjectProjection> omitted)
     {
         int monster = 0, npc = 0, portal = 0, door = 0, corpse = 0, chest = 0,
-            book = 0, sign = 0, lifestone = 0, vendor = 0, healer = 0, openable = 0;
+            book = 0, sign = 0, lifestone = 0, vendor = 0, healer = 0, openable = 0,
+            other = 0;
         foreach (var v in omitted)
         {
-            if (v.IsCreature) { if (v.IsMonster) monster++; else npc++; }
-            if (v.IsPortal) portal++;
-            if (v.IsDoor) door++;
-            if (v.IsCorpse) corpse++;
-            if (v.IsChest) chest++;
-            if (v.IsBook) book++;
-            if (v.IsSign) sign++;
-            if (v.IsLifestone) lifestone++;
-            if (v.IsVendor) vendor++;
-            if (v.IsHealer) healer++;
-            if (v.IsOpenable) openable++;
+            bool tagged = false;
+            if (v.IsCreature) { if (v.IsMonster) monster++; else npc++; tagged = true; }
+            if (v.IsPortal) { portal++; tagged = true; }
+            if (v.IsDoor) { door++; tagged = true; }
+            if (v.IsCorpse) { corpse++; tagged = true; }
+            if (v.IsChest) { chest++; tagged = true; }
+            if (v.IsBook) { book++; tagged = true; }
+            if (v.IsSign) { sign++; tagged = true; }
+            if (v.IsLifestone) { lifestone++; tagged = true; }
+            if (v.IsVendor) { vendor++; tagged = true; }
+            if (v.IsHealer) { healer++; tagged = true; }
+            if (v.IsOpenable) { openable++; tagged = true; }
+            if (!tagged) other++;
         }
         var parts = new List<string>();
         void Add(string k, int n) { if (n > 0) parts.Add($"{k}={n}"); }
@@ -3994,6 +3992,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Add("door", door); Add("corpse", corpse); Add("chest", chest);
         Add("book", book); Add("sign", sign); Add("lifestone", lifestone);
         Add("vendor", vendor); Add("healer", healer); Add("openable", openable);
+        Add("other", other);
         return parts.Count == 0 ? "(none)" : string.Join(", ", parts);
     }
 
@@ -4265,48 +4264,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         if (visible.Count == 0) { sb.AppendLine("- (nothing)"); return; }
 
-        var tagged = visible.Where(IsTaggedVisible)
-            .OrderBy(v => v.Distance ?? float.MaxValue).ToList();
-        var plain = visible.Where(v => !IsTaggedVisible(v))
-            .OrderBy(v => v.Distance ?? float.MaxValue).ToList();
+        // Neutral nearest-first inclusion. Rows survive truncation by DISTANCE
+        // only — the source does not privilege any in-game object TYPE for
+        // prompt real estate (that would be a type-priority; the LLM decides
+        // what matters). Distance ordering matches the cp-2316 prompt-ceiling
+        // trim, which also sheds the far tail of nearest-first.
+        var ordered = visible
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .ToList();
 
         // Rows must fit within the budget minus the summary headroom so the
-        // closing omission-summary lines never push the section over budget.
+        // closing omission-summary line never pushes the section over budget.
         int rowBudget = VisibleSectionCharBudget - VisibleSummaryReserve;
         int chars = 0;
-        int taggedShown = 0;
-        foreach (var v in tagged)
+        int shown = 0;
+        foreach (var v in ordered)
         {
+            if (shown >= VisibleRowSoftCap) break;
             var row = ClampRow(RenderVisibleRow(v, combatHistory, openedCorpseGuids));
             int cost = row.Length + 1; // include the newline AppendLine adds
-            // Always render at least one tagged row (clamped); otherwise stop
+            // Always render at least the nearest row (clamped); otherwise stop
             // once the next row would exceed the row budget so the section
-            // stays bounded even when tagged objects alone are numerous.
-            if (taggedShown > 0 && chars + cost > rowBudget) break;
+            // stays bounded even when objects are numerous.
+            if (shown > 0 && chars + cost > rowBudget) break;
             sb.AppendLine(row);
             chars += cost;
-            taggedShown++;
+            shown++;
         }
-        if (taggedShown < tagged.Count)
+        if (shown < ordered.Count)
         {
-            var omitted = tagged.Skip(taggedShown).ToList();
-            sb.AppendLine($"- (+{omitted.Count} more tagged objects not shown due to prompt budget: {SummarizeOmittedTags(omitted)})");
-        }
-
-        int plainShown = 0;
-        foreach (var v in plain)
-        {
-            if (plainShown >= VisiblePlainSoftCap) break;
-            var row = ClampRow(RenderVisibleRow(v, combatHistory, openedCorpseGuids));
-            int cost = row.Length + 1;
-            if (chars + cost > rowBudget) break;
-            sb.AppendLine(row);
-            chars += cost;
-            plainShown++;
-        }
-        if (plainShown < plain.Count)
-        {
-            sb.AppendLine($"- (+{plain.Count - plainShown} more distant plain objects not shown)");
+            var omitted = ordered.Skip(shown).ToList();
+            // Factual, type-neutral omission telemetry: a raw count plus the
+            // decoded-flag breakdown of what was dropped (projection facts, not
+            // a priority). Flag counts are NOT a partition — an object may carry
+            // several flags (e.g. chest+openable) so the breakdown can exceed N;
+            // the wording says so. The LLM can weigh whether to move closer to
+            // reveal an omitted object.
+            sb.AppendLine($"- (+{omitted.Count} more distant objects not shown due to prompt budget; flag counts among them, an object may match several: {SummarizeOmittedTags(omitted)})");
         }
     }
 
