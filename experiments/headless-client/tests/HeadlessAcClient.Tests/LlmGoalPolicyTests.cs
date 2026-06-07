@@ -2298,6 +2298,107 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_RepeatedIdenticalNpcReply_RendersRepeatCount()
+    {
+        // cp-2323 — the dedup collapses identical NPC replies to one line; the
+        // repeat count must still surface so the LLM can tell a stuck Talk loop
+        // (same reply N times) from a progressing dialog.
+        var es = new EventStream();
+        for (int i = 0; i < 12; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.NpcDialog, Name = "Jonathan",
+                Text = "I already gave you an Exit Token.",
+            });
+        }
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Server hints", prompt);
+        Assert.Contains("I already gave you an Exit Token.", prompt);
+        Assert.Contains("(repeated x12)", prompt);
+        // The neutral explanatory NOTE appears when at least one line repeated.
+        Assert.Contains("\"(repeated xN)\"", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SingleNpcReply_NoRepeatSuffixOrNote()
+    {
+        // A reply seen ONCE must render without a count suffix, and the NOTE
+        // must be omitted (no false "you are looping" signal).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Name = "Jonathan",
+            Text = "Welcome, adventurer.",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("Welcome, adventurer.", prompt);
+        Assert.DoesNotContain("(repeated x", prompt);
+        Assert.DoesNotContain("\"(repeated xN)\"", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RepeatCount_DistinguishesProgressingDialog()
+    {
+        // Two DIFFERENT replies from the same NPC must NOT be counted together;
+        // a progressing multi-turn dialog should not be flagged as repeated.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Name = "Tutor",
+            Text = "Step one: equip your weapon.",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Name = "Tutor",
+            Text = "Step two: attack the target.",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("Step one: equip your weapon.", prompt);
+        Assert.Contains("Step two: attack the target.", prompt);
+        Assert.DoesNotContain("(repeated x", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RepeatedPopupAndServerMessage_RenderRepeatCount()
+    {
+        // The count is uniform across all three deduped hint surfaces (no
+        // object-type/NPC special-casing), so repeated PopupString and
+        // ServerMessage lines surface their counts too.
+        var es = new EventStream();
+        for (int i = 0; i < 5; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.PopupString, Text = "Talk to Jonathan to leave.",
+            });
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage, ChatType = 0,
+                Text = "You are not in range.",
+            });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("Talk to Jonathan to leave.", prompt);
+        Assert.Contains("(repeated x5)", prompt);
+        Assert.Contains("You are not in range.", prompt);
+        Assert.Contains("(repeated x3)", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_RendersPopupStringHint_Durably()
     {
         // A PopupString carrying an exit directive must survive in the

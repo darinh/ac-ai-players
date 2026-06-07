@@ -3618,15 +3618,61 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 .Select(g => g.First())
                 .ToList(),
             earliest: 6, newest: 6);
+        // cp-2323 — repeated-hint count. The dedup above collapses every
+        // identical line to ONE row, which is correct for token budget but
+        // ERASES the fact that the SAME line arrived many times. Live-observed
+        // loop: the bot Talk'd one NPC 12 times in a row; the NPC's reply was
+        // byte-identical each time, but the deduped hint showed it once, so the
+        // LLM had no signal that re-doing the action kept producing the same
+        // response and looped. Re-derive the occurrence count for each retained
+        // line (exact string-equality over the same retained window — pure
+        // bookkeeping, NO semantic parsing of the text) and surface it as a
+        // neutral `(repeated xN)` suffix so the LLM can tell a progressing
+        // interaction (new text) from a stuck one (same text again). Telemetry
+        // only; the LLM decides whether to retry. No object-type/NPC/quest
+        // knowledge is encoded.
+        var serverRepeats = hintPool
+            .Where(e => e.Kind == EventKind.ServerMessage && !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => (e.ChatType, e.Text))
+            .ToDictionary(g => g.Key, g => g.Count());
+        var npcRepeats = hintPool
+            .Where(e => e.Kind == EventKind.NpcDialog && !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => (e.Name, e.Text))
+            .ToDictionary(g => g.Key, g => g.Count());
+        var popupRepeats = hintPool
+            .Where(e => e.Kind == EventKind.PopupString && !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => e.Text!)
+            .ToDictionary(g => g.Key, g => g.Count());
+        static string RepeatSuffix(int count) => count > 1 ? $" (repeated x{count})" : "";
         if (serverHints.Count > 0 || npcHints.Count > 0 || popupHints.Count > 0)
         {
             sb.AppendLine("## Server hints (recent — text the server sent you, dedupe'd)");
+            bool anyRepeated = false;
             foreach (var h in serverHints)
-                sb.AppendLine($"- ServerMessage[chat=0x{h.ChatType ?? 0:X}]: \"{Truncate(h.Text, 320)}\"");
+            {
+                var c = serverRepeats.TryGetValue((h.ChatType, h.Text), out var sc) ? sc : 1;
+                if (c > 1) anyRepeated = true;
+                sb.AppendLine($"- ServerMessage[chat=0x{h.ChatType ?? 0:X}]: \"{Truncate(h.Text, 320)}\"{RepeatSuffix(c)}");
+            }
             foreach (var h in npcHints)
-                sb.AppendLine($"- NpcDialog from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"");
+            {
+                var c = npcRepeats.TryGetValue((h.Name, h.Text), out var nc) ? nc : 1;
+                if (c > 1) anyRepeated = true;
+                sb.AppendLine($"- NpcDialog from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"{RepeatSuffix(c)}");
+            }
             foreach (var h in popupHints)
-                sb.AppendLine($"- PopupString: \"{Truncate(h.Text, 320)}\"");
+            {
+                var c = h.Text is { } pt && popupRepeats.TryGetValue(pt, out var pc) ? pc : 1;
+                if (c > 1) anyRepeated = true;
+                sb.AppendLine($"- PopupString: \"{Truncate(h.Text, 320)}\"{RepeatSuffix(c)}");
+            }
+            if (anyRepeated)
+                sb.AppendLine(
+                    "- NOTE: \"(repeated xN)\" is how many times the server sent " +
+                    "you that exact line in the recent window. A high repeat count " +
+                    "means re-doing the same action keeps producing the identical " +
+                    "response — prefer a different action or target unless you have " +
+                    "a concrete new reason to retry.");
             sb.AppendLine();
         }
 
