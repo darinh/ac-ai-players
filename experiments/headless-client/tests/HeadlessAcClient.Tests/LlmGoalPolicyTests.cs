@@ -6031,7 +6031,103 @@ public class LlmGoalPolicyTests
             $"static prompt floor grew to {prompt.Length} chars (budget 13500)");
     }
 
-    // combat-feel: the "## Combat readiness" combat-history block renders
+    // ---- Recent goal outcomes section (cp-2299) ----
+    //
+    // The bot's own GoalCompleted/GoalFailed lifecycle events get evicted
+    // from the 25-event "## Recent events" tail by observe-firehose noise in
+    // busy areas, so the LLM repeats long failed engagements (e.g. chasing a
+    // fleeing/far mob whose Attack keeps timing out). Distill them into a
+    // dedicated section, dedup by (kind, target), so a repeatedly-failing
+    // goal surfaces once and clearly. Pure echo of own bookkeeping; the LLM
+    // decides whether to retry.
+
+    [Fact]
+    public void BuildUserPrompt_RendersRecentGoalOutcomes_FailedWithTargetAndReason()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed,
+            Name = "The Chicken",
+            Text = "Attack: selector resolved to no live object",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("[FAILED]", prompt);
+        Assert.Contains("target=\"The Chicken\"", prompt);
+        Assert.Contains("Attack: selector resolved to no live object", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGoalOutcomes_DedupsRepeatedIdenticalFailures()
+    {
+        // The same Attack on the same target failing three times in a row
+        // must collapse to a single line (dedup by (Kind, Name)) so a stuck
+        // engagement reads as one clear signal, not a flood.
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.GoalFailed,
+                Name = "Young Mosswart",
+                Text = "Attack: chase timed out",
+            });
+        }
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        var section = prompt.Substring(prompt.IndexOf("## Recent goal outcomes", StringComparison.Ordinal));
+        // exactly one Young Mosswart failure line in the section
+        var occurrences = section.Split("Young Mosswart").Length - 1;
+        Assert.Equal(1, occurrences);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsRecentGoalOutcomes_WhenNoLifecycleEvents()
+    {
+        // No GoalCompleted/GoalFailed events → section absent → zero
+        // static-floor budget cost.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "Jonathan: hi",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        Assert.DoesNotContain("## Recent goal outcomes", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGoalOutcomes_ShowsBothDoneAndFailedForSameTarget()
+    {
+        // A target that failed once then succeeded keys differently
+        // ((GoalFailed, name) vs (GoalCompleted, completion-text)) so both
+        // a [FAILED] and a [done] line appear.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed,
+            Name = "The Chicken",
+            Text = "Attack: chase timed out",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalCompleted,
+            Text = "Attack: action cycle done on 'The Chicken'",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("[FAILED]", prompt);
+        Assert.Contains("[done]", prompt);
+        Assert.Contains("action cycle done on 'The Chicken'", prompt);
+    }
+
     // RAW per-kind counts only — NO danger/safe label, NO avoidance advice
     // baked in by source (the LLM owns the avoidance decision via the
     // COMBAT SAFETY rule). It renders nothing when there is no history.
