@@ -4086,12 +4086,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // The per-NPC recent-Talk counts already render mid-prompt in
         // `## Location & recency`, yet live runs show the LLM re-Talking the
         // same NPC 6-7 times in a row with rationales that show ZERO
-        // awareness of the repeat count ("Wilomine HAS the directions") —
-        // the same burial pattern the `## Unspent XP` capsule fixed: a fact
-        // present ~20KB earlier is out-competed by the parked local
-        // affordance. Re-surface the SAME computed counts in the most
-        // decision-proximate slot so the repeat is visible right before the
-        // model answers. Rendered whenever any recent Talk exists (no
+        // awareness of the repeat count (the model treats each Talk as if it
+        // will yield a new result) — the same burial pattern the `## Unspent
+        // XP` capsule fixed: a fact present ~20KB earlier is out-competed by
+        // the parked local affordance. Re-surface the SAME computed counts in
+        // the most decision-proximate slot so the repeat is visible right
+        // before the model answers. Rendered whenever any recent Talk exists (no
         // source-side significance threshold — the raw counts are exposed and
         // the LLM judges significance, mirroring the `## Unspent XP` capsule's
         // any-positive gate). RAW counts + an explicit not-a-recommendation
@@ -4124,6 +4124,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "Explore all remain executable right now. See `## Location & recency` above. Your call.");
         }
 
+        // ── ## Recent Use (end-of-prompt salience capsule) ───────────────
+        // The per-target recent-Use counts already render mid-prompt in
+        // `## Location & recency`, yet live runs show the LLM re-Using the
+        // SAME world object many times with rationales that show ZERO
+        // awareness of the repeat (it reasons as if each Use opens a new
+        // outcome even when the prior Uses produced no lasting change). This
+        // is the SAME burial pattern the `## Unspent XP` and `## Recent Talk`
+        // capsules fixed: a fact present ~20KB earlier is out-competed by the
+        // parked local affordance. Re-surface the SAME emission history in the
+        // most decision-proximate slot so the repeat is visible right before
+        // the model answers. Mirrors the `talkByKey` construction exactly but
+        // for the Use verb: key identity by the guid token when present (else
+        // name, else verbatim selector), DISPLAY prefers the human name,
+        // identical displays across DISTINCT guids get a guid disambiguator.
+        // Rendered whenever any recent Use exists (no source-side significance
+        // threshold — the raw counts are exposed and the LLM judges, mirroring
+        // the other end-capsules' any-positive gate). RAW counts + an explicit
+        // not-a-recommendation disclaimer — no urgency wording, no "loop", no
+        // "dead end", no instruction to pivot: the LLM decides. No game
+        // knowledge; perception re-positioned for salience.
+        var useByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Use ", StringComparison.Ordinal)) continue;
+            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!sm.Success) continue;
+            var sel = sm.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            var display = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : sel);
+            if (useByKey.TryGetValue(key, out var cur))
+            {
+                var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
+                    ? display : cur.Display;
+                useByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null));
+            }
+            else
+            {
+                useByKey[key] = (1, display, gm.Success ? gm.Value : null);
+            }
+        }
+        if (useByKey.Count > 0)
+        {
+            var endcapUseDupDisplays = useByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endcapUseList = string.Join(", ", useByKey
+                .OrderByDescending(p => p.Value.Count)
+                .Select(p =>
+                {
+                    var label = endcapUseDupDisplays.Contains(p.Value.Display) && p.Value.Guid is not null
+                        ? $"{p.Value.Display} ({p.Value.Guid})"
+                        : p.Value.Display;
+                    return $"{label} x{p.Value.Count}";
+                }));
+            sb.AppendLine();
+            sb.AppendLine("## Recent Use");
+            sb.AppendLine(
+                $"- in your last 10 emitted goals you emitted Use on: {endcapUseList}.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
+                "Explore all remain executable right now. See `## Location & recency` above. Your call.");
+        }
         // ── ## Server-refused interaction targets (end-of-prompt capsule) ─
         // The cp-2338 InteractUnreachableTracker is a Motor-only guard: when
         // the server refuses an interaction as out-of-reach, the Motor marks
