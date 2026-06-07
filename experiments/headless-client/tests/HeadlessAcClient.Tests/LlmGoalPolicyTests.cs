@@ -7328,6 +7328,101 @@ public class LlmGoalPolicyTests
         Assert.True(capsuleIdx > visibleIdx && visibleIdx >= 0, "capsule should render after ## Visible nearby");
     }
 
+    // ---- Recent-Talk salience end-capsule (talk-repeat-endcap, cp-2337) ----
+    //
+    // Live mistral runs showed the bot re-Talking the SAME town NPC 6-7 times
+    // with rationales that never mention the repeat count ("Wilomine HAS the
+    // directions") — the per-NPC counts render mid-prompt in `## Location &
+    // recency` but are out-competed by the parked local affordance, the same
+    // burial pattern the `## Unspent XP` capsule fixed. This re-surfaces the
+    // SAME counts at the decision-proximate end slot whenever any recent Talk
+    // exists (no source-side significance threshold — the LLM judges).
+    private static EventStream BuildTalkStream(string npcName, int times)
+    {
+        var events = new EventStream();
+        for (var i = 0; i < times; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(times - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Talk target=name=\"{npcName}\" item= source=llm:test",
+            });
+        }
+        return events;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentTalkEndcap_RendersWhenTalkPresent()
+    {
+        // Any recent Talk re-surfaces the count facts-only in the
+        // decision-proximate slot (no significance threshold in source).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), BuildTalkStream("Wilomine", 3), null);
+        Assert.Contains("## Recent Talk", prompt);
+        Assert.Contains("in your last 10 emitted goals you emitted Talk to: Wilomine x3", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentTalkEndcap_RendersForSingleTalk()
+    {
+        // No threshold: even a single recent Talk renders the raw count.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), BuildTalkStream("Wilomine", 1), null);
+        Assert.Contains("## Recent Talk", prompt);
+        Assert.Contains("Wilomine x1", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentTalkEndcap_OmittedWhenNoTalk()
+    {
+        // No Talk emissions at all: capsule omitted (nothing to re-surface).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Recent Talk", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentTalkEndcap_RendersAtEndAfterLocationRecency()
+    {
+        // The salience value depends on the capsule sitting AFTER the mid-prompt
+        // `## Location & recency` section where the same counts first render.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), BuildTalkStream("Wilomine", 4), null);
+        var capsuleIdx = prompt.IndexOf("## Recent Talk", System.StringComparison.Ordinal);
+        var lrIdx = prompt.IndexOf("## Location & recency", System.StringComparison.Ordinal);
+        Assert.True(lrIdx >= 0, "## Location & recency section missing");
+        Assert.True(capsuleIdx > lrIdx, "capsule should render after ## Location & recency");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentTalkEndcap_DisambiguatesSameNameDifferentGuid()
+    {
+        // Two DISTINCT NPCs sharing a display name (different guids) must NOT
+        // collapse to one indistinguishable label — each gets a guid suffix,
+        // mirroring the `## Location & recency` disambiguation.
+        var events = new EventStream();
+        foreach (var (guid, n) in new[] { ("0x80000AAA", 2), ("0x80000BBB", 1) })
+        {
+            for (var i = 0; i < n; i++)
+            {
+                events.Append(new StreamEvent
+                {
+                    Sequence = 0,
+                    Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5),
+                    Kind = EventKind.GoalEmitted,
+                    GoalId = Guid.NewGuid(),
+                    Text = $"Talk target=guid={guid} name=\"Town Guard\" item= source=llm:test",
+                });
+            }
+        }
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), events, null);
+        var capsuleIdx = prompt.IndexOf("## Recent Talk", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx >= 0, "capsule missing");
+        var capsule = prompt.Substring(capsuleIdx);
+        Assert.Contains("Town Guard (guid=0x80000AAA) x2", capsule);
+        Assert.Contains("Town Guard (guid=0x80000BBB) x1", capsule);
+    }
+
     [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
