@@ -2213,12 +2213,69 @@ public class LlmGoalPolicyTests
     public void BuildUserPrompt_ContainsCorpseLootingRule()
     {
         var es = new EventStream();
-        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        // The corpse-looting rule now renders only when a corpse is visible
+        // (cp-2331-loot section-presence gating), so seed one.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x404u, Name = "Corpse of a Drudge", Wcid = 21u, Distance = 5f,
+                  IsCorpse = true, IsMonster = false },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
 
         Assert.Contains("Looting:", prompt);
         Assert.Contains("corpse", prompt);
         Assert.Contains("Use{target: name=\"<corpse>\"}", prompt);
         Assert.Contains("Pickup{target: name=\"<item>\"}", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CorpseLootingRule_OmittedWhenNoCorpse()
+    {
+        // No corpse visible -> the corpse-looting rule carries no information
+        // and is omitted. BuildExitTokenWorld has no corpse.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("NEVER skip a fresh corpse", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ChestLootingRule_PresentWhenChestVisible()
+    {
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x501u, Name = "Chest", Wcid = 9001u, Distance = 3f,
+                  IsChest = true, IsOpenable = true },
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("NEVER skip an unopened chest", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ChestLootingRule_OmittedWhenNoChest()
+    {
+        // No chest visible -> omit the chest-looting rule. BuildExitTokenWorld
+        // has no chest.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("NEVER skip an unopened chest", p);
     }
 
     [Fact]
@@ -7856,8 +7913,10 @@ public class LlmGoalPolicyTests
         // combat safety: absolute-HP / rising self-health interpretation (cp-2269)
         Assert.Contains("trust the ABSOLUTE HP", p);
         Assert.Contains("regenerating BELOW full strength", p);
-        // looting: never skip a fresh corpse
-        Assert.Contains("NEVER skip a fresh corpse", p);
+        // NOTE: the corpse-looting rule ("NEVER skip a fresh corpse") is now
+        // conditional — it renders only when a corpse is visible (cp-2331-loot),
+        // which BuildExitTokenWorld has none of, so it is not asserted here. Its
+        // present/absent rendering is covered by dedicated tests above.
         // door / passage traversal
         Assert.Contains("PASSAGE-OPENED is not progress", p);
         // loop-break + town-stuck + hunt excursion
