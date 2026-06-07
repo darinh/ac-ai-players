@@ -3825,6 +3825,81 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public async Task LlmGoalPolicy_LocationRecency_TalkCountsGuidFirstSelector()
+    {
+        // Regression (cp-2329): once the picker resolves a Talk target to a
+        // concrete NPC the goal carries a guid, and Selector.ToString() prints
+        // `guid=...` BEFORE `name="..."`, so the emitted Text is
+        // `Talk target=guid=0x.. name="X" item= source=..`. The old name-only
+        // regex (`target=name="X"`) required `target=` to be immediately
+        // followed by `name="`, so it MISSED every guid-bearing Talk goal and
+        // the section silently rendered `(none)` even during a real Talk loop.
+        // The counter must extract the whole selector, key by guid, and still
+        // DISPLAY the human name.
+        var requestBodies = new System.Collections.Generic.List<string>();
+        var goalJson = """
+        {
+          "goal_id": "11111111-2222-3333-4444-555555555555",
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "item":   null,
+          "priority": 4,
+          "rationale": "stuck talking"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        // Seed 5 guid-FIRST Talk goals to the same NPC (picker-resolved shape).
+        for (var i = 0; i < 5; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(6 - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = "Talk target=guid=0x80000B82 name=\"Flinrala Ryndmad\" item= source=llm:openai/gpt-4.1-mini",
+            });
+        }
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        Assert.NotNull(policy.ProposeGoal(world, events, null));
+
+        var body = requestBodies[0];
+        using var doc = JsonDocument.Parse(body);
+        var prompt = doc.RootElement.GetProperty("messages")[1].GetProperty("content").GetString()!;
+        var lrIdx = prompt.IndexOf("## Location & recency", StringComparison.Ordinal);
+        Assert.True(lrIdx >= 0, "Location & recency section missing");
+        var afterLr = prompt.IndexOf("##", lrIdx + 1, StringComparison.Ordinal);
+        var lrBlock = afterLr > lrIdx ? prompt.Substring(lrIdx, afterLr - lrIdx) : prompt.Substring(lrIdx);
+
+        // The guid-bearing Talk loop must be COUNTED and displayed by NAME,
+        // collapsed to one row — not silently dropped to (none).
+        Assert.Contains("Flinrala Ryndmad: x5", lrBlock);
+        Assert.DoesNotContain("recent Talk emissions: (none)", lrBlock);
+        // Identity collapses by guid, so the guid token must NOT leak as a
+        // separate row label when a name is available.
+        Assert.DoesNotContain("guid=0x80000B82: x", lrBlock);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_LocationRecency_WorldUseCounts()
     {
         // Open-world door-fixation guard — the Location & recency
