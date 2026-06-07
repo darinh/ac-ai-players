@@ -887,6 +887,14 @@ internal sealed class HandshakeDriver : IDisposable
         // LLM goal that arrived mid-motion is never clobbered by an
         // unrelated (older / fallback) lock's completion.
         Guid?                motionLockedGoalId = null;
+        // Tempo instrumentation (motor-dialog-cycle-tempo): lock-time stamp
+        // so the action-cycle completion log can split per-interaction
+        // latency into lock->stop (walk + AP move round-trips, paired with
+        // the existing motionStoppedAt), stop->dispatch (post-stop interact
+        // wait, paired with useSentAt), and dispatch->complete (post-action
+        // cooldown). Pure timing bookkeeping — no game knowledge, no
+        // behavior change.
+        DateTime?            motionLockStartedUtc = null;
         Quaternion?          motionRotation = null;
         float?               motionInitialDistance = null;
         DateTime?            motionStartedAt = null;
@@ -3409,11 +3417,33 @@ internal sealed class HandshakeDriver : IDisposable
                         $"after {postActionCooldown.TotalSeconds:F1}s cooldown; " +
                         $"resetting motion state to pick next target");
 
+                    // Tempo breakdown (motor-dialog-cycle-tempo): split the
+                    // per-interaction wall-clock so a live run shows where the
+                    // latency lives. lock->stop = walk + AP move round-trips
+                    // (paired with the existing motionStoppedAt);
+                    // stop->dispatch = post-stop interact/dialog wait;
+                    // dispatch->complete = post-action cooldown. Raw timing only.
+                    if (motionLockStartedUtc is DateTime tLock)
+                    {
+                        var tNow = DateTime.UtcNow;
+                        var totalMs = (tNow - tLock).TotalMilliseconds;
+                        var stopStr = motionStoppedAt is DateTime tStop
+                            ? $"lock->stop {(tStop - tLock).TotalMilliseconds:F0}ms, " +
+                              $"stop->dispatch {(useSentAt is DateTime ud ? (ud - tStop).TotalMilliseconds : double.NaN):F0}ms"
+                            : "stop not stamped";
+                        var dispatchStr = useSentAt is DateTime us
+                            ? $"dispatch->complete {(tNow - us).TotalMilliseconds:F0}ms"
+                            : "no dispatch stamp";
+                        Console.WriteLine(
+                            $"[tempo] action-cycle latency: total {totalMs:F0}ms ({stopStr}, {dispatchStr})");
+                    }
+
                     // Reset every per-action gate.
                     autonomousPositionSent = false;
                     moveToStateStartSent = false;
                     moveToStateStopSent = false;
                     motionTarget = null;
+                    motionLockStartedUtc = null;
                     motionRememberedDest = null;
                     motionRememberedSightingId = null;
                     motionIsFrontierProbe = false;
@@ -4472,6 +4502,7 @@ internal sealed class HandshakeDriver : IDisposable
                             motionRotation = rotX;
                             lockedGoalKind = GoalKind.Explore;
                             motionLockedGoalId = goal.Id;
+                            motionLockStartedUtc = DateTime.UtcNow;
                             motionInitialDistance = bestDist;
 
                             autonomousPositionSent = true;
@@ -5153,6 +5184,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // re-deliberates during motion.
                                 lockedGoalKind = goal.Kind;
                                 motionLockedGoalId = goal.Id;
+                                motionLockStartedUtc = DateTime.UtcNow;
                                 if (goal.Kind == GoalKind.Give)
                                     pendingGiveItemGuid = itemSnap!.Guid;
                                 else if (goal.Kind == GoalKind.Use && itemSnap is not null)
