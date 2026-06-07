@@ -73,6 +73,20 @@ internal enum GoalKind
     /// the skill is trained (the server validates and rejects untrained ones).
     /// </summary>
     RaiseSkill = 12,
+
+    /// <summary>
+    /// Recall to the bot's attuned lifestone (sanctuary). A self-action
+    /// with NO world target, item, amount, or motion: the motor sends the
+    /// empty-body <c>TeleToLifestone</c> (0x0063) GameAction and the server
+    /// teleports the bot to its tied lifestone after a recall animation.
+    /// This is the escape hatch the Strategy layer can name when the bot is
+    /// physically unable to move (see the <c>## Movement</c> prompt section).
+    /// The motor makes NO decision about WHETHER to recall — Strategy owns
+    /// that; the server owns the preconditions (an attuned sanctuary is
+    /// required; recall is refused inside the training academy and shortly
+    /// after PvP).
+    /// </summary>
+    Recall = 13,
 }
 
 /// <summary>
@@ -152,9 +166,13 @@ internal sealed record Goal
     /// <summary>
     /// Primary subject of the goal (the NPC to talk to, the door
     /// to use, the creature to attack, the location to walk to).
+    /// Defaults to an empty selector so self-actions that have no
+    /// world target (e.g. <see cref="GoalKind.Recall"/>) can omit it;
+    /// <c>TryParseGoal</c> still rejects an empty target for every verb
+    /// that needs one.
     /// </summary>
     [JsonPropertyName("target")]
-    public required Selector Target { get; init; }
+    public Selector Target { get; init; } = new();
 
     /// <summary>
     /// Secondary object for two-actor goals: the item to GIVE,

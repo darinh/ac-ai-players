@@ -66,6 +66,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_RecallParsesWithoutTarget()
+    {
+        // Recall is a self-action with no world target; it must parse even
+        // though every other verb requires a non-empty target selector.
+        var json = """{"kind":"Recall","rationale":"stuck on a ledge, nothing frees me","priority":9}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Recall, g!.Kind);
+        Assert.True(g.Target.IsEmpty);
+    }
+
+    [Fact]
+    public void TryParseGoal_NonRecallVerbStillRequiresTarget()
+    {
+        // The Recall exception must NOT relax target validation for other
+        // verbs: an Attack with no target is still rejected.
+        var json = """{"kind":"Attack","rationale":"x","priority":3}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SchemaAndRules_AdvertiseRecallVerb()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);
+
+        // The verb must appear in the kind enum so the LLM may emit it,
+        Assert.Contains("\"Recall\"", prompt);
+        // and the STUCK ESCAPE rule must explain when/how to use it.
+        Assert.Contains("STUCK ESCAPE", prompt);
+        Assert.Contains("Recall{}", prompt);
+    }
+
+    [Fact]
     public void TryParseGoal_ParsesRaiseAttributeWithAmount()
     {
         var json = """
@@ -6188,18 +6221,21 @@ public class LlmGoalPolicyTests
     // bumped 13000 -> 13300 (cp-2282) for the third XP-spend advancement verb
     // RaiseSkill (its schema enum entry + the inline SPEND XP example). Bumped
     // 13300 -> 13500 (cp-2297) for the COMBAT SAFETY threat-count clause that
-    // points the LLM at the new `monsters in view` cluster signal. Both are
-    // intentional, reviewed additions, not silent regrowth; the ~90-char delta
-    // (~23 tokens) does not move the runtime 413 risk, which is driven by dense
-    // per-tick WORLD/visible sections, not the static floor.
+    // points the LLM at the new `monsters in view` cluster signal. Bumped
+    // 13500 -> 14500 (recall-lifestone-escape-verb) for the STUCK ESCAPE rule
+    // (+ the `Recall` schema enum entry in both kind blocks) that gives the LLM
+    // a lifestone-recall verb to escape a physical-immobilization wedge. All
+    // are intentional, reviewed additions, not silent regrowth; the delta does
+    // not move the runtime 413 risk, which is driven by dense per-tick
+    // WORLD/visible sections, not the static floor.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 13500,
-            $"static prompt floor grew to {prompt.Length} chars (budget 13500)");
+        Assert.True(prompt.Length <= 14500,
+            $"static prompt floor grew to {prompt.Length} chars (budget 14500)");
     }
 
     // ---- Recent goal outcomes section (cp-2299) ----

@@ -923,6 +923,32 @@ internal sealed class HandshakeDriver : IDisposable
         // cleared on a confirmed AvailableExperience decrease (success) or
         // after the timeout (no confirmation seen).
         (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaise = null;
+        // Lifestone-recall in-flight bookkeeping. Recall (TeleToLifestone
+        // 0x0063) is NOT instant like the Raise* self-actions: the server
+        // plays a recall animation, then teleports the bot — and it ABORTS
+        // the teleport if the bot moves past a small threshold during the
+        // animation (Player_Location.cs YouHaveMovedTooFar). So once we send
+        // the opcode we keep the Recall goal LOCKED (do NOT complete it) for
+        // a bounded window: a Recall goal carries no motionTarget/combat
+        // target, so while it stays the active goal the motor issues no walk
+        // and the autonomous picker (which only drives when there is NO goal)
+        // stays dormant — the bot holds still and cannot cancel its own
+        // recall. The window is cleared early when a landblock change proves
+        // the teleport landed. recallDispatchLandblock is the landblock the
+        // bot was in when the opcode was sent (high 16 bits of the cell id).
+        DateTime?            recallInFlightUntil = null;
+        ushort               recallDispatchLandblock = 0;
+        // True for the current tick while a lifestone recall is animating (set
+        // each tick from recallInFlightUntil). Declared at connection scope so
+        // it is visible in BOTH the deeper goal-dispatch block (which assigns
+        // it) and the sibling picker / MoveToState blocks (which read it).
+        bool                 recallQuiescing = false;
+        // Upper bound on how long we hold the Recall goal locked while the
+        // server plays the recall animation + teleports. Cleared early on a
+        // landblock change (teleport landed); a generous bound covers the
+        // animation when the recall fails silently (no sanctuary) so the bot
+        // eventually re-deliberates.
+        var                  recallInFlightWindow = TimeSpan.FromSeconds(20);
         DateTime             nextWalkTickAt = DateTime.UtcNow;
         Vector3?             lastSentWaypointPos = null;
         // The last walk-tick waypoint's GLOBAL (frame-free) XY, captured
@@ -2834,6 +2860,14 @@ internal sealed class HandshakeDriver : IDisposable
                 // LLM is told via an ActionRejected event so it
                 // re-deliberates rather than re-issuing the dead Attack.
                 if (combatTargetGuid is uint dgTarget &&
+                    // Suppress the flee reflex while a lifestone recall is in
+                    // flight: recall IS the escape, and a flee AP would move the
+                    // bot and make the server abort the teleport
+                    // (YouHaveMovedTooFar). This block runs before the per-tick
+                    // recall-quiescence computation, so check the in-flight
+                    // window directly. The 20s ceiling bounds it; once it
+                    // elapses the reflex is available again.
+                    !(recallInFlightUntil is { } dgRecallUntil && DateTime.UtcNow < dgRecallUntil) &&
                     worldState.Self is WorldObjectSnapshot dgSelf &&
                     dgSelf.HealthCurrent is uint dgHc &&
                     dgSelf.HealthMax is uint dgHm &&
@@ -3863,6 +3897,67 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                     }
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
+
+                    // Lifestone-recall quiescence — computed HERE, before any
+                    // goal-dispatch branch can send a movement/AP, so the whole
+                    // chain (not just the picker) is suppressed while a recall
+                    // animates. The server aborts the teleport (YouHaveMovedTooFar)
+                    // if the bot moves during the recall window, so we must stay
+                    // motionless. The Recall goal branch normally releases
+                    // recallInFlightUntil when the teleport lands or the window
+                    // elapses; but if the policy REPLACES the Recall goal mid-
+                    // window (TacticsExecutor swaps goals unconditionally) that
+                    // branch never runs again, so we ALSO expire the window here
+                    // (time elapsed OR landblock changed = teleport landed). This
+                    // makes the suppression self-healing — a stranded
+                    // recallInFlightUntil can never disable movement forever.
+                    recallQuiescing = false;
+                    if (recallInFlightUntil is { } recallUntil)
+                    {
+                        var recallLbNow = (ushort)(((worldState.Self?.CellId) ?? 0u) >> 16);
+                        // Only treat a landblock change as "teleport landed" when
+                        // we actually have a known current landblock. A transient
+                        // null Self (recallLbNow == 0) must NOT prematurely clear
+                        // the window via the landblock path — that would let
+                        // motion resume and cancel the recall. The 20s ceiling
+                        // still bounds the window in that case.
+                        var recallLanded = recallDispatchLandblock != 0 &&
+                            recallLbNow != 0 &&
+                            recallLbNow != recallDispatchLandblock;
+                        if (DateTime.UtcNow >= recallUntil || recallLanded)
+                        {
+                            // Window ended. If the Recall goal is still active,
+                            // leave the latch set so the Recall branch's own arm
+                            // does the release (it logs the outcome and calls
+                            // tactics.Clear -> per-action motion reset). Only the
+                            // goal-REPLACEMENT case is handled here: that branch
+                            // never runs again, so clear the latch and reset the
+                            // motion handshake so the replacement goal can step.
+                            if (goal is null || goal.Kind != GoalKind.Recall)
+                            {
+                                recallInFlightUntil = null;
+                                recallDispatchLandblock = 0;
+                                motionDone = false;
+                                moveToStateStartSent = false;
+                                moveToStateStopSent = false;
+                            }
+                        }
+                        else
+                        {
+                            recallQuiescing = true;
+                            // Global motion suppression while the recall animates.
+                            // Drop any motion lock every tick and mark motion done
+                            // so the walk-tick (all stepping is gated on
+                            // !motionDone) sends nothing. The leading hold arm of
+                            // the dispatch chain below skips every non-Recall goal
+                            // branch (so their AP sends never fire), and the picker
+                            // (Phase 5a) and MoveToState START are gated on
+                            // !recallQuiescing.
+                            motionTarget = null;
+                            combatTargetGuid = null;
+                            motionDone = true;
+                        }
+                    }
                     // Allowlist:
                     //   - Give: walk to NPC, deliver item from bag.
                     //   - Use:  branch on whether target is spatial
@@ -3902,7 +3997,19 @@ internal sealed class HandshakeDriver : IDisposable
                     //     ResolveTarget would miss (no name match),
                     //     and the bot would sit motionless until the
                     //     LLM picked a different goal.
-                    if (goal is not null && goal.Kind == GoalKind.RaiseAttribute)
+                    if (recallQuiescing && (goal is null || goal.Kind != GoalKind.Recall))
+                    {
+                        // A lifestone recall is in flight. Do NOT actuate any
+                        // other goal: every non-Recall dispatch branch below
+                        // sets a motion lock and sends a movement AP, which
+                        // would move the bot and make the server abort the
+                        // teleport (YouHaveMovedTooFar). Hold — motion is
+                        // already suppressed (motionDone=true, motionTarget
+                        // nulled above); when the window clears the chain
+                        // resumes normally. The Recall goal itself is handled
+                        // by its own branch below (excluded from this guard).
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.RaiseAttribute)
                     {
                         // Self-action: spend accumulated experience to raise a
                         // primary attribute. The LLM decides WHICH attribute
@@ -4171,6 +4278,99 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={raisePktSeqS} fragSeq={raiseFragSeqS} bytes={raiseSentS}");
                             tactics.Clear("raise-skill dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.Recall)
+                    {
+                        // Self-action: recall to the attuned lifestone
+                        // (TeleToLifestone 0x0063, empty body). Strategy
+                        // decides WHETHER to recall (e.g. to escape the
+                        // immobile-stuck wedge surfaced by `## Movement`);
+                        // the motor only sends the opcode and waits out the
+                        // server-side recall animation+teleport. Unlike the
+                        // Raise* self-actions this does NOT complete on
+                        // dispatch — see recallInFlightUntil for why the goal
+                        // is held locked (so the motor stays motionless and
+                        // can't make the server abort the recall).
+                        var nowR = DateTime.UtcNow;
+                        var selfLandblockNow = (ushort)(((worldState.Self?.CellId) ?? 0u) >> 16);
+
+                        if (recallInFlightUntil is { } untilR && nowR < untilR &&
+                            (recallDispatchLandblock == 0 || selfLandblockNow == 0 ||
+                             selfLandblockNow == recallDispatchLandblock))
+                        {
+                            // Recall in flight and the teleport has not landed
+                            // yet (still in the dispatch landblock, or our
+                            // landblock is momentarily unknown). HOLD: keep
+                            // this goal locked so no motion is issued and the
+                            // picker stays dormant. Do not re-send (the server
+                            // is busy) and do not fail; just wait it out. A
+                            // transient null Self (selfLandblockNow == 0) must
+                            // NOT be read as "teleport landed" — that would
+                            // release the goal early and let motion cancel the
+                            // recall; the time ceiling still bounds the hold.
+                        }
+                        else if (recallInFlightUntil is not null)
+                        {
+                            // Window elapsed, or a landblock change proved the
+                            // teleport landed: the recall action is done.
+                            // Complete the goal so the LLM re-deliberates from
+                            // the new location.
+                            var landed = recallDispatchLandblock != 0 && selfLandblockNow != 0 &&
+                                selfLandblockNow != recallDispatchLandblock;
+                            Console.WriteLine(
+                                $"[recall] recall window closed (" +
+                                (landed
+                                    ? $"teleport landed: landblock 0x{recallDispatchLandblock:X4}->0x{selfLandblockNow:X4}"
+                                    : "timed out, no landblock change observed") +
+                                "); releasing goal.");
+                            recallInFlightUntil = null;
+                            recallDispatchLandblock = 0;
+                            // Recall quiescence forced motionDone=true (and may have
+                            // sent a MoveToState STOP) to suppress every stepping AP
+                            // during the in-flight window. Those latches persist across
+                            // ticks, so reset the motion handshake here — mirroring the
+                            // goal-replacement case above — or the next goal would stay
+                            // motion-suppressed forever (walk-tick is gated on
+                            // !motionDone).
+                            motionDone = false;
+                            moveToStateStartSent = false;
+                            moveToStateStopSent = false;
+                            tactics.Clear("recall: action cycle done", eventStream);
+                        }
+                        else
+                        {
+                            // First dispatch: send the empty-body opcode, drop
+                            // any stale motion/combat lock so nothing walks into
+                            // the recall window, and start the in-flight hold.
+                            // The Recall goal stays locked (no Clear here).
+                            var recallPktSeq  = nextOutboundPacketSequence++;
+                            var recallFragSeq = nextOutboundFragmentSequence++;
+                            var recallBuf = new byte[GameActionTeleToLifestoneMessage.PackedSize];
+                            var recallLen = GameActionTeleToLifestoneMessage.Pack(recallBuf);
+                            var recallMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                recallMsg.AddAckSequence(lastReceivedSeq);
+                            recallMsg.AddBlobFragment(
+                                fragSequence: recallFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: recallBuf.AsSpan(0, recallLen));
+                            var recallSent = recallMsg.Pack(sendBuf, myClientId,
+                                                            sequence: recallPktSeq, iteration: 1,
+                                                            encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, recallSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            motionTarget = null;
+                            combatTargetGuid = null;
+                            recallDispatchLandblock = selfLandblockNow;
+                            recallInFlightUntil = nowR + recallInFlightWindow;
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Recall: TeleToLifestone (0x0063) sent " +
+                                $"(landblock=0x{selfLandblockNow:X4}) source={goal.Source} " +
+                                $"rationale=\"{goal.Rationale}\"; pktSeq={recallPktSeq} " +
+                                $"fragSeq={recallFragSeq} bytes={recallSent}; holding goal until " +
+                                $"recall completes (<= {recallInFlightWindow.TotalSeconds:F0}s).");
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
@@ -5339,6 +5539,12 @@ internal sealed class HandshakeDriver : IDisposable
                 else if (!llmBusyNow)
                     llmInflightSince = null;
 
+                // (Lifestone-recall quiescence is computed earlier, right
+                // after the goal is fetched — see `recallQuiescing` near the
+                // top of the goal-dispatch chain — so it gates the goal-branch
+                // AP sends too, not just the picker below. `recallQuiescing`
+                // remains in scope here.)
+
                 // Phase 5a: send one GameActionAutonomousPosition
                 // (0xF753) echoing our current server-asserted
                 // position back at the server. First outbound
@@ -5364,6 +5570,13 @@ internal sealed class HandshakeDriver : IDisposable
                 // rubber-duck critique in checkpoint 033.
                 if (!autonomousPositionSent &&
                     combatTargetGuid is null &&
+                    // A lifestone recall is in flight: hold position. Sending
+                    // an autonomous-movement AP now would move the bot during
+                    // the recall animation and the server aborts the teleport
+                    // (YouHaveMovedTooFar). recallQuiescing self-expires on
+                    // teleport-land or window timeout (computed above), so the
+                    // picker resumes even if the Recall goal was replaced.
+                    !recallQuiescing &&
                     actionsCompleted < MaxActionsPerSession &&
                     loginCompleteSent &&
                     loginCompletePacketIndex >= 0 &&
@@ -5873,6 +6086,7 @@ internal sealed class HandshakeDriver : IDisposable
                     : 0;
                 if (autonomousPositionSent &&
                     !moveToStateStartSent &&
+                    !recallQuiescing &&
                     autonomousPositionPacketIndex >= 0 &&
                     ((count - autonomousPositionPacketIndex) >= PostAutonomousPositionGracePackets ||
                      apGraceElapsedMs >= PostAutonomousPositionGraceMaxMs) &&
@@ -6025,6 +6239,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         noLockSec: MotionNoLockTimeoutSec);
                 if (moveToStateStartSent &&
                     !moveToStateStopSent &&
+                    !recallQuiescing &&
                     (motionDone || stopByDistance || stopByTimeout) &&
                     worldState.Self is WorldObjectSnapshot stopSelf &&
                     stopSelf.CellId is uint stopCell &&

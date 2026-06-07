@@ -51,6 +51,7 @@ internal enum GameActionType : uint
     QueryHealth         = 0x01BF,
     GiveObjectRequest   = 0x00CD,
     SetSingleCharacterOption = 0x0005,
+    TeleToLifestone     = 0x0063,
 }
 
 /// <summary>
@@ -209,6 +210,28 @@ internal static class GameActionLoginCompleteMessage
     /// </summary>
     public static int Pack(Span<byte> dest)
         => GameActionMessage.Pack(dest, GameActionType.LoginComplete);
+}
+
+/// <summary>
+/// TeleToLifestone (0x0063). The lifestone-recall escape verb: asks the
+/// server to teleport the player to their attuned sanctuary (lifestone).
+/// Server handler
+/// <c>Source/ACE.Server/Network/GameAction/Actions/GameActionTeleToLifestone.cs</c>
+/// calls <c>session.Player.HandleActionTeleToLifestone()</c> and reads
+/// NOTHING from the message body — so the wire payload is empty (just the
+/// standard 12-byte GameAction header). The server validates preconditions
+/// itself (must have an attuned sanctuary; refused inside the training
+/// academy, during a recent PvP timer, or while too busy) and, on success,
+/// plays the LifestoneRecall animation then teleports the player. The motor
+/// only sends the opcode when Strategy names a <see cref="Strategy.GoalKind.Recall"/>
+/// goal; it makes NO decision about WHETHER to recall.
+/// </summary>
+internal static class GameActionTeleToLifestoneMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize;  // 12 bytes
+
+    public static int Pack(Span<byte> dest, uint actionSequence = 1)
+        => GameActionMessage.Pack(dest, GameActionType.TeleToLifestone, actionSequence);
 }
 
 /// <summary>
