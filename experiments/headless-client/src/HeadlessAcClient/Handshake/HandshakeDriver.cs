@@ -2182,8 +2182,41 @@ internal sealed class HandshakeDriver : IDisposable
                                     ?? ge.Payload?.EvasionDefenderNotification?.AttackerName;
                                 if (WorldStateProjection.NormalizeHostileName(hostileName) is string hk)
                                 {
-                                    recentHostileAt[hk] = DateTime.UtcNow;
+                                    var hostileNow = DateTime.UtcNow;
+                                    recentHostileAt[hk] = hostileNow;
                                     Console.WriteLine($"[hostile] attacked by \"{hostileName}\" (tracking {recentHostileAt.Count})");
+
+                                    // combat-feel: a foe HITTING the bot is a live
+                                    // combat moment with that foe. Refresh the
+                                    // death-attribution anchor's freshness when the
+                                    // attacker is the SAME identity we are tracking.
+                                    // This is the inbound mirror of the bot's own
+                                    // swing-outcome refresh above, but for the
+                                    // mob-hits-bot direction — and it is the signal
+                                    // that survives a FLEE: once the bot disengages
+                                    // and stops swinging, AttackerNotification
+                                    // (our swing) stops firing, but the mob keeps
+                                    // hitting the fleeing bot (DefenderNotification),
+                                    // right up to a flee-then-die death. Without this
+                                    // the 12s window expired mid-flee and the death
+                                    // recorded "not attributed", so the combat-feel
+                                    // ledger never learned the mob was lethal.
+                                    //
+                                    // Match name-only (the wire carries only the
+                                    // attacker NAME, no guid): a different attacker
+                                    // landing on the bot while we track foe A will
+                                    // NOT refresh A (precision over recall — a
+                                    // mis-attributed death would teach avoidance of
+                                    // the wrong mob kind). Same-display-name /
+                                    // different-wcid ambiguity is accepted as rare,
+                                    // consistent with the swing-outcome refresh.
+                                    if (lastCombatFoe is { } dnFoe &&
+                                        CombatDeathAttribution.SignalMatchesFoe(
+                                            dnFoe.Wcid, dnFoe.Name,
+                                            observedWcid: null, observedName: hostileName))
+                                    {
+                                        lastCombatFoe = (dnFoe.Wcid, dnFoe.Name, hostileNow);
+                                    }
                                 }
                             }
                             // M1.5 — surface WeenieErrorWithString
@@ -2191,9 +2224,8 @@ internal sealed class HandshakeDriver : IDisposable
                             // event so the LLM can see the rejection
                             // and pivot. Otherwise the LLM keeps
                             // re-emitting the same Give/Use goal
-                            // forever (Society Greeter refusing the
-                            // Calling Stone with TradeAiDoesntWant
-                            // observed in stalefix-run-01). The
+                            // forever (e.g. an NPC refusing a traded
+                            // item with a TradeAiDoesntWant error). The
                             // rubber-duck pass said skip the
                             // deterministic anti-repeat gate for
                             // now; the prompt + currentGoal drop in

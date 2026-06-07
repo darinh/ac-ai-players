@@ -120,6 +120,25 @@ public class CombatDeathAttributionTests
             observedWcid: null, observedName: "(unknown)"));
     }
 
+    [Fact]
+    public void SignalMatchesFoe_DefenderHitDuringFlee_RefreshesTrackedFoe()
+    {
+        // cp-2312: while the bot flees it stops swinging, so only inbound
+        // mob-hits-bot DefenderNotifications keep firing — carrying the
+        // attacker NAME (no wcid). The tracked foe has a wcid from the
+        // engage. Name-only fallback must still confirm the same foe so the
+        // death-attribution window stays fresh up to a flee-then-die death.
+        Assert.True(CombatDeathAttribution.SignalMatchesFoe(
+            foeWcid: 19261, foeName: "Creeper Mosswart",
+            observedWcid: null, observedName: "Creeper Mosswart"));
+        // A DIFFERENT mob landing a hit while we track the original foe must
+        // NOT refresh it (precision over recall — never poison the ledger
+        // with a death the tracked foe did not cause).
+        Assert.False(CombatDeathAttribution.SignalMatchesFoe(
+            foeWcid: 19261, foeName: "Creeper Mosswart",
+            observedWcid: null, observedName: "Drudge Slinker"));
+    }
+
     // ---- IsFresh -------------------------------------------------------
 
     [Fact]
