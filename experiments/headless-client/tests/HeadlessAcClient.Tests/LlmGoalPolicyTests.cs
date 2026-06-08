@@ -9644,4 +9644,120 @@ public class LlmGoalPolicyTests
         Assert.True(result.Length <= 2_000, $"len={result.Length}");
         Assert.Contains("hard-truncated to fit request budget", result);
     }
+
+    // ---- FitPromptToCeiling protected-suffix overload (cp-2343) ----
+    // The salience capsules render at the very end of the prompt. A verified
+    // live failure showed the single-arg hard-cut guillotining that entire
+    // tail when a rich context overflowed the ceiling. The protected-suffix
+    // overload reserves the capsule bytes and hard-cuts only the BODY, so the
+    // capsules always survive AND the fixed ## Combat readiness (which renders
+    // far above the capsules) is never cut — preserving the cp-2334 invariant.
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_SurvivesWhenBodyOverflows()
+    {
+        var bodySb = new StringBuilder();
+        bodySb.Append("PREAMBLE-FIXED-KEEP\n");
+        bodySb.Append("## Combat readiness\n- monsters in view: 0\n");
+        bodySb.Append("## Visible nearby\n");
+        for (int i = 0; i < 300; i++) bodySb.Append("- obj").Append(i).Append("\n");
+        bodySb.Append("## Recent goal outcomes (your own recent goals)\n");
+        for (int i = 0; i < 300; i++) bodySb.Append("- outcome").Append(i).Append("\n");
+
+        var suffix =
+            "\n## Unspent XP\n- unspent: 100\n" +
+            "## Recent Talk\n- talked\n" +
+            "## Recent Use\n- used\n" +
+            "## Server-refused interaction targets\n- refused\n" +
+            "## Approach distance history\n- 27.5u, 27.5u\n";
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(bodySb.ToString(), suffix, ceiling: 900);
+
+        Assert.True(result.Length <= 900, $"len={result.Length}");
+        Assert.EndsWith(suffix, result);                 // capsule tail intact at the end
+        Assert.Contains("## Unspent XP", result);
+        Assert.Contains("## Recent Talk", result);
+        Assert.Contains("## Recent Use", result);
+        Assert.Contains("## Server-refused interaction targets", result);
+        Assert.Contains("## Approach distance history", result);
+        Assert.Contains("## Combat readiness", result);  // fixed section preserved
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_PreservesCombatReadiness_WhenBodyHardCut()
+    {
+        // The duck's critical cp-2334-regression case: the body has NO
+        // trimmable sections, so it MUST be hard-cut. ## Combat readiness
+        // renders early; a huge non-trimmable section follows. The body
+        // hard-cut must eat the trailing non-trimmable rows, NOT the early
+        // fixed section, and the protected capsule suffix must survive.
+        var bodySb = new StringBuilder();
+        bodySb.Append("## Combat readiness\n- ready-CRITICAL\n");
+        bodySb.Append("## Recent goal outcomes (your own recent goals)\n");
+        for (int i = 0; i < 2_000; i++) bodySb.Append("- outcome").Append(i).Append("\n");
+
+        var suffix = "\n## Unspent XP\n- unspent: 42\n## Approach distance history\n- 9.9u, 9.9u\n";
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(bodySb.ToString(), suffix, ceiling: 500);
+
+        Assert.True(result.Length <= 500, $"len={result.Length}");
+        Assert.Contains("## Combat readiness", result);
+        Assert.Contains("- ready-CRITICAL", result);
+        Assert.EndsWith(suffix, result);                 // capsules survive the body hard-cut
+        Assert.Contains("hard-truncated to fit request budget", result);
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_EmptyBehavesLikeSingleArg()
+    {
+        var p = "PREAMBLE\n## Visible nearby\n- a\n- b\n## Combat readiness\n- ready\n";
+        Assert.Equal(
+            LlmGoalPolicy.FitPromptToCeiling(p, ceiling: 10_000),
+            LlmGoalPolicy.FitPromptToCeiling(p, "", ceiling: 10_000));
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_UnderCeiling_ReturnsBodyPlusSuffix()
+    {
+        var body = "PREAMBLE\n## Combat readiness\n- ready\n";
+        var suffix = "\n## Unspent XP\n- unspent: 5\n";
+        Assert.Equal(body + suffix, LlmGoalPolicy.FitPromptToCeiling(body, suffix, ceiling: 10_000));
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_PathologicalHugeSuffix_StillCapped()
+    {
+        // Impossible-by-construction (each capsule caps its rows) but defended:
+        // a protected suffix that alone meets/exceeds the ceiling must not
+        // break the ceiling invariant — fall back to whole-string hard-cut.
+        var body = "## Combat readiness\n- ready\n";
+        var suffix = new string('x', 300);
+        var result = LlmGoalPolicy.FitPromptToCeiling(body, suffix, ceiling: 100);
+        Assert.True(result.Length <= 100, $"len={result.Length}");
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_SingleArg_TinyCeilingBelowMarkerLength_StillCapped()
+    {
+        // Root-cause regression: the hard-cut marker is ~48 chars; with a
+        // ceiling below that, `result[..cut] + marker` alone exceeds the
+        // ceiling unless the final clamp fires.
+        var prompt = new string('y', 500);
+        var result = LlmGoalPolicy.FitPromptToCeiling(prompt, ceiling: 20);
+        Assert.True(result.Length <= 20, $"len={result.Length}");
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_ProtectedSuffix_LargeSuffix_TinyInnerCeiling_StillCapped()
+    {
+        // The codex-review counterexample: a protected suffix that is large
+        // but still < ceiling leaves an inner body budget (ceiling − suffix)
+        // below the marker length. The overload must still honour the OUTER
+        // ceiling once the body is truncated and the suffix re-appended.
+        var body = new string('b', 5_000);
+        var suffix = "\n## Unspent XP\n" + new string('s', 70); // < ceiling, big
+        var result = LlmGoalPolicy.FitPromptToCeiling(body, suffix, ceiling: 100);
+        Assert.True(result.Length <= 100, $"len={result.Length}");
+        Assert.EndsWith(suffix, result); // capsule suffix still intact
+    }
 }
