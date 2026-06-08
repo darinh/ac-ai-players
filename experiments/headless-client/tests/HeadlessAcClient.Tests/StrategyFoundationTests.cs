@@ -1072,6 +1072,90 @@ public class StrategyFoundationTests
         Assert.Equal(ChestGuid, goal.Target.Guid);
     }
 
+    // ---- cp-2360: break a barren openable TOUR (fallback egress) ----
+    // With no LLM (rate-limited), this fallback re-picks the nearest openable
+    // every tick; a town full of static containers becomes an endless tour. After
+    // touring a threshold of DISTINCT openables in one landblock with no egress
+    // and no productive inventory change, the openable step taps out so the
+    // deliberation falls through to Explore. Resets on landblock or inventory
+    // change, so a real productive loot room is unaffected.
+
+    private static WorldStateProjection TourWorld(uint landblock, params VisibleObjectProjection[] visible) =>
+        new()
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = landblock,
+                CellId = (landblock << 16) | 0x0001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+
+    private static VisibleObjectProjection TourChest(uint g, float d) => new()
+    {
+        Guid = g, Name = "Chest", Wcid = 13007u, ItemType = 0x200u, Distance = d,
+        IsOpenable = true, IsChest = true,
+    };
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_OpenableTour_TapsOutAndEgresses()
+    {
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = TourWorld(0xA9B4u,
+            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
+            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f), TourChest(0x7006u, 6f));
+        var events = new EventStream();
+        // Tour the forgiveness threshold of DISTINCT openables.
+        for (int i = 0; i < 4; i++)
+            Assert.Equal(GoalKind.Use, policy.ProposeGoal(proj, events, null)!.Kind);
+        // Tapped out: no openable proposed -> falls through to Explore.
+        var last = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(last);
+        Assert.NotEqual(GoalKind.Use, last!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_OpenableTour_ResetsOnLandblockChange()
+    {
+        var policy = new NoQuestKnowledgePolicy();
+        var chests = new[]
+        {
+            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
+            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f),
+        };
+        var events = new EventStream();
+        for (int i = 0; i < 4; i++)
+            policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null);
+        Assert.NotEqual(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind); // tapped
+        // Egress to a new landblock resets the tour memory -> openables eligible again.
+        Assert.Equal(GoalKind.Use, policy.ProposeGoal(TourWorld(0xCCCCu, chests), events, null)!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_OpenableTour_ResetsOnInventoryAdd()
+    {
+        var policy = new NoQuestKnowledgePolicy();
+        var chests = new[]
+        {
+            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
+            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f),
+        };
+        var events = new EventStream();
+        for (int i = 0; i < 4; i++)
+            policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null);
+        Assert.NotEqual(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind); // tapped
+        // A productive loot (InventoryItemAdded) resets the tour memory. The item
+        // guid is not in Inventory, so the inv-Use step does not consume the turn.
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InventoryItemAdded,
+            ItemGuid = 0x900u, Wcid = 273u, Name = "Pyreal",
+        });
+        Assert.Equal(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind);
+    }
+
     [Fact]
     public void NoQuestKnowledgePolicy_DoesNotPickDoor_AsOpenable()
     {
