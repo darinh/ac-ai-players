@@ -3443,6 +3443,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
+  "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing that steers the search (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null
@@ -3460,6 +3461,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
+  "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing that steers the search (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null,
