@@ -4275,6 +4275,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // render far earlier and are unaffected) and always re-appends the
         // capsules intact.
         var salienceTailStart = sb.Length;
+
+        // ── ## No active objective (end-of-prompt salience capsule, cp-2345) ─
+        // When the IntentStack has no ACTIVE top intent (the top reached a
+        // terminal state — Completed/Expired/Blocked — or the stack is empty)
+        // the bot has no persistent strategic objective and acts tick-by-tick.
+        // The `## Intent stack` section that shows the terminal/empty top
+        // renders earlier in the prompt and can be out-competed by closer
+        // affordances — the same burial pattern the `## Unspent XP` capsule
+        // addresses. Re-surface the RAW stack state + the mechanical stack_ops
+        // capability in the decision-proximate slot. Gated on raw presence (no
+        // Active top), no threshold. RAW fact + capability + explicit
+        // not-a-recommendation — it states the stack state and that stack_ops
+        // CAN set an objective; it never says WHAT objective to set (that is the
+        // LLM's strategic call, not source knowledge). No game knowledge;
+        // perception re-positioned for salience.
+        if (stack is not null && (stack.Top is null || stack.Top.Status != IntentLifecycle.Active))
+        {
+            var topState = stack.Top is null ? "empty" : stack.Top.Status.ToString();
+            sb.AppendLine();
+            sb.AppendLine("## No active objective");
+            sb.AppendLine(
+                $"- raw stack state: the Intent stack has no Active top intent (current top: {topState}).");
+            sb.AppendLine(
+                "- mechanical capability: a `stack_ops` push (or replace_top) sets a persistent objective the " +
+                "bot pursues across ticks until its completion predicate fires; the full schema and the current " +
+                "`stack_revision` to echo are in `## Intent stack` above.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: whether to set a persistent objective, what kind/target/" +
+                "completion to use, and what per-tick goal to emit are your strategic choices from the facts above.");
+        }
         if (world.Self.AvailableExperience is long endcapUnspent && endcapUnspent > 0)
         {
             sb.AppendLine();
