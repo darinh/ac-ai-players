@@ -4199,7 +4199,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 var nm = string.IsNullOrEmpty(o.Name) ? "(unknown)" : o.Name;
                 var wcidStr = o.Wcid is uint ow ? $" wcid={ow}" : "";
-                sb.AppendLine($"- {nm}{wcidStr} guid=0x{o.Guid:X8}: interacted x{o.Count} recently (still visible)");
+                // cp-2375: a pickup-eligible item the bot interacted with that is
+                // STILL VISIBLE means the pickup did NOT stick — had it been
+                // acquired it would be in the bag, not on the ground. Surface that
+                // as a factual not-acquired signal (telemetry only; the LLM still
+                // decides) so the bot stops re-trying an un-acquirable ground item
+                // instead of looping on it. Pickup-eligibility is the wire-decoded
+                // ItemType & ItemTypeMasks.Pickup affordance, not a type priority.
+                var vobj = world.Visible.FirstOrDefault(v => v.Guid == o.Guid);
+                var failedPickup = vobj is not null && vobj.ItemType is uint vit
+                    && (vit & ItemTypeMasks.Pickup) != 0;
+                var pickupNote = failedPickup
+                    ? " — a pickup-eligible item you tried to take is STILL on the ground" +
+                      " (it did NOT enter your bag); re-trying the same way will not acquire it"
+                    : "";
+                sb.AppendLine($"- {nm}{wcidStr} guid=0x{o.Guid:X8}: interacted x{o.Count} recently (still visible){pickupNote}");
             }
             sb.AppendLine(
                 "- NOTE: you have already interacted with the object(s) above. " +
