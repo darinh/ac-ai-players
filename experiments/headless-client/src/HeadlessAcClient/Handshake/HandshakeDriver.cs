@@ -1146,6 +1146,15 @@ internal sealed class HandshakeDriver : IDisposable
         // id. Coverage is otherwise bounded naturally: once entered, a
         // cell joins _seenIndoorCells and stops being a frontier.
         var frontierCellCooldownUntil = new Dictionary<uint, DateTime>();
+        // cp-2363: anti-tunnel sweep for the undirected outdoor frontier. The
+        // geometry-only frontier (no caller heading) prefers the bearing away
+        // from the visited centroid, which equals the current travel direction,
+        // so an undirected Explore walks one straight line. FrontierSweepState
+        // cycles a compass heading through the 8 sectors as the bot crosses
+        // outdoor landblocks, fed to ChooseFrontier as the LOW-precedence
+        // fallback heading bias so the frontier fans across sectors. Pure
+        // bookkeeping over the bot's own landblock progress + compass geometry.
+        var frontierSweep = new Strategy.FrontierSweepState(FrontierSweepLandblockSpan);
         // Optional override: pick a specific named target instead of
         // nearest-named heuristic. Empty/null => no override.
         string?              motionTargetNameOverride =
@@ -5183,9 +5192,23 @@ internal sealed class HandshakeDriver : IDisposable
                             // signals only — no English rationale parsing.
                             var huntBiasAuthorized =
                                 Strategy.Intent.HuntAuthorization.IsHuntCommitment(intentStack.Top);
+                            // cp-2363: when the LLM's Explore named a direction,
+                            // honor it (the high-precedence heading). When it is
+                            // UNDIRECTED, drive the anti-tunnel sweep as the
+                            // LOW-precedence fallback heading so the frontier fans
+                            // across compass sectors instead of tunnelling the
+                            // away-from-trail bearing — without overriding an LLM
+                            // heading or a remembered-monster steer. Advance the
+                            // sweep only on the undirected branch, keyed on the
+                            // bot's OUTDOOR landblock (indoor/unknown => 0, ignored).
+                            string? exploreSweepHeading = goal.Direction is null
+                                ? frontierSweep.Advance(
+                                    Strategy.AcCoords.IsIndoor(tacticsSelfCell) ? 0u : (tacticsSelfCell >> 16))
+                                : null;
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
-                                frontierCellCooldownUntil, huntBiasAuthorized, goal.Direction, out var outdoorPathCells);
+                                frontierCellCooldownUntil, huntBiasAuthorized, goal.Direction, out var outdoorPathCells,
+                                fallbackSweepHeading: exploreSweepHeading);
                             if (outdoorFrontier is not null)
                             {
                                 exploreTarget = outdoorFrontier;
@@ -6361,11 +6384,23 @@ internal sealed class HandshakeDriver : IDisposable
                         // nearest-known-object pick remains ONLY as a last resort
                         // when no frontier exists (indoors / cells exhausted), so
                         // the bot never goes inert.
+                        // cp-2363: advance the anti-tunnel sweep and steer the
+                        // aimless frontier along the sweep heading (passed as the
+                        // LOW-precedence fallback, so it only acts when no other
+                        // steer claims the pick). The sweep rotates compass
+                        // sectors as the bot crosses outdoor landblocks (see
+                        // FrontierSweepState); indoor/unknown cells map to 0 and
+                        // are ignored. A near-tie bias inside ChooseFrontier that
+                        // never overrides a clearly-more-unexplored or cooled cell.
+                        var sweepCellId = self.CellId ?? 0u;
+                        var sweepHeading = frontierSweep.Advance(
+                            Strategy.AcCoords.IsIndoor(sweepCellId) ? 0u : (sweepCellId >> 16));
                         var aimlessFrontier = TryChooseOutdoorFrontierDest(
-                            self.CellId ?? 0u, self.Position, navGraph,
+                            sweepCellId, self.Position, navGraph,
                             frontierCellCooldownUntil, huntBiasAuthorized: false,
                             headingDirection: null,
-                            out var aimlessFrontierCells);
+                            out var aimlessFrontierCells,
+                            fallbackSweepHeading: sweepHeading);
                         if (aimlessFrontier is not null)
                         {
                             candidate = aimlessFrontier;
@@ -8982,6 +9017,12 @@ internal sealed class HandshakeDriver : IDisposable
     /// heading; the Motor only walks it.</summary>
     private const float OutdoorFrontierHeadingBiasTieWindowMeters = 36f;
 
+    /// <summary>Distinct landblocks the AIMLESS-frontier anti-tunnel sweep may
+    /// cross on one heading before rotating to the next compass sector (see
+    /// <see cref="Strategy.FrontierSweepState"/>). Generic travel-progress
+    /// span; no game knowledge.</summary>
+    private const int FrontierSweepLandblockSpan = 4;
+
     /// <summary>
     /// Autonomous OUTDOOR frontier exploration — the surface analogue of
     /// <see cref="TryChooseFrontierDest"/>. When the active Explore goal has
@@ -9017,7 +9058,8 @@ internal sealed class HandshakeDriver : IDisposable
         Dictionary<uint, DateTime> frontierCooldownUntil,
         bool huntBiasAuthorized,
         string? headingDirection,
-        out IReadOnlySet<uint>? pathCells)
+        out IReadOnlySet<uint>? pathCells,
+        string? fallbackSweepHeading = null)
     {
         pathCells = null;
         if (Strategy.AcCoords.IsIndoor(currentCellId))
@@ -9073,6 +9115,13 @@ internal sealed class HandshakeDriver : IDisposable
         // unexplored or cooled direction). Unknown/empty heading => no bias.
         var headingVec = Strategy.OutdoorFrontierExplorer.TryHeadingVector(headingDirection);
 
+        // Optional FALLBACK heading (cp-2363 anti-tunnel sweep): a mechanical
+        // compass heading applied at LOWEST precedence — only when neither an
+        // LLM heading nor a remembered-monster steer claimed the pick — so an
+        // UNDIRECTED Explore fans across sectors instead of tunnelling the
+        // away-from-trail bearing. Never overrides the LLM heading or mob-bias.
+        var fallbackVec = Strategy.OutdoorFrontierExplorer.TryHeadingVector(fallbackSweepHeading);
+
         var choice = Strategy.OutdoorFrontierExplorer.ChooseFrontier(
             selfGX, selfGY, samples, cooled, DateTimeOffset.UtcNow,
             OutdoorFrontierStepMeters, OutdoorFrontierLocalityMeters, OutdoorFrontierRecency,
@@ -9081,7 +9130,10 @@ internal sealed class HandshakeDriver : IDisposable
             OutdoorFrontierMobBiasMinDistanceMeters,
             headingVec?.X ?? 0f,
             headingVec?.Y ?? 0f,
-            headingVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f);
+            headingVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f,
+            fallbackVec?.X ?? 0f,
+            fallbackVec?.Y ?? 0f,
+            fallbackVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f);
         if (choice is not Strategy.OutdoorFrontierExplorer.FrontierResult ft)
             return null;
 

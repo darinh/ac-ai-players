@@ -336,6 +336,98 @@ public class OutdoorFrontierExplorerTests
     }
 
     [Fact]
+    public void Sweep_RedirectsTheTunnelingTrailGeometry_ViaFallbackChannel()
+    {
+        // Reproduce the cp-2363 tunnel: the bot has walked EAST, leaving a trail
+        // of visited samples behind it to the west (including its current spot).
+        // Every 72 m candidate's nearest reference is the bot's own current node,
+        // so east/north/south all tie on geometric score; the undirected
+        // tie-break ("away from the visited centroid") picks EAST — the travel
+        // direction — and tunnels. The mechanical sweep is wired as the
+        // LOW-precedence FALLBACK heading; supplying it must redirect the SAME
+        // geometry to a different bearing (the anti-tunnel core).
+        var trail = new List<OutdoorFrontierExplorer.VisitedSample>
+        {
+            Sample(SelfX,         SelfY, Now),
+            Sample(SelfX - 72f,   SelfY, Now),
+            Sample(SelfX - 144f,  SelfY, Now),
+            Sample(SelfX - 216f,  SelfY, Now),
+        };
+
+        // Undirected (the bug): the away-from-centroid tie-break tunnels east.
+        var tunneled = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, trail, NoCooldown, Now, Step, Locality, Recency);
+        Assert.NotNull(tunneled);
+        Assert.Equal(0, tunneled!.Value.Sector); // east = the tunnel bearing
+
+        // The fallback sweep heading steers the SAME geometry to new bearings.
+        var north = OutdoorFrontierExplorer.TryHeadingVector("north")!.Value;
+        var withNorth = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, trail, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, 0f, 0f, 0f, north.X, north.Y, 36f);
+        Assert.Equal(2, withNorth!.Value.Sector); // north, not east
+
+        var south = OutdoorFrontierExplorer.TryHeadingVector("south")!.Value;
+        var withSouth = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, trail, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, 0f, 0f, 0f, south.X, south.Y, 36f);
+        Assert.Equal(6, withSouth!.Value.Sector); // south, not east
+    }
+
+    [Fact]
+    public void Fallback_DoesNotOverride_ExplicitHeading()
+    {
+        // When BOTH an explicit LLM heading and a mechanical fallback heading are
+        // supplied, the explicit heading (higher precedence) must win.
+        var east = OutdoorFrontierExplorer.TryHeadingVector("east")!.Value;
+        var north = OutdoorFrontierExplorer.TryHeadingVector("north")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, Array.Empty<OutdoorFrontierExplorer.VisitedSample>(),
+            NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f,
+            east.X, east.Y, 36f,      // explicit heading => east
+            north.X, north.Y, 36f);   // fallback => north (must lose)
+
+        Assert.Equal(0, result!.Value.Sector); // east, the explicit heading
+    }
+
+    [Fact]
+    public void Fallback_DoesNotOverride_MobBias()
+    {
+        // When a remembered monster sighting and a fallback sweep heading both
+        // apply, mob-bias (higher precedence) must win — the sweep never drags a
+        // hunting bot off a remembered monster.
+        var sightings = new List<OutdoorFrontierExplorer.MonsterSighting>
+        {
+            new(SelfX, SelfY + 100f), // a monster to the NORTH
+        };
+        var south = OutdoorFrontierExplorer.TryHeadingVector("south")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, Array.Empty<OutdoorFrontierExplorer.VisitedSample>(),
+            NoCooldown, Now, Step, Locality, Recency,
+            sightings, 36f, 1f,        // mob-bias active => north (the sighting)
+            0f, 0f, 0f,                // no explicit heading
+            south.X, south.Y, 36f);    // fallback => south (must lose)
+
+        Assert.Equal(2, result!.Value.Sector); // north, toward the monster
+    }
+
+    [Fact]
+    public void Fallback_ZeroWindow_IsNoOp()
+    {
+        // A fallback heading with a zero tie window is inactive => identical to
+        // the undirected pick (sector 0 = east with no references).
+        var n = OutdoorFrontierExplorer.TryHeadingVector("north")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, Array.Empty<OutdoorFrontierExplorer.VisitedSample>(),
+            NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, 0f, 0f, 0f, n.X, n.Y, 0f);
+
+        Assert.NotNull(result);
+        Assert.Equal(0, result!.Value.Sector); // east — unchanged default
+    }
+
+    [Fact]
     public void Heading_ZeroWindow_IsNoOp()
     {
         // A heading vector with a zero tie window is inactive => identical to
