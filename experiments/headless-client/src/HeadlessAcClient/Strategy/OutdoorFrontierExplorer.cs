@@ -113,7 +113,10 @@ internal static class OutdoorFrontierExplorer
         TimeSpan recencyWindow,
         IReadOnlyList<MonsterSighting>? monsterSightings = null,
         float mobBiasTieWindowMeters = 0f,
-        float mobBiasMinDistanceMeters = 0f)
+        float mobBiasMinDistanceMeters = 0f,
+        float headingBiasX = 0f,
+        float headingBiasY = 0f,
+        float headingBiasTieWindowMeters = 0f)
     {
         // Build the reference set: visited samples that are both LOCAL
         // (near the bot) and RECENT. Relax to any-age local samples if
@@ -150,9 +153,12 @@ internal static class OutdoorFrontierExplorer
         float bestScore = float.NegativeInfinity;
         float bestTie = float.NegativeInfinity;
 
-        // Candidates retained ONLY for the optional hunt-bias post-pass; not
-        // allocated on the common (no-bias) path so that path is unchanged.
-        var candidates = (mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 })
+        // Candidates retained ONLY for the optional hunt-bias / heading-bias
+        // post-passes; not allocated on the common (no-bias) path so that path
+        // is unchanged.
+        var headingBiasActive = headingBiasTieWindowMeters > 0f
+            && (headingBiasX != 0f || headingBiasY != 0f);
+        var candidates = ((mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 }) || headingBiasActive)
             ? new List<(float Gx, float Gy, uint DestCell, int Sector, float Score, float DirX, float DirY, float Tie)>(SectorCount)
             : null;
 
@@ -206,6 +212,36 @@ internal static class OutdoorFrontierExplorer
                 bestTie = tie;
                 best = new FrontierResult(gx, gy, destCell, k);
             }
+        }
+
+        // Optional heading-bias post-pass. When the caller supplied an
+        // LLM-chosen exploration heading (a unit bearing the LLM picked from
+        // raw coverage facts), prefer — among candidates within
+        // headingBiasTieWindowMeters of the best geometric score — the sector
+        // whose bearing best ALIGNS with that heading. Near-ties only, so an
+        // explicit heading steers WITHIN reasonable unexplored options and can
+        // never force a cooled cell or a clearly worse-explored direction. The
+        // LLM chooses WHERE to head; source only walks it. Takes precedence
+        // over the mob-bias below (an explicit directive beats remembered-mob
+        // memory). Pure bearing geometry; no game knowledge.
+        if (headingBiasActive && candidates is not null && best is FrontierResult)
+        {
+            FrontierResult? headBest = null;
+            float headBestAlign = float.NegativeInfinity;
+            float headBestScore = float.NegativeInfinity;
+            foreach (var c in candidates)
+            {
+                if (c.Score < bestScore - headingBiasTieWindowMeters) continue;
+                var align = c.DirX * headingBiasX + c.DirY * headingBiasY;
+                if (align > headBestAlign + 1e-3f ||
+                    (MathF.Abs(align - headBestAlign) <= 1e-3f && c.Score > headBestScore))
+                {
+                    headBest = new FrontierResult(c.Gx, c.Gy, c.DestCell, c.Sector);
+                    headBestAlign = align;
+                    headBestScore = c.Score;
+                }
+            }
+            if (headBest is not null) return headBest;
         }
 
         // Optional hunt-bias post-pass. When the caller authorized a hunt
@@ -263,5 +299,33 @@ internal static class OutdoorFrontierExplorer
             if (dot >= MobBiasCosHalfSector) return true;
         }
         return false;
+    }
+
+    // Diagonal component: cos(45°) = sin(45°) ≈ 0.70710678.
+    private const float Diag = 0.70710678f;
+
+    /// <summary>
+    /// Parse an 8-way compass heading string into a global-XY unit bearing
+    /// (the world frame is +Y = north, +X = east; see WorldHeading). Accepts
+    /// full names ("north", "northeast", …) and abbreviations ("n", "ne", …),
+    /// case- and whitespace-insensitive. Returns null for null/empty/unknown
+    /// input so the caller falls back to undirected frontier search. Pure
+    /// geometry — no game knowledge.
+    /// </summary>
+    internal static (float X, float Y)? TryHeadingVector(string? heading)
+    {
+        if (string.IsNullOrWhiteSpace(heading)) return null;
+        return heading.Trim().ToLowerInvariant() switch
+        {
+            "n" or "north"        => (0f, 1f),
+            "ne" or "northeast"   => (Diag, Diag),
+            "e" or "east"         => (1f, 0f),
+            "se" or "southeast"   => (Diag, -Diag),
+            "s" or "south"        => (0f, -1f),
+            "sw" or "southwest"   => (-Diag, -Diag),
+            "w" or "west"         => (-1f, 0f),
+            "nw" or "northwest"   => (-Diag, Diag),
+            _ => null,
+        };
     }
 }

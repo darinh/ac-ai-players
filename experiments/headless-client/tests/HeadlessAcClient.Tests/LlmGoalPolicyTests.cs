@@ -77,6 +77,26 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_ExploreWithDirection_ParsesHeading()
+    {
+        // An Explore goal may carry an optional 8-way compass `direction` that
+        // steers the outdoor frontier excursion.
+        var json = """{"kind":"Explore","target":{"name":"anywhere"},"direction":"southeast","rationale":"barren north, try SE","priority":3}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+        Assert.Equal("southeast", g.Direction);
+    }
+
+    [Fact]
+    public void TryParseGoal_ExploreWithoutDirection_DirectionNull()
+    {
+        // Direction is optional — a plain Explore leaves it null (undirected).
+        var json = """{"kind":"Explore","target":{"name":"anywhere"},"rationale":"x","priority":3}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Null(g!.Direction);
+    }
+
+    [Fact]
     public void TryParseGoal_NonRecallVerbStillRequiresTarget()
     {
         // The Recall exception must NOT relax target validation for other
