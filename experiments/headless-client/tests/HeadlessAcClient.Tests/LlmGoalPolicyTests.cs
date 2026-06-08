@@ -7528,6 +7528,53 @@ public class LlmGoalPolicyTests
         Assert.Contains("unlikely to produce a different outcome", prompt);
     }
 
+    private static WorldStateProjection WorldWithVisiblePickup(uint guid, string name) =>
+        BuildExitTokenWorld() with
+        {
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    // ItemType 0x2 (armor bit) is in the Pickup mask -> pickup-eligible.
+                    Guid = guid, Name = name, Wcid = 5555u, ItemType = 0x2u, Distance = 5f,
+                },
+            },
+        };
+
+    [Fact]
+    public void BuildUserPrompt_RecentlyInteracted_AnnotatesFailedPickup_WhenPickupItemStillVisible()
+    {
+        // cp-2375: the bot interacted with a pickup-eligible ground item that is
+        // STILL visible -> the pickup did not stick -> annotate it as not-acquired
+        // so the LLM stops re-trying an un-acquirable ground item.
+        const uint itemGuid = 0x7A9B5001u;
+        var world = WorldWithVisiblePickup(itemGuid, "Leather Cap");
+        var es = new EventStream();
+        es.Append(WorldObjInteracted("Leather Cap", 5555u, itemGuid));
+        es.Append(WorldObjInteracted("Leather Cap", 5555u, itemGuid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.Contains("## Recently interacted objects", prompt);
+        Assert.Contains("Leather Cap", prompt);
+        Assert.Contains("STILL on the ground", prompt);
+        Assert.Contains("did NOT enter your bag", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentlyInteracted_DoesNotAnnotateNonPickupAsFailedPickup()
+    {
+        // A non-pickup-eligible interacted object (a chest = Use target, ItemType
+        // 0x10 not in the Pickup mask) must NOT get the failed-pickup annotation.
+        const uint chestGuid = 0x7A9B400Bu;
+        var world = WorldWithVisibleChest(chestGuid, "Treasure Chest");
+        var es = new EventStream();
+        es.Append(WorldObjInteracted("Treasure Chest", 4321u, chestGuid));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("Treasure Chest", prompt);
+        Assert.DoesNotContain("STILL on the ground", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_OmitsRecentlyInteracted_WhenObjectNoLongerVisible()
     {
