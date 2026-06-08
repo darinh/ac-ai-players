@@ -350,6 +350,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const float StationaryUseEpsilonSq = StationaryUseEpsilon * StationaryUseEpsilon;
     private const int StationaryUseRepeatThreshold = 3;
 
+    // ── Landblock-scoped world-object USE churn loop-break (cp-2354) ──────
+    // The stationary guard above resets on ANY movement, so it MISSES a TOUR
+    // of several doors/openables within ONE landblock: the bot walks between
+    // the doors (cell/position changes) and re-Uses them, never egressing,
+    // while each per-target stationary streak resets on the move. This episode
+    // keys on the LANDBLOCK (not cell/position) and counts per-target bare-Use
+    // emissions ACROSS intervening moves; it resets ONLY when the landblock
+    // changes (genuine egress) or inventory changes (a productive key-Use or
+    // loot). A never-before-Used target gets first-use forgiveness (count 1),
+    // so a legitimate sequence of DISTINCT doors toward an exit is never
+    // broken; only a RE-Used target reaching the threshold LATCHES as
+    // suppressed for the rest of the episode (so a picker re-arrival + LLM
+    // re-emit cannot leak one Use per cycle). Pure mechanical loop bookkeeping
+    // over the bot's OWN emission identity + its OWN self landblock +
+    // inventory events; landblock is decoded coordinate state, not a named
+    // zone — no object-type or game knowledge.
+    private WorldUseChurnEpisode? _worldUseChurnEpisode;
+
+    private sealed class WorldUseChurnEpisode
+    {
+        public required uint? Landblock { get; init; }
+        public long FloorSequence;
+        public readonly Dictionary<string, int> UseCounts = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> Suppressed = new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    // Fire on the Nth bare-Use emission against the SAME world-object identity
+    // within one landblock episode (across intervening moves). 3 mirrors the
+    // StationaryUseRepeatThreshold / MultiNpcTalkChurnStaleThreshold: the LLM
+    // has chosen the same object three times without the landblock changing or
+    // inventory advancing — strong loop evidence.
+    private const int LandblockWorldUseChurnThreshold = 3;
+
     // Stationary NPC Talk loop-break (2026-06-05). A weak model loops
     // Talk{same NPC} on a dead-end NPC whose quest it cannot satisfy
     // (e.g. "bring me a frost infusion"); the server re-emits the same
@@ -1990,6 +2023,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
         }
 
+        // Landblock world-object USE churn loop-break (cp-2354): the stationary
+        // guard above resets on movement, so it misses a TOUR of several doors
+        // within ONE landblock (the bot walks between them and re-Uses them,
+        // never egressing). Drop a bare world-object Use re-emitted against the
+        // same target the Nth time within the same landblock (no egress, no
+        // inventory change) and defer to the escape/fallback so the bot Explores
+        // OUT instead of re-touring interior doors. First-use forgiveness keeps
+        // a legitimate multi-door exit (each DISTINCT door Used once) from firing.
+        if (IsLandblockWorldUseChurn(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Use target={goal.Target}" +
+                " — same world-object re-Used to threshold within one landblock (no egress); deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: landblock world-object Use churn (no egress)");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
+        }
+
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
         // stationary NPC with no movement and no inventory change is an
         // exhausted conversation (the server just re-greets) — drop it and
@@ -2451,6 +2502,92 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Count = count,
         };
         return count >= StationaryUseRepeatThreshold;
+    }
+
+    /// <summary>
+    /// True when an LLM-authored bare <see cref="GoalKind.Use"/> targets a
+    /// world-object identity the bot has already Used
+    /// <see cref="LandblockWorldUseChurnThreshold"/> times within the CURRENT
+    /// landblock episode — a multi-door TOUR that
+    /// <see cref="IsStationaryWorldUseRepeat"/> (which resets on any movement)
+    /// structurally cannot catch, because the bot walks between the doors. The
+    /// episode is keyed on the LANDBLOCK and counts per-target bare-Use
+    /// emissions ACROSS intervening cell/position moves; it resets ONLY on a
+    /// landblock change (genuine egress) or an inventory change (a productive
+    /// key-Use / loot). A never-before-Used target-identity in the episode gets
+    /// first-use forgiveness (count 1), so a legitimate sequence of DISTINCT
+    /// doors toward an exit never fires; only a RE-Used identity reaching the
+    /// threshold LATCHES as suppressed for the rest of the episode (so a picker
+    /// re-arrival + LLM re-emit cannot leak one Use per cycle). The per-target
+    /// identity is the GUID when the selector carries one (stable, cell-
+    /// independent), else the NAME disambiguated by the bot's self CELL so three
+    /// DISTINCT same-named ("Door") corridor doors in distinct cells never
+    /// collapse onto one count. Pure mechanical loop bookkeeping over the bot's
+    /// OWN emission identity (<see cref="CanonicalUseTargetKey"/> + self cell),
+    /// its OWN self landblock, and the PRESENCE of inventory events — no
+    /// object-type, door, or zone knowledge. Returns false for under-specified
+    /// selectors (no stable identity).
+    /// </summary>
+    internal bool IsLandblockWorldUseChurn(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Use) return false;
+        if (goal.Item is not null) return false;   // item-Use is owned by the inventory dedup
+        var targetKey = CanonicalUseTargetKey(goal.Target);
+        if (targetKey is null) return false;
+
+        var self = world.Self;
+
+        // A GUID is a stable per-object identity, so key on it alone — re-Using
+        // the SAME guid is unambiguously one object regardless of approach cell.
+        // A NAME-only selector (the common case: the LLM emits {"name":"Door"})
+        // cannot tell three DISTINCT same-named doors in a corridor apart, so
+        // disambiguate it by the bot's self CELL at emission: when the picker
+        // has parked the bot at a door to Use it, the self cell IS that door's
+        // interaction spot — distinct corridor doors sit in DISTINCT cells and
+        // never collapse onto one count, while a door re-Used from the same spot
+        // keys identically across the tour. Cell is decoded coordinate state,
+        // not game knowledge.
+        var key = goal.Target!.Guid is not null
+            ? targetKey
+            : $"{targetKey}@0x{self.CellId:X8}";
+
+        var ep = _worldUseChurnEpisode;
+
+        // Reset on a landblock change (egress succeeded) or inventory change (a
+        // productive key-Use/loot). NOT on cell/position change — the tour moves
+        // between doors WITHIN the landblock, which must not clear the counts.
+        bool landblockChanged = ep is null || ep.Landblock != self.Landblock;
+        bool inventoryChanged = ep is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, ep.FloorSequence)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, ep.FloorSequence));
+
+        if (ep is null || landblockChanged || inventoryChanged)
+        {
+            ep = new WorldUseChurnEpisode { Landblock = self.Landblock, FloorSequence = events.NextSequence };
+            ep.UseCounts[key] = 1;
+            _worldUseChurnEpisode = ep;
+            return false;
+        }
+
+        // Already latched as a no-egress loop this episode → keep suppressing.
+        // The reset conditions above are the ONLY way out, so a picker
+        // re-arrival + LLM re-emit cannot leak one Use per cycle.
+        if (ep.Suppressed.Contains(key))
+        {
+            ep.FloorSequence = events.NextSequence;
+            return true;
+        }
+
+        int count = (ep.UseCounts.TryGetValue(key, out var c) ? c : 0) + 1;
+        ep.UseCounts[key] = count;
+        ep.FloorSequence = events.NextSequence;
+
+        if (count >= LandblockWorldUseChurnThreshold)
+        {
+            ep.Suppressed.Add(key);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>

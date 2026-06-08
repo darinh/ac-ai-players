@@ -5542,6 +5542,152 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsStationaryWorldUseRepeat(goal, world, es));
     }
 
+    // ---- Landblock world-object USE churn loop-break (cp-2354) ----
+    // The multi-door TOUR the stationary guard misses: the bot walks between
+    // doors within ONE landblock (cell changes each time) and re-Uses them,
+    // never egressing. The landblock-scoped per-target counter catches it.
+
+    [Fact]
+    public void LandblockWorldUseChurn_FiresOnThirdSameDoorUse_AcrossCellMoves()
+    {
+        // Live fixation: the bot re-Used Door guid=0x7A9B403A while touring the
+        // sanctuary (cells change, landblock 0xA9B4 does not). The stationary
+        // guard resets on each move; this guard counts across moves.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var doorA = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x7A9B403Au } };
+        var doorB = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x7A9B4017u } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(doorA, WorldAt(0xA9B4u, 0xA9B40170u, 0, 0), es)); // A #1
+        Assert.False(policy.IsLandblockWorldUseChurn(doorB, WorldAt(0xA9B4u, 0xA9B40154u, 5, 0), es)); // B #1 (moved)
+        Assert.False(policy.IsLandblockWorldUseChurn(doorA, WorldAt(0xA9B4u, 0xA9B40170u, 0, 0), es)); // A #2 (moved back)
+        Assert.True(policy.IsLandblockWorldUseChurn(doorA, WorldAt(0xA9B4u, 0xA9B40170u, 0, 0), es));  // A #3 -> fire
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_DistinctDoorSequence_DoesNotFire_FirstUseForgiveness()
+    {
+        // A legitimate multi-door exit: D1 -> new cell -> D2 -> new cell -> D3.
+        // Each DISTINCT door is Used once (count 1), so the guard never fires
+        // even though all three are in the same landblock with no egress yet.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var d1 = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x1001u } };
+        var d2 = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x1002u } };
+        var d3 = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x1003u } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(d1, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es));
+        Assert.False(policy.IsLandblockWorldUseChurn(d2, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es));
+        Assert.False(policy.IsLandblockWorldUseChurn(d3, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es));
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_LatchesSuppressed_NoOneInNLeak()
+    {
+        // Once a target trips the threshold it LATCHES suppressed for the
+        // episode, so a picker re-arrival + LLM re-emit cannot leak one Use per
+        // cycle. A landblock change is the only way out.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x2001u } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es)); // #1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // #2
+        Assert.True(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es));  // #3 -> fire
+        Assert.True(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es));  // stays suppressed
+        Assert.True(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Du, 0, 0), es));  // stays suppressed
+        // Landblock change = egress: episode resets, the door is fresh again.
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xB1C2u, 0xB1C20001u, 0, 0), es));
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_LandblockChange_ResetsEpisode()
+    {
+        // Reaching the threshold requires the SAME landblock throughout; a
+        // landblock change mid-count (genuine egress) restarts the episode.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x3001u } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es)); // #1 in 0xA9B4
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // #2 in 0xA9B4
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xAAAAu, 0xAAAA0001u, 0, 0), es)); // egressed -> #1 in new lb
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xAAAAu, 0xAAAA0002u, 0, 0), es)); // #2 in new lb
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_InventoryChange_ResetsEpisode()
+    {
+        // A productive key-Use / loot (InventoryItemAdded/Removed) is progress,
+        // so it resets the episode just like the stationary guard.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x4001u } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es)); // #1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // #2
+        es.Append(InvAdded("Key turned / loot"));
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es)); // reset -> #1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es)); // #2
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_NameOnlyDoor_DistinctCells_DoesNotFire()
+    {
+        // Reviewer-caught false-positive: the LLM commonly emits name-only
+        // {"name":"Door"} (no guid). A LEGITIMATE corridor of DISTINCT doors all
+        // named "Door" must NOT collapse onto one count. They are Used from
+        // DISTINCT cells, so the name is disambiguated by self cell and each gets
+        // first-use forgiveness — even past the threshold count of emissions.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es)); // door 1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // door 2
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es)); // door 3
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es)); // door 4
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_NameOnlyDoor_SameCell_Fires()
+    {
+        // The live bug: the LLM emits name-only {"name":"Door"} and the picker
+        // parks the bot at the SAME door (same cell) to Use it again and again.
+        // The name+cell key keeps the count, so the 3rd same-cell re-Use fires —
+        // even though distinct-cell corridor doors (test above) never do.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Door" } };
+        var cell = WorldAt(0xA9B4u, 0xA9B40170u, 0, 0);
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // #1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // #2
+        Assert.True(policy.IsLandblockWorldUseChurn(door, cell, es));  // #3 -> fire
+        Assert.True(policy.IsLandblockWorldUseChurn(door, cell, es));  // stays suppressed
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_NotGuarded_ForNonUse_ItemUse_AndUnderspecifiedSelector()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B40019u, 0, 0);
+        // Talk is not a Use.
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x5001u } };
+        // Use WITH an item is owned by the inventory-Use dedup, not this guard.
+        var itemUse = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x5002u }, Item = new Selector { Name = "Key" } };
+        // Under-specified selector (no guid/name) has no stable identity.
+        var vague = new Goal { Kind = GoalKind.Use, Target = new Selector { NameContains = "oor" } };
+
+        for (int i = 0; i < 4; i++)
+        {
+            Assert.False(policy.IsLandblockWorldUseChurn(talk, world, es));
+            Assert.False(policy.IsLandblockWorldUseChurn(itemUse, world, es));
+            Assert.False(policy.IsLandblockWorldUseChurn(vague, world, es));
+        }
+    }
+
     // ---- Stationary NPC Talk loop-break (exhausted conversation) ----
     //
     // A weak model re-emits Talk{same NPC} on a dead-end quest NPC whose
