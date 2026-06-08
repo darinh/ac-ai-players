@@ -374,6 +374,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         public long FloorSequence;
         public readonly Dictionary<string, int> UseCounts = new(StringComparer.OrdinalIgnoreCase);
         public readonly HashSet<string> Suppressed = new(StringComparer.OrdinalIgnoreCase);
+        // cp-2359: latched once the episode has Used too MANY DISTINCT world
+        // objects in this landblock without egress or a productive inventory
+        // change — a barren TOUR of different objects (which the per-target
+        // Suppressed set above cannot catch). While latched, any bare
+        // world-object Use is deferred to Explore until the episode resets.
+        public bool DistinctChurnLatched;
     }
 
     // Fire on the Nth bare-Use emission against the SAME world-object identity
@@ -382,6 +388,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // has chosen the same object three times without the landblock changing or
     // inventory advancing — strong loop evidence.
     private const int LandblockWorldUseChurnThreshold = 3;
+
+    // cp-2359: fire once the episode has Used this many DISTINCT world objects
+    // in one landblock with NO egress and NO productive inventory change — a
+    // barren tour of different objects (e.g. working every container/door in a
+    // safe zone) that the per-target threshold above never catches because each
+    // object is Used only once or twice. Higher than the per-target threshold:
+    // touring a few distinct objects is plausibly legitimate, but the episode
+    // resets the instant an inventory change (a productive loot/key-Use) or a
+    // landblock change occurs, so only an UNPRODUCTIVE tour accumulates this far.
+    private const int LandblockDistinctUseChurnThreshold = 5;
 
     // Stationary NPC Talk loop-break (2026-06-05). A weak model loops
     // Talk{same NPC} on a dead-end NPC whose quest it cannot satisfy
@@ -1721,7 +1737,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses);
+        // cp-2359: project the current landblock's world-Use churn episode (the
+        // bot's OWN distinct-object Use count + whether the distinct-tour egress
+        // guard has latched) so the prompt can state the no-progress activity as
+        // a fact. Only when the episode belongs to the current landblock.
+        (int Distinct, bool Latched)? localUseChurn =
+            _worldUseChurnEpisode is { } ue && ue.Landblock == world.Self.Landblock && ue.UseCounts.Count > 0
+                ? (ue.UseCounts.Count, ue.DistinctChurnLatched)
+                : null;
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -2053,7 +2077,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             Console.WriteLine(
                 $"[llm-dedup] dropping LLM Use target={goal.Target}" +
-                " — same world-object re-Used to threshold within one landblock (no egress); deferring to fallback.");
+                " — world-object Use churn within one landblock (same target re-Used, or too many distinct" +
+                " objects toured, with no egress); deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: landblock world-object Use churn (no egress)");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
@@ -2596,9 +2621,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return true;
         }
 
+        // cp-2359: a barren TOUR — many DISTINCT world objects Used in this
+        // landblock with no egress and no productive inventory change. Once
+        // latched, ANY bare world-object Use is deferred to Explore until the
+        // episode resets (egress or productive loot), so the bot stops working
+        // every container/door in a tapped-out zone and heads out to hunt. The
+        // latch is episode-wide (not per-key) because the tour is over DIFFERENT
+        // objects; the per-key Suppressed set above cannot catch it.
+        if (ep.DistinctChurnLatched)
+        {
+            ep.FloorSequence = events.NextSequence;
+            return true;
+        }
+
         int count = (ep.UseCounts.TryGetValue(key, out var c) ? c : 0) + 1;
         ep.UseCounts[key] = count;
         ep.FloorSequence = events.NextSequence;
+
+        if (ep.UseCounts.Count >= LandblockDistinctUseChurnThreshold)
+        {
+            ep.DistinctChurnLatched = true;
+            return true;
+        }
 
         if (count >= LandblockWorldUseChurnThreshold)
         {
@@ -3448,7 +3492,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         ApproachDistanceProjection? approachDistance = null,
         ExcursionCoverageProjection? excursionCoverage = null,
         IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null,
-        IReadOnlyList<LootedCorpse>? lootedEmptyCorpses = null)
+        IReadOnlyList<LootedCorpse>? lootedEmptyCorpses = null,
+        (int Distinct, bool Latched)? localUseChurn = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4823,6 +4868,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     "- raw fact, not a recommendation. Your call.");
             }
+        }
+
+        // cp-2359: when the distinct-object world-Use churn guard has latched —
+        // the bot has Used several DISTINCT world objects in this landblock with
+        // no egress and no productive inventory change — surface that no-progress
+        // activity (the bot's OWN distinct-Use count + outcomes) plus the guard's
+        // mechanical state, so the LLM understands why a world-object Use was
+        // deferred and can apply its existing HUNT EXCURSION / tapped-out egress
+        // reasoning. Guard-state perception (mirrors the cp-2340 server-refused
+        // capsule); no priority, no game knowledge.
+        if (localUseChurn is { Latched: true } luc)
+        {
+            var lvlGain = world.Self.Level is int lvNow && levelAtLandblockEntry is int lvEntry
+                ? lvNow - lvEntry
+                : (int?)null;
+            sb.AppendLine();
+            sb.AppendLine("## Local activity");
+            sb.AppendLine(
+                $"- in this landblock you have Used {luc.Distinct} distinct world objects with no new " +
+                "inventory item" + (lvlGain is 0 ? " and no level gained" : "") + " since arriving.");
+            sb.AppendLine(
+                "- the motor is now deferring further bare world-object Use here to Explore until you " +
+                "leave this landblock or your inventory changes.");
         }
 
         var assembled = sb.ToString();
