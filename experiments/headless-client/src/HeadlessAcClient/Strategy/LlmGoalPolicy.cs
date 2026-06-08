@@ -400,6 +400,54 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // stationary no-progress streak.
     private const int InteractFixationThreshold = 4;
 
+    // cp-2344 — multi-NPC Talk-churn episode. IsExhaustedNpcTalkRepeat resets
+    // its streak whenever the Talk target changes, so it NEVER fires when the
+    // bot ALTERNATES Talk between a small set of NPCs (a referral ping-pong),
+    // because that guard resets its streak on every target change. This tracks
+    // a STATIONARY no-progress Talk EPISODE over a small cyclic target set. It
+    // accrues a "stale" streak while the bot stays put, observes NO server
+    // progress signal (inventory / landblock / self-progression), AND sees NO
+    // dialog NOVELTY (a server text fingerprint it has not seen this episode)
+    // between Talk emissions; a productive turn-in, zone change, XP gain, or a
+    // genuinely new line of dialog resets it. Pure mechanical loop-detection of
+    // the bot's OWN Talk emissions + server-observable progress + runtime text
+    // NOVELTY by normalized hash (never the text's meaning) — no NPC names, no
+    // quest knowledge. The "cycle period cap" of 2 distinct targets scopes this
+    // to the tight alternation the single-NPC guard misses; a larger Talk
+    // frontier reads as traversal, not a loop, and abandons the episode.
+    private TalkChurnEpisode? _talkChurnEpisode;
+
+    private sealed class TalkChurnEpisode
+    {
+        public long FloorSequence;
+        public uint? Landblock;
+        public uint? Cell;
+        public float X;
+        public float Y;
+        public int StaleTalks;
+        public readonly HashSet<string> Targets = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> SeenDialogFingerprints = new(StringComparer.Ordinal);
+    }
+
+    // Fire on the Nth consecutive STALE (no-novelty, no-progress, stationary)
+    // Talk in a <=2-target cycle. A legitimate referral chain (A->B->A, or
+    // A->B->A->B) produces new dialog/an item/a move that resets the streak
+    // well before this, so the 3rd stale repeat over a 2-NPC cycle is a
+    // defensible mechanical loop signal — the same shape as the single-NPC
+    // NpcTalkRepeatThreshold and the cross-kind InteractFixationThreshold.
+    private const int MultiNpcTalkChurnStaleThreshold = 3;
+    private const int MultiNpcTalkChurnMaxTargets = 2;
+
+    // Server text kinds that count as "dialog" for novelty fingerprinting.
+    // Wire-decoded categories only — no per-message content knowledge.
+    private static readonly EventKind[] TalkChurnDialogKinds =
+    {
+        EventKind.NpcDialog,
+        EventKind.ServerMessage,
+        EventKind.PopupString,
+        EventKind.BookText,
+    };
+
     // Early Talk-loop egress (2026-06-07). A PROVEN stationary NPC Talk
     // fixation (IsExhaustedNpcTalkRepeat — 4 same-NPC Talks with no movement
     // and no inventory change) is time-INDEPENDENT dead-end evidence: re-Talking
@@ -1933,6 +1981,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
+        // Multi-NPC Talk-churn loop-break (cp-2344): the single-NPC guard above
+        // resets on every target change, so it misses a referral PING-PONG
+        // between a small set of NPCs. This fires on a stationary no-progress,
+        // no-dialog-novelty cycle over <=2 distinct targets — the alternation
+        // the per-NPC guard cannot see — and breaks it via the SAME egress.
+        if (IsMultiNpcTalkChurn(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: stationary no-progress multi-NPC Talk cycle");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
+
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
         // guards above each count only their own GoalKind, so a mixed
         // Use{target} ↔ Pickup{target} alternation on one stationary target
@@ -2486,6 +2549,114 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Count = interactCount,
         };
         return interactCount >= InteractFixationThreshold;
+    }
+
+    /// <summary>
+    /// True when the bot is churning Talk emissions over a SMALL cyclic set of
+    /// NPCs — the 2+-NPC alternation that <see cref="IsExhaustedNpcTalkRepeat"/>
+    /// (which resets on every target change) structurally cannot catch — while
+    /// STATIONARY, with NO server-observable progress, and NO dialog NOVELTY
+    /// between emissions. Complements the single-NPC guard; requires at least 2
+    /// distinct targets so it never double-counts a same-NPC fixation.
+    ///
+    /// <para>Pure mechanical loop-detection, identical in spirit to the per-kind
+    /// guards: it keys on the bot's OWN Talk emission identities
+    /// (<see cref="CanonicalUseTargetKey"/>), its OWN self cell/position, the
+    /// PRESENCE of inventory / landblock / self-progression EVENTS, and the
+    /// NOVELTY of server text by normalized hash (NEW vs already-seen — it never
+    /// interprets the text). A real turn-in (inventory), a zone change
+    /// (landblock), an XP/level gain (self-progression), a move, or a
+    /// genuinely new line of dialog all reset the streak, so a productive
+    /// referral chain is never suppressed; only a stationary no-progress,
+    /// no-novelty cycle fires. No NPC names, wcids, or quest content.</para>
+    /// </summary>
+    internal bool IsMultiNpcTalkChurn(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+
+        var key = CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+
+        var self = world.Self;
+        var ep = _talkChurnEpisode;
+
+        // Hard reset: no episode yet, the bot moved, or any server-observable
+        // progress occurred since the last counted Talk. Progress means the
+        // conversation is advancing — never a dead loop.
+        bool moved = ep is null
+            || ep.Landblock != self.Landblock
+            || ep.Cell != self.CellId
+            || SquaredXyDistance(ep.X, ep.Y, self.PositionX, self.PositionY) > StationaryUseEpsilonSq;
+        bool progressed = ep is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, ep.FloorSequence)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, ep.FloorSequence)
+             || events.HasNewSince(EventKind.LandblockChanged, ep.FloorSequence)
+             || events.HasNewSince(EventKind.SelfProgressChanged, ep.FloorSequence));
+
+        if (ep is null || moved || progressed)
+        {
+            ep = new TalkChurnEpisode
+            {
+                FloorSequence = events.NextSequence,
+                Landblock = self.Landblock,
+                Cell = self.CellId,
+                X = self.PositionX,
+                Y = self.PositionY,
+                StaleTalks = 0,
+            };
+            ep.Targets.Add(key);
+            // Seed with dialog already in the buffer so a later re-send of the
+            // SAME greeting reads as repetition, not novelty.
+            foreach (var fp in DialogFingerprintsSince(events, 0))
+                ep.SeenDialogFingerprints.Add(fp);
+            _talkChurnEpisode = ep;
+            return false;
+        }
+
+        // Dialog NOVELTY since the last counted Talk: a fingerprint the episode
+        // has not seen means the conversation advanced (productive).
+        bool novelDialog = false;
+        foreach (var fp in DialogFingerprintsSince(events, ep.FloorSequence))
+            if (ep.SeenDialogFingerprints.Add(fp))
+                novelDialog = true;
+
+        ep.Targets.Add(key);
+        ep.X = self.PositionX;
+        ep.Y = self.PositionY;
+        ep.FloorSequence = events.NextSequence;
+
+        // The Talk frontier grew past a tight cycle → traversal, not a loop.
+        if (ep.Targets.Count > MultiNpcTalkChurnMaxTargets)
+        {
+            _talkChurnEpisode = null;
+            return false;
+        }
+
+        if (novelDialog)
+        {
+            ep.StaleTalks = 0;
+            return false;
+        }
+
+        ep.StaleTalks++;
+        return ep.StaleTalks >= MultiNpcTalkChurnStaleThreshold && ep.Targets.Count >= 2;
+    }
+
+    // Normalized dialog fingerprints at sequence >= floor (newest-first source,
+    // order irrelevant). A fingerprint is the dialog kind + whitespace-collapsed
+    // lower-cased text — a structural identity that tells NEW server text from a
+    // re-sent repeat WITHOUT interpreting meaning. Empty/blank text is skipped.
+    private static IEnumerable<string> DialogFingerprintsSince(EventStream events, long floor)
+    {
+        foreach (var e in events.Recent())
+        {
+            if (e.Sequence < floor) continue;
+            if (System.Array.IndexOf(TalkChurnDialogKinds, e.Kind) < 0) continue;
+            if (string.IsNullOrWhiteSpace(e.Text)) continue;
+            var norm = System.Text.RegularExpressions.Regex.Replace(
+                e.Text.Trim().ToLowerInvariant(), "\\s+", " ");
+            yield return $"{(int)e.Kind}:{norm}";
+        }
     }
 
     private static float SquaredXyDistance(float ax, float ay, float bx, float by)

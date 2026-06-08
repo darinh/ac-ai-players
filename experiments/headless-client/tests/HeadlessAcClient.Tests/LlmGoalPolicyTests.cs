@@ -5548,6 +5548,139 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsExhaustedNpcTalkRepeat(npcB, world, es));
     }
 
+    // ---- Multi-NPC Talk-churn loop-break (cp-2344) ----
+    //
+    // IsExhaustedNpcTalkRepeat resets on every target change, so a referral
+    // PING-PONG between two NPCs (verified live: Scribe x5 / Renald x3, in
+    // range, 0 inventory, ## Recent Talk capsule present but ignored) slips
+    // past it forever. IsMultiNpcTalkChurn tracks a STATIONARY no-progress,
+    // no-dialog-novelty cycle over <=2 distinct targets and fires on the
+    // MultiNpcTalkChurnStaleThreshold'th stale repeat. Server progress
+    // (inventory/landblock/self-progression), movement, a genuinely new line of
+    // dialog, or a frontier that grows past 2 targets all reset/abandon it.
+
+    [Fact]
+    public void MultiNpcTalkChurn_FiresOnTwoNpcAlternation_WithNoProgress()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        Assert.False(policy.IsMultiNpcTalkChurn(npcA, world, es)); // episode start
+        Assert.False(policy.IsMultiNpcTalkChurn(npcB, world, es)); // stale 1
+        Assert.False(policy.IsMultiNpcTalkChurn(npcA, world, es)); // stale 2
+        Assert.True(policy.IsMultiNpcTalkChurn(npcB, world, es));  // stale 3 -> fire
+        Assert.True(policy.IsMultiNpcTalkChurn(npcA, world, es));  // stays fired
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_NeverFires_WhenDialogIsNovelEachTalk()
+    {
+        // QUESTING SAFETY: a legitimate referral chain advances the dialog each
+        // Talk (new server text, even with no item or movement). New dialog
+        // novelty resets the stale streak, so a productive chain is NEVER
+        // suppressed — only a re-greeting cycle with no new content fires.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        var goals = new[] { npcA, npcB, npcA, npcB, npcA, npcB, npcA, npcB };
+        for (var i = 0; i < goals.Length; i++)
+        {
+            // The server reply to the PREVIOUS Talk is in the buffer; each is a
+            // genuinely new line (the conversation is advancing).
+            es.Append(NpcDialog($"advancing dialogue line number {i}"));
+            Assert.False(policy.IsMultiNpcTalkChurn(goals[i], world, es),
+                $"must not fire on novel-dialog chain at step {i}");
+        }
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_NeverFires_WhenRepeatedGreetingsButInventoryProgresses()
+    {
+        // A real turn-in chain: each Talk consumes/grants an item. Inventory
+        // progress resets the episode; never suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        var goals = new[] { npcA, npcB, npcA, npcB, npcA, npcB };
+        foreach (var g in goals)
+        {
+            es.Append(InvAdded("Quest Token"));
+            Assert.False(policy.IsMultiNpcTalkChurn(g, world, es));
+        }
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_DoesNotFire_ForSingleNpcRepeat()
+    {
+        // A single-NPC fixation is the OTHER guard's job; this one requires >=2
+        // distinct targets so the two never double-count.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+
+        for (var i = 0; i < 8; i++)
+            Assert.False(policy.IsMultiNpcTalkChurn(npcA, world, es));
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_ResetsWhenBotMoves()
+    {
+        // Walking between NPCs in different cells is traversal, not a cycle.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        Assert.False(policy.IsMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es));
+        Assert.False(policy.IsMultiNpcTalkChurn(npcB, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es));
+        Assert.False(policy.IsMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es));
+        Assert.False(policy.IsMultiNpcTalkChurn(npcB, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es));
+        Assert.False(policy.IsMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B4001Du, 0, 0), es));
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_AbandonsWhenFrontierExceedsTwoTargets()
+    {
+        // Three-plus distinct NPCs looks like exploration/traversal across a
+        // crowded area, not a tight 2-node cycle — abandon, never fire.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var a = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var b = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+        var c = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80009999u } };
+
+        var goals = new[] { a, b, c, a, b, c, a, b, c };
+        foreach (var g in goals)
+            Assert.False(policy.IsMultiNpcTalkChurn(g, world, es));
+    }
+
+    [Fact]
+    public void MultiNpcTalkChurn_IgnoresNonTalkGoals()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var world = WorldAt(0xA9B4u, 0xA9B4014Du, 0, 0);
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Guid = 0x80002625u } };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = new Selector { Guid = 0x80001234u } };
+
+        for (var i = 0; i < 8; i++)
+        {
+            Assert.False(policy.IsMultiNpcTalkChurn(attack, world, es));
+            Assert.False(policy.IsMultiNpcTalkChurn(pickup, world, es));
+        }
+    }
+
     [Fact]
     public void ExhaustedNpcTalk_IgnoresNonTalkGoals()
     {
