@@ -51,7 +51,9 @@ internal sealed record CombatFightStatus(
     string? TargetName,
     int SwingsLanded,
     int SwingsEvaded,
-    uint DamageDealt);
+    uint DamageDealt,
+    float? FirstTargetHealthFraction = null,
+    float? CurrentTargetHealthFraction = null);
 
 /// <summary>
 /// active-combat-telemetry: a rolling-window summary of recent INBOUND

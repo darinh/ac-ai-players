@@ -3550,6 +3550,72 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_CurrentFight_RendersTargetHealthTrajectory()
+    {
+        // combat-effectiveness: surface the target's health at fight start vs
+        // now so the LLM can see it is barely denting an out-defending target
+        // (e.g. many swings but health still ~89%) and disengage.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 0.4f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = new CombatFightStatus(0xABCDu, "Auroch Bull", 3, 12, 17, 1.0f, 0.89f),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains(
+            "current fight vs \"Auroch Bull\": swings landed 3, evaded 12, damage dealt 17; " +
+            "target health now 89% (was 100% when this fight began)",
+            prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_CurrentFight_RendersCurrentHealthOnly_WhenNoFirstObservation()
+    {
+        // Only the current target-health fraction observed (no fight-start
+        // baseline yet) → render the current value without a "was" clause.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = new CombatFightStatus(0xABCDu, "Cow", 2, 1, 9, null, 0.5f),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("damage dealt 9; target health now 50%", prompt);
+        Assert.DoesNotContain("now 50% (was", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_CurrentFight_OmitsTargetHealth_WhenNoneObserved()
+    {
+        // No target-health observed (both fractions null, the back-compat
+        // default) → the fight line renders exactly as before, no health note.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = new CombatFightStatus(0xABCDu, "Drudge Skulker", 0, 6, 0),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("current fight vs \"Drudge Skulker\": swings landed 0, evaded 6, damage dealt 0", prompt);
+        Assert.DoesNotContain("damage dealt 0; target health", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_RecentInboundDamage_RendersRawHitsAndDamage()
     {
         // active-combat-telemetry: the rolling inbound-damage summary is
