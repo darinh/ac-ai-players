@@ -4090,6 +4090,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // how much, and which to raise (it reads attributes/skills in
         // `## Self` and the mechanics in the SPEND XP rule). No game
         // knowledge; perception re-positioned for salience.
+        // cp-2343 — mark the start of the protected salience-capsule tail.
+        // Everything appended from here to the return is the decision-proximate
+        // end-capsule block: ## Unspent XP, ## Recent Talk, ## Recent Use,
+        // ## Server-refused interaction targets, ## Approach distance history.
+        // These short, individually-bounded perception capsules exist precisely
+        // because they sit in the most decision-proximate slot. The request-
+        // size fitter's defensive hard-cut trims the TAIL of the string, which
+        // would delete these capsules when a large prompt overflows the
+        // ceiling. Split the tail off as a PROTECTED suffix so the fitter trims
+        // and hard-cuts only the body (whose trailing, lowest-value sections
+        // render just above this point — the fixed ## Combat readiness et al.
+        // render far earlier and are unaffected) and always re-appends the
+        // capsules intact.
+        var salienceTailStart = sb.Length;
         if (world.Self.AvailableExperience is long endcapUnspent && endcapUnspent > 0)
         {
             sb.AppendLine();
@@ -4286,7 +4300,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "Explore all remain executable right now. Your call.");
         }
 
-        return FitPromptToCeiling(sb.ToString());
+        var assembled = sb.ToString();
+        var salienceTail = assembled.Substring(salienceTailStart);
+        var body = assembled.Substring(0, salienceTailStart);
+        return FitPromptToCeiling(body, salienceTail);
     }
 
     // Some GitHub Models endpoints reject an over-large request body with
@@ -4343,8 +4360,49 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             const string suffix = "\n\u2026 (prompt hard-truncated to fit request budget)";
             var cut = Math.Max(0, ceiling - suffix.Length);
             result = result[..cut] + suffix;
+            // Final clamp: when the ceiling is smaller than the marker itself
+            // (reachable when a caller fits the BODY into a tiny remaining
+            // budget after reserving a large protected suffix), the line above
+            // still exceeds the ceiling. Clamp unconditionally so the ceiling
+            // is an absolute invariant for every caller.
+            if (result.Length > ceiling)
+                result = result[..ceiling];
         }
         return result;
+    }
+
+    // cp-2343 — fit a prompt that ends in a PROTECTED salience-capsule suffix.
+    // The single-argument overload above trims the four PromptTrimOrder
+    // sections and then, as a last resort, hard-cuts the TAIL of the string —
+    // which removes the decision-proximate end-capsules (## Unspent XP,
+    // ## Recent Talk/Use, ## Server-refused, ## Approach distance history)
+    // whenever a large context pushes the prompt over the ceiling. This
+    // overload keeps the capsules: it fits the BODY into (ceiling − suffix
+    // length) using the exact same tested cascade + backstop, then re-appends
+    // the protected suffix intact. Because the body's own trailing sections
+    // (the lowest-value ## blocks that render just above the capsules) absorb
+    // the body hard-cut, the fixed decision sections that render far earlier
+    // (## Combat readiness et al.) are unaffected — the cp-2334 invariant is
+    // preserved. No game knowledge; pure request-size management by structural
+    // position.
+    internal static string FitPromptToCeiling(
+        string body, string protectedSuffix, int ceiling = HardUserPromptCeilingChars)
+    {
+        if (string.IsNullOrEmpty(protectedSuffix))
+            return FitPromptToCeiling(body, ceiling);
+        if (body.Length + protectedSuffix.Length <= ceiling)
+            return body + protectedSuffix;
+        // The protected suffix alone meets/exceeds the ceiling (should not
+        // happen — each capsule caps its own rows). Preserve the ceiling as an
+        // UNCONDITIONAL invariant over capsule survival: fit the whole string.
+        if (protectedSuffix.Length >= ceiling)
+            return FitPromptToCeiling(body + protectedSuffix, ceiling);
+        // Normal path: reserve the suffix's length, fit the body into the
+        // remainder with the tested single-argument logic (whose final clamp
+        // guarantees the returned body is ≤ the inner ceiling even when that
+        // remainder is below the truncation-marker length), then re-append the
+        // capsules. Total length ≤ (ceiling − suffix) + suffix = ceiling.
+        return FitPromptToCeiling(body, ceiling - protectedSuffix.Length) + protectedSuffix;
     }
 
     private static int JoinLen(List<string> lines, string nl) =>
