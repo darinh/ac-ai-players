@@ -5709,6 +5709,110 @@ public class LlmGoalPolicyTests
         }
     }
 
+    // ---- Landblock DISTINCT-object world-Use churn (cp-2359) ----
+    // A barren TOUR of MANY DIFFERENT world objects in one landblock (the live
+    // chest tour: 10 distinct static chests Used, 0 egress) that the per-target
+    // counter never catches because each object is Used only once or twice.
+
+    [Fact]
+    public void LandblockDistinctUseChurn_FiresOnFifthDistinctObject()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        // 4 DISTINCT objects each Used once in one landblock -> forgiveness, no fire.
+        for (uint g = 0x6001u; g <= 0x6004u; g++)
+            Assert.False(policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xA9B4u, 0xA9B40000u + (g & 0xFFu), 0, 0), es));
+        // 5th DISTINCT object -> distinct-tour trip.
+        Assert.True(policy.IsLandblockWorldUseChurn(
+            new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x6005u } },
+            WorldAt(0xA9B4u, 0xA9B40055u, 0, 0), es));
+        // 6th NEW distinct object -> episode latched, still dropped.
+        Assert.True(policy.IsLandblockWorldUseChurn(
+            new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x6006u } },
+            WorldAt(0xA9B4u, 0xA9B40066u, 0, 0), es));
+    }
+
+    [Fact]
+    public void LandblockDistinctUseChurn_DoesNotBlockNonUseWhenLatched()
+    {
+        // The latch defers world-object Use only — Attack/Pickup must still pass
+        // (the bot can commit to a monster that appears mid-tour).
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        for (uint g = 0x6101u; g <= 0x6105u; g++) // trip the distinct latch
+            policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xA9B4u, 0xA9B40000u + (g & 0xFFu), 0, 0), es);
+        // Attack is not a Use — never guarded, even with the latch active.
+        Assert.False(policy.IsLandblockWorldUseChurn(
+            new Goal { Kind = GoalKind.Attack, Target = new Selector { Guid = 0x61FFu } },
+            WorldAt(0xA9B4u, 0xA9B401FFu, 0, 0), es));
+    }
+
+    [Fact]
+    public void LandblockDistinctUseChurn_InventoryChangeResetsDistinctCount()
+    {
+        // A productive loot (InventoryItemAdded) mid-tour resets the episode, so a
+        // real loot room of several PRODUCTIVE containers never latches.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        for (uint g = 0x7001u; g <= 0x7004u; g++) // 4 distinct, no fire
+            Assert.False(policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xA9B4u, 0xA9B40000u + (g & 0xFFu), 0, 0), es));
+        es.Append(InvAdded("Looted gold"));
+        // distinct count restarts; the next 4 distinct objects do NOT latch.
+        for (uint g = 0x7005u; g <= 0x7008u; g++)
+            Assert.False(policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xA9B4u, 0xA9B40000u + (g & 0xFFu), 0, 0), es));
+    }
+
+    [Fact]
+    public void LandblockDistinctUseChurn_LandblockChangeResetsDistinctCount()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        for (uint g = 0x8001u; g <= 0x8004u; g++) // 4 distinct in 0xA9B4
+            Assert.False(policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xA9B4u, 0xA9B40000u + (g & 0xFFu), 0, 0), es));
+        // Egress to a new landblock resets; 4 distinct there do not latch.
+        for (uint g = 0x8005u; g <= 0x8008u; g++)
+            Assert.False(policy.IsLandblockWorldUseChurn(
+                new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = g } },
+                WorldAt(0xCCCCu, 0xCCCC0000u + (g & 0xFFu), 0, 0), es));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LocalActivityCapsule_RendersWhenChurnLatched()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            localUseChurn: (Distinct: 6, Latched: true));
+        Assert.Contains("## Local activity", prompt);
+        Assert.Contains("6 distinct world objects", prompt);
+        Assert.Contains("deferring further bare world-object Use", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LocalActivityCapsule_OmittedWhenNotLatchedOrNull()
+    {
+        var pNull = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            localUseChurn: null);
+        Assert.DoesNotContain("## Local activity", pNull);
+        var pUnlatched = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            localUseChurn: (Distinct: 3, Latched: false));
+        Assert.DoesNotContain("## Local activity", pUnlatched);
+    }
+
     // ---- Stationary NPC Talk loop-break (exhausted conversation) ----
     //
     // A weak model re-emits Talk{same NPC} on a dead-end quest NPC whose
