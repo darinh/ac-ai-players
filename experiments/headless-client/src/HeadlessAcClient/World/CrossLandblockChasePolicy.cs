@@ -1,5 +1,7 @@
 namespace HeadlessAcClient.World;
 
+using System;
+
 /// <summary>
 /// Pure decision for the Attack cross-landblock resolver's
 /// "no explored navgraph route" fallback.
@@ -36,5 +38,32 @@ public static class CrossLandblockChasePolicy
         if (!WorldDistance.IsOutdoor(selfCell) || !WorldDistance.IsOutdoor(sightingCell))
             return false;
         return WorldDistance.IsSameOrAdjacentLandblock(selfCell, sightingCell);
+    }
+
+    /// <summary>
+    /// Diagnostic companion to <see cref="ShouldStraightSteerOutdoor"/>:
+    /// returns a short reason string naming the FIRST failing sub-condition,
+    /// so the cooldown branch can log WHY a straight outdoor steer was refused
+    /// (zero cell, indoor self/sighting, or a non-adjacent landblock with the
+    /// Chebyshev grid distance). Returns "eligible" when nothing fails (the
+    /// steer would be allowed). Pure wire-coordinate geometry; no game
+    /// knowledge.
+    /// </summary>
+    public static string ExplainStraightSteerRefusal(uint selfCell, uint sightingCell)
+    {
+        if (selfCell == 0u || sightingCell == 0u)
+            return $"zero-cell (self=0x{selfCell:X8} sighting=0x{sightingCell:X8})";
+        if (!WorldDistance.IsOutdoor(selfCell))
+            return $"self-indoor (cell=0x{selfCell:X8})";
+        if (!WorldDistance.IsOutdoor(sightingCell))
+            return $"sighting-indoor (cell=0x{sightingCell:X8})";
+        if (!WorldDistance.IsSameOrAdjacentLandblock(selfCell, sightingCell))
+        {
+            var dx = Math.Abs((int)((selfCell >> 24) & 0xFF) - (int)((sightingCell >> 24) & 0xFF));
+            var dy = Math.Abs((int)((selfCell >> 16) & 0xFF) - (int)((sightingCell >> 16) & 0xFF));
+            return $"non-adjacent landblock (self lb=0x{(selfCell >> 16) & 0xFFFF:X4} " +
+                   $"sighting lb=0x{(sightingCell >> 16) & 0xFFFF:X4} chebyshev={Math.Max(dx, dy)})";
+        }
+        return "eligible";
     }
 }

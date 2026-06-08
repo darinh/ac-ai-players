@@ -5769,10 +5769,21 @@ internal sealed class HandshakeDriver : IDisposable
                                             {
                                                 rememberedSightedCooldownUntil[farA.Id] =
                                                     nowWallA + rememberedSightedRevisitCooldown;
+                                                // The straight-steer refusal reason only applies when
+                                                // the plan was NoRoute (the steer is gated on NoRoute +
+                                                // ShouldStraightSteerOutdoor above). For Advance (on its
+                                                // own cooldown) or TransitionPending the cooldown is for
+                                                // that plan state, not steer geometry — printing a steer
+                                                // reason then would mislead, so omit it.
+                                                var steerNote =
+                                                    planA.Kind == RouteWaypointKind.NoRoute
+                                                        ? $" straight-steer refused: " +
+                                                          $"{CrossLandblockChasePolicy.ExplainStraightSteerRefusal(tacticsSelfCell, farA.CellId)};"
+                                                        : "";
                                                 Console.WriteLine(
                                                     $"[strategy] LLM-GOAL Attack{{target}} '{farA.Name}' is " +
                                                     $"cross-landblock (lb 0x{(farA.CellId >> 16):X4}); {planA.Kind} " +
-                                                    $"(no on-foot route prefix); cooling down " +
+                                                    $"(no on-foot route prefix);{steerNote} cooling down " +
                                                     $"{rememberedSightedRevisitCooldown.TotalSeconds:F0}s");
                                             }
                                         }

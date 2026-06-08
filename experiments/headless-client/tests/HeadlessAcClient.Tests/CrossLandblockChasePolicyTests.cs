@@ -125,4 +125,49 @@ public class CrossLandblockChasePolicyTests
         var sighting = Outdoor(0xA9, 0xB4, 0x0001);
         Assert.True(CrossLandblockChasePolicy.ShouldStraightSteerOutdoor(self, sighting));
     }
+
+    // ExplainStraightSteerRefusal — the diagnostic companion. It names the
+    // FIRST failing sub-condition so the cooldown log can show WHY a steer
+    // was refused. "eligible" means the steer WOULD be allowed.
+
+    [Fact]
+    public void Explain_SameOrAdjacentOutdoor_Eligible()
+    {
+        Assert.Equal("eligible", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(
+            Outdoor(0xA8, 0xB4), Outdoor(0xA8, 0xB4, 0x00FF)));
+        Assert.Equal("eligible", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(
+            Outdoor(0xA8, 0xB4), Outdoor(0xA8, 0xB5)));
+    }
+
+    [Fact]
+    public void Explain_ZeroCell_NamesZeroCell()
+    {
+        Assert.StartsWith("zero-cell", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(0u, Outdoor(0xA8, 0xB5)));
+        Assert.StartsWith("zero-cell", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(Outdoor(0xA8, 0xB4), 0u));
+    }
+
+    [Fact]
+    public void Explain_SelfIndoor_NamesSelfIndoor()
+    {
+        Assert.StartsWith("self-indoor", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(
+            Indoor(0xA8, 0xB4), Outdoor(0xA8, 0xB5)));
+    }
+
+    [Fact]
+    public void Explain_SightingIndoor_NamesSightingIndoor()
+    {
+        Assert.StartsWith("sighting-indoor", CrossLandblockChasePolicy.ExplainStraightSteerRefusal(
+            Outdoor(0xA8, 0xB4), Indoor(0xA8, 0xB5)));
+    }
+
+    [Fact]
+    public void Explain_NonAdjacent_NamesChebyshevDistance()
+    {
+        // self 0xAB,0xB6 vs sighting 0xAF,0xB7 — the live cp-2347 case:
+        // bot wandered 4 landblocks east of where it sighted the monster.
+        var reason = CrossLandblockChasePolicy.ExplainStraightSteerRefusal(
+            Outdoor(0xAB, 0xB6), Outdoor(0xAF, 0xB7));
+        Assert.StartsWith("non-adjacent landblock", reason);
+        Assert.Contains("chebyshev=4", reason);
+    }
 }
