@@ -63,21 +63,24 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     private const int RecentProposedWindow = 8;
     private readonly Queue<uint> _recentProposedGuids = new();
 
-    // cp-2360: break a barren openable TOUR. With no LLM (e.g. the model is
-    // rate-limited) this fallback drives the bot, and step 5b below re-picks the
-    // nearest visible openable every tick; in a zone full of openables (a town
-    // with many static containers) the bot tours them forever and never egresses
-    // to hunt. Track the DISTINCT openables proposed in the CURRENT landblock and,
-    // once that crosses a threshold with no egress and no productive inventory
-    // change, stop proposing openables so the deliberation falls through to the
-    // Explore step. Generic anti-churn over the bot's OWN proposals + observed
+    // cp-2360/cp-2361: break a barren TOWN-OBJECT tour. With no LLM (e.g. the
+    // model is rate-limited) this fallback drives the bot, and the town-interaction
+    // steps below (openable Use, lifestone Use, portal Use, NPC Talk + the Talk
+    // recycle) each re-pick the nearest such object every tick; in a town the bot
+    // tours them forever and never egresses to hunt. Count the town-interaction
+    // goals PROPOSED in the CURRENT landblock across ALL those steps — counting
+    // re-proposals, not just distinct guids, so a sparse landblock where the bot
+    // re-Talks the same one or two NPCs (via the recycle) still trips it — and once
+    // that crosses a threshold with no egress and no productive inventory change,
+    // stop proposing town-interaction targets so the deliberation falls through to
+    // the Explore step. Generic anti-churn over the bot's OWN proposals + observed
     // progress signals — object-type neutral, no game knowledge. Resets on a
-    // landblock change (egress) or an inventory-add (a productive loot), so a real
-    // loot room of productive containers never trips it.
-    private uint? _openableTourLandblock;
-    private readonly HashSet<uint> _openablesTouredThisLandblock = new();
-    private long _openableTourInvSeq = -1;
-    private const int OpenableTourEgressThreshold = 4;
+    // landblock change (egress) or an inventory-add (a productive loot/quest item),
+    // so genuinely productive town interaction never trips it.
+    private uint? _townTourLandblock;
+    private int _townTourCount;
+    private long _townTourInvSeq = -1;
+    private const int TownTourEgressThreshold = 6;
 
     // Slice 0 (Hunt) — shared reference to the IntentStack so this
     // fallback can read (NEVER mutate) the strategic context an
@@ -300,18 +303,26 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // so this deliberation falls through to the Explore step and the bot
         // heads out. Generic anti-churn over the bot's OWN proposals — no
         // object-type judgment.
-        var openAddSeq = events.RecentOfKind(EventKind.InventoryItemAdded, 1)
+        // cp-2360/cp-2361: reset the per-landblock town-tour memory on egress
+        // (landblock change) or a productive inventory-add (loot/quest item) —
+        // only a barren tour with neither persists. Once the bot has toured the
+        // threshold of DISTINCT town objects here (across the openable/lifestone/
+        // portal/NPC steps below) without progress, the town-interaction steps tap
+        // out (propose nothing, unless a hunt is already active) so this
+        // deliberation falls through to the Explore step and the bot heads out.
+        // Generic anti-churn over the bot's OWN proposals — no object-type judgment.
+        var townAddSeq = events.RecentOfKind(EventKind.InventoryItemAdded, 1)
             .FirstOrDefault()?.Sequence ?? -1;
-        if (_openableTourLandblock != world.Self.Landblock || openAddSeq > _openableTourInvSeq)
+        if (_townTourLandblock != world.Self.Landblock || townAddSeq > _townTourInvSeq)
         {
-            _openableTourLandblock = world.Self.Landblock;
-            _openablesTouredThisLandblock.Clear();
-            _openableTourInvSeq = openAddSeq;
+            _townTourLandblock = world.Self.Landblock;
+            _townTourCount = 0;
+            _townTourInvSeq = townAddSeq;
         }
-        var openableTourTapped = !huntActive
-            && _openablesTouredThisLandblock.Count >= OpenableTourEgressThreshold;
+        var townTourTapped = !huntActive
+            && _townTourCount >= TownTourEgressThreshold;
 
-        var openable = openableTourTapped ? null : world.Visible
+        var openable = townTourTapped ? null : world.Visible
             .Where(v => v.IsOpenable && !v.IsDoor)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -324,7 +335,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (openable is not null)
         {
-            _openablesTouredThisLandblock.Add(openable.Guid);
+            _townTourCount++;
             RememberProposed(openable.Guid);
             return MakeGoal(GoalKind.Use,
                 new Selector { Guid = openable.Guid, Name = openable.Name },
@@ -345,7 +356,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     openable in the same view still wins one tick first;
         //     the lifestone gets its turn on the next tick because
         //     the openable will be in `_recentProposedGuids` by then.
-        var lifestone = world.Visible
+        var lifestone = townTourTapped ? null : world.Visible
             .Where(v => v.IsLifestone)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -356,6 +367,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (lifestone is not null)
         {
+            _townTourCount++;
             RememberProposed(lifestone.Guid);
             return MakeGoal(GoalKind.Use,
                 new Selector { Guid = lifestone.Guid, Name = lifestone.Name },
@@ -389,7 +401,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     `Explore{outdoor}` or `ReturnTo{lifestone}`), but the
         //     fallback baseline matches step 5b's posture: observe,
         //     act, learn from the result.
-        var portal = world.Visible
+        var portal = townTourTapped ? null : world.Visible
             .Where(v => v.IsPortal)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -400,6 +412,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (portal is not null)
         {
+            _townTourCount++;
             RememberProposed(portal.Guid);
             return MakeGoal(GoalKind.Use,
                 new Selector { Guid = portal.Guid, Name = portal.Name },
@@ -431,7 +444,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    greeters, quest-givers) and avoids competing with the
         //    Hunt-intent decomposer (step 6c) for the same wire
         //    objects. Skipped entirely under an active hunt (see above).
-        var npc = huntActive ? null : world.Visible
+        var npc = (huntActive || townTourTapped) ? null : world.Visible
             .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -439,6 +452,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (npc is not null)
         {
+            _townTourCount++;
             RememberProposed(npc.Guid);
             return MakeGoal(GoalKind.Talk,
                 new Selector { Guid = npc.Guid, Name = npc.Name },
@@ -452,7 +466,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     window and try again. Without this we'd starve the
         //     fallback in a small room. Same !IsMonster filter as
         //     step 6.
-        if (!huntActive && _recentProposedGuids.Count > 0)
+        if (!huntActive && !townTourTapped && _recentProposedGuids.Count > 0)
         {
             _recentProposedGuids.Clear();
             var npcRetry = world.Visible
@@ -462,6 +476,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 .FirstOrDefault();
             if (npcRetry is not null)
             {
+                _townTourCount++;
                 RememberProposed(npcRetry.Guid);
                 return MakeGoal(GoalKind.Talk,
                     new Selector { Guid = npcRetry.Guid, Name = npcRetry.Name },
