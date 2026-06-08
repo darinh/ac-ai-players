@@ -3754,8 +3754,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // IsChest projection flag that renders the `chest` tag). Omit otherwise.
         if (world.Visible.Any(v => v.IsChest))
         sb.AppendLine("- Loot containers: `chest`-tagged openables (Container + Openable, don't decay). `Use` to open, then `Pickup` contents. NEVER skip an unopened chest to chase the next NPC.");
+        // cp-2370: the Writables rule only applies when a sign or book is
+        // visible (same IsSign/IsBook projection flags that render the `sign`/
+        // `book` tags). Omit it otherwise (cp-2331 corpse/chest gating pattern)
+        // to save prompt bytes and unbury the applicable rules.
+        if (world.Visible.Any(v => v.IsSign || v.IsBook))
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
         sb.AppendLine("- LOOP-BREAK — do not repeat an action that produced no change (see the `Location & recency` section): (a) Talk: if you emitted `Talk{X}` 3+ times in the last 10 emissions with no new item and no new server hint, talk to a different NPC or Use/Give/Explore. (b) inventory-USE: if `Recently used inventory items` lists an item as `still in inventory (not consumed)`, the policy WILL drop a Use against it — do not re-emit unless a new event (ActionRejected recovery hint, new dialog/hint, inventory change) justifies it; when broken, pick a DIFFERENT action (a `monster` in view + weapon wielded → `Attack`; a not-yet-talked visible NPC → `Talk`; a visible pickup item → `Pickup`; else `Explore`). (c) world-object USE: the `Location & recency` section lists `recent Use emissions` per target; 3+ Uses of the SAME target with no change (same landblock per `minutes in current landblock`, no new hint/item) is a dead end → `Explore{target: {name: \"anywhere\"}}` or pick a different target. Re-Use ONLY if something concrete changed (you crossed into a new landblock, a new hint/item appeared, or an `ActionRejected` told you to retry).");
+        // PASSAGE-OPENED stays UNGATED: it is relevant after the bot has USED a
+        // door (a temporal/behavioural signal in `recent Use emissions`), not
+        // only when a door is currently in `Visible nearby` — a door can scroll
+        // out of view between the Use and the next decision. Visibility-gating
+        // it would wrongly drop the rule mid door-Use loop, so it is left
+        // always-on.
         sb.AppendLine("- PASSAGE-OPENED is not progress: opening a `door` (or any non-container `openable`) does NOT move you. Only MOVING to a new area counts (current cell/landblock changing, or previously-unseen objects in `Visible nearby`). After Using a door once, do NOT Use it again from the same spot — emit `Explore{target: {name: \"anywhere\"}}` (or a goal beyond it) to travel THROUGH it. (Does NOT apply to `chest`/`corpse` containers, which you Use to reveal loot then `Pickup`.)");
         // cp-2368: the next three rules are ENTIRELY about the NO-monster-in-
         // view case — LOOP-BREAK (town-stuck) requires `nearest monster: (none

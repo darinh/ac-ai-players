@@ -2647,6 +2647,40 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("COMBAT SAFETY & PACE", p);
     }
 
+    // ---- Writables rule gating on sign/book visibility (cp-2370) ----------
+    // The Writables rule applies only when a sign or book is visible (the
+    // IsSign/IsBook projection flags), so it is gated on their presence (the
+    // cp-2331 corpse/chest gating pattern). Unlike PASSAGE-OPENED it has no
+    // temporal/recent-Use aspect, so visibility-gating is exact.
+
+    [Fact]
+    public void BuildUserPrompt_WritablesRule_PresentWhenSignVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xD00u, Name = "WIELDING ITEMS", Wcid = 5101u, Distance = 4f, IsSign = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("- Writables:", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WritablesRule_PresentWhenBookVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xD01u, Name = "Tinkering", Wcid = 21093u, Distance = 6f, IsBook = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("- Writables:", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WritablesRule_OmittedWhenNoSignOrBook()
+    {
+        // No sign/book visible -> the rule carries no information and is omitted.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("- Writables:", p);
+    }
+
     // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
     // A bloated bag of duplicate quest items was rendered one-row-per-item and
     // (being an early, non-trimmable section) pushed the later FIXED sections
