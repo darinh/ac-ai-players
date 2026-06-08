@@ -4766,6 +4766,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "which target, is your call.");
         }
 
+        // ── ## Nearest objects (protected nearest-object guarantee, cp-2367)
+        // The mid-prompt `## Visible nearby` section is in PromptTrimOrder, so
+        // the global request-size fitter (FitPromptToCeiling) can strip ALL of
+        // its rows when an object-dense scene overflows the ceiling, leaving the
+        // LLM with NO per-object perception (only the `## Combat readiness`
+        // summary). Re-surface the nearest few objects in the protected salience
+        // tail (which the fitter never trims) so the closest objects always
+        // survive. Nearest-first by DISTANCE only (object-type-NEUTRAL; no type
+        // priority — the LLM decides what matters); reuses the same audit-blessed
+        // row renderer as `## Visible nearby`. Self-bounded to a small TOTAL char
+        // budget so the protected tail stays well under the ceiling and can never
+        // force the body hard-cut to eat the fixed rules preamble. Pure request-
+        // size management by structural position (cp-2343 class); no game
+        // knowledge.
+        if (world.Visible.Count > 0)
+        {
+            var nearestRows = new List<string>();
+            int nearestChars = 0;
+            foreach (var v in world.Visible.OrderBy(v => v.Distance ?? float.MaxValue))
+            {
+                var row = ClampRow(RenderVisibleRow(v, world.CombatHistory, world.OpenedCorpseGuids));
+                if (nearestRows.Count > 0 &&
+                    nearestChars + row.Length + 1 > NearestObjectsProtectedCharBudget)
+                    break;
+                nearestRows.Add(row);
+                nearestChars += row.Length + 1;
+            }
+            sb.AppendLine();
+            sb.AppendLine("## Nearest objects");
+            sb.AppendLine(
+                $"- the {nearestRows.Count} nearest visible object(s) by distance, kept here so they " +
+                "survive the prompt budget even when `## Visible nearby` above is trimmed away; the full " +
+                "list is there when it fits:");
+            foreach (var row in nearestRows)
+                sb.AppendLine(row);
+        }
+
         // ── ## Recent Talk (end-of-prompt salience capsule) ──────────────
         // The per-NPC recent-Talk counts already render mid-prompt in
         // `## Location & recency`, yet live runs show the LLM re-Talking the
@@ -5238,6 +5275,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Hard clamp on a single rendered row so one pathological object name can
     // never blow the budget (the always-emit-the-nearest-row guarantee).
     private const int VisibleRowMaxChars = 400;
+
+    // Total char budget for the protected `## Nearest objects` capsule ROWS
+    // (cp-2367) — bounds the rendered object rows only; the fixed header + the
+    // one-line count caption (~230 chars) are added on top, so the whole
+    // capsule is at most ~700 chars. Kept small so the protected salience tail
+    // stays well under the request ceiling — the body fitter reserves the
+    // tail's length and trims the BODY's trailing dynamic sections (never the
+    // head preamble, which the hard-cut preserves) to fit. ~450 chars fits
+    // several short rows (nearest-first) while leaving ample body headroom.
+    private const int NearestObjectsProtectedCharBudget = 450;
 
     private static string ClampRow(string row) =>
         row.Length <= VisibleRowMaxChars

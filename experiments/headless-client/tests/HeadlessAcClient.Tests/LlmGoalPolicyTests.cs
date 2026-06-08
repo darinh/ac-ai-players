@@ -2427,6 +2427,109 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("nearest ''", p);
     }
 
+    // ---- ## Nearest objects protected capsule (cp-2367) -------------------
+    // The mid-prompt `## Visible nearby` section is trimmable; in an object-
+    // dense scene the global request-size fitter can strip ALL its rows. The
+    // `## Nearest objects` capsule re-surfaces the nearest few objects in the
+    // PROTECTED salience tail so the LLM is never left blind to its closest
+    // surroundings. Object-type-neutral (nearest by distance), self-bounded.
+
+    [Fact]
+    public void BuildUserPrompt_NearestObjectsCapsule_RendersWhenObjectsVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x700u, Name = "Holtburg Door", Wcid = 80u, Distance = 8f, IsDoor = true },
+            new VisibleObjectProjection
+            { Guid = 0x701u, Name = "Calling Stone", Wcid = 81u, Distance = 3f });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Nearest objects", p);
+        Assert.Contains("Holtburg Door", p);
+        Assert.Contains("Calling Stone", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NearestObjectsCapsule_OmittedWhenNothingVisible()
+    {
+        // Empty visible set -> the capsule carries no information and is omitted.
+        var world = BuildWorldWithMonsters();
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Nearest objects", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NearestObjectsCapsule_OrdersNearestFirst()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection { Guid = 0x710u, Name = "FarThing", Distance = 40f },
+            new VisibleObjectProjection { Guid = 0x711u, Name = "NearThing", Distance = 2f });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var section = p.Substring(p.IndexOf("## Nearest objects", System.StringComparison.Ordinal));
+        var nearIdx = section.IndexOf("NearThing", System.StringComparison.Ordinal);
+        var farIdx = section.IndexOf("FarThing", System.StringComparison.Ordinal);
+        Assert.True(nearIdx >= 0 && farIdx >= 0, "both objects should be listed");
+        Assert.True(nearIdx < farIdx, "nearer object must render before the farther one");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NearestObjectsCapsule_SelfBoundedUnderManyObjects()
+    {
+        // 80 visible objects with long names must not bloat the capsule: its
+        // rendered rows are self-bounded by a small total char budget.
+        var many = System.Linq.Enumerable.Range(0, 80)
+            .Select(i => new VisibleObjectProjection
+            {
+                Guid = (uint)(0x800u + i),
+                Name = $"Verbose Object Number {i:D2} With A Long Descriptive Name",
+                Wcid = (uint)(900 + i),
+                Distance = i + 1f,
+            })
+            .ToArray();
+        var world = BuildWorldWithMonsters(many);
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Nearest objects", p);
+        // The capsule body (from its header to the next "##" section or end)
+        // stays small — well under 800 chars including the header line.
+        var start = p.IndexOf("## Nearest objects", System.StringComparison.Ordinal);
+        var rest = p.Substring(start + "## Nearest objects".Length);
+        var nextHdr = rest.IndexOf("\n## ", System.StringComparison.Ordinal);
+        var capsule = nextHdr >= 0 ? rest.Substring(0, nextHdr) : rest;
+        Assert.True(capsule.Length < 800, $"capsule body {capsule.Length} should be self-bounded");
+        // The nearest object (Distance=1) is always included.
+        Assert.Contains("Verbose Object Number 00", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NearestObjectsCapsule_SurvivesGlobalTrimInDenseScene()
+    {
+        // CORE PROPERTY: in a scene dense enough to overflow the request ceiling
+        // (so `## Visible nearby` is trimmed by the global fitter), the protected
+        // `## Nearest objects` capsule still renders, and the prompt stays within
+        // the hard ceiling.
+        var dense = System.Linq.Enumerable.Range(0, 200)
+            .Select(i => new VisibleObjectProjection
+            {
+                Guid = (uint)(0x900u + i),
+                Name = $"Dense Scene Object {i:D3} occupying prompt budget space here",
+                Wcid = (uint)(1000 + i),
+                Distance = i + 1f,
+            })
+            .ToArray();
+        var world = BuildWorldWithMonsters(dense);
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Nearest objects", p);
+        Assert.Contains("Dense Scene Object 000", p); // nearest survives in the capsule
+        // Prove the dense scene actually overflowed and the farthest objects were
+        // dropped from the prompt entirely (so `## Visible nearby` could NOT have
+        // carried them) — yet the protected capsule still keeps the nearest.
+        Assert.DoesNotContain("Dense Scene Object 199", p);
+        Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
+    }
+
     // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
     // A bloated bag of duplicate quest items was rendered one-row-per-item and
     // (being an early, non-trimmable section) pushed the later FIXED sections
