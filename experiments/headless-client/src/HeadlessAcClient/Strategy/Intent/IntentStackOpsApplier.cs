@@ -216,7 +216,10 @@ internal static class IntentStackOpsApplier
             sb.Append("- ancestor[").Append(i).Append("] ").AppendLine(f.ToString());
         }
         var top = stack.Top!;
-        sb.AppendLine("- TOP (act on this until its completion predicate fires):");
+        var topActive = top.Status == IntentLifecycle.Active;
+        sb.AppendLine(topActive
+            ? "- TOP (act on this until its completion predicate fires):"
+            : $"- TOP (status {top.Status} — this objective has reached a terminal state and is NO LONGER active; the stack has no active objective until a `stack_ops` push/replace sets one):");
         sb.Append("    id=").AppendLine(top.Id);
         sb.Append("    kind=").AppendLine(top.Kind);
         if (!string.IsNullOrEmpty(top.TargetName)) sb.Append("    target_name=\"").Append(top.TargetName).AppendLine("\"");

@@ -428,6 +428,77 @@ public class IntentStackWiringTests
         Assert.Contains("predicate_request", prompt);
     }
 
+    // ---- No-active-objective render fix + salience capsule (cp-2345) ----
+
+    [Fact]
+    public void RenderStackForPrompt_ActiveTop_LabelsActionable()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b));
+        var s = IntentStackOpsApplier.RenderStackForPrompt(stack);
+        Assert.Contains("act on this until its completion predicate fires", s);
+    }
+
+    [Fact]
+    public void RenderStackForPrompt_TerminalTop_NotLabeledActionable()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        // Always-satisfied predicate -> CheckTopForCompletion marks the ROOT
+        // Completed in place (depth stays 1).
+        stack.TryPush(NewIntent("i-root", "arm-self", b, completion: new NotPredicate(new AlwaysFalsePredicate())));
+        stack.CheckTopForCompletion(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        Assert.Equal(IntentLifecycle.Completed, stack.Top!.Status);
+
+        var s = IntentStackOpsApplier.RenderStackForPrompt(stack);
+        Assert.DoesNotContain("act on this until its completion predicate fires", s);
+        Assert.Contains("NO LONGER active", s);
+        Assert.Contains("status Completed", s);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoActiveObjectiveCapsule_RendersWhenStackEmpty()
+    {
+        var stack = new IntentStack(); // depth 0, no top
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack);
+        Assert.Contains("## No active objective", prompt);
+        Assert.Contains("current top: empty", prompt);
+        Assert.Contains("stack_ops", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoActiveObjectiveCapsule_OmittedWhenTopActive()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b)); // Active top
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack);
+        Assert.DoesNotContain("## No active objective", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoActiveObjectiveCapsule_RendersWhenTopTerminal()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "arm-self", b, completion: new NotPredicate(new AlwaysFalsePredicate())));
+        stack.CheckTopForCompletion(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        Assert.Equal(IntentLifecycle.Completed, stack.Top!.Status);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack);
+        Assert.Contains("## No active objective", prompt);
+        Assert.Contains("current top: Completed", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoActiveObjectiveCapsule_OmittedWhenNoStack()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null);
+        Assert.DoesNotContain("## No active objective", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_WithoutStack_OmitsStackSchema()
     {
