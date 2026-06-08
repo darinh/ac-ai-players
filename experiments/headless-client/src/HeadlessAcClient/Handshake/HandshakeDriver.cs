@@ -704,6 +704,12 @@ internal sealed class HandshakeDriver : IDisposable
         // being surfaced as a fresh kill to loot (no re-fixation). Bot's OWN outcomes.
         var                  recentKills = new List<Strategy.RecentKill>();
         var                  freshKillRecencyWindow = TimeSpan.FromSeconds(90);
+        // loot-fresh-kills follow-up (cp-2358): the bot's OWN kill corpses it
+        // opened and the loot system reported empty (no un-visited contents
+        // remained), kept briefly (guid -> name + time) and surfaced as the
+        // "## Already looted" capsule so the observed empty-loot outcome is in
+        // the prompt. Bot's OWN outcome; the LLM decides what to do next.
+        var                  emptiedKillCorpses = new Dictionary<uint, (string Name, DateTimeOffset At)>();
         // combat-missile-attack: the attack opcode family used for the
         // most recent ATTACK dispatch, for the cmd= log line only.
         AttackMode           combatAttackMode = AttackMode.Melee;
@@ -1212,6 +1218,13 @@ internal sealed class HandshakeDriver : IDisposable
         // decays server-side without us hearing about it.
         const int            LootContainerTtlSec = 90;
         const float          LootContainerProximityRadius = 5.0f;
+        // cp-2358: grace (seconds since a corpse was opened) before its
+        // contents are considered fully observed. A USE-opened corpse streams
+        // its item ObjectCreates back over a short window; a single "no items
+        // inside" snapshot taken before they arrive would mislabel a lootable
+        // corpse as empty. Only resolve a corpse as empty after this grace so a
+        // late-hydrating corpse is looted on a later tick instead.
+        const int            CorpseEmptyConfirmGraceSec = 3;
         // PickupItemTypeMask (0xD96F) plus Misc (0x80) for trophy
         // items (claws, teeth, etc.) which standard pickup excludes
         // because Misc collides with Door — but inside a corpse the
@@ -4099,7 +4112,32 @@ internal sealed class HandshakeDriver : IDisposable
                                         !visitedTargetGuids.Contains(s.Guid));
                                     if (!anyLeftInside)
                                     {
+                                        // cp-2358: don't resolve the corpse as empty
+                                        // until its contents have had time to stream in
+                                        // since it was opened. A "no items inside"
+                                        // snapshot taken during the open-hydration window
+                                        // would mislabel a lootable corpse as empty
+                                        // (untrack it early AND surface a false empty-loot
+                                        // fact); leave it tracked and re-scan next tick.
+                                        if (recentlyOpenedContainers.TryGetValue(nearbyCorpse, out var openInfo)
+                                            && (DateTime.UtcNow - openInfo.OpenedAt).TotalSeconds
+                                                < CorpseEmptyConfirmGraceSec)
+                                            continue;
                                         recentlyOpenedContainers.Remove(nearbyCorpse);
+                                        // cp-2358: record an emptied OWN-kill corpse
+                                        // (guid -> name + time) so the observed empty-
+                                        // loot outcome can be surfaced in the prompt.
+                                        // Scope to wire Corpse-flagged objects (the
+                                        // Corpse bit distinguishes a kill corpse from a
+                                        // chest) and only when a display name is known.
+                                        if (worldState.Objects.TryGetValue(nearbyCorpse, out var emptiedSnap)
+                                            && !string.IsNullOrEmpty(emptiedSnap.Name)
+                                            && ((emptiedSnap.ObjectDescriptionFlags ?? 0u)
+                                                & (uint)ObjectDescriptionFlag.Corpse) != 0)
+                                        {
+                                            emptiedKillCorpses[nearbyCorpse] =
+                                                (emptiedSnap.Name!, DateTimeOffset.UtcNow);
+                                        }
                                         Console.WriteLine(
                                             $"[loot] corpse 0x{nearbyCorpse:X8} fully looted / empty — untracking");
                                     }
@@ -6569,6 +6607,25 @@ internal sealed class HandshakeDriver : IDisposable
                                 maxResults: 3);
                         }
                         llmPolicyForPickerSurface.SetFreshKillCorpses(freshKillProj);
+
+                        // cp-2358: prune stale emptied-corpse records, then surface
+                        // the bot's OWN recently-emptied kill corpses so the observed
+                        // empty-loot outcome is available to the prompt. Pure
+                        // bookkeeping over the bot's OWN loot outcome; the LLM decides.
+                        if (emptiedKillCorpses.Count > 0)
+                        {
+                            var emptiedCutoff = DateTimeOffset.UtcNow - freshKillRecencyWindow;
+                            foreach (var stale in emptiedKillCorpses
+                                         .Where(kv => kv.Value.At < emptiedCutoff)
+                                         .Select(kv => kv.Key).ToList())
+                                emptiedKillCorpses.Remove(stale);
+                        }
+                        llmPolicyForPickerSurface.SetLootedEmptyCorpses(
+                            Strategy.LootedKillCorpseProjection.Compute(
+                                emptiedKillCorpses,
+                                DateTimeOffset.UtcNow,
+                                freshKillRecencyWindow,
+                                maxResults: 3));
                     }
 
                     // Phase C (picker-hunt-suppress) — while an LLM/operator
