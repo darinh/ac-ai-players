@@ -190,4 +190,112 @@ public class CombatFeelLedgerTests
         Assert.Equal(2, e.Kills);
         Assert.Equal(1, e.Fights);
     }
+
+    // ---- cross-session persistence (ToJson / FromJson) ----------------
+
+    [Fact]
+    public void JsonRoundTrip_PreservesAllCountsAndRecency()
+    {
+        var l = new CombatFeelLedger();
+        l.RecordFightStart(Wcid(211u, "Mudlurk Mosswart"));
+        l.RecordNearDeath(Wcid(211u, "Mudlurk Mosswart"));
+        l.RecordDeath(Wcid(211u, "Mudlurk Mosswart"));
+        l.RecordKill(Wcid(24937u, "The Chicken"));          // older outcome
+        l.RecordIneffective(Named("Drudge Skulker"));        // newest outcome
+
+        var restored = CombatFeelLedger.FromJson(l.ToJson());
+
+        // Same significant rows, same danger-first/recency ordering.
+        var orig = l.Snapshot()!;
+        var round = restored.Snapshot()!;
+        Assert.Equal(orig.Count, round.Count);
+        Assert.Equal(
+            orig.Select(e => (e.Name, e.Wcid, e.Kills, e.Deaths, e.NearDeaths, e.Ineffective, e.Fights, e.LastOutcome)),
+            round.Select(e => (e.Name, e.Wcid, e.Kills, e.Deaths, e.NearDeaths, e.Ineffective, e.Fights, e.LastOutcome)));
+    }
+
+    [Fact]
+    public void Restored_NewOutcomeRanksAboveAllPersistedRows()
+    {
+        // The recency counter must resume past the highest persisted order so a
+        // newly recorded outcome sorts as most-recent (top of the Snapshot).
+        var l = new CombatFeelLedger();
+        l.RecordKill(Wcid(1u, "A"));
+        l.RecordKill(Wcid(2u, "B"));
+        var restored = CombatFeelLedger.FromJson(l.ToJson());
+
+        restored.RecordKill(Wcid(3u, "C"));
+        Assert.Equal("C", restored.Snapshot()![0].Name);
+    }
+
+    [Fact]
+    public void FromJson_LoadedLedgerIsNotDirty()
+    {
+        var l = new CombatFeelLedger();
+        l.RecordKill(Wcid(1u, "A"));
+        Assert.True(l.Dirty);
+
+        var restored = CombatFeelLedger.FromJson(l.ToJson());
+        Assert.False(restored.Dirty);
+    }
+
+    [Fact]
+    public void Dirty_SetOnRecord_ClearedOnMarkClean()
+    {
+        var l = new CombatFeelLedger();
+        Assert.False(l.Dirty);
+        l.RecordDeath(Wcid(7u, "Banderling Scout"));
+        Assert.True(l.Dirty);
+        l.MarkClean();
+        Assert.False(l.Dirty);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("not json {{{")]
+    [InlineData("{\"Version\":999,\"Order\":0,\"Entries\":[]}")] // version mismatch
+    public void FromJson_BadOrEmptyInput_YieldsEmptyLedger(string? json)
+    {
+        var l = CombatFeelLedger.FromJson(json);
+        Assert.True(l.IsEmpty);
+        Assert.Null(l.Snapshot());
+    }
+
+    [Fact]
+    public void MergeFrom_TakesMaxPerCounter_AndAdoptsDiskOnlyKinds()
+    {
+        var mine = new CombatFeelLedger();
+        mine.RecordDeath(Wcid(211u, "Mudlurk Mosswart"));  // deaths 1
+        mine.RecordKill(Wcid(211u, "Mudlurk Mosswart"));   // kills 1
+
+        var other = new CombatFeelLedger();
+        other.RecordDeath(Wcid(211u, "Mudlurk Mosswart"));
+        other.RecordDeath(Wcid(211u, "Mudlurk Mosswart")); // deaths 2 (higher)
+        other.RecordKill(Wcid(99u, "Cow"));                // a kind only "other" has
+
+        mine.MergeFrom(other);
+
+        var rows = mine.Snapshot()!;
+        var mud = rows.Single(r => r.Name == "Mudlurk Mosswart");
+        Assert.Equal(2, mud.Deaths); // took the higher count
+        Assert.Equal(1, mud.Kills);  // kept our higher count (other had 0)
+        Assert.Contains(rows, r => r.Name == "Cow" && r.Kills == 1); // adopted
+    }
+
+    [Fact]
+    public void MergeFrom_NeverDecreasesCounts_AndConverges()
+    {
+        var a = new CombatFeelLedger();
+        a.RecordKill(Wcid(1u, "A"));
+        a.RecordKill(Wcid(1u, "A")); // kills 2
+        var b = new CombatFeelLedger();
+        b.RecordKill(Wcid(1u, "A")); // kills 1
+
+        b.MergeFrom(a);                 // b should rise to 2
+        Assert.Equal(2, b.Snapshot()!.Single().Kills);
+        b.MergeFrom(a);                 // idempotent
+        Assert.Equal(2, b.Snapshot()!.Single().Kills);
+    }
 }
