@@ -6015,6 +6015,48 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void LandblockWorldUseChurn_PersistentCount_LatchesSameObjectDespiteInterleavedInventoryChanges()
+    {
+        // cp-2371 loophole: re-Using the SAME object while interleaving an
+        // UNRELATED productive Pickup between repeats kept resetting the
+        // per-episode count below the threshold, so a barren same-object loop
+        // (e.g. Use door, Use door, Pickup item, repeat) never broke. The
+        // CUMULATIVE per-key count survives the inventory resets and latches the
+        // object once it has been Used PersistentWorldUseChurnThreshold (5) times
+        // in the landblock, regardless of the interleaved inventory churn.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x4001u } };
+        var cell = WorldAt(0xA9B4u, 0xA9B40170u, 0, 0);
+
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // cumulative 1
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // cumulative 2
+        es.Append(InvAdded("unrelated apple picked up"));              // resets per-episode count
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // cumulative 3
+        Assert.False(policy.IsLandblockWorldUseChurn(door, cell, es)); // cumulative 4
+        es.Append(InvAdded("another unrelated pickup"));               // resets per-episode count again
+        Assert.True(policy.IsLandblockWorldUseChurn(door, cell, es));  // cumulative 5 -> latch
+        es.Append(InvAdded("more unrelated pickups cannot un-latch")); // stays suppressed across resets
+        Assert.True(policy.IsLandblockWorldUseChurn(door, cell, es));
+    }
+
+    [Fact]
+    public void LandblockWorldUseChurn_PersistentCount_ResetsOnLandblockChange()
+    {
+        // The cumulative count is per-LANDBLOCK: genuine egress to a new
+        // landblock wipes it, so a door Used in the next area starts fresh.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var door = new Goal { Kind = GoalKind.Use, Target = new Selector { Guid = 0x4001u } };
+
+        for (int i = 0; i < 4; i++)
+            policy.IsLandblockWorldUseChurn(door, WorldAt(0xA9B4u, 0xA9B40170u, 0, 0), es);
+        // Egress to a NEW landblock -> cumulative count wiped.
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xB1C2u, 0xB1C20001u, 0, 0), es));
+        Assert.False(policy.IsLandblockWorldUseChurn(door, WorldAt(0xB1C2u, 0xB1C20001u, 0, 0), es));
+    }
+
+    [Fact]
     public void LandblockWorldUseChurn_NameOnlyDoor_DistinctCells_DoesNotFire()
     {
         // Reviewer-caught false-positive: the LLM commonly emits name-only
