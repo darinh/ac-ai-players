@@ -1268,9 +1268,12 @@ internal sealed class HandshakeDriver : IDisposable
         // re-parsing the firehose.
         var worldState = new WorldState();
 
-        // combat-feel ledger: per-mob-kind kill/death/near-death memory
-        // for this session, surfaced to the LLM as raw "## Combat history"
-        // facts. `lastCombatFoe` snapshots the kind we last engaged WITH a
+        // combat-feel ledger: per-mob-kind kill/death/near-death memory,
+        // surfaced to the LLM as raw "## Combat history" facts. Persisted
+        // per-character across restarts (CombatFeelStore) so hard-won "this
+        // kind keeps killing me" knowledge survives the frequent process
+        // restarts instead of being re-learned (and re-died to) every session.
+        // `lastCombatFoe` snapshots the kind we last engaged WITH a
         // timestamp so a death can be attributed even though the disengage
         // reflex clears combatTargetGuid/Name before health reaches 0. A
         // death is only attributed if the foe is fresh (the bot died
@@ -1278,10 +1281,23 @@ internal sealed class HandshakeDriver : IDisposable
         // the ledger is never poisoned with a wrong identity.
         // `selfDeathAttributed` debounces the multi-tick HealthCurrent==0
         // window to a single recorded death per life.
-        var                  combatFeel = new CombatFeelLedger();
+        var                  combatFeelPath = Strategy.CombatFeelStore.ResolvePath(_characterName);
+        var                  combatFeel = Strategy.CombatFeelStore.LoadOrNew(combatFeelPath);
         (uint? Wcid, string? Name, DateTime At)? lastCombatFoe = null;
         var                  selfDeathAttributed = false;
-        void PublishCombatHistory() => worldState.CombatHistory = combatFeel.Snapshot();
+        // Publish the prompt snapshot AND durably persist any new outcome.
+        // Both run at the same outcome sites (kill / death / near-death /
+        // ineffective), and SaveIfDirty is a no-op unless something changed.
+        void PublishCombatHistory()
+        {
+            worldState.CombatHistory = combatFeel.Snapshot();
+            Strategy.CombatFeelStore.SaveIfDirty(combatFeel, combatFeelPath);
+        }
+        // Surface any persisted (prior-session) combat history immediately so
+        // the LLM can weigh "this kind killed me before" on its FIRST decision
+        // this run — not only after recording a fresh outcome. The loaded
+        // ledger is not dirty, so this initial publish never triggers a save.
+        PublishCombatHistory();
         // combat-feel: attribute the bot's own death to the monster KIND it
         // was fighting, debounced to once per life. Only attributes when the
         // engagement is recent (died shortly after fighting it) and the foe

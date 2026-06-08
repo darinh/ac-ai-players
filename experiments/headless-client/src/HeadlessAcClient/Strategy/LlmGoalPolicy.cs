@@ -4093,14 +4093,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (FormatRecentInboundDamage(world.RecentInboundDamage) is string inboundDmgLine)
             sb.AppendLine(inboundDmgLine);
         // combat-feel: surface the bot's own recorded outcomes per monster
-        // KIND this session (kills / deaths / near-deaths). RAW counts
-        // only — no danger label, no advice. The COMBAT SAFETY rule tells
-        // the LLM to avoid a kind that keeps defeating it; this gives it
-        // the cross-tick memory to act on. Match a "Visible nearby" name
+        // KIND, durable ACROSS sessions (CombatFeelStore persists the ledger).
+        // RAW counts only — no danger label, no advice. The COMBAT SAFETY rule
+        // tells the LLM to avoid a kind that keeps defeating it; this gives it
+        // the cross-session memory to act on. Match a "Visible nearby" name
         // against these rows to judge a fight before starting it.
         if (world.CombatHistory is { Count: > 0 } hist)
         {
-            sb.AppendLine("- combat history (your own outcomes vs each monster kind this session):");
+            sb.AppendLine("- combat history (your own outcomes vs each monster kind, across sessions):");
             foreach (var h in hist)
             {
                 sb.AppendLine(
