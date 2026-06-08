@@ -380,6 +380,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Suppressed set above cannot catch). While latched, any bare
         // world-object Use is deferred to Explore until the episode resets.
         public bool DistinctChurnLatched;
+
+        // cp-2371: a per-key Use count that SURVIVES the inventory-change reset
+        // (it is carried over when the episode is re-created within the SAME
+        // landblock) and resets ONLY on a landblock change. The episode-level
+        // UseCounts above reset on any inventory change so a productive loot
+        // forgives the DISTINCT tour (cp-2359) — but that let a bot evade the
+        // per-target loop-break by interleaving an UNRELATED productive Pickup
+        // between repeats of the SAME barren Use (e.g. Use door, Use door,
+        // Pickup item, repeat): the door count reset before reaching the
+        // threshold. Re-Using the SAME object many times is barren regardless of
+        // unrelated inventory gains, so this cumulative count latches it.
+        public Dictionary<string, int> PersistentUseCounts = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> PersistentSuppressed = new(StringComparer.OrdinalIgnoreCase);
     }
 
     // Fire on the Nth bare-Use emission against the SAME world-object identity
@@ -388,6 +401,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // has chosen the same object three times without the landblock changing or
     // inventory advancing — strong loop evidence.
     private const int LandblockWorldUseChurnThreshold = 3;
+
+    // cp-2371: latch a SINGLE world-object identity re-Used this many times in
+    // one landblock CUMULATIVELY — i.e. counting across the inventory-change
+    // resets that clear the per-episode UseCounts. Higher than the per-episode
+    // threshold (3) so a couple of legitimate retries interleaved with real
+    // loot never trip it, but a genuine barren same-object loop (which can hide
+    // behind unrelated Pickups) still latches. Resets only on a landblock change.
+    private const int PersistentWorldUseChurnThreshold = 5;
 
     // cp-2359: fire once the episode has Used this many DISTINCT world objects
     // in one landblock with NO egress and NO productive inventory change — a
@@ -2645,10 +2666,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         if (ep is null || landblockChanged || inventoryChanged)
         {
+            // cp-2371: carry the cumulative per-key counts across an inventory-
+            // change reset within the SAME landblock (a barren same-object loop
+            // can hide behind unrelated productive Pickups); a landblock change
+            // wipes them (genuine egress).
+            var carriedCounts = (!landblockChanged && ep is not null)
+                ? ep.PersistentUseCounts : new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var carriedSuppressed = (!landblockChanged && ep is not null)
+                ? ep.PersistentSuppressed : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             ep = new WorldUseChurnEpisode { Landblock = self.Landblock, FloorSequence = events.NextSequence };
+            ep.PersistentUseCounts = carriedCounts;
+            ep.PersistentSuppressed = carriedSuppressed;
             ep.UseCounts[key] = 1;
             _worldUseChurnEpisode = ep;
+
+            int persistentReset = (carriedCounts.TryGetValue(key, out var pcr) ? pcr : 0) + 1;
+            carriedCounts[key] = persistentReset;
+            if (carriedSuppressed.Contains(key) || persistentReset >= PersistentWorldUseChurnThreshold)
+            {
+                carriedSuppressed.Add(key);
+                return true;
+            }
             return false;
+        }
+
+        // cp-2371: a single object re-Used past the CUMULATIVE threshold (across
+        // intra-landblock inventory resets) stays suppressed until egress.
+        if (ep.PersistentSuppressed.Contains(key))
+        {
+            ep.FloorSequence = events.NextSequence;
+            return true;
         }
 
         // Already latched as a no-egress loop this episode → keep suppressing.
@@ -2676,6 +2724,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int count = (ep.UseCounts.TryGetValue(key, out var c) ? c : 0) + 1;
         ep.UseCounts[key] = count;
         ep.FloorSequence = events.NextSequence;
+
+        // cp-2371: also advance the cumulative per-key count (survives inventory
+        // resets) and latch the SAME object re-Used past the cumulative
+        // threshold, so a barren same-object loop cannot hide behind interleaved
+        // unrelated Pickups.
+        int persistent = (ep.PersistentUseCounts.TryGetValue(key, out var pc) ? pc : 0) + 1;
+        ep.PersistentUseCounts[key] = persistent;
+        if (persistent >= PersistentWorldUseChurnThreshold)
+        {
+            ep.PersistentSuppressed.Add(key);
+            return true;
+        }
 
         if (ep.UseCounts.Count >= LandblockDistinctUseChurnThreshold)
         {
