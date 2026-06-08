@@ -557,6 +557,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // substitute is a generic Explore{anywhere}. No NPC names/wcids/priorities —
     // own-signal mechanical loop recovery, audit-safe.
     private const string NpcTalkLoopKind = "NPC Talk";
+    // cp-2372: the loopKind tag passed to EscapeOrFallback for a confirmed bare
+    // world-object Use churn (stationary repeat OR landblock tour). The bot's
+    // OWN goal verb (Use), not any object identity.
+    private const string WorldUseLoopKind = "world-object Use";
     private DateTimeOffset _talkLoopEgressUntilUtc = DateTimeOffset.MinValue;
     private uint? _talkLoopEgressLandblock;
     private static readonly TimeSpan TalkLoopEgressDuration = TimeSpan.FromSeconds(90);
@@ -1042,6 +1046,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "mechanical talk-loop egress: proven stationary NPC Talk fixation with no " +
                 "hostile in view; leaving to break the dead-end conversation loop");
         }
+        // cp-2372: a confirmed bare world-object Use churn (this method is only
+        // reached AFTER the cp-2354 churn guard fired — the bot has re-Used the
+        // SAME object, or toured interior objects, with NO egress and NO inventory
+        // gain) is PROVEN not-progress. Realise the churn guard's documented
+        // intent ("Explore OUT instead of re-touring interior doors") with a
+        // generic Explore so the bot travels THROUGH/past the looped object,
+        // instead of deferring to the fallback (which just re-picks the same
+        // interior objects). Unlike a Talk loop — which may be following a fresh
+        // NPC instruction — re-Using one object cannot be "finishing guided
+        // training", so this fires even within FreshDirectiveGrace; a hostile in
+        // view still takes priority (defend/flee, never turn away from a fight).
+        if (ShouldEscapeWorldUseLoop(loopKind, AnyHostileInView(world)))
+        {
+            Console.WriteLine(
+                "[llm-override] use-loop egress: confirmed world-object Use churn with no " +
+                "hostile in view — substituting Explore{anywhere} to travel through/past the " +
+                "looped object (enforces the LOOP-BREAK / PASSAGE-OPENED rules).");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:use-loop-egress",
+                "mechanical use-loop egress: confirmed bare world-object Use churn with no " +
+                "egress, no inventory gain, no hostile in view; Exploring to travel through " +
+                "instead of re-Using the same object");
+        }
         return _fallback.ProposeGoal(world, events, currentGoal);
     }
 
@@ -1059,6 +1086,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool ShouldEarlyEscapeTalkLoop(
         string loopKind, bool hostileInView, bool freshDirective)
         => loopKind == NpcTalkLoopKind && !hostileInView && !freshDirective;
+
+    // Pure decision: a confirmed bare world-object Use churn should break the
+    // loop with a generic Explore (travel through/past the looped object) rather
+    // than defer to the fallback. NOT gated on freshDirective — re-Using the
+    // SAME object cannot be "finishing guided training", so a confirmed churn
+    // overrides the directive grace (unlike a Talk loop). Only a hostile in view
+    // suppresses it (defend/flee first). Extracted for deterministic unit
+    // testing; own-signal only, no game content.
+    internal static bool ShouldEscapeWorldUseLoop(string loopKind, bool hostileInView)
+        => loopKind == WorldUseLoopKind && !hostileInView;
 
     // Pure decision: the early Talk-loop egress latch is still ACTIVE this tick.
     // Active while within the latch window AND still in the same landblock the
@@ -2105,7 +2142,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary world-object Use repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-op world-object Use loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, WorldUseLoopKind);
         }
 
         // Landblock world-object USE churn loop-break (cp-2354): the stationary
@@ -2124,7 +2161,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " objects toured, with no egress); deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: landblock world-object Use churn (no egress)");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "world-object Use");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, WorldUseLoopKind);
         }
 
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
