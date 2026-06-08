@@ -6751,6 +6751,204 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCalls()); // budget exhausted → LLM called
     }
 
+    // Untargeted-Explore sticky-budget exemption (call-volume reduction).
+    // A policy whose LLM always returns the SAME Explore goal with the given
+    // target JSON. A bare Explore{anywhere} is a Motor-owned traversal that is
+    // exempt from MaxStickyReEmits; a targeted Explore is not.
+    private static (LlmGoalPolicy Policy, Func<int> HttpCalls) MakeStickyExplorePolicy(
+        string targetJson, int maxStickyReEmits = 3, TimeSpan? stuckTimeout = null)
+    {
+        var goalJson = $$"""
+        {
+          "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "kind": "Explore",
+          "target": {{targetJson}},
+          "priority": 4,
+          "rationale": "wander"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var count = 0;
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            Interlocked.Increment(ref count);
+            _ = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+            MaxStickyReEmits = maxStickyReEmits,
+            StuckTimeout = stuckTimeout ?? TimeSpan.FromMinutes(10),
+        };
+        return (policy, () => count);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_UntargetedExplore_ReDrivesPastStickyBudget_NoExtraCall()
+    {
+        // A bare Explore{anywhere} is a non-interactive traversal with no
+        // object target, so it must re-drive for free PAST MaxStickyReEmits
+        // (a hunt excursion crosses many ticks) — no extra LLM call while the
+        // only churn is goal lifecycle.
+        var (policy, httpCalls) = MakeStickyExplorePolicy("{ \"name\": \"anywhere\" }", maxStickyReEmits: 2);
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        // Re-clear far more than the budget (2). Each clear emits only the
+        // lifecycle churn that GoalCompleted represents.
+        for (var i = 0; i < 6; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.GoalCompleted, Text = "explore leg done",
+            });
+            var reEmitted = policy.ProposeGoal(world, events, null);
+            Assert.NotNull(reEmitted);
+            Assert.Equal(GoalKind.Explore, reEmitted!.Kind);
+        }
+        // Budget would have forced a call after 2 with a targeted goal; the
+        // untargeted Explore stayed free the whole way.
+        Assert.Equal(1, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_TargetedExplore_ObeysStickyBudget_CallsLlmAfterBudget()
+    {
+        // An Explore NAMING a concrete target IS subject to the budget — it
+        // could be an unreachable pursuit, so it must fall through to a fresh
+        // LLM decision after MaxStickyReEmits re-clears.
+        var (policy, httpCalls) = MakeStickyExplorePolicy("{ \"name\": \"the trainer\" }", maxStickyReEmits: 2);
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, Text = "leg" });
+        Assert.NotNull(policy.ProposeGoal(world, events, null)); // re-emit #1
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, Text = "leg" });
+        Assert.NotNull(policy.ProposeGoal(world, events, null)); // re-emit #2
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, Text = "leg" });
+        Assert.Null(policy.ProposeGoal(world, events, null));    // budget exhausted → LLM call
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_UntargetedExplore_ExternalSalientEvent_StillBreaks_CallsLlm()
+    {
+        // The exemption lifts ONLY the retry budget. A genuine external
+        // change (e.g. NpcDialog) must still wake the LLM.
+        var (policy, httpCalls) = MakeStickyExplorePolicy("{ \"name\": \"anywhere\" }");
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Text = "A villager: greetings",
+        });
+        policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_UntargetedExplore_NewPickerTarget_StillBreaks_CallsLlm()
+    {
+        // The bot is NOT blinded to discoveries while free-exploring: a new
+        // picker target (the discovery wake for a real object coming into
+        // range) must still break the gate and call the LLM.
+        var (policy, httpCalls) = MakeStickyExplorePolicy("{ \"name\": \"anywhere\" }");
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerActivityStarted,
+            ItemGuid = 0x800001D4u, Name = "Drudge", Text = "in-range: nearest candidate",
+        });
+        policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_UntargetedExplore_StuckTimeout_StillBreaks_CallsLlm()
+    {
+        // The stuck-timeout liveness backstop is unchanged: even with the
+        // budget exemption, a real LLM call fires once the stuck window
+        // elapses since the last call.
+        var (policy, httpCalls) = MakeStickyExplorePolicy(
+            "{ \"name\": \"anywhere\" }", stuckTimeout: TimeSpan.FromMilliseconds(1));
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+
+        await EstablishLlmGoalAsync(policy, world, events);
+        Assert.Equal(1, httpCalls());
+
+        await Task.Delay(30);
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, Text = "leg" });
+        policy.ProposeGoal(world, events, null);
+        Assert.Equal(2, httpCalls());
+    }
+
+    [Theory]
+    [InlineData("anywhere", true)]
+    [InlineData("ANYWHERE", true)]
+    [InlineData("  anywhere  ", true)]
+    [InlineData("the trainer", false)]
+    [InlineData("Drudge", false)]
+    public void IsUntargetedExploreGoal_NameSentinel(string name, bool expected)
+    {
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = name } };
+        Assert.Equal(expected, LlmGoalPolicy.IsUntargetedExploreGoal(goal));
+    }
+
+    [Fact]
+    public void IsUntargetedExploreGoal_EmptyAndDefaultTarget_AreUntargeted()
+    {
+        Assert.True(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector() }));
+        // Target defaults to an empty Selector when omitted.
+        Assert.True(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore }));
+    }
+
+    [Fact]
+    public void IsUntargetedExploreGoal_ConcreteSelectorFields_AreTargeted()
+    {
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector { Guid = 5u } }));
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector { Wcid = 42u } }));
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector { NameContains = "any" } }));
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector { ItemTypeMask = 1u } }));
+        // anywhere name but ALSO a concrete field → targeted (not the pure sentinel).
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere", Guid = 5u } }));
+    }
+
+    [Fact]
+    public void IsUntargetedExploreGoal_NonExploreOrNull_AreNotUntargeted()
+    {
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "anywhere" } }));
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(new Goal { Kind = GoalKind.Attack }));
+        Assert.False(LlmGoalPolicy.IsUntargetedExploreGoal(null));
+    }
+
     // break-sticky-on-self-interact: a policy whose LLM always returns the
     // same Use{Door guid=56528} goal. Same wiring as MakeStickyPolicy but a
     // spatial Use verb whose Target matches a WorldObjectInteracted echo.

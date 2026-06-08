@@ -1575,11 +1575,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"{_lastLlmGoal!.Kind} target={_lastLlmGoal.Target} since last LLM look " +
                 "— forcing fresh LLM decision (recently-interacted telemetry)");
         }
+        // Budget exemption for a NON-TARGETED Explore (schema "anywhere"
+        // sentinel). The MaxStickyReEmits cap exists to stop spin on an
+        // UNREACHABLE named target; a targetless Explore has no object target
+        // and is never "unreachable", so the cap does not apply to it. While
+        // crossing toward open country a bare Explore should re-drive for free
+        // until a GENUINE wake — a new picker target/arrival (a discovered
+        // object), any non-picker external change, a landblock change, or the
+        // stuck-timeout backstop — every one of which still breaks the gate
+        // below. Only the retry-count cap is lifted; a TARGETED Explore
+        // (named/guid/wcid/...) keeps the cap. Pure goal-shape bookkeeping;
+        // the schema sentinel is not game knowledge.
+        var stickyUntargetedExplore = IsUntargetedExploreGoal(_lastLlmGoal);
         if (currentGoal is null
             && _lastLlmGoal is not null
             && !stuck
             && !redriveEndedMustCallLlm
-            && _stickyReEmitCount < MaxStickyReEmits
+            && (_stickyReEmitCount < MaxStickyReEmits || stickyUntargetedExplore)
             && !hasNonPickerExternal
             && !pickerArrived
             && !pickerStartWake
@@ -1621,8 +1633,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _stickyReEmitCount++;
             var sticky = _lastLlmGoal with { Id = Guid.NewGuid(), CreatedAtUtc = nowUtc };
             Console.WriteLine(
-                $"[strategy] sticky-objective re-emit #{_stickyReEmitCount}/{MaxStickyReEmits} " +
-                $"kind={sticky.Kind} target={sticky.Target}" +
+                $"[strategy] sticky-objective re-emit #{_stickyReEmitCount}" +
+                (stickyUntargetedExplore ? " (untargeted-Explore: budget-exempt)" : $"/{MaxStickyReEmits}") +
+                $" kind={sticky.Kind} target={sticky.Target}" +
                 (sticky.Item is null ? "" : $" item={sticky.Item}") +
                 " (no external salient event since last LLM look; skipping LLM call)");
             return sticky;
@@ -3000,6 +3013,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         kind is EventKind.GoalCompleted
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
+
+    // Untargeted-Explore discriminator (call-volume reduction): true iff the
+    // goal is an Explore whose target is the schema "anywhere" sentinel — it
+    // carries NO resolved object selector (no guid/wcid/name_contains/
+    // item_type/short_desc, and any Name is the literal schema token
+    // "anywhere"). Such a goal is a Motor-owned traversal with nothing to
+    // interact with, so the sticky-objective gate exempts it from the
+    // unreachable-target retry budget. A goal naming ANY concrete target is
+    // NOT untargeted. Schema-level goal-shape only; no game knowledge.
+    internal static bool IsUntargetedExploreGoal(Goal? goal)
+    {
+        if (goal is not { Kind: GoalKind.Explore }) return false;
+        var t = goal.Target;
+        if (t.IsEmpty) return true;
+        return t.Guid is null
+            && t.Wcid is null
+            && t.ItemTypeMask is null
+            && string.IsNullOrWhiteSpace(t.NameContains)
+            && string.IsNullOrWhiteSpace(t.ShortDescContains)
+            && string.Equals(t.Name?.Trim(), "anywhere", StringComparison.OrdinalIgnoreCase);
+    }
 
     // break-sticky-on-self-interact: true iff the Motor emitted a
     // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
