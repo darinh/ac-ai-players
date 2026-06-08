@@ -2530,6 +2530,66 @@ public class LlmGoalPolicyTests
         Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
     }
 
+    // ---- Monster-in-view rule gating (cp-2368) ---------------------------
+    // The HUNT EXCURSION / STEER A BARREN EXCURSION / LOOP-BREAK (town-stuck)
+    // rules are entirely about the NO-monster-in-view case, so they are gated
+    // OFF when a monster is visible (behaviour-preserving, frees ~2.5KB of
+    // prompt budget in a combat scene). The NON-HOSTILE rule is the inverse.
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionRules_OmittedWhenMonsterInView()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB00u, Name = "Sparring Golem", Wcid = 70u, Distance = 5f, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        // Inapplicable "go find monsters" rules are gated off...
+        Assert.DoesNotContain("HUNT EXCURSION", p);
+        Assert.DoesNotContain("STEER A BARREN EXCURSION", p);
+        Assert.DoesNotContain("LOOP-BREAK (town-stuck)", p);
+        // ...while the monster-present rule renders.
+        Assert.Contains("NON-HOSTILE IS NOT NON-TARGET", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionRules_PresentWhenNoMonsterInView()
+    {
+        // No monster visible (only a non-monster object) -> the excursion/town-
+        // stuck rules render unchanged, and the NON-HOSTILE rule is omitted.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB01u, Name = "Town Crier", Wcid = 90u, Distance = 4f, IsMonster = false });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("HUNT EXCURSION", p);
+        Assert.Contains("STEER A BARREN EXCURSION", p);
+        Assert.Contains("LOOP-BREAK (town-stuck)", p);
+        Assert.DoesNotContain("NON-HOSTILE IS NOT NON-TARGET", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionRuleGating_ExcludesCorpsesAndCountsObservedHostile()
+    {
+        // A corpse is NOT a monster-in-view (excursion rules still render);
+        // an ObservedHostile non-monster IS (excursion rules gated off) — the
+        // gate uses the same `!IsCorpse && (IsMonster || ObservedHostile)` fact
+        // as the rendered `monsters in view` line.
+        var corpseOnly = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB02u, Name = "Corpse of a Golem", Distance = 3f, IsCorpse = true, IsMonster = true });
+        var pc = LlmGoalPolicy.BuildUserPrompt(corpseOnly, new EventStream(), null);
+        Assert.Contains("HUNT EXCURSION", pc); // corpse excluded -> no monster in view
+        Assert.DoesNotContain("NON-HOSTILE IS NOT NON-TARGET", pc);
+
+        var hostile = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB03u, Name = "Angry Critter", Distance = 3f, IsMonster = false, ObservedHostile = true });
+        var ph = LlmGoalPolicy.BuildUserPrompt(hostile, new EventStream(), null);
+        Assert.DoesNotContain("HUNT EXCURSION", ph); // observed-hostile -> monster in view
+        Assert.Contains("NON-HOSTILE IS NOT NON-TARGET", ph);
+    }
+
     // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
     // A bloated bag of duplicate quest items was rendered one-row-per-item and
     // (being an early, non-trimmable section) pushed the later FIXED sections
