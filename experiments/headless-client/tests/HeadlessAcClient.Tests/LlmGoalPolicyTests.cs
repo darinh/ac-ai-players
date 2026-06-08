@@ -7910,6 +7910,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_FreshKillCorpseCapsule_RendersWhenPresent()
+    {
+        // cp-2357: after a kill the picker abandons the corpse before the LLM
+        // latency lands and the hunt-excursion re-drives away, so fresh kills go
+        // unlooted. Surface the bot's own fresh, unlooted kill corpse as a
+        // decision-proximate loot opportunity (fact + Use->Pickup affordance).
+        var corpses = new[] { new FreshKillCorpse("Corpse of Cow", 0x800u, 5.0f) };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            freshKillCorpses: corpses);
+        Assert.Contains("## Fresh kill to loot", prompt);
+        Assert.Contains("Corpse of Cow", prompt);
+        Assert.Contains("not yet looted", prompt);
+        Assert.Contains("Use it to reveal its loot, then Pickup", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_FreshKillCorpseCapsule_OmittedWhenNoneOrNull()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            freshKillCorpses: null);
+        Assert.DoesNotContain("## Fresh kill to loot", prompt);
+        var empty = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            freshKillCorpses: System.Array.Empty<FreshKillCorpse>());
+        Assert.DoesNotContain("## Fresh kill to loot", empty);
+    }
+
+    [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OmittedWhenNoUnspent()
     {
         // unspent == 0: the verbs are not executable, so the capsule is omitted

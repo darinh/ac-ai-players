@@ -697,6 +697,13 @@ internal sealed class HandshakeDriver : IDisposable
         // farmed HERE (proven non-leveling once the bot is tapped out). Bot's
         // own outcome bookkeeping — no danger/value label.
         var                  killedKindsThisLandblock = new HashSet<string>(StringComparer.Ordinal);
+        // loot-fresh-kills (cp-2357): recent OWN kills (creature name + time), kept
+        // briefly so a freshly-spawned corpse can be matched to the kill by
+        // name+recency and surfaced as a loot opportunity. The "opened" check
+        // reuses the existing corpseOpenedByBotAt map so an opened corpse stops
+        // being surfaced as a fresh kill to loot (no re-fixation). Bot's OWN outcomes.
+        var                  recentKills = new List<Strategy.RecentKill>();
+        var                  freshKillRecencyWindow = TimeSpan.FromSeconds(90);
         // combat-missile-attack: the attack opcode family used for the
         // most recent ATTACK dispatch, for the cmd= log line only.
         AttackMode           combatAttackMode = AttackMode.Melee;
@@ -2065,6 +2072,20 @@ internal sealed class HandshakeDriver : IDisposable
                                             killSnap?.WeenieClassId ?? lastCombatFoe?.Wcid,
                                             killSnap?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
                                         combatFeel.RecordKill(killIdentity);
+                                        // loot-fresh-kills (cp-2357): remember the global-XY of
+                                        // this kill SITE + time so the freshly-spawned corpse
+                                        // (which replaces the creature in place) can be correlated
+                                        // to the bot's OWN kill by proximity+recency and surfaced as
+                                        // a loot opportunity. Prefer the killed snapshot's position
+                                        // (the corpse spawns there); fall back to self (adjacent).
+                                        var killPosSnap = killSnap ?? worldState.Self;
+                                        if (killPosSnap is not null && killPosSnap.CellId is uint killCell)
+                                        {
+                                            var killNow = DateTimeOffset.UtcNow;
+                                            var (killGx, killGy) = Strategy.AcCoords.ToGlobalXY(killCell, killPosSnap.Position);
+                                            recentKills.Add(new Strategy.RecentKill(killGx, killGy, killNow));
+                                            recentKills.RemoveAll(k => killNow - k.At > freshKillRecencyWindow);
+                                        }
                                         // cold-start egress: remember this KIND was killed in
                                         // the current landblock so the egress override can treat
                                         // it as already-farmed-here (bot's own outcome; no label).
@@ -6525,6 +6546,29 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
                         llmPolicyForPickerSurface.SetExcursionCoverage(covProj);
+
+                        // loot-fresh-kills (cp-2357): surface the bot's OWN fresh,
+                        // unlooted kill corpse(s) so a kill is followed by looting
+                        // before the hunt-excursion re-drives the bot away. Match a
+                        // visible Corpse-flagged object to a recent kill by
+                        // name+recency (not yet opened — reusing corpseOpenedByBotAt
+                        // — and within range). Pure perception over the bot's OWN
+                        // kill record + wire flags; no priority, no game knowledge.
+                        IReadOnlyList<Strategy.FreshKillCorpse>? freshKillProj = null;
+                        if (covSelf is not null && recentKills.Count > 0)
+                        {
+                            freshKillProj = Strategy.FreshKillCorpseProjection.Compute(
+                                worldState.Objects.Values,
+                                covSelf,
+                                recentKills,
+                                corpseOpenedByBotAt.ContainsKey,
+                                DateTimeOffset.UtcNow,
+                                freshKillRecencyWindow,
+                                killMatchRadiusUnits: 8f,
+                                maxDistanceUnits: 60f,
+                                maxResults: 3);
+                        }
+                        llmPolicyForPickerSurface.SetFreshKillCorpses(freshKillProj);
                     }
 
                     // Phase C (picker-hunt-suppress) — while an LLM/operator
