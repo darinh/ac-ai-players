@@ -116,7 +116,10 @@ internal static class OutdoorFrontierExplorer
         float mobBiasMinDistanceMeters = 0f,
         float headingBiasX = 0f,
         float headingBiasY = 0f,
-        float headingBiasTieWindowMeters = 0f)
+        float headingBiasTieWindowMeters = 0f,
+        float fallbackHeadingX = 0f,
+        float fallbackHeadingY = 0f,
+        float fallbackHeadingTieWindowMeters = 0f)
     {
         // Build the reference set: visited samples that are both LOCAL
         // (near the bot) and RECENT. Relax to any-age local samples if
@@ -153,12 +156,14 @@ internal static class OutdoorFrontierExplorer
         float bestScore = float.NegativeInfinity;
         float bestTie = float.NegativeInfinity;
 
-        // Candidates retained ONLY for the optional hunt-bias / heading-bias
-        // post-passes; not allocated on the common (no-bias) path so that path
-        // is unchanged.
+        // Candidates retained ONLY for the optional hunt-bias / heading-bias /
+        // fallback-heading post-passes; not allocated on the common (no-bias)
+        // path so that path is unchanged.
         var headingBiasActive = headingBiasTieWindowMeters > 0f
             && (headingBiasX != 0f || headingBiasY != 0f);
-        var candidates = ((mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 }) || headingBiasActive)
+        var fallbackHeadingActive = fallbackHeadingTieWindowMeters > 0f
+            && (fallbackHeadingX != 0f || fallbackHeadingY != 0f);
+        var candidates = ((mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 }) || headingBiasActive || fallbackHeadingActive)
             ? new List<(float Gx, float Gy, uint DestCell, int Sector, float Score, float DirX, float DirY, float Tie)>(SectorCount)
             : null;
 
@@ -250,8 +255,12 @@ internal static class OutdoorFrontierExplorer
         // mobBiasTieWindowMeters of the best geometric score, so monster
         // memory resolves NEAR-TIES and can never override a clearly more
         // unexplored direction or a cooled cell. Empty list / zero window =>
-        // candidates is null and this is skipped (geometry result stands).
-        if (candidates is not null && best is FrontierResult)
+        // this is skipped (geometry/heading result stands). The explicit
+        // sightings+window guard keeps this safe even when `candidates` was
+        // allocated for a DIFFERENT post-pass (heading / fallback) with no
+        // sightings present.
+        if (candidates is not null && best is FrontierResult
+            && mobBiasTieWindowMeters > 0f && monsterSightings is { Count: > 0 })
         {
             FrontierResult? mobBest = null;
             float mobBestScore = float.NegativeInfinity;
@@ -261,7 +270,7 @@ internal static class OutdoorFrontierExplorer
                 if (c.Score < bestScore - mobBiasTieWindowMeters) continue;
                 if (!SectorPointsAtMonster(
                         selfGlobalX, selfGlobalY, c.DirX, c.DirY,
-                        monsterSightings!, mobBiasMinDistanceMeters))
+                        monsterSightings, mobBiasMinDistanceMeters))
                     continue;
                 if (mobBest is null ||
                     c.Score > mobBestScore + 1e-3f ||
@@ -273,6 +282,33 @@ internal static class OutdoorFrontierExplorer
                 }
             }
             if (mobBest is not null) return mobBest;
+        }
+
+        // Optional FALLBACK heading-bias post-pass. LOWEST precedence: runs only
+        // after the explicit-heading pass and the mob-bias pass have both
+        // declined, so a mechanical anti-tunnel sweep heading steers UNDIRECTED
+        // exploration WITHOUT ever overriding an LLM-chosen heading or a
+        // remembered-monster steer. Same near-tie alignment geometry as the
+        // explicit-heading pass; can never pull the bot to a meaningfully
+        // more-explored or cooled direction.
+        if (fallbackHeadingActive && candidates is not null && best is FrontierResult)
+        {
+            FrontierResult? fbBest = null;
+            float fbBestAlign = float.NegativeInfinity;
+            float fbBestScore = float.NegativeInfinity;
+            foreach (var c in candidates)
+            {
+                if (c.Score < bestScore - fallbackHeadingTieWindowMeters) continue;
+                var align = c.DirX * fallbackHeadingX + c.DirY * fallbackHeadingY;
+                if (align > fbBestAlign + 1e-3f ||
+                    (MathF.Abs(align - fbBestAlign) <= 1e-3f && c.Score > fbBestScore))
+                {
+                    fbBest = new FrontierResult(c.Gx, c.Gy, c.DestCell, c.Sector);
+                    fbBestAlign = align;
+                    fbBestScore = c.Score;
+                }
+            }
+            if (fbBest is not null) return fbBest;
         }
 
         return best;
