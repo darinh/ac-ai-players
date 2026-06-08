@@ -7696,6 +7696,31 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SpendXpRule_StatesFullUnspentAmountRange()
+    {
+        // Tempo (reduce-llm-call-volume): live evidence (cp2352-livefire) showed the
+        // LLM dribbling an XP hoard out in many tiny RaiseAttribute decisions — 10
+        // confirmed raises + 2 timeouts to drain ~1188 XP, 12 of 28 LLM calls that
+        // run, each a multi-second deliberation cycle. The rule never stated the
+        // amount's valid RANGE, so the LLM may have assumed small increments. State
+        // the neutral mechanics fact: amount can be up to the full unspent balance in
+        // a single raise. Granularity stays the model's judgment (no prescription).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("up to your full unspent balance", prompt);
+        Assert.Contains("invest your entire unspent total in a single action", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_AmountRangeFact_OmittedWhenNoUnspentXp()
+    {
+        // The amount-range fact lives inside the unspent-gated SPEND XP rule, so it
+        // disappears with the rule when there is nothing to invest (no prompt-byte
+        // cost in the common zero-unspent case).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("up to your full unspent balance", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SpendXpRule_OmittedWhenNoUnspentXp()
     {
         // Unspent XP == 0: the ~1.1KB SPEND XP rule is inapplicable (nothing to
