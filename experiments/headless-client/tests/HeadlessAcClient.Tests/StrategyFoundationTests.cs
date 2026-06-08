@@ -1072,13 +1072,13 @@ public class StrategyFoundationTests
         Assert.Equal(ChestGuid, goal.Target.Guid);
     }
 
-    // ---- cp-2360: break a barren openable TOUR (fallback egress) ----
-    // With no LLM (rate-limited), this fallback re-picks the nearest openable
-    // every tick; a town full of static containers becomes an endless tour. After
-    // touring a threshold of DISTINCT openables in one landblock with no egress
-    // and no productive inventory change, the openable step taps out so the
-    // deliberation falls through to Explore. Resets on landblock or inventory
-    // change, so a real productive loot room is unaffected.
+    // ---- cp-2360/cp-2361: break a barren TOWN-OBJECT tour (fallback egress) ----
+    // With no LLM (rate-limited), this fallback re-picks the nearest town object
+    // (openable / lifestone / portal / NPC) every tick; a town full of static
+    // objects becomes an endless tour. After touring a threshold of DISTINCT town
+    // objects in one landblock with no egress and no productive inventory change,
+    // the town-interaction steps tap out (shared across types) so the deliberation
+    // falls through to Explore. Resets on landblock or inventory change.
 
     private static WorldStateProjection TourWorld(uint landblock, params VisibleObjectProjection[] visible) =>
         new()
@@ -1099,51 +1099,76 @@ public class StrategyFoundationTests
         IsOpenable = true, IsChest = true,
     };
 
+    private static VisibleObjectProjection TourNpc(uint g, float d) => new()
+    {
+        Guid = g, Name = "Townsfolk", Wcid = 1u, Distance = d,
+        IsCreature = true, IsMonster = false,
+    };
+
+    private static VisibleObjectProjection[] ManyChests() => new[]
+    {
+        TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
+        TourChest(0x7004u, 4f), TourChest(0x7005u, 5f), TourChest(0x7006u, 6f),
+        TourChest(0x7007u, 7f), TourChest(0x7008u, 8f),
+    };
+
     [Fact]
-    public void NoQuestKnowledgePolicy_OpenableTour_TapsOutAndEgresses()
+    public void NoQuestKnowledgePolicy_TownTour_TapsOutAndEgresses()
     {
         var policy = new NoQuestKnowledgePolicy();
-        var proj = TourWorld(0xA9B4u,
-            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
-            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f), TourChest(0x7006u, 6f));
+        var proj = TourWorld(0xA9B4u, ManyChests());
         var events = new EventStream();
-        // Tour the forgiveness threshold of DISTINCT openables.
-        for (int i = 0; i < 4; i++)
+        // Tour the forgiveness threshold of DISTINCT town objects.
+        for (int i = 0; i < 6; i++)
             Assert.Equal(GoalKind.Use, policy.ProposeGoal(proj, events, null)!.Kind);
-        // Tapped out: no openable proposed -> falls through to Explore.
+        // Tapped out: no town object proposed -> falls through to Explore.
         var last = policy.ProposeGoal(proj, events, null);
         Assert.NotNull(last);
         Assert.NotEqual(GoalKind.Use, last!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_OpenableTour_ResetsOnLandblockChange()
+    public void NoQuestKnowledgePolicy_TownTour_SharedAcrossOpenableAndNpc()
+    {
+        // cp-2361: the tap is SHARED across town-object types — touring 3 chests
+        // and 3 NPCs (6 distinct) taps out the same counter, so the 7th town
+        // interaction (a Talk) is suppressed and the bot egresses.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = TourWorld(0xA9B4u,
+            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
+            TourNpc(0x8001u, 4f), TourNpc(0x8002u, 5f), TourNpc(0x8003u, 6f), TourNpc(0x8004u, 7f));
+        var events = new EventStream();
+        var kinds = new System.Collections.Generic.List<GoalKind>();
+        for (int i = 0; i < 6; i++)
+            kinds.Add(policy.ProposeGoal(proj, events, null)!.Kind);
+        // The first 6 were town interactions (Use chests then Talk NPCs).
+        Assert.All(kinds, k => Assert.True(k is GoalKind.Use or GoalKind.Talk));
+        // 7th: shared tap -> neither a chest Use nor an NPC Talk -> Explore.
+        var last = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(last);
+        Assert.True(last!.Kind is not GoalKind.Use and not GoalKind.Talk);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_TownTour_ResetsOnLandblockChange()
     {
         var policy = new NoQuestKnowledgePolicy();
-        var chests = new[]
-        {
-            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
-            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f),
-        };
+        var chests = ManyChests();
         var events = new EventStream();
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 6; i++)
             policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null);
         Assert.NotEqual(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind); // tapped
-        // Egress to a new landblock resets the tour memory -> openables eligible again.
+        // Egress to a new landblock resets the tour memory -> town objects eligible again.
         Assert.Equal(GoalKind.Use, policy.ProposeGoal(TourWorld(0xCCCCu, chests), events, null)!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_OpenableTour_ResetsOnInventoryAdd()
+    public void NoQuestKnowledgePolicy_TownTour_ResetsOnInventoryAdd()
     {
         var policy = new NoQuestKnowledgePolicy();
-        var chests = new[]
-        {
-            TourChest(0x7001u, 1f), TourChest(0x7002u, 2f), TourChest(0x7003u, 3f),
-            TourChest(0x7004u, 4f), TourChest(0x7005u, 5f),
-        };
+        var chests = ManyChests();
         var events = new EventStream();
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 6; i++)
             policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null);
         Assert.NotEqual(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind); // tapped
         // A productive loot (InventoryItemAdded) resets the tour memory. The item
@@ -1154,6 +1179,28 @@ public class StrategyFoundationTests
             ItemGuid = 0x900u, Wcid = 273u, Name = "Pyreal",
         });
         Assert.Equal(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_TownTour_TapsOut_SparseNpcReTalkLoop()
+    {
+        // cp-2361 correctness fix: a sparse landblock with only 1-2 NPCs never
+        // reaches a DISTINCT threshold; the Talk-recycle re-Talks the same NPCs
+        // forever. A TOTAL proposal counter (not distinct) catches it: re-Talking
+        // a couple NPCs enough times taps out to Explore.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = TourWorld(0xA9B4u, TourNpc(0x8001u, 1f), TourNpc(0x8002u, 2f));
+        var events = new EventStream();
+        var egressed = false;
+        for (int i = 0; i < 12; i++)
+        {
+            if (policy.ProposeGoal(proj, events, null)!.Kind is not GoalKind.Talk)
+            {
+                egressed = true;
+                break;
+            }
+        }
+        Assert.True(egressed, "re-Talking a few NPCs must eventually tap out to a non-Talk goal (Explore)");
     }
 
     [Fact]
