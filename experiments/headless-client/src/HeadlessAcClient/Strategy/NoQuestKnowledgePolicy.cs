@@ -239,8 +239,32 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 rationale: $"unwielded gear in inventory: {unwielded.Name}");
         }
 
+        // cp-2360/cp-2361/cp-2373: reset the per-landblock town-tour memory on
+        // egress (landblock change) or a productive inventory-add (loot/quest
+        // item) — only a barren tour with neither persists. Once the bot has
+        // toured the threshold of DISTINCT town objects here (the Pickup step
+        // below + the openable/lifestone/portal/NPC steps) without progress, the
+        // town-interaction steps tap out (propose nothing, unless a hunt is
+        // active) so this deliberation falls through to the Explore step and the
+        // bot heads out. cp-2373 folds the Pickup step into the cap: a barren
+        // Pickup churn — re-proposing pickup-eligible items that never enter the
+        // bag because the pickup never completes (out of reach / non-committal
+        // re-targeting) — must also count toward the egress cap, while a
+        // productive Pickup (InventoryItemAdded) resets it. Generic anti-churn
+        // over the bot's OWN proposals — no object-type judgment.
+        var townAddSeq = events.RecentOfKind(EventKind.InventoryItemAdded, 1)
+            .FirstOrDefault()?.Sequence ?? -1;
+        if (_townTourLandblock != world.Self.Landblock || townAddSeq > _townTourInvSeq)
+        {
+            _townTourLandblock = world.Self.Landblock;
+            _townTourCount = 0;
+            _townTourInvSeq = townAddSeq;
+        }
+        var townTourTapped = !huntActive
+            && _townTourCount >= TownTourEgressThreshold;
+
         // 4) Pickup: nearest pickup-eligible (by ItemType mask) on the ground.
-        var pickup = world.Visible
+        var pickup = townTourTapped ? null : world.Visible
             .Where(v => v.ItemType is uint it && (it & ItemTypeMasks.Pickup) != 0)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -248,6 +272,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (pickup is not null)
         {
+            _townTourCount++;
             RememberProposed(pickup.Guid);
             return MakeGoal(GoalKind.Pickup,
                 new Selector { Guid = pickup.Guid, Name = pickup.Name },
@@ -295,33 +320,10 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     Schema-only framing: mirrors step 4 (Pickup) in shape —
         //     observation drives behavior, no game-knowledge value
         //     judgment about whether openable things are worth opening.
-        // cp-2360: reset the per-landblock openable-tour memory on egress
-        // (landblock change) or a productive inventory-add (loot) — only a barren
-        // tour with neither persists. Then, once the bot has toured the threshold
-        // of DISTINCT openables here without progress, stop proposing openables
-        // (unless a hunt is already active, which has its own no-detour envelope)
-        // so this deliberation falls through to the Explore step and the bot
-        // heads out. Generic anti-churn over the bot's OWN proposals — no
-        // object-type judgment.
-        // cp-2360/cp-2361: reset the per-landblock town-tour memory on egress
-        // (landblock change) or a productive inventory-add (loot/quest item) —
-        // only a barren tour with neither persists. Once the bot has toured the
-        // threshold of DISTINCT town objects here (across the openable/lifestone/
-        // portal/NPC steps below) without progress, the town-interaction steps tap
-        // out (propose nothing, unless a hunt is already active) so this
-        // deliberation falls through to the Explore step and the bot heads out.
-        // Generic anti-churn over the bot's OWN proposals — no object-type judgment.
-        var townAddSeq = events.RecentOfKind(EventKind.InventoryItemAdded, 1)
-            .FirstOrDefault()?.Sequence ?? -1;
-        if (_townTourLandblock != world.Self.Landblock || townAddSeq > _townTourInvSeq)
-        {
-            _townTourLandblock = world.Self.Landblock;
-            _townTourCount = 0;
-            _townTourInvSeq = townAddSeq;
-        }
-        var townTourTapped = !huntActive
-            && _townTourCount >= TownTourEgressThreshold;
-
+        // The per-landblock town-tour cap (_townTourCount / townTourTapped) is
+        // computed once above (at the Pickup step) and shared by every town
+        // step below — openable/lifestone/portal/NPC. cp-2360/cp-2361 added the
+        // openable/NPC/etc steps; cp-2373 folded in the Pickup step.
         var openable = townTourTapped ? null : world.Visible
             .Where(v => v.IsOpenable && !v.IsDoor)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
