@@ -9042,6 +9042,104 @@ public class LlmGoalPolicyTests
         Assert.True(capsuleIdx > selfIdx && selfIdx >= 0, "capsule should render after ## Self");
     }
 
+    // ---- cp-2352 "## Recent outdoor coverage" capsule ----
+    // Rolling-window summary of the bot's own outdoor visited-node + sighting
+    // memory so an LLM steering a hunt excursion (Explore direction, cp-2351)
+    // has raw facts behind its bearing choice. Render-gated on a recent Explore
+    // emission so it never clutters town/quest/combat prompts; raw counts + a
+    // compass bearing only, no recommendation.
+
+    private static EventStream RecentExploreEmissionStream()
+    {
+        var ev = new EventStream();
+        ev.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"anywhere\" item=<empty> source=llm",
+        });
+        return ev;
+    }
+
+    private static ExcursionCoverageProjection Coverage(int landblocks, float dx, float dy, int mobs) =>
+        new()
+        {
+            WindowMinutes = 15.0,
+            DistinctOutdoorLandblocks = landblocks,
+            NetTravelDx = dx,
+            NetTravelDy = dy,
+            MobSightingsInWindow = mobs,
+        };
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionCoverage_RendersWithRecentExplore()
+    {
+        // net travel (-x,+y) = NW.
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), RecentExploreEmissionStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: Coverage(8, -100f, 100f, 0));
+        Assert.Contains("## Recent outdoor coverage", p);
+        Assert.Contains("8 distinct outdoor landblock", p);
+        Assert.Contains("points NW", p);
+        Assert.Contains("0 monster sighting", p);
+        Assert.Contains("raw fact, not a recommendation", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionCoverage_OmittedWithoutRecentExplore()
+    {
+        // Coverage is set but there is no recent Explore emission → suppressed
+        // so the capsule never clutters a town/quest/combat decision.
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: Coverage(8, -100f, 100f, 0));
+        Assert.DoesNotContain("## Recent outdoor coverage", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionCoverage_OmittedWhenNull()
+    {
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), RecentExploreEmissionStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: null);
+        Assert.DoesNotContain("## Recent outdoor coverage", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionCoverage_IsFactualWithNoImperativeOrRecommendation()
+    {
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), RecentExploreEmissionStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: Coverage(3, 100f, 0f, 2));
+        var idx = p.IndexOf("## Recent outdoor coverage", System.StringComparison.Ordinal);
+        Assert.True(idx >= 0);
+        var capsule = p.Substring(idx);
+        foreach (var banned in new[] { "barren", "opposite", "you should", "you must", "avoid", "dead end", "better direction" })
+            Assert.DoesNotContain(banned, capsule, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExcursionCoverage_RendersBearingFromNetTravel()
+    {
+        // net travel (+x,0) = E; (0,-y) = S.
+        var east = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), RecentExploreEmissionStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: Coverage(2, 100f, 0f, 0));
+        Assert.Contains("points E;", east);
+
+        var south = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), RecentExploreEmissionStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            excursionCoverage: Coverage(2, 0f, -100f, 0));
+        Assert.Contains("points S;", south);
+    }
+
     // ---- Intent-stack completion-predicate schema accuracy ----
     // The prompt teaches the LLM the JSON shape of completion predicates.
     // It MUST match the actual System.Text.Json polymorphic contract on

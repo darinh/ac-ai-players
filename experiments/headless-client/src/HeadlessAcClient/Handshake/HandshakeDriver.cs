@@ -621,6 +621,10 @@ internal sealed class HandshakeDriver : IDisposable
         // distance. Mechanical distance bookkeeping; no game knowledge.
         var                  approachDistance = new HeadlessAcClient.World.ApproachDistanceTracker();
         var                  approachDistanceFreshness = TimeSpan.FromSeconds(30);
+        // cp-2352 — rolling window over which the "## Recent outdoor coverage"
+        // capsule summarizes the bot's own outdoor visited-node + sighting
+        // memory (distinct landblocks, net travel bearing, own Mob sightings).
+        var                  excursionCoverageWindow = TimeSpan.FromMinutes(15);
         // Set by the low-health attack-suppression dispatch guard so the
         // post-action reset cascade does NOT permanently add a suppressed
         // hostile to visitedTargetGuids (suppression is TEMPORARY — the
@@ -6466,6 +6470,61 @@ internal sealed class HandshakeDriver : IDisposable
                                 };
                         }
                         llmPolicyForPickerSurface.SetApproachDistanceHistory(apProj);
+
+                        // cp-2352 — rolling-window OUTDOOR coverage summary (see
+                        // ExcursionCoverageProjection): distinct outdoor
+                        // landblocks visited, net travel vector, and own Mob
+                        // sightings in the window, so an LLM steering a hunt
+                        // excursion (Explore `direction`, cp-2351) has raw facts
+                        // behind its bearing choice. Outdoors + visited-node-data
+                        // gated here; the capsule additionally render-gates on a
+                        // recent Explore. Pure perception of the bot's own
+                        // visited-node + sighting memory; no map/zone/monster-
+                        // location knowledge.
+                        ExcursionCoverageProjection? covProj = null;
+                        var covSelf = worldState.Self;
+                        if (covSelf is not null && covSelf.CellId is uint covCell
+                            && !Strategy.AcCoords.IsIndoor(covCell))
+                        {
+                            var covNow = DateTimeOffset.UtcNow;
+                            var covLandblocks = new HashSet<uint>();
+                            float oldestX = 0f, oldestY = 0f;
+                            var oldestSeen = DateTimeOffset.MaxValue;
+                            var haveOldest = false;
+                            foreach (var nd in navGraph.SnapshotNodes())
+                            {
+                                if (Strategy.AcCoords.IsIndoor(nd.CellId)) continue;
+                                if (covNow - nd.LastSeenUtc > excursionCoverageWindow) continue;
+                                covLandblocks.Add(nd.CellId >> 16);
+                                if (nd.LastSeenUtc < oldestSeen)
+                                {
+                                    oldestSeen = nd.LastSeenUtc;
+                                    oldestX = nd.WorldX;
+                                    oldestY = nd.WorldY;
+                                    haveOldest = true;
+                                }
+                            }
+                            if (covLandblocks.Count > 0 && haveOldest)
+                            {
+                                var covMobSeen = 0;
+                                foreach (var sg in navGraph.SnapshotSighted())
+                                {
+                                    if (sg.Kind != EntityKind.Mob) continue;
+                                    if (covNow - sg.LastSeenUtc > excursionCoverageWindow) continue;
+                                    covMobSeen++;
+                                }
+                                var (covGX, covGY) = Strategy.AcCoords.ToGlobalXY(covCell, covSelf.Position);
+                                covProj = new ExcursionCoverageProjection
+                                {
+                                    WindowMinutes             = excursionCoverageWindow.TotalMinutes,
+                                    DistinctOutdoorLandblocks = covLandblocks.Count,
+                                    NetTravelDx               = covGX - oldestX,
+                                    NetTravelDy               = covGY - oldestY,
+                                    MobSightingsInWindow      = covMobSeen,
+                                };
+                            }
+                        }
+                        llmPolicyForPickerSurface.SetExcursionCoverage(covProj);
                     }
 
                     // Phase C (picker-hunt-suppress) — while an LLM/operator

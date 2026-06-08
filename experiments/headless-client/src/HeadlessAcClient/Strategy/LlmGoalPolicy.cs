@@ -558,6 +558,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetApproachDistanceHistory(ApproachDistanceProjection? approach)
         => _currentApproachDistance = approach;
 
+    private ExcursionCoverageProjection? _currentExcursionCoverage;
+
+    /// <summary>
+    /// Driver-driven setter for the "## Recent outdoor coverage" capsule.
+    /// Called before ProposeGoal with a rolling-window summary of the bot's own
+    /// recent outdoor coverage (distinct landblocks visited, net travel vector,
+    /// own Mob sightings) when the bot is outdoors with visited-node memory.
+    /// Null = nothing to surface. The capsule additionally render-gates on a
+    /// recent Explore emission so it does not clutter town/quest/combat prompts.
+    /// </summary>
+    public void SetExcursionCoverage(ExcursionCoverageProjection? coverage)
+        => _currentExcursionCoverage = coverage;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -1657,7 +1670,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -3277,7 +3290,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int? secondsSinceLastDeath = null,
         GoalProgressSnapshot? goalProgress = null,
         IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null,
-        ApproachDistanceProjection? approachDistance = null)
+        ApproachDistanceProjection? approachDistance = null,
+        ExcursionCoverageProjection? excursionCoverage = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4575,6 +4589,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
                 "Explore all remain executable right now. Your call.");
+        }
+
+        // ── ## Recent outdoor coverage (end-of-prompt salience capsule) ──
+        // Rolling-window summary of the bot's OWN recent outdoor coverage so an
+        // LLM steering a hunt excursion (via the Explore `direction` verb) has
+        // raw facts behind its bearing choice: how many distinct outdoor
+        // landblocks it has recently crossed, which way it has net-travelled,
+        // and how many of its OWN Mob sightings landed in the window. The
+        // driver sets the projection only when outdoors with visited-node
+        // memory; we additionally gate on a recent Explore emission so the
+        // capsule never clutters town/quest/combat prompts. Raw counts + a
+        // compass bearing only — no map, no zone, no recommendation.
+        if (excursionCoverage is { } ec
+            && recentGoalEmits.Any(ge => ge.Text!.StartsWith("Explore ", StringComparison.Ordinal)))
+        {
+            var bearing = Compass8(ec.NetTravelDx, ec.NetTravelDy);
+            sb.AppendLine();
+            sb.AppendLine("## Recent outdoor coverage");
+            sb.AppendLine(
+                $"- in the last ~{ec.WindowMinutes:F0} min of your own outdoor visited-node memory you have " +
+                $"visited {ec.DistinctOutdoorLandblocks} distinct outdoor landblock(s); net travel from the " +
+                $"oldest visited node in that window to your current position points {bearing}; you recorded " +
+                $"{ec.MobSightingsInWindow} monster sighting(s) in the same window.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: this is not a map or a known monster location. The " +
+                "`Explore` `direction` is optional and only steers the search. Your call.");
         }
 
         var assembled = sb.ToString();
