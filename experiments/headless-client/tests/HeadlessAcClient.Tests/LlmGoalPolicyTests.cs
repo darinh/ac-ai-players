@@ -2590,6 +2590,63 @@ public class LlmGoalPolicyTests
         Assert.Contains("NON-HOSTILE IS NOT NON-TARGET", ph);
     }
 
+    // ---- COMBAT SAFETY rule gating on combat-relevance (cp-2369) ----------
+    // The ~2KB COMBAT SAFETY & PACE rule is entirely about an in-progress or
+    // imminent fight, so it renders only when a monster is in view OR a fight
+    // is active (CurrentFight != null). Frees ~2KB of budget in non-combat
+    // scenes; behaviour-preserving.
+
+    private static WorldStateProjection BuildWorld_NoMonster_WithFight(CombatFightStatus? fight)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0xA9B3u, CellId = 0xA9B30001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            CurrentFight = fight,
+        };
+
+    [Fact]
+    public void BuildUserPrompt_CombatSafetyRule_PresentWhenMonsterInView()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xC00u, Name = "Sparring Golem", Wcid = 70u, Distance = 5f, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("COMBAT SAFETY & PACE", p);
+        // Semantic canary (relocated from BuildUserPrompt_RulesRetainCriticalBehaviorClauses,
+        // which now omits COMBAT SAFETY because it is conditional): the critical
+        // trigger->action clauses must survive whenever the rule DOES render.
+        Assert.Contains("DISENGAGE", p);
+        Assert.Contains("AVOID re-attacking the same KIND", p);
+        Assert.Contains("trust the ABSOLUTE HP", p);
+        Assert.Contains("regenerating BELOW full strength", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CombatSafetyRule_PresentDuringActiveFightEvenWithNoMonsterVisible()
+    {
+        // A fight that scrolled the foe out of view: CurrentFight persists, so
+        // the disengage/safety guidance must still render.
+        var world = BuildWorld_NoMonster_WithFight(
+            new CombatFightStatus(0xABCDu, "Drudge Skulker", 0, 6, 0));
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("COMBAT SAFETY & PACE", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CombatSafetyRule_OmittedWhenNoMonsterAndNoFight()
+    {
+        // No monster in view AND no active fight -> the rule is inapplicable
+        // noise and is gated off to free prompt budget.
+        var world = BuildWorld_NoMonster_WithFight(null);
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("COMBAT SAFETY & PACE", p);
+    }
+
     // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
     // A bloated bag of duplicate quest items was rendered one-row-per-item and
     // (being an early, non-trimmable section) pushed the later FIXED sections
@@ -9496,13 +9553,12 @@ public class LlmGoalPolicyTests
         // self-arming before optional combat
         Assert.Contains("SELF-ARM before fighting", p);
         Assert.Contains("UNARMED", p);
-        // combat safety: disengage + avoid the killer kind
-        Assert.Contains("COMBAT SAFETY", p);
-        Assert.Contains("DISENGAGE", p);
-        Assert.Contains("AVOID re-attacking the same KIND", p);
-        // combat safety: absolute-HP / rising self-health interpretation (cp-2269)
-        Assert.Contains("trust the ABSOLUTE HP", p);
-        Assert.Contains("regenerating BELOW full strength", p);
+        // NOTE: the COMBAT SAFETY & PACE rule (disengage / avoid the killer
+        // kind / absolute-HP interpretation) is now conditional — it renders
+        // only when a monster is in view OR a fight is active (cp-2369), which
+        // BuildExitTokenWorld has neither of, so its clauses are not asserted
+        // here. Its present/absent rendering + critical clauses are covered by
+        // the dedicated BuildUserPrompt_CombatSafetyRule_* tests.
         // NOTE: the corpse-looting rule ("NEVER skip a fresh corpse") is now
         // conditional — it renders only when a corpse is visible (cp-2331-loot),
         // which BuildExitTokenWorld has none of, so it is not asserted here. Its
