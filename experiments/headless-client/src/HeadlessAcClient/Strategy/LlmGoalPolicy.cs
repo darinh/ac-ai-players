@@ -4724,6 +4724,48 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "how much, and which to raise is your call.");
         }
 
+        // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
+        // Visible monsters already render mid-prompt (`## Visible nearby`,
+        // `## Combat readiness`), but a fact placed earlier in this large
+        // prompt competes for attention with everything after it; re-stating
+        // the SAME computed perception in the most decision-proximate slot is
+        // the established salience fix shared by the `## Unspent XP` and
+        // `## Recent Talk` capsules. Rendered on RAW PRESENCE (any non-corpse
+        // monster visible — no source-side threshold, mirroring the
+        // `## Unspent XP` any-positive gate). RAW facts + an explicit
+        // not-a-recommendation disclaimer — no urgency, no instruction to
+        // engage, no object-type priority in source: the existing "a monster
+        // is a valid XP target" RULE and the `## Combat readiness` history
+        // supply the judgment, the LLM decides. Perception re-positioned for
+        // salience; no game knowledge.
+        var endcapMonsters = world.Visible
+            .Where(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .ToList();
+        if (endcapMonsters.Count > 0)
+        {
+            var endcapMonsterList = string.Join(", ", endcapMonsters
+                .GroupBy(v => string.IsNullOrWhiteSpace(v.Name) ? "(unknown)" : v.Name!,
+                         StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.Count() > 1 ? $"{g.Key} x{g.Count()}" : g.Key)
+                .Take(6));
+            var endcapNearest = endcapMonsters[0];
+            var endcapNearestName =
+                string.IsNullOrWhiteSpace(endcapNearest.Name) ? "(unknown)" : endcapNearest.Name!;
+            var endcapNearestDist =
+                endcapNearest.Distance is float d ? $"at d={d:F1}u" : "at an unknown distance";
+            sb.AppendLine();
+            sb.AppendLine("## Monsters in view");
+            sb.AppendLine(
+                $"- {endcapMonsters.Count} attackable monster(s) in view ({endcapMonsterList}); " +
+                $"nearest '{endcapNearestName}' {endcapNearestDist}. The Attack verb " +
+                "is executable right now, the same as Talk/Use/Pickup/Explore.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: see `## Combat readiness` above for your arms/" +
+                "health and your own recorded outcomes per monster kind. Whether to engage, and " +
+                "which target, is your call.");
+        }
+
         // ── ## Recent Talk (end-of-prompt salience capsule) ──────────────
         // The per-NPC recent-Talk counts already render mid-prompt in
         // `## Location & recency`, yet live runs show the LLM re-Talking the
