@@ -487,6 +487,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const int MultiNpcTalkChurnStaleThreshold = 3;
     private const int MultiNpcTalkChurnMaxTargets = 2;
 
+    // cp-2365: roving single-NPC Talk-loop guard. IsExhaustedNpcTalkRepeat
+    // resets on MOVEMENT, and IsMultiNpcTalkChurn requires >=2 targets, so a bot
+    // that keeps walking up to (or around) the SAME NPC loops past BOTH and
+    // never breaks. This sibling counts consecutive STALE Talks to the SAME NPC
+    // regardless of position, resetting only on a DIFFERENT NPC or server-
+    // observable PROGRESS (new dialog text by hash, inventory, landblock, or
+    // self-progression) — so a genuinely advancing single-NPC conversation is
+    // never suppressed. Pure mechanical bookkeeping over the bot's OWN Talk
+    // emissions + progress-event PRESENCE + dialog-text novelty; no NPC names,
+    // wcids, or quest content.
+    private RovingNpcTalkLoop? _rovingNpcTalkLoop;
+
+    private sealed class RovingNpcTalkLoop
+    {
+        public string Key = "";
+        public long FloorSequence;
+        public int StaleTalks;
+        public readonly HashSet<string> SeenDialogFingerprints = new(StringComparer.Ordinal);
+    }
+
+    private const int RovingNpcTalkLoopStaleThreshold = 4;
+
     // Server text kinds that count as "dialog" for novelty fingerprinting.
     // Wire-decoded categories only — no per-message content knowledge.
     private static readonly EventKind[] TalkChurnDialogKinds =
@@ -2116,6 +2138,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
+        // Roving single-NPC Talk-loop break (cp-2365): the stationary single-NPC
+        // guard resets on MOVEMENT and the multi-NPC guard needs >=2 targets, so a
+        // bot that keeps walking up to the SAME NPC loops past both. This fires on
+        // N consecutive STALE (no dialog-novelty, no progress) Talks to ONE NPC
+        // regardless of position, and breaks it via the SAME egress so the bot
+        // does something else (train / explore / equip) instead of re-greeting a
+        // dead conversation.
+        if (IsRovingNpcTalkLoop(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — roving single-NPC Talk loop with no progress or dialog novelty; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: roving no-progress single-NPC Talk loop");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
+
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
         // guards above each count only their own GoalKind, so a mixed
         // Use{target} ↔ Pickup{target} alternation on one stationary target
@@ -2865,6 +2904,78 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         ep.StaleTalks++;
         return ep.StaleTalks >= MultiNpcTalkChurnStaleThreshold && ep.Targets.Count >= 2;
+    }
+
+    /// <summary>
+    /// True when the bot is looping Talk on a SINGLE NPC while ROVING — walking
+    /// up to (or around) the same NPC each emission. <see cref="IsExhaustedNpcTalkRepeat"/>
+    /// resets on movement and <see cref="IsMultiNpcTalkChurn"/> requires >=2
+    /// targets, so a moving same-NPC loop slips past BOTH. Counts consecutive
+    /// STALE Talks to the SAME canonical target and
+    /// fires at <see cref="RovingNpcTalkLoopStaleThreshold"/>. Resets on a
+    /// DIFFERENT target or any server-observable PROGRESS — inventory add/remove,
+    /// landblock change, self-progression, or a NEW line of dialog (normalized
+    /// hash novelty). Unlike the stationary guards it does NOT reset on movement,
+    /// so a roving same-NPC loop is caught; like the multi-NPC guard it still
+    /// never suppresses an advancing conversation. Pure mechanical bookkeeping:
+    /// the bot's OWN emission identity + progress-event PRESENCE + dialog novelty
+    /// by hash. No NPC names, wcids, or quest content.
+    /// </summary>
+    internal bool IsRovingNpcTalkLoop(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+
+        var key = CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+        // GUID-backed identity ONLY. CanonicalUseTargetKey falls back to a
+        // name when no guid is present; because this guard (unlike the
+        // stationary ones) does NOT reset on movement, a name-only key would
+        // conflate DISTINCT same-named NPC instances into one bogus loop. Skip
+        // name-only targets entirely.
+        if (!key.StartsWith("guid=", StringComparison.Ordinal)) return false;
+
+        var ep = _rovingNpcTalkLoop;
+        bool sameTarget = ep is not null &&
+            string.Equals(ep.Key, key, StringComparison.OrdinalIgnoreCase);
+        bool progressed = ep is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, ep.FloorSequence)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, ep.FloorSequence)
+             || events.HasNewSince(EventKind.LandblockChanged, ep.FloorSequence)
+             || events.HasNewSince(EventKind.SelfProgressChanged, ep.FloorSequence));
+
+        // Reset on a DIFFERENT NPC or any server-observable progress — but NOT
+        // on movement (the sole distinction from IsExhaustedNpcTalkRepeat). Seed
+        // the seen-dialog set so a later re-send of the SAME greeting reads as
+        // repetition, not novelty.
+        if (ep is null || !sameTarget || progressed)
+        {
+            ep = new RovingNpcTalkLoop { Key = key, FloorSequence = events.NextSequence, StaleTalks = 0 };
+            foreach (var fp in DialogFingerprintsSince(events, 0))
+                ep.SeenDialogFingerprints.Add(fp);
+            _rovingNpcTalkLoop = ep;
+            return false;
+        }
+
+        bool novelDialog = false;
+        foreach (var fp in DialogFingerprintsSince(events, ep.FloorSequence))
+            if (ep.SeenDialogFingerprints.Add(fp)) novelDialog = true;
+        ep.FloorSequence = events.NextSequence;
+
+        if (novelDialog) { ep.StaleTalks = 0; return false; }
+
+        ep.StaleTalks++;
+        if (ep.StaleTalks >= RovingNpcTalkLoopStaleThreshold)
+        {
+            // Reset on fire so suppression is NEVER permanent. The drop defers to
+            // the fallback (the bot does something else); a later re-attempt at
+            // the same NPC starts a FRESH streak and only re-fires if it loops
+            // again. A genuinely-advancing NPC produces dialog/progress on the
+            // re-attempt and is never blocked indefinitely; a true dead loop is
+            // still broken on every Nth stale Talk.
+            _rovingNpcTalkLoop = null;
+            return true;
+        }
+        return false;
     }
 
     // Normalized dialog fingerprints at sequence >= floor (newest-first source,

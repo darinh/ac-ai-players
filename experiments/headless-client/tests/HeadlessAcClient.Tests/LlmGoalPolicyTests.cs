@@ -5989,6 +5989,116 @@ public class LlmGoalPolicyTests
             Assert.False(policy.IsMultiNpcTalkChurn(npcA, world, es));
     }
 
+    // ---- IsRovingNpcTalkLoop (cp-2365: roving single-NPC Talk loop) ----
+
+    private static readonly uint SamuelGuid = 0x800076B6u;
+
+    [Fact]
+    public void RovingNpcTalkLoop_Fires_OnMovingSameNpcLoop_WithNoProgress()
+    {
+        // The bot walks up to the SAME NPC each Talk (position changes every
+        // time) — which IsExhaustedNpcTalkRepeat (resets on movement) and
+        // IsMultiNpcTalkChurn (needs >=2 targets) both miss. With no dialog
+        // novelty and no progress, the roving guard fires at the stale
+        // threshold (4 stale after the episode start).
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 10, -30), es)); // start
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 12, -28), es)); // moved, stale 1
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 9, -31), es));  // moved, stale 2
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 14, -27), es)); // moved, stale 3
+        Assert.True(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 11, -29), es));  // moved, stale 4 -> fire
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_NeverFires_WhenDialogIsNovelEachTalk()
+    {
+        // QUESTING SAFETY: an advancing single-NPC conversation emits a new line
+        // each Talk; dialog novelty resets the stale streak, so a productive
+        // multi-exchange dialog is NEVER suppressed even while the bot moves.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        for (var i = 0; i < 8; i++)
+        {
+            es.Append(NpcDialog($"new training instruction {i}"));
+            Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, i, -i), es),
+                $"must not fire on a novel-dialog single-NPC chain at step {i}");
+        }
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_NeverFires_WhenInventoryProgresses()
+    {
+        // A turn-in / item-grant resets the episode — a productive single-NPC
+        // exchange is never suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        for (var i = 0; i < 8; i++)
+        {
+            es.Append(InvAdded("Leather Leggings"));
+            Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, i, 0), es));
+        }
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_ResetsOnDifferentNpc()
+    {
+        // Switching to a different NPC restarts the streak (per-NPC), so an
+        // A,A,A -> B sequence does not carry A's count into B.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var a = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+        var b = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x800076A4u } };
+
+        Assert.False(policy.IsRovingNpcTalkLoop(a, WorldAt(0x8602u, 0x860201B3u, 1, 0), es)); // start A
+        Assert.False(policy.IsRovingNpcTalkLoop(a, WorldAt(0x8602u, 0x860201B3u, 2, 0), es)); // A stale 1
+        Assert.False(policy.IsRovingNpcTalkLoop(a, WorldAt(0x8602u, 0x860201B3u, 3, 0), es)); // A stale 2
+        Assert.False(policy.IsRovingNpcTalkLoop(b, WorldAt(0x8602u, 0x860201B3u, 4, 0), es)); // switch -> restart on B
+        Assert.False(policy.IsRovingNpcTalkLoop(b, WorldAt(0x8602u, 0x860201B3u, 5, 0), es)); // B stale 1 (not fired)
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_RecoversAfterFiring_NotPermanentlySuppressed()
+    {
+        // After firing, the episode resets so suppression is never PERMANENT: a
+        // later re-attempt at the same NPC starts a fresh streak (the bot gets to
+        // re-probe) and only re-fires if it loops again. A legitimately advancing
+        // NPC would produce progress/novelty on the re-attempt and clear.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        // First loop: start + 4 stale -> fire on the 5th.
+        for (var i = 0; i < 4; i++)
+            Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, i, 0), es));
+        Assert.True(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 9, 0), es)); // fire #1
+
+        // Immediately after firing, the NEXT same-NPC Talk is a fresh re-probe,
+        // NOT an instant re-drop (recovery path; no permanent suppression).
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 10, 0), es));
+        Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 11, 0), es)); // stale 1 again
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_DoesNotGuard_NameOnlyTarget()
+    {
+        // A Talk target with no guid (name-only) is NOT guarded — without a
+        // stable guid, distinct same-named NPC instances could be conflated into
+        // a bogus loop. Such a target never fires regardless of repetition.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var nameOnly = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Town Crier" } };
+
+        for (var i = 0; i < 10; i++)
+            Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldAt(0x8602u, 0x860201B3u, i, 0), es));
+    }
+
     [Fact]
     public void MultiNpcTalkChurn_ResetsWhenBotMoves()
     {
