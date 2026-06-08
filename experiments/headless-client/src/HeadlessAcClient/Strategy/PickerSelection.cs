@@ -121,6 +121,24 @@ internal static class PickerSelection
         => (s.ContainerGuid is uint cg && cg == selfGuid)
         || (s.WielderGuid is uint wg && wg == selfGuid);
 
+    // Mechanical self-identity filter — the SAME class as the IsAttachedToSelf
+    // filter above (drop objects that ARE the bot's own). Drops a Corpse-flagged
+    // object (wire ObjectDescriptionFlag bit 0x2000) whose name is the bot's OWN
+    // runtime name on a word boundary, i.e. the bot's own corpse. Keys only on the
+    // wire flag + self.Name; no hardcoded object/zone/name, and no type-priority.
+    private static bool IsBotsOwnCorpse(WorldObjectSnapshot s, WorldObjectSnapshot self)
+    {
+        const uint CorpseFlag = (uint)ObjectDescriptionFlag.Corpse;
+        if (((s.ObjectDescriptionFlags ?? 0u) & CorpseFlag) == 0) return false;
+        var selfName = self.Name;
+        if (string.IsNullOrEmpty(selfName) || string.IsNullOrEmpty(s.Name)) return false;
+        // Word-boundary match (Equals OR ends with " " + the self name), NOT a raw
+        // substring — so an object whose name merely superstrings the self name is
+        // not dropped. Uses only the bot's OWN runtime name; no hardcoded prefix.
+        return s.Name!.Equals(selfName, StringComparison.Ordinal)
+            || s.Name!.EndsWith(" " + selfName, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// W.2 — fallback picker for exploration when the in-range queue
     /// is empty. Returns the nearest mechanically-eligible
@@ -192,6 +210,7 @@ internal static class PickerSelection
             .Where(s => s.Guid != selfGuid)
             .Where(s => !string.IsNullOrEmpty(s.Name))
             .Where(s => !IsAttachedToSelf(s, selfGuid))
+            .Where(s => !IsBotsOwnCorpse(s, self))
             .Where(s => s.CellId is uint sc && sc != 0u && (sc & 0xFFFF0000u) == (selfLandblock & 0xFFFF0000u))
             .Select(s =>
             {

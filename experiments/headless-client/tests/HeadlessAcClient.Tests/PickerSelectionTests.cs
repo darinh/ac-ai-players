@@ -326,6 +326,66 @@ public class PickerSelectionTests
     }
 
     [Fact]
+    public void Fallback_ExcludesBotsOwnCorpse_ButKeepsOtherCorpsesAndLoot()
+    {
+        // Live (cp2355-livefire): after death the bot's OWN corpse ("Corpse of
+        // <self>") is surfaced as a nearest-named candidate, the picker walks the
+        // bot to it, and the LLM's Use/Pickup resolves to a no-op MISS (retain-
+        // items server) — a wasted detour + deliberation cycles every death.
+        // Self() is named "Bot". The self-corpse is a Corpse-flagged object whose
+        // name embeds the bot's own name; it is dropped like the attached-to-self
+        // filter. Another player's corpse and ordinary loot are NOT affected (no
+        // priority change).
+        var ownCorpse   = Snap(0x700, "Corpse of Bot",      x: 3f, descFlags: FlagCorpse);
+        var otherCorpse = Snap(0x701, "Corpse of Stranger", x: 5f, descFlags: FlagCorpse);
+        var loot        = Snap(0x702, "Leather Cap",        x: 8f);
+
+        var listed = PickerSelection.EnumerateFallbackCandidates(
+            new[] { ownCorpse, otherCorpse, loot },
+            Self(), SelfGuid, SelfLandblock).ToList();
+
+        Assert.DoesNotContain(listed, t => t.snap.Guid == 0x700u);
+        Assert.Contains(listed, t => t.snap.Guid == 0x701u);
+        Assert.Contains(listed, t => t.snap.Guid == 0x702u);
+        Assert.Equal(2, listed.Count);
+    }
+
+    [Fact]
+    public void Fallback_DoesNotExclude_OtherCorpseWhoseNameSuperstringsSelf()
+    {
+        // Word-boundary match (review-hardened): self is "Bot". The own corpse
+        // "Corpse of Bot" is dropped, but "Corpse of Botman" (a DIFFERENT player
+        // whose name merely superstrings the self name) must be KEPT — a raw
+        // substring match would have wrongly dropped it.
+        var ownCorpse = Snap(0x700, "Corpse of Bot",    x: 3f, descFlags: FlagCorpse);
+        var botman    = Snap(0x701, "Corpse of Botman", x: 5f, descFlags: FlagCorpse);
+
+        var listed = PickerSelection.EnumerateFallbackCandidates(
+            new[] { ownCorpse, botman },
+            Self(), SelfGuid, SelfLandblock).ToList();
+
+        Assert.DoesNotContain(listed, t => t.snap.Guid == 0x700u);
+        Assert.Contains(listed, t => t.snap.Guid == 0x701u);
+        Assert.Single(listed);
+    }
+
+    [Fact]
+    public void Fallback_DoesNotExclude_NonCorpseObjectNamedAfterSelf()
+    {
+        // The filter gates on the wire Corpse flag, so a NON-corpse object whose
+        // name merely contains the self name is NOT dropped — only the self-corpse
+        // is filtered.
+        var namedItem = Snap(0x700, "Bot's Training Sword", x: 3f); // no corpse flag
+
+        var listed = PickerSelection.EnumerateFallbackCandidates(
+            new[] { namedItem },
+            Self(), SelfGuid, SelfLandblock).ToList();
+
+        Assert.Single(listed);
+        Assert.Equal(0x700u, listed[0].snap.Guid);
+    }
+
+    [Fact]
     public void Fallback_DoesNotBumpUnvisitedDoorAheadOfFartherNpc()
     {
         // FORBIDDEN before W.2: door > pickup, NPC > pickup, etc.
