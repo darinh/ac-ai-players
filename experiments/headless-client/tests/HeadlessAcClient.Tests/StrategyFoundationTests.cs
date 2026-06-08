@@ -1112,6 +1112,20 @@ public class StrategyFoundationTests
         TourChest(0x7007u, 7f), TourChest(0x7008u, 8f),
     };
 
+    // cp-2373: a ground pickup-eligible item (ItemType carries a Pickup-mask bit,
+    // not openable/creature) — the fallback Pickup step targets these.
+    private static VisibleObjectProjection TourPickup(uint g, float d) => new()
+    {
+        Guid = g, Name = "Ground Item", Wcid = 9999u, ItemType = 0x2u, Distance = d,
+    };
+
+    private static VisibleObjectProjection[] ManyPickups() => new[]
+    {
+        TourPickup(0x6001u, 1f), TourPickup(0x6002u, 2f), TourPickup(0x6003u, 3f),
+        TourPickup(0x6004u, 4f), TourPickup(0x6005u, 5f), TourPickup(0x6006u, 6f),
+        TourPickup(0x6007u, 7f), TourPickup(0x6008u, 8f),
+    };
+
     [Fact]
     public void NoQuestKnowledgePolicy_TownTour_TapsOutAndEgresses()
     {
@@ -1179,6 +1193,45 @@ public class StrategyFoundationTests
             ItemGuid = 0x900u, Wcid = 273u, Name = "Pyreal",
         });
         Assert.Equal(GoalKind.Use, policy.ProposeGoal(TourWorld(0xA9B4u, chests), events, null)!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_TownTour_TapsOut_PickupChurn()
+    {
+        // cp-2373: a barren Pickup churn (pickup-eligible items that never enter
+        // the bag — 0 InventoryItemAdded) counts toward the SHARED town-tour cap,
+        // so the 7th re-proposed Pickup taps out and the bot falls through to
+        // Explore instead of re-targeting un-acquirable ground items forever.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = TourWorld(0xA9B4u, ManyPickups());
+        var events = new EventStream();
+        for (int i = 0; i < 6; i++)
+            Assert.Equal(GoalKind.Pickup, policy.ProposeGoal(proj, events, null)!.Kind);
+        var last = policy.ProposeGoal(proj, events, null);
+        Assert.NotNull(last);
+        Assert.NotEqual(GoalKind.Pickup, last!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_TownTour_PickupResetsOnInventoryAdd()
+    {
+        // A PRODUCTIVE Pickup (InventoryItemAdded) resets the cap, so genuine
+        // looting is never falsely capped. The added item's guid is not in
+        // Inventory, so the inv-Use step does not consume the turn.
+        var policy = new NoQuestKnowledgePolicy();
+        var pickups = ManyPickups();
+        var events = new EventStream();
+        for (int i = 0; i < 6; i++)
+            policy.ProposeGoal(TourWorld(0xA9B4u, pickups), events, null);
+        Assert.NotEqual(GoalKind.Pickup,
+            policy.ProposeGoal(TourWorld(0xA9B4u, pickups), events, null)!.Kind); // tapped
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InventoryItemAdded,
+            ItemGuid = 0x901u, Wcid = 9999u, Name = "Picked Item",
+        });
+        Assert.Equal(GoalKind.Pickup,
+            policy.ProposeGoal(TourWorld(0xA9B4u, pickups), events, null)!.Kind);
     }
 
     [Fact]
