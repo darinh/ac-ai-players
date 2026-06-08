@@ -636,6 +636,12 @@ internal sealed class HandshakeDriver : IDisposable
         var                  combatFastRetryRequested = false;
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
+        // combat-effectiveness: the target's health fraction at the FIRST
+        // observation of the current fight (paired lifecycle with
+        // lastObservedTargetHealthFraction). Surfaced with the current
+        // fraction so the LLM can see how far the target's health has moved
+        // over the fight — RAW perception; the LLM owns the disengage call.
+        float?               firstObservedTargetHealthFraction = null;
         // combat-damage-output: per-fight swing-outcome counters surfaced
         // to the LLM as raw perception (it never auto-disengages — the LLM
         // owns that). Counters belong to combatStatsForGuid; a notification
@@ -1288,6 +1294,7 @@ internal sealed class HandshakeDriver : IDisposable
             combatFeedbackSent = false;
             combatTargetName = null;
             combatStatsForGuid = null;
+            firstObservedTargetHealthFraction = null;
             worldState.CurrentFight = null;
         }
 
@@ -2037,6 +2044,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastServerCombatActivityAt = DateTime.UtcNow;
                                     }
                                     lastObservedTargetHealthFraction = updHealth.HealthFraction;
+                                    firstObservedTargetHealthFraction ??= updHealth.HealthFraction;
                                     if (updHealth.HealthFraction <= 0.0001f)
                                     {
                                         Console.WriteLine(
@@ -2274,7 +2282,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 // prompt (## Combat readiness reads this).
                                 worldState.CurrentFight = new CombatFightStatus(
                                     cnTarget, combatTargetName,
-                                    combatSwingsLanded, combatSwingsEvaded, combatDamageDealt);
+                                    combatSwingsLanded, combatSwingsEvaded, combatDamageDealt,
+                                    firstObservedTargetHealthFraction, lastObservedTargetHealthFraction);
 
                                 // Wake the LLM ONCE per fight when this target
                                 // first produces swing-outcome telemetry, so it
