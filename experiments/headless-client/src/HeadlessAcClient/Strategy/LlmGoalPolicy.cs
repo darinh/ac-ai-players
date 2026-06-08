@@ -3383,11 +3383,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- HUNT EXCURSION (leave a tapped-out safe zone to find monsters): monsters do NOT spawn in safe zones — you must travel OUT to surrounding open country. When combat-ready, NO `monster` anywhere in `Visible nearby`, NO un-acted server/quest directive naming a specific next target (re-talking an NPC with no NEW dialog and browsing vendors do NOT count), AND `minutes in current landblock` is more than a few with local progress dried up (no new level, quest item, or unique hint), the zone is TAPPED OUT. Emit `Explore{target: {name: \"anywhere\"}}` — crossing out takes MANY ticks, so KEEP emitting it every cycle (your own recent `Explore` does NOT mean the excursion is done; do NOT revert to talking the same town NPCs mid-excursion) until your `landblock` actually changes OR a `monster` appears (then `Attack` it). A NEW server/quest directive, quest item, danger, or fresh dialog step interrupts the hunt — act on it. Quest progress outranks an optional hunt.");
         sb.AppendLine("- BLOCKED targets: `ActionRejected` label `Blocked`/`Unreachable` = server physics held the bot against geometry (wall, closed door, barrier). Do NOT re-emit the same target. Prefer a visible Door (walk to / Use it — it likely leads where you were going); else `Explore` to route around. The bot cannot clip through obstacles.");
         sb.AppendLine("- STUCK ESCAPE (last resort): `Recall{}` teleports you to your attuned lifestone. Use it ONLY when you are physically unable to move at all — e.g. the movement report (when shown) says the server held you at the same position across repeated attempts AND no visible Door or `Explore` route frees you (a ledge/cliff with your target far BELOW is a classic trap: every step is mid-air and rejected). It requires an attuned lifestone (Use a `Life Stone` to attune); the server refuses it inside the training academy and right after PvP, and it costs half your mana — so it is an escape hatch, NOT routine travel. Try a Door or `Explore` first; reach for `Recall` only when those cannot move you.");
+        // cp-2346 — does the recent event window carry server/NPC text the LLM
+        // might need to compile (a task directive)? Pure presence check on the
+        // same dialog kinds the `## Server hints` section renders; gates the
+        // QUEST-DIALOG COMPILER rule + the `## Recent directive check` capsule
+        // so they cost zero prompt bytes when no dialog is present.
+        var hasRecentServerDialog = events.Recent(EventStream.DefaultCapacity).Any(e =>
+            (e.Kind == EventKind.NpcDialog || e.Kind == EventKind.ServerMessage || e.Kind == EventKind.PopupString)
+            && !string.IsNullOrEmpty(e.Text));
         if (stack is not null)
         {
             sb.AppendLine("- STRATEGIC STACK: `## Intent stack` is the current plan; TOP is the active sub-goal, ancestors paused. Per-cycle goals advance TOP. PUSH on a discovered sub-task; POP_TOP when done and no predicate caught it (rare — predicates auto-pop); REPLACE_TOP when right-frame-wrong-target; MARK_TOP_BLOCKED when stuck. Always echo `stack_revision`.");
             sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate matching your termination criterion (the discriminator field is `type`, e.g. `{\"type\":\"kill_count_total_at_least\",\"count\":3}`); prefer server-authoritative (num_deaths, coin_value). *_total_* for absolute thresholds, *_since_push_* for deltas. A hunt excursion completes when a monster is finally in view: `{\"type\":\"visible_tag\",\"tag\":\"monster\"}` (set `deadline_seconds` too, as a liveness backstop). If none fits, `{\"type\":\"always_false\"}` + `predicate_request`.");
             sb.AppendLine("- PERSIST A HUNT EXCURSION ON THE STACK: when you begin a hunt excursion (per the HUNT EXCURSION rule) and TOP is not already one, in the SAME response PUSH an intent — `kind`:\"hunt-excursion\", completion `{\"type\":\"visible_tag\",\"tag\":\"monster\"}`, and set `deadline_seconds` to a few minutes — alongside your `Explore`. The completion auto-pops the intent the instant a `monster` appears (then `Attack` it); the deadline is just a backstop so a wedged excursion eventually re-deliberates. While it stays TOP you are EN ROUTE: keep emitting `Explore{target: {name: \"anywhere\"}}`. Merely crossing into a new `landblock` is NOT done — if the new area is ALSO a monster-free town, the excursion stays TOP, so keep exploring OUT (do not start working town objects again). The ONLY things that interrupt are a genuinely NEW server/quest directive, a newly-acquired quest item, or danger — stale NPCs, vendors, and already-seen doors are NOT interrupts. This makes the excursion survive across ticks instead of being re-decided (and abandoned) every cycle.");
+            if (hasRecentServerDialog)
+                sb.AppendLine("- QUEST-DIALOG COMPILER: if observed NPC/server text (see `## Server hints`) ASSIGNS a task — names target creature(s) to kill, an item to fetch, or a place to reach — compile it onto the stack BEFORE optional grinding: PUSH (or REPLACE_TOP if TOP is a generic hunt-excursion) an intent whose `kind`/`target_name`/`rationale` COPY the named target(s) verbatim FROM the observed text, and prefer `Attack` only against visible monsters whose names match those target words (unrelated monsters are optional fallback, NOT quest progress). Use a `kill_count_*` completion ONLY when the required count is explicitly stated in the observed text — NEVER invent a count; if no predicate fits, use `{\"type\":\"always_false\"}` + `predicate_request`, and set `deadline_seconds` as a liveness backstop so an unreachable/unfound target eventually re-deliberates. When observed progress/dialog indicates the task is done, RETURN to the task-giver and `Talk`/`Use` it to turn in. Greetings, lore, vendor flavor, and descriptions with no requested action are NOT tasks — do NOT invent a task, target, count, NPC, or location.");
         }
         // The AUTONOMOUS PICKER rule only makes sense when the
         // `## Autonomous picker activity` section is present (same gate the
@@ -4275,6 +4285,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // render far earlier and are unaffected) and always re-appends the
         // capsules intact.
         var salienceTailStart = sb.Length;
+
+        // ── ## Recent directive check (end-of-prompt salience capsule, cp-2346)
+        // The QUEST-DIALOG COMPILER rule renders mid-prompt and can be lost
+        // behind the long context; re-surface a short decision-proximate
+        // reminder to CHECK whether the recent server/NPC text assigns a task
+        // that needs a compiled stack objective. Gated on raw presence of
+        // recent server/NPC dialog + a stack being enabled. RAW pointer +
+        // explicit not-a-recommendation — task detection and WHAT to push stay
+        // entirely with the LLM (it reads the words above); source names no
+        // task, target, count, NPC, or location. No game knowledge.
+        if (hasRecentServerDialog && stack is not null)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Recent directive check");
+            sb.AppendLine(
+                "- `## Server hints` above contains recent NPC/server text. If that text ASSIGNS a task " +
+                "(names creature(s) to kill, an item to fetch, a place to reach), you likely need a persistent " +
+                "`stack_ops` objective compiled from it (see the QUEST-DIALOG COMPILER rule) before this tick's " +
+                "optional Goal.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: decide from the observed words only; do not invent a task, " +
+                "target, count, NPC, or location.");
+        }
 
         // ── ## No active objective (end-of-prompt salience capsule, cp-2345) ─
         // When the IntentStack has no ACTIVE top intent (the top reached a

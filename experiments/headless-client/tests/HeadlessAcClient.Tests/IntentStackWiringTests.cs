@@ -499,6 +499,51 @@ public class IntentStackWiringTests
         Assert.DoesNotContain("## No active objective", prompt);
     }
 
+    // ---- Quest-dialog compiler rule + directive-check capsule (cp-2346) ----
+
+    private static StreamEvent Dialog(string text, string from = "Someone") => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = from, Text = text,
+    };
+
+    [Fact]
+    public void BuildUserPrompt_QuestDialogCompiler_RendersWhenDialogPresentWithStack()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b));
+        var es = new EventStream();
+        es.Append(Dialog("a task was assigned to you"));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), es, currentGoal: null, stack);
+        Assert.Contains("QUEST-DIALOG COMPILER", prompt);
+        Assert.Contains("## Recent directive check", prompt);
+        Assert.Contains("do not invent a task, target, count, NPC, or location", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_QuestDialogCompiler_OmittedWhenNoDialog()
+    {
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), new EventStream(), currentGoal: null, stack);
+        Assert.DoesNotContain("QUEST-DIALOG COMPILER", prompt);
+        Assert.DoesNotContain("## Recent directive check", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_QuestDialogCompiler_OmittedWhenNoStack()
+    {
+        // Both the rule and the capsule are gated on a stack being enabled.
+        var es = new EventStream();
+        es.Append(Dialog("a task was assigned to you"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorld(), es, currentGoal: null);
+        Assert.DoesNotContain("QUEST-DIALOG COMPILER", prompt);
+        Assert.DoesNotContain("## Recent directive check", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_WithoutStack_OmitsStackSchema()
     {
