@@ -1248,6 +1248,27 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void LlmGoalPolicy_Prompt_SchemaDeclaresExploreDirectionField()
+    {
+        // cp-2351 added the Explore `direction` parser + Motor wiring and a prose
+        // STEER A BARREN EXCURSION rule, but never declared `direction` in the
+        // output JSON schema — and the prompt says "no extra fields", so the LLM
+        // (obeying the schema) could not emit it (live: 0 directional Explores
+        // across runs despite the rule rendering, the bot oscillating near the
+        // safe zone). Declaring it in the schema unblocks the field. Guard it.
+        var world = BuildXpWorld(69296, 0);
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+
+        Assert.Contains("\"direction\":", prompt);   // declared field
+        Assert.Contains("\"northwest\"", prompt);    // the 8-way compass enum
+        Assert.Contains("Explore only", prompt);     // scoped to the Explore verb
+        // Schema documents the full accepted set, matching TryHeadingVector
+        // (which also accepts the n/ne/.../nw abbreviations).
+        Assert.Contains("short forms n/ne/e/se/s/sw/w/nw also accepted", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {
         // Deliberation-race regression guard. A fresh L1 bot in an
