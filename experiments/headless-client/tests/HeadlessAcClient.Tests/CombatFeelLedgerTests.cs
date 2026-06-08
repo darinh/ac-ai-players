@@ -92,6 +92,36 @@ public class CombatFeelLedgerTests
     }
 
     [Fact]
+    public void RecordIneffective_SurfacesInSnapshot()
+    {
+        // A non-lethal abandon (out-defended, no kill, no death) is its own
+        // significant outcome so the LLM learns the kind without dying.
+        var l = new CombatFeelLedger();
+        Assert.True(l.IsEmpty);
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"));
+        Assert.False(l.IsEmpty);
+
+        var snap = l.Snapshot();
+        Assert.NotNull(snap);
+        var e = Assert.Single(snap!);
+        Assert.Equal("Auroch Bull", e.Name);
+        Assert.Equal(1, e.Ineffective);
+        Assert.Equal(0, e.Kills);
+        Assert.Equal(0, e.Deaths);
+        Assert.Equal("ineffective", e.LastOutcome);
+    }
+
+    [Fact]
+    public void RecordIneffective_AccumulatesPerKind()
+    {
+        var l = new CombatFeelLedger();
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"));
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"));
+        var e = Assert.Single(l.Snapshot()!);
+        Assert.Equal(2, e.Ineffective);
+    }
+
+    [Fact]
     public void RecordFightStart_AloneIsNotSignificant()
     {
         // A fight that produced no kill/death/near-death is zero-signal:

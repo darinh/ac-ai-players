@@ -94,7 +94,8 @@ internal sealed record CombatHistoryEntry(
     int Deaths,
     int NearDeaths,
     int Fights,
-    string LastOutcome);
+    string LastOutcome,
+    int Ineffective = 0);
 
 internal sealed class WorldState
 {
