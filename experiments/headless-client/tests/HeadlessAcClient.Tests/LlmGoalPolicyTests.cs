@@ -6850,8 +6850,9 @@ public class LlmGoalPolicyTests
     [Fact]
     public void EarlyTalkLoopEgress_SuppressedForOtherLoopKinds()
     {
-        // A world-object Use loop may be genuine early-zone progress — it keeps
-        // the dwell-gated path, so only the Talk loop kind early-escapes.
+        // The Talk-loop early-escape is Talk-only; a world-object Use loop has
+        // its OWN escape (ShouldEscapeWorldUseLoop, cp-2372), so this Talk
+        // predicate correctly does not fire for it.
         Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
             loopKind: "Use", hostileInView: false, freshDirective: false));
     }
@@ -6870,6 +6871,36 @@ public class LlmGoalPolicyTests
         // The server is actively guiding the bot — let it follow the directive.
         Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
             loopKind: "NPC Talk", hostileInView: false, freshDirective: true));
+    }
+
+    // --- world-object Use-loop egress (cp-2372) ----------------------------
+    // A confirmed bare world-object Use churn (the cp-2354 churn guard already
+    // fired) Explores to travel through/past the looped object instead of
+    // deferring to the fallback. NOT gated on freshDirective (re-Using one
+    // object cannot be "finishing guided training"); only a hostile suppresses.
+
+    [Fact]
+    public void WorldUseLoopEgress_FiresForUseChurnWhenSafe()
+    {
+        Assert.True(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
+            loopKind: "world-object Use", hostileInView: false));
+    }
+
+    [Fact]
+    public void WorldUseLoopEgress_SuppressedWhenHostileInView()
+    {
+        // An attacker is present — defend or flee, never turn away to wander.
+        Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
+            loopKind: "world-object Use", hostileInView: true));
+    }
+
+    [Fact]
+    public void WorldUseLoopEgress_SuppressedForOtherLoopKinds()
+    {
+        // Only the world-object Use churn kind uses this escape; a Talk loop has
+        // its own (freshDirective-gated) path.
+        Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
+            loopKind: "NPC Talk", hostileInView: false));
     }
 
     [Fact]
