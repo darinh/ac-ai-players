@@ -63,6 +63,22 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     private const int RecentProposedWindow = 8;
     private readonly Queue<uint> _recentProposedGuids = new();
 
+    // cp-2360: break a barren openable TOUR. With no LLM (e.g. the model is
+    // rate-limited) this fallback drives the bot, and step 5b below re-picks the
+    // nearest visible openable every tick; in a zone full of openables (a town
+    // with many static containers) the bot tours them forever and never egresses
+    // to hunt. Track the DISTINCT openables proposed in the CURRENT landblock and,
+    // once that crosses a threshold with no egress and no productive inventory
+    // change, stop proposing openables so the deliberation falls through to the
+    // Explore step. Generic anti-churn over the bot's OWN proposals + observed
+    // progress signals — object-type neutral, no game knowledge. Resets on a
+    // landblock change (egress) or an inventory-add (a productive loot), so a real
+    // loot room of productive containers never trips it.
+    private uint? _openableTourLandblock;
+    private readonly HashSet<uint> _openablesTouredThisLandblock = new();
+    private long _openableTourInvSeq = -1;
+    private const int OpenableTourEgressThreshold = 4;
+
     // Slice 0 (Hunt) — shared reference to the IntentStack so this
     // fallback can read (NEVER mutate) the strategic context an
     // operator (or eventually the LLM) has authorised.
@@ -276,7 +292,26 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //     Schema-only framing: mirrors step 4 (Pickup) in shape —
         //     observation drives behavior, no game-knowledge value
         //     judgment about whether openable things are worth opening.
-        var openable = world.Visible
+        // cp-2360: reset the per-landblock openable-tour memory on egress
+        // (landblock change) or a productive inventory-add (loot) — only a barren
+        // tour with neither persists. Then, once the bot has toured the threshold
+        // of DISTINCT openables here without progress, stop proposing openables
+        // (unless a hunt is already active, which has its own no-detour envelope)
+        // so this deliberation falls through to the Explore step and the bot
+        // heads out. Generic anti-churn over the bot's OWN proposals — no
+        // object-type judgment.
+        var openAddSeq = events.RecentOfKind(EventKind.InventoryItemAdded, 1)
+            .FirstOrDefault()?.Sequence ?? -1;
+        if (_openableTourLandblock != world.Self.Landblock || openAddSeq > _openableTourInvSeq)
+        {
+            _openableTourLandblock = world.Self.Landblock;
+            _openablesTouredThisLandblock.Clear();
+            _openableTourInvSeq = openAddSeq;
+        }
+        var openableTourTapped = !huntActive
+            && _openablesTouredThisLandblock.Count >= OpenableTourEgressThreshold;
+
+        var openable = openableTourTapped ? null : world.Visible
             .Where(v => v.IsOpenable && !v.IsDoor)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -289,6 +324,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .FirstOrDefault();
         if (openable is not null)
         {
+            _openablesTouredThisLandblock.Add(openable.Guid);
             RememberProposed(openable.Guid);
             return MakeGoal(GoalKind.Use,
                 new Selector { Guid = openable.Guid, Name = openable.Name },
