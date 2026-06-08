@@ -5122,7 +5122,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 Strategy.Intent.HuntAuthorization.IsHuntCommitment(intentStack.Top);
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
-                                frontierCellCooldownUntil, huntBiasAuthorized, out var outdoorPathCells);
+                                frontierCellCooldownUntil, huntBiasAuthorized, goal.Direction, out var outdoorPathCells);
                             if (outdoorFrontier is not null)
                             {
                                 exploreTarget = outdoorFrontier;
@@ -6301,6 +6301,7 @@ internal sealed class HandshakeDriver : IDisposable
                         var aimlessFrontier = TryChooseOutdoorFrontierDest(
                             self.CellId ?? 0u, self.Position, navGraph,
                             frontierCellCooldownUntil, huntBiasAuthorized: false,
+                            headingDirection: null,
                             out var aimlessFrontierCells);
                         if (aimlessFrontier is not null)
                         {
@@ -8813,6 +8814,14 @@ internal sealed class HandshakeDriver : IDisposable
     /// stale coord would only cause an orbit. One frontier step (72 m).</summary>
     private const float OutdoorFrontierMobBiasMinDistanceMeters = 72f;
 
+    /// <summary>Near-tie window (meters of geometric frontier score) within
+    /// which an LLM-chosen Explore heading may steer the outdoor bearing. Same
+    /// magnitude as the Mob-bias window: the directional steer only resolves
+    /// near-ties among reasonable unexplored sectors and can NEVER pull the bot
+    /// to a meaningfully more-explored or cooled direction. The LLM picks the
+    /// heading; the Motor only walks it.</summary>
+    private const float OutdoorFrontierHeadingBiasTieWindowMeters = 36f;
+
     /// <summary>
     /// Autonomous OUTDOOR frontier exploration — the surface analogue of
     /// <see cref="TryChooseFrontierDest"/>. When the active Explore goal has
@@ -8847,6 +8856,7 @@ internal sealed class HandshakeDriver : IDisposable
         NavGraph navGraph,
         Dictionary<uint, DateTime> frontierCooldownUntil,
         bool huntBiasAuthorized,
+        string? headingDirection,
         out IReadOnlySet<uint>? pathCells)
     {
         pathCells = null;
@@ -8896,12 +8906,22 @@ internal sealed class HandshakeDriver : IDisposable
             }
         }
 
+        // Optional LLM-chosen heading: when the active Explore goal named an
+        // 8-way compass direction, convert it to a global-XY unit bearing and
+        // pass it as a near-tie steer. The LLM chose WHERE; the Motor only
+        // walks it (a near-tie bias that can never override a clearly-more-
+        // unexplored or cooled direction). Unknown/empty heading => no bias.
+        var headingVec = Strategy.OutdoorFrontierExplorer.TryHeadingVector(headingDirection);
+
         var choice = Strategy.OutdoorFrontierExplorer.ChooseFrontier(
             selfGX, selfGY, samples, cooled, DateTimeOffset.UtcNow,
             OutdoorFrontierStepMeters, OutdoorFrontierLocalityMeters, OutdoorFrontierRecency,
             mobSightings,
             mobSightings is { Count: > 0 } ? OutdoorFrontierMobBiasTieWindowMeters : 0f,
-            OutdoorFrontierMobBiasMinDistanceMeters);
+            OutdoorFrontierMobBiasMinDistanceMeters,
+            headingVec?.X ?? 0f,
+            headingVec?.Y ?? 0f,
+            headingVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f);
         if (choice is not Strategy.OutdoorFrontierExplorer.FrontierResult ft)
             return null;
 

@@ -195,6 +195,21 @@ internal sealed record Goal
     public long? Amount { get; init; }
 
     /// <summary>
+    /// Optional 8-way compass heading for an <see cref="GoalKind.Explore"/>
+    /// goal (north, northeast, east, southeast, south, southwest, west,
+    /// northwest; case-insensitive). When set, the Motor's outdoor frontier
+    /// search BIASES its bearing toward this heading among near-tie unexplored
+    /// sectors — letting Strategy steer a hunt excursion that has covered
+    /// ground without finding monsters. Null (the default) keeps the existing
+    /// undirected "walk to the nearest unexplored frontier" behavior. The LLM
+    /// chooses the heading; the Motor only walks it (a near-tie bias that can
+    /// never force a cooled or clearly worse-explored cell). Ignored by every
+    /// other verb and by indoor exploration.
+    /// </summary>
+    [JsonPropertyName("direction")]
+    public string? Direction { get; init; }
+
+    /// <summary>
     /// Free-form rationale from Strategy. Used for log readability
     /// and training-data audit ("why did the LLM pick this?").
     /// </summary>

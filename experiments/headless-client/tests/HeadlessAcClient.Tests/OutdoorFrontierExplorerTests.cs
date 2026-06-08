@@ -292,4 +292,98 @@ public class OutdoorFrontierExplorerTests
         Assert.NotNull(result);
         Assert.Equal(0, result!.Value.Sector); // east — too-close mob ignored
     }
+
+    // ---- directional Explore heading-bias -----------------------------
+
+    [Fact]
+    public void Heading_BreaksTie_TowardChosenBearing()
+    {
+        // No visited history => all 8 sectors tie on geometric score, so the
+        // LLM-chosen heading decides. "north" must pick the north sector (+Y).
+        var n = OutdoorFrontierExplorer.TryHeadingVector("north")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, Array.Empty<OutdoorFrontierExplorer.VisitedSample>(),
+            NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, n.X, n.Y, 36f);
+
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Value.Sector); // sector 2 = +Y = north
+        Assert.True(result.Value.GlobalY > SelfY);
+        Assert.True(Math.Abs(result.Value.GlobalX - SelfX) < 1f);
+    }
+
+    [Fact]
+    public void Heading_CannotOverrideAClearlyBetterDirection()
+    {
+        // A tight western cluster makes EAST clearly the least-explored bearing
+        // (score far beyond the near-tie window). A heading pointing WEST (back
+        // at the explored cluster) must NOT drag the bot there — the steer is a
+        // near-tie bias only, so the geometric east pick stands.
+        var visited = new List<OutdoorFrontierExplorer.VisitedSample>
+        {
+            Sample(SelfX - 60f, SelfY, Now),
+            Sample(SelfX - 70f, SelfY + 10f, Now),
+            Sample(SelfX - 80f, SelfY - 10f, Now),
+        };
+        var w = OutdoorFrontierExplorer.TryHeadingVector("west")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, w.X, w.Y, 36f);
+
+        Assert.NotNull(result);
+        Assert.True(result!.Value.GlobalX > SelfX,
+            $"heading should not override the clearly-better east pick, got ({result.Value.GlobalX},{result.Value.GlobalY})");
+    }
+
+    [Fact]
+    public void Heading_ZeroWindow_IsNoOp()
+    {
+        // A heading vector with a zero tie window is inactive => identical to
+        // the undirected pick (sector 0 = east with no references).
+        var n = OutdoorFrontierExplorer.TryHeadingVector("north")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, Array.Empty<OutdoorFrontierExplorer.VisitedSample>(),
+            NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, n.X, n.Y, 0f);
+
+        Assert.NotNull(result);
+        Assert.Equal(0, result!.Value.Sector); // east — unchanged default
+    }
+
+    [Theory]
+    [InlineData("north", 0f, 1f)]
+    [InlineData("east", 1f, 0f)]
+    [InlineData("south", 0f, -1f)]
+    [InlineData("west", -1f, 0f)]
+    public void TryHeadingVector_ParsesCardinalPoints(string heading, float ex, float ey)
+    {
+        var v = OutdoorFrontierExplorer.TryHeadingVector(heading);
+        Assert.NotNull(v);
+        Assert.Equal(ex, v!.Value.X, 3);
+        Assert.Equal(ey, v.Value.Y, 3);
+    }
+
+    [Theory]
+    [InlineData("ne")]
+    [InlineData("NorthEast")]
+    [InlineData("  northeast  ")]
+    public void TryHeadingVector_AcceptsAbbreviationsAndCaseAndWhitespace(string heading)
+    {
+        var v = OutdoorFrontierExplorer.TryHeadingVector(heading);
+        Assert.NotNull(v);
+        // northeast = (+,+), equal magnitude on both axes.
+        Assert.True(v!.Value.X > 0f && v.Value.Y > 0f);
+        Assert.Equal(v.Value.X, v.Value.Y, 3);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("up")]
+    [InlineData("toward the trees")]
+    public void TryHeadingVector_NullEmptyOrUnknown_ReturnsNull(string? heading)
+    {
+        Assert.Null(OutdoorFrontierExplorer.TryHeadingVector(heading));
+    }
 }
