@@ -2788,6 +2788,62 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Visible nearby", prompt);
     }
 
+    // ---- SELF-ARM rule gating on combat-effectiveness (cp-2374) ------------
+    // The SELF-ARM rule applies only when the bot is not yet combat-effective
+    // (no melee weapon wielded, no wielded missile weapon with ammo). Gated on
+    // the same wire fact (WieldedAt + typed weapon/ammo masks) the combat-
+    // readiness `weapon:` line uses (cp-2335 per-rule gating pattern).
+
+    [Fact]
+    public void BuildUserPrompt_SelfArmRule_PresentWhenUnarmed()
+    {
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()), new EventStream(), null);
+        Assert.Contains("SELF-ARM before fighting", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfArmRule_OmittedWhenMeleeWielded()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        Assert.DoesNotContain("SELF-ARM before fighting", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfArmRule_PresentWhenMissileWieldedButNoAmmo()
+    {
+        // A wielded missile weapon with EMPTY ammo is NOT combat-effective —
+        // the rule must render (it tells the bot to wield ammo).
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        Assert.Contains("SELF-ARM before fighting", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfArmRule_OmittedWhenMissileWieldedWithAmmo()
+    {
+        // Wielded missile weapon + wielded ammo (WieldedAt == MissileAmmoSlot) is
+        // combat-effective -> the rule is moot and omitted.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+            new InventoryItemProjection
+            { Guid = 0x2u, Name = "Arrows", Wcid = 3u, ItemType = 0x800u, WieldedAt = 0x00800000u },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        Assert.DoesNotContain("SELF-ARM before fighting", p);
+    }
+
     [Fact]
     public void FitPromptToCeiling_TrimsInventoryBeforeGuillotiningFixedSections()
     {

@@ -3803,6 +3803,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite). Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a blocked combo.");
         sb.AppendLine("- Read `## Server hints`: phrases like \"Double click X\" or \"Use X to ...\" tell you the exact verb+target. If that object is visible AND the server instructed it, emit `Use{target: name=\"X\"}`. The server is your tutorial; don't ignore it for pure exploration.");
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
+        // SELF-ARM is entirely about getting armed: it applies ONLY when the bot
+        // is NOT yet combat-effective (no melee weapon wielded, and no wielded
+        // missile weapon with ammo loaded). Once combat-effective the rule is
+        // moot, so gate it on the SAME wire fact (`WieldedAt != 0` + the typed
+        // MeleeWeapon / MissileWeapon / MissileAmmo masks) that the `## Combat
+        // readiness` `weapon:` line is derived from (cp-2335 per-rule gating
+        // pattern). Behaviour-preserving — it renders identically whenever the
+        // bot is unarmed or has a missile weapon with EMPTY ammo; the HOSTILE-
+        // attacker-takes-priority clause is also carried by the COMBAT SAFETY
+        // rule when a monster/hostile is in view. A render gate on an observed
+        // fact; the LLM still decides; no game knowledge.
+        var selfArmMeleeWielded = world.Inventory.Any(i =>
+            i.WieldedAt is uint sw && sw != 0 &&
+            i.ItemType is uint sit && (sit & ItemTypeMasks.MeleeWeapon) != 0);
+        var selfArmMissileWielded = world.Inventory.Any(i =>
+            i.WieldedAt is uint smw && smw != 0 &&
+            i.ItemType is uint smit && (smit & ItemTypeMasks.MissileWeapon) != 0);
+        var selfArmAmmoLoaded = world.Inventory.Any(i =>
+            i.WieldedAt is uint saw && saw == ItemTypeMasks.MissileAmmoSlot);
+        var selfArmCombatEffective =
+            selfArmMeleeWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
+        if (!selfArmCombatEffective)
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         // Whether a monster is in view — the SAME wire fact (`!IsCorpse &&
