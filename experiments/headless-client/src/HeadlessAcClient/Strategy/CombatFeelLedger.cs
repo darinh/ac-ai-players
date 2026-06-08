@@ -34,6 +34,7 @@ internal sealed class CombatFeelLedger
         public int Kills;
         public int Deaths;
         public int NearDeaths;
+        public int Ineffective;
         public int Fights;
         public string LastOutcome = "";
         public long LastOutcomeOrder;
@@ -78,6 +79,15 @@ internal sealed class CombatFeelLedger
     public void RecordNearDeath(MobIdentity id) => Bump(id, e => { e.NearDeaths++; }, "near-death");
 
     /// <summary>
+    /// Records a non-lethal INEFFECTIVE engagement: the bot disengaged a
+    /// fight it could not make progress in (the Motor's no-progress abandon —
+    /// 0 damage over the watchdog window, or all swings evaded) WITHOUT a
+    /// kill or death. Lets the LLM learn the KIND out-defends it without the
+    /// bot having to die first. RAW recorded fact; no avoidance decision.
+    /// </summary>
+    public void RecordIneffective(MobIdentity id) => Bump(id, e => { e.Ineffective++; }, "ineffective");
+
+    /// <summary>
     /// Records the START of an engagement against a monster kind (the
     /// first swing of a fresh target). Increments the Fights counter
     /// without changing the win/loss outcome columns.
@@ -105,7 +115,7 @@ internal sealed class CombatFeelLedger
 
     /// <summary>True when nothing significant has been recorded yet.</summary>
     public bool IsEmpty => _byKey.Values.All(e =>
-        e.Kills == 0 && e.Deaths == 0 && e.NearDeaths == 0);
+        e.Kills == 0 && e.Deaths == 0 && e.NearDeaths == 0 && e.Ineffective == 0);
 
     /// <summary>
     /// The most-relevant recorded outcomes for the prompt, capped at
@@ -118,7 +128,7 @@ internal sealed class CombatFeelLedger
     public IReadOnlyList<CombatHistoryEntry>? Snapshot(int max = 6)
     {
         var significant = _byKey.Values
-            .Where(e => e.Kills > 0 || e.Deaths > 0 || e.NearDeaths > 0)
+            .Where(e => e.Kills > 0 || e.Deaths > 0 || e.NearDeaths > 0 || e.Ineffective > 0)
             .OrderByDescending(e => e.LastOutcomeOrder)
             .Take(Math.Max(0, max))
             .Select(e => new CombatHistoryEntry(
@@ -127,6 +137,7 @@ internal sealed class CombatFeelLedger
                 Kills: e.Kills,
                 Deaths: e.Deaths,
                 NearDeaths: e.NearDeaths,
+                Ineffective: e.Ineffective,
                 Fights: e.Fights,
                 LastOutcome: e.LastOutcome))
             .ToList();

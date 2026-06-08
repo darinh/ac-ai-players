@@ -3412,6 +3412,17 @@ internal sealed class HandshakeDriver : IDisposable
                             $"individuals of the same type may still be killable, e.g. different " +
                             $"position/armor state). Phase 7f.5 changed this from wcid-satisfaction " +
                             $"to per-guid visited so multi-mob rooms aren't exited after one bad fight.");
+                        // combat-feel: record a non-lethal INEFFECTIVE outcome
+                        // for this KIND (the bot abandoned a fight it could not
+                        // make progress in, without a kill or death) so the LLM
+                        // learns the kind out-defends it without having to die.
+                        // Per-KIND raw fact; source makes no avoidance decision.
+                        if (lastCombatFoe is { } abandonFoe)
+                        {
+                            combatFeel.RecordIneffective(
+                                new CombatFeelLedger.MobIdentity(abandonFoe.Wcid, abandonFoe.Name));
+                            PublishCombatHistory();
+                        }
                         visitedTargetGuids.Add(ctgWatch);
                         combatTargetGuid = null;
                         combatStartedAt = null;

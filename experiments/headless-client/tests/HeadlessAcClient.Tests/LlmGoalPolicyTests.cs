@@ -8433,7 +8433,7 @@ public class LlmGoalPolicyTests
 
         // The nearest-monster line carries the inline record.
         Assert.Contains("nearest monster: Sparring Golem", p);
-        Assert.Contains("your record: fights 3, kills 1, deaths 2, near-deaths 0, last death", p);
+        Assert.Contains("your record: fights 3, kills 1, deaths 2, near-deaths 0, ineffective 0, last death", p);
     }
 
     [Fact]
@@ -8564,7 +8564,21 @@ public class LlmGoalPolicyTests
             new CombatHistoryEntry("Drudge Skulker", 7u, 0, 1, 0, 1, "death"),
         };
         var s = LlmGoalPolicy.FormatCombatRecordFor(hist, 19257u, "Drudge Skulker");
-        Assert.Equal(" [your record: fights 3, kills 2, deaths 1, near-deaths 0, last kill]", s);
+        Assert.Equal(" [your record: fights 3, kills 2, deaths 1, near-deaths 0, ineffective 0, last kill]", s);
+    }
+
+    [Fact]
+    public void FormatCombatRecordFor_RendersIneffectiveCount()
+    {
+        // A kind the bot fought but never killed (out-defended, abandoned)
+        // surfaces its raw ineffective count so the LLM can avoid it up front.
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Auroch Bull", 20u, 0, 0, 0, 2, "ineffective", Ineffective: 2),
+        };
+        var s = LlmGoalPolicy.FormatCombatRecordFor(hist, 20u, "Auroch Bull");
+        Assert.Contains("kills 0", s);
+        Assert.Contains("ineffective 2", s);
     }
 
     [Fact]
