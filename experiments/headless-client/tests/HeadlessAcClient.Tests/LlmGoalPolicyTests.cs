@@ -2319,6 +2319,114 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("NEVER skip an unopened chest", p);
     }
 
+    // ---- ## Monsters in view end-capsule (cp-2366) ------------------------
+    // Mirrors the `## Unspent XP` / `## Recent Talk` end-of-prompt salience
+    // capsules: re-surface the already-computed visible-monster perception in
+    // the most decision-proximate slot, on RAW PRESENCE, as a not-a-
+    // recommendation fact. The capsule must render iff a non-corpse monster is
+    // visible.
+
+    private static WorldStateProjection BuildWorldWithMonsters(
+        params VisibleObjectProjection[] visible)
+        => new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_RendersWhenMonsterVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f,
+              IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        Assert.Contains("Sparring Golem", p);
+        Assert.Contains("d=6.5u", p);
+        Assert.Contains("raw fact, not a recommendation", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_OmittedWhenNoMonster()
+    {
+        // BuildExitTokenWorld has no monster -> the capsule carries no
+        // information and must be absent.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null);
+        Assert.DoesNotContain("## Monsters in view", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_OmittedWhenOnlyCorpseVisible()
+    {
+        // A corpse is not an attackable monster (IsCorpse excluded) -> omit.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x601u, Name = "Corpse of a Golem", Wcid = 70u, Distance = 4f,
+              IsCorpse = true, IsMonster = false });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Monsters in view", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_GroupsKindsWithCount()
+    {
+        // Two of the same kind collapse to "<Name> x2"; the count and the
+        // nearest distance reflect the full set.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x602u, Name = "Drudge Skulker", Wcid = 71u, Distance = 9f,
+              IsMonster = true },
+            new VisibleObjectProjection
+            { Guid = 0x603u, Name = "Drudge Skulker", Wcid = 71u, Distance = 3f,
+              IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        Assert.Contains("Drudge Skulker x2", p);
+        Assert.Contains("2 attackable monster(s)", p);
+        Assert.Contains("d=3.0u", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_NullDistanceRendersGracefully()
+    {
+        // A visible monster with no computed distance must not produce a
+        // malformed "d=u"; it falls back to an explicit unknown-distance phrase.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x604u, Name = "Mosswart", Wcid = 72u, Distance = null, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        Assert.Contains("Mosswart", p);
+        Assert.DoesNotContain("d=u", p);
+        Assert.Contains("unknown distance", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_BlankNameRendersUnknown()
+    {
+        // A visible monster with a blank name normalizes to "(unknown)" in both
+        // the grouped list and the nearest-target fragment (no empty quotes).
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x605u, Name = "  ", Wcid = 73u, Distance = 5f, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        Assert.Contains("(unknown)", p);
+        Assert.Contains("nearest '(unknown)'", p);
+        Assert.DoesNotContain("nearest ''", p);
+    }
+
     // ---- Inventory dedup + prompt-bound (cp-2334) -------------------------
     // A bloated bag of duplicate quest items was rendered one-row-per-item and
     // (being an early, non-trimmable section) pushed the later FIXED sections
