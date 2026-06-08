@@ -604,6 +604,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetExcursionCoverage(ExcursionCoverageProjection? coverage)
         => _currentExcursionCoverage = coverage;
 
+    // loot-fresh-kills (cp-2357): the bot's OWN fresh, unlooted kill corpses
+    // (matched by name+recency to a recent kill, not yet opened, within range),
+    // surfaced as the "## Fresh kill to loot" capsule so the LLM loots a kill
+    // before the hunt-excursion re-drives it away. Null/empty = nothing to surface.
+    private IReadOnlyList<FreshKillCorpse>? _currentFreshKillCorpses;
+
+    public void SetFreshKillCorpses(IReadOnlyList<FreshKillCorpse>? corpses)
+        => _currentFreshKillCorpses = corpses;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -1703,7 +1712,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -3428,7 +3437,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         GoalProgressSnapshot? goalProgress = null,
         IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null,
         ApproachDistanceProjection? approachDistance = null,
-        ExcursionCoverageProjection? excursionCoverage = null)
+        ExcursionCoverageProjection? excursionCoverage = null,
+        IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4754,6 +4764,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- raw fact, not a recommendation: this is not a map or a known monster location. The " +
                 "`Explore` `direction` is optional and only steers the search. Your call.");
+        }
+
+        // loot-fresh-kills (cp-2357): after a kill the picker abandons the corpse
+        // when its short wait is outrun by the multi-second LLM latency, and the
+        // hunt-excursion re-drives the bot away, so a fresh kill goes unlooted.
+        // Surface the bot's OWN fresh, unlooted kill corpse(s) (matched to a recent
+        // kill by name+recency, not yet opened) as a decision-proximate loot
+        // opportunity. Perception + the existing loot-fresh-corpse rule above — no
+        // game knowledge, no priority assigned here (the LLM decides).
+        if (freshKillCorpses is { Count: > 0 } fkc)
+        {
+            var nearest = fkc[0];
+            sb.AppendLine();
+            sb.AppendLine("## Fresh kill to loot");
+            sb.AppendLine(
+                $"- a corpse from your own recent kill (\"{nearest.Name}\") is {nearest.Distance:F1}u away and not " +
+                $"yet looted" + (fkc.Count > 1 ? $"; {fkc.Count - 1} more fresh corpse(s) await" : "") +
+                ". Use it to reveal its loot, then Pickup.");
         }
 
         var assembled = sb.ToString();
