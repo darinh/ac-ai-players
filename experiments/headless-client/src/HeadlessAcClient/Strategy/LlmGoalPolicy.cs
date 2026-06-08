@@ -613,6 +613,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetFreshKillCorpses(IReadOnlyList<FreshKillCorpse>? corpses)
         => _currentFreshKillCorpses = corpses;
 
+    // loot-fresh-kills follow-up (cp-2358): the bot's OWN kill corpses it opened
+    // and the loot system reported empty. Surfaced as the "## Already looted"
+    // capsule so the observed empty-loot outcome is available in the prompt.
+    // Null/empty = nothing to surface.
+    private IReadOnlyList<LootedCorpse>? _currentLootedEmptyCorpses;
+
+    public void SetLootedEmptyCorpses(IReadOnlyList<LootedCorpse>? corpses)
+        => _currentLootedEmptyCorpses = corpses;
+
     // Slice T — 429 / rate-limit backoff. GitHub Models (the spike's
     // current LLM provider) returns HTTP 429 once a small per-minute
     // and per-day quota is exhausted. Without backoff the policy
@@ -1712,7 +1721,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -3438,7 +3447,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlyList<UnreachableTargetProjection>? unreachableTargets = null,
         ApproachDistanceProjection? approachDistance = null,
         ExcursionCoverageProjection? excursionCoverage = null,
-        IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null)
+        IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null,
+        IReadOnlyList<LootedCorpse>? lootedEmptyCorpses = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -4782,6 +4792,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"- a corpse from your own recent kill (\"{nearest.Name}\") is {nearest.Distance:F1}u away and not " +
                 $"yet looted" + (fkc.Count > 1 ? $"; {fkc.Count - 1} more fresh corpse(s) await" : "") +
                 ". Use it to reveal its loot, then Pickup.");
+        }
+
+        // cp-2358: the complement of "## Fresh kill to loot" — the bot's OWN
+        // kill corpses it already opened and the loot system found EMPTY. Once a
+        // corpse is opened the fresh-kill capsule above stops surfacing it, but
+        // the bot's recent Use emissions still name it in "## Recent Use" (which
+        // states every verb stays executable). State the observed loot OUTCOME
+        // as a fact so the model has the empty result in the most decision-
+        // proximate slot. A name is omitted when a fresh unlooted corpse shares
+        // it (the fresh-kill capsule wins — avoids contradicting it). Perception
+        // of the bot's OWN outcome; no instruction, no priority.
+        if (lootedEmptyCorpses is { Count: > 0 } lec)
+        {
+            var freshNames = freshKillCorpses is { Count: > 0 } fk
+                ? fk.Select(c => c.Name).ToHashSet(System.StringComparer.OrdinalIgnoreCase)
+                : null;
+            var emptyNames = lec
+                .Select(c => c.Name)
+                .Where(n => freshNames is null || !freshNames.Contains(n))
+                .Distinct(System.StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (emptyNames.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Already looted");
+                sb.AppendLine(
+                    "- you opened your own kill corpse(s) and the loot was empty — no contents " +
+                    $"remained to take: {string.Join(", ", emptyNames)}.");
+                sb.AppendLine(
+                    "- raw fact, not a recommendation. Your call.");
+            }
         }
 
         var assembled = sb.ToString();

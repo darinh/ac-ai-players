@@ -7943,6 +7943,57 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_AlreadyLootedCapsule_RendersWhenPresent()
+    {
+        // cp-2358: after emptying its own kill corpse the bot keeps re-Use/
+        // Pickup-ing it (the recent-Use section still names it as executable).
+        // State the loot OUTCOME as a fact so the model can stop.
+        var looted = new[] { new LootedCorpse("husk-alpha", 0x900u) };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            lootedEmptyCorpses: looted);
+        Assert.Contains("## Already looted", prompt);
+        Assert.Contains("husk-alpha", prompt);
+        Assert.Contains("no contents remained to take", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AlreadyLootedCapsule_OmittedWhenNullOrEmpty()
+    {
+        var pNull = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            lootedEmptyCorpses: null);
+        Assert.DoesNotContain("## Already looted", pNull);
+        var pEmpty = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            lootedEmptyCorpses: System.Array.Empty<LootedCorpse>());
+        Assert.DoesNotContain("## Already looted", pEmpty);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AlreadyLootedCapsule_ExcludesNameSharedWithFreshKill()
+    {
+        // Disambiguation: if a fresh UNLOOTED corpse shares the name with an
+        // emptied one, the fresh-kill capsule wins and the looted note drops
+        // the name (never tell the LLM a name is empty while also offering it
+        // as a fresh kill). Here the only looted name matches the only fresh
+        // name, so the looted capsule is omitted entirely.
+        var fresh = new[] { new FreshKillCorpse("husk-twin", 0x801u, 5.0f) };
+        var looted = new[] { new LootedCorpse("husk-twin", 0x900u) };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), currentGoal: null,
+            stack: null, pickerActivity: null, explorationCandidates: null,
+            freshKillCorpses: fresh, lootedEmptyCorpses: looted);
+        Assert.Contains("## Fresh kill to loot", prompt);
+        Assert.DoesNotContain("## Already looted", prompt);
+    }
+
+
+    [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OmittedWhenNoUnspent()
     {
         // unspent == 0: the verbs are not executable, so the capsule is omitted
