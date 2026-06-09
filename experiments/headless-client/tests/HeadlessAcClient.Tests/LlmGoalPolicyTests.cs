@@ -2553,6 +2553,43 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_RemindsToPursueNamedTarget()
+    {
+        // cp-2387: when a directive is present the capsule re-surfaces the
+        // pursue-the-named-target reminder (decision-proximate), gated on the
+        // capsule rendering (a directive exists).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "If you wish to skip this tutorial, go talk to the guide in the next room.",
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        var marker = "directed text the server/NPCs sent you earlier this session";
+        var start = p.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.True(start >= 0, "the capsule must render");
+        var rest = p.Substring(start);
+        var nextHdr = rest.IndexOf("\n## ", System.StringComparison.Ordinal);
+        var capsule = nextHdr >= 0 ? rest.Substring(0, nextHdr) : rest;
+        // The reminder points at the existing rules and tells the LLM to NAME
+        // the target rather than Explore generically.
+        Assert.Contains("pursue it by NAMING that exact target", capsule);
+        Assert.Contains("INSTEAD of Exploring", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectives_PursueReminder_OmittedWhenNoDirective()
+    {
+        // No persisted directive -> capsule absent -> no pursue reminder.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "ambient" });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+        Assert.DoesNotContain("pursue it by NAMING that exact target", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_EarlyServerDirectivesCapsule_OmittedWhenNoPopups()
     {
         // No PopupString ever seen -> nothing to persist -> capsule omitted.
