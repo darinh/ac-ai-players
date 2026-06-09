@@ -3714,7 +3714,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // NPC collapse to one count even when the selector carries a guid. A purely
     // structural read of the bot's OWN emission history — no server text, no game
     // knowledge.
-    private static bool HasRecentRepeatedTalkGoal(EventStream events)
+    // cp-2400/cp-2401: cheap pre-pass for the repeat-driven RULES gates. Returns
+    // true when the recent emission history (last 10 GoalEmitted) shows the SAME
+    // (verb,target) emitted 2+ times for ANY of the given verb prefixes — i.e. a
+    // re-action loop is forming and the corresponding "stop repeating" guidance
+    // is actionable. Mirrors the talkByKey/useByKey parse used by
+    // `## Location & recency` (Tactics formats GoalEmitted Text as
+    // `<Kind> target=<Selector> item=<Selector> source=<src>`, and
+    // Selector.ToString() prints `guid=...` before `name="..."`), keying by
+    // VERB + (guid token else name token) so re-emissions of the SAME target
+    // collapse to one count while a Talk and a Use of the same object stay
+    // distinct. A purely structural read of the bot's OWN emission history — no
+    // server text, no game knowledge.
+    private static bool HasRecentRepeatedGoalOfKinds(EventStream events, params string[] verbPrefixes)
     {
         var recent = events.Recent(EventStream.DefaultCapacity)
             .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
@@ -3723,14 +3735,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var ge in recent)
         {
             var txt = ge.Text!;
-            if (!txt.StartsWith("Talk ", StringComparison.Ordinal)) continue;
+            var verb = System.Array.Find(verbPrefixes, p => txt.StartsWith(p, StringComparison.Ordinal));
+            if (verb is null) continue;
             var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
             if (!sm.Success) continue;
             var sel = sm.Groups[1].Value.Trim();
             if (sel.Length == 0 || sel == "<empty>") continue;
             var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
             var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
-            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            var key = verb + (gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel));
             counts[key] = counts.GetValueOrDefault(key) + 1;
             if (counts[key] >= 2) return true;
         }
@@ -3911,7 +3924,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Motor's mechanical talk-loop guards (multi-NPC + per-NPC egress)
         // backstop loop-breaking regardless. A render gate on the bot's OWN
         // emission history; the LLM still decides; no game knowledge.
-        if (HasRecentRepeatedTalkGoal(events))
+        if (HasRecentRepeatedGoalOfKinds(events, "Talk "))
         sb.AppendLine("- NPC REPEAT EXHAUSTION — a repeating conversation is not progress: when `## Server hints` tags an NPC's dialog `repeated xN` (the count it shows) with N>=3, OR the recency note shows `recent Talk emissions: <that NPC> xN` with N>=3 (this ALSO covers a SILENT NPC that returns no dialog), OR the SAME NPC keeps producing recent lines that add no new item, hint, inventory, location, or change, that conversation is EXHAUSTED — re-`Talk`ing it will NOT advance anything even if it alternates 2-3 canned lines, so do NOT keep Talking just because the latest line looks new. PIVOT to a DIFFERENT verb/target: if the dialog named a concrete next action, follow it with a NON-Talk verb (`Use` the object it pointed at, `Give` a held item, `Pickup` visible loot, or `Talk` a DIFFERENT not-yet-talked NPC); else `Explore` away. Re-Talking the same NPC is NEVER how you follow an exhausted directive. If killable `monster`s are in view and no concrete non-Talk action is actionable, `Attack` one for XP instead — but only AFTER the conversation is exhausted; an NPC with genuinely NEW dialog still takes priority.");
         // The SPEND XP rule (~1.1KB) is inapplicable when there is nothing to
         // spend, so render it ONLY when unspent XP > 0 — the SAME factual gate
@@ -3951,6 +3964,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // to save prompt bytes and unbury the applicable rules.
         if (world.Visible.Any(v => v.IsSign || v.IsBook))
         sb.AppendLine("- Writables: a `sign` (stuck) is read in place with `Use{target: name=\"<sign>\"}`; a `book` (not stuck) is `Pickup`-able — prefer Pickup.");
+        // cp-2401: the main LOOP-BREAK rule (~1.1KB) is the action-repeat dead-end
+        // guard — its three sub-cases all describe REPEATING an action with no
+        // change: (a) Talk{X} 3+ times, (b) re-Use an unconsumed inventory item,
+        // (c) Use the SAME world object 3+ times. It is only actionable once such
+        // a repeat is forming, so gate it on an observed Talk-OR-Use goal repeat
+        // (cp-2400 helper, extended to both verbs). All three sub-cases are
+        // Motor-backstopped regardless of the prompt: cp-2344 talk-loop egress
+        // (a), the policy mechanically drops an unconsumed-inventory re-Use (b,
+        // stated in the rule itself), and the cp-2354/2359 world-object Use churn
+        // guard (c) — so gating the ADVISORY rule is behaviour-preserving and
+        // frees ~1.1KB in the common no-repeat case. cp-2368/69/92/2400 per-rule
+        // relevance-gating; a render gate on the bot's OWN emission history, no
+        // game knowledge. (The separate LOOP-BREAK town-stuck rule below stays
+        // ungated — it keys on dwell time + no-monsters, not an action repeat.)
+        if (HasRecentRepeatedGoalOfKinds(events, "Talk ", "Use "))
         sb.AppendLine("- LOOP-BREAK — do not repeat an action that produced no change (see the `Location & recency` section): (a) Talk: if you emitted `Talk{X}` 3+ times in the last 10 emissions with no new item and no new server hint, talk to a different NPC or Use/Give/Explore. (b) inventory-USE: if `Recently used inventory items` lists an item as `still in inventory (not consumed)`, the policy WILL drop a Use against it — do not re-emit unless a new event (ActionRejected recovery hint, new dialog/hint, inventory change) justifies it; when broken, pick a DIFFERENT action (a `monster` in view + weapon wielded → `Attack`; a not-yet-talked visible NPC → `Talk`; a visible pickup item → `Pickup`; else `Explore`). (c) world-object USE: the `Location & recency` section lists `recent Use emissions` per target; 3+ Uses of the SAME target with no change (same landblock per `minutes in current landblock`, no new hint/item) is a dead end → `Explore{target: {name: \"anywhere\"}}` or pick a different target. Re-Use ONLY if something concrete changed (you crossed into a new landblock, a new hint/item appeared, or an `ActionRejected` told you to retry).");
         // PASSAGE-OPENED stays UNGATED: it is relevant after the bot has USED a
         // door (a temporal/behavioural signal in `recent Use emissions`), not
