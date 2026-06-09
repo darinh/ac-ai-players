@@ -282,4 +282,79 @@ public class SilentTalkTargetLearnerTests
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Talk, goal!.Kind);
     }
+
+    // ---- Observability: RecordTalkDispatch outcome + Evaluate conclusions ----
+
+    [Fact]
+    public void RecordTalkDispatch_FreshProbe_ReturnsRecorded()
+        => Assert.Equal(
+            TalkProbeOutcome.Recorded,
+            New().RecordTalkDispatch(0xA001u, 22257u, T0));
+
+    [Fact]
+    public void RecordTalkDispatch_NullWcid_ReturnsIgnoredUnknownWcid()
+        => Assert.Equal(
+            TalkProbeOutcome.IgnoredUnknownWcid,
+            New().RecordTalkDispatch(0xA001u, null, T0));
+
+    [Fact]
+    public void RecordTalkDispatch_ImmunisedWcid_ReturnsIgnoredImmuneWcid()
+    {
+        var l = New();
+        l.RecordDialogFrom(0xB001u, 714u); // 714 is now a proven talker
+        Assert.Equal(
+            TalkProbeOutcome.IgnoredImmuneWcid,
+            l.RecordTalkDispatch(0xB002u, 714u, T0));
+    }
+
+    [Fact]
+    public void Evaluate_ReturnsWcid_WhenItCrossesThreshold()
+    {
+        var l = New(threshold: 2);
+        l.RecordTalkDispatch(0xA001u, 22257u, T0);
+        l.RecordTalkDispatch(0xA002u, 22257u, T0);
+        var concluded = l.Evaluate(T0.AddSeconds(Grace + 1));
+        Assert.Equal(new[] { 22257u }, concluded);
+    }
+
+    [Fact]
+    public void Evaluate_ReturnsEmpty_WhenNothingNewlyConcludes()
+    {
+        var l = New(threshold: 2);
+        // Only one distinct instance matures — below the 2-distinct threshold.
+        l.RecordTalkDispatch(0xA001u, 22257u, T0);
+        var concluded = l.Evaluate(T0.AddSeconds(Grace + 1));
+        Assert.Empty(concluded);
+    }
+
+    [Fact]
+    public void Evaluate_DoesNotReReportAnAlreadyConcludedWcid()
+    {
+        var l = New(threshold: 1);
+        l.RecordTalkDispatch(0xA001u, 22257u, T0);
+        Assert.Equal(new[] { 22257u }, l.Evaluate(T0.AddSeconds(Grace + 1)));
+        // A second distinct silent instance of the SAME already-concluded kind
+        // must not be reported again (it is reported exactly once).
+        l.RecordTalkDispatch(0xA002u, 22257u, T0.AddSeconds(Grace + 2));
+        Assert.Empty(l.Evaluate(T0.AddSeconds(2 * Grace + 4)));
+        Assert.True(l.IsSilent(22257u));
+    }
+
+    [Fact]
+    public void DistinctSilentInstances_TracksProgressTowardThreshold()
+    {
+        var l = New(threshold: 3);
+        Assert.Equal(0, l.DistinctSilentInstances(22257u));
+        Assert.Equal(0, l.DistinctSilentInstances(null));
+
+        l.RecordTalkDispatch(0xA001u, 22257u, T0);
+        l.Evaluate(T0.AddSeconds(Grace + 1));
+        Assert.Equal(1, l.DistinctSilentInstances(22257u));
+
+        l.RecordTalkDispatch(0xA002u, 22257u, T0.AddSeconds(Grace + 2));
+        l.Evaluate(T0.AddSeconds(2 * Grace + 4));
+        Assert.Equal(2, l.DistinctSilentInstances(22257u));
+        // Still below threshold 3, so not yet silent.
+        Assert.False(l.IsSilent(22257u));
+    }
 }
