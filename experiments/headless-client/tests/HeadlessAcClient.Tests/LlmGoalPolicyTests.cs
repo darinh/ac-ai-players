@@ -6856,10 +6856,10 @@ public class LlmGoalPolicyTests
     // (which re-picks the same dead-end class of stationary object).
 
     [Fact]
-    public void StuckLoop_EscapesWhenCombatReadyTappedOutAndNoHostile()
+    public void StuckLoop_EscapesWhenCombatReadyTappedOutAndNoMonster()
     {
         Assert.True(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, hostileInView: false));
+            combatReady: true, tappedOut: true, monsterInView: false));
     }
 
     [Fact]
@@ -6868,7 +6868,7 @@ public class LlmGoalPolicyTests
         // An UNARMED bot may legitimately need to Use objects to progress —
         // do not send it wandering off.
         Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: false, tappedOut: true, hostileInView: false));
+            combatReady: false, tappedOut: true, monsterInView: false));
     }
 
     [Fact]
@@ -6876,16 +6876,19 @@ public class LlmGoalPolicyTests
     {
         // Early in a zone a Use loop may be a genuine progress attempt.
         Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: false, hostileInView: false));
+            combatReady: true, tappedOut: false, monsterInView: false));
     }
 
     [Fact]
-    public void StuckLoop_SuppressedWhenHostileInView()
+    public void StuckLoop_SuppressedWhenMonsterInView()
     {
-        // An active attacker is present — defend or flee the fight, never
-        // turn away to wander.
+        // A monster is in view (hostile OR non-hostile — the caller passes
+        // AnyAttackableMonsterInView): the egress exists to LEAVE and find
+        // monsters, so when one is already in view the bot should engage it
+        // (defend/flee a hostile, or fight a non-hostile XP target), never wander
+        // off to find a monster it can already see.
         Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, hostileInView: true));
+            combatReady: true, tappedOut: true, monsterInView: true));
     }
 
     // --- silent-NPC Talk-loop early egress (cp-2328) ------------------------
@@ -6939,15 +6942,17 @@ public class LlmGoalPolicyTests
     public void WorldUseLoopEgress_FiresForUseChurnWhenSafe()
     {
         Assert.True(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
-            loopKind: "world-object Use", hostileInView: false));
+            loopKind: "world-object Use", monsterInView: false));
     }
 
     [Fact]
-    public void WorldUseLoopEgress_SuppressedWhenHostileInView()
+    public void WorldUseLoopEgress_SuppressedWhenMonsterInView()
     {
-        // An attacker is present — defend or flee, never turn away to wander.
+        // A monster is in view (hostile OR non-hostile — the caller passes
+        // AnyAttackableMonsterInView): engage the visible XP target instead of
+        // wandering off to "find monsters" the bot can already see.
         Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
-            loopKind: "world-object Use", hostileInView: true));
+            loopKind: "world-object Use", monsterInView: true));
     }
 
     [Fact]
@@ -6956,7 +6961,62 @@ public class LlmGoalPolicyTests
         // Only the world-object Use churn kind uses this escape; a Talk loop has
         // its own (freshDirective-gated) path.
         Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
-            loopKind: "NPC Talk", hostileInView: false));
+            loopKind: "NPC Talk", monsterInView: false));
+    }
+
+    // --- AnyAttackableMonsterInView: the broadened egress-defer predicate -----
+    // The stuck-loop / use-loop Explore-egress exists to LEAVE and find monsters,
+    // so it must defer when a monster is already in view. Before this widening the
+    // gate only checked ObservedHostile, so a fresh combat-ready bot near visible
+    // but non-hostile training monsters got Explored AWAY from them. The predicate
+    // now mirrors the `## Monsters in view` capsule (cp-2335/2366): any non-corpse
+    // monster OR observed-hostile creature counts.
+
+    private static WorldStateProjection WorldWithVisible(params VisibleObjectProjection[] visible)
+        => BuildExitTokenWorld() with { Visible = visible };
+
+    [Fact]
+    public void AnyAttackableMonsterInView_TrueForNonHostileMonster()
+    {
+        var world = WorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x80008064u, Name = "Sparring Golem", Wcid = 12698u,
+            Distance = 40f, IsMonster = true, ObservedHostile = false, IsCorpse = false,
+        });
+        Assert.True(LlmGoalPolicy.AnyAttackableMonsterInView(world));
+    }
+
+    [Fact]
+    public void AnyAttackableMonsterInView_TrueForObservedHostile()
+    {
+        var world = WorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x80008065u, Name = "Drudge", Wcid = 99u,
+            Distance = 5f, IsMonster = false, ObservedHostile = true, IsCorpse = false,
+        });
+        Assert.True(LlmGoalPolicy.AnyAttackableMonsterInView(world));
+    }
+
+    [Fact]
+    public void AnyAttackableMonsterInView_FalseForCorpseMonster()
+    {
+        var world = WorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x80008066u, Name = "Sparring Golem", Wcid = 12698u,
+            Distance = 3f, IsMonster = true, ObservedHostile = false, IsCorpse = true,
+        });
+        Assert.False(LlmGoalPolicy.AnyAttackableMonsterInView(world));
+    }
+
+    [Fact]
+    public void AnyAttackableMonsterInView_FalseWhenNoMonsters()
+    {
+        var world = WorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = 0x8000814Fu, Name = "Society Greeter", Wcid = 30991u,
+            Distance = 2f, IsMonster = false, ObservedHostile = false, IsCorpse = false,
+        });
+        Assert.False(LlmGoalPolicy.AnyAttackableMonsterInView(world));
     }
 
     [Fact]
