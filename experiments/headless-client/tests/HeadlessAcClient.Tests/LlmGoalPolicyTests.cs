@@ -6903,7 +6903,7 @@ public class LlmGoalPolicyTests
     public void EarlyTalkLoopEgress_FiresForTalkLoopWhenSafe()
     {
         Assert.True(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", hostileInView: false, freshDirective: false));
+            loopKind: "NPC Talk", monsterInView: false, freshDirective: false));
     }
 
     [Fact]
@@ -6913,15 +6913,17 @@ public class LlmGoalPolicyTests
         // its OWN escape (ShouldEscapeWorldUseLoop, cp-2372), so this Talk
         // predicate correctly does not fire for it.
         Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "Use", hostileInView: false, freshDirective: false));
+            loopKind: "Use", monsterInView: false, freshDirective: false));
     }
 
     [Fact]
-    public void EarlyTalkLoopEgress_SuppressedWhenHostileInView()
+    public void EarlyTalkLoopEgress_SuppressedWhenMonsterInView()
     {
-        // An attacker is present — defend or flee, never turn away to wander.
+        // A monster is in view (hostile OR non-hostile — the caller passes
+        // AnyAttackableMonsterInView): engage the visible XP target instead of
+        // wandering off to break the talk loop (cp-2378/cp-2379 principle).
         Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", hostileInView: true, freshDirective: false));
+            loopKind: "NPC Talk", monsterInView: true, freshDirective: false));
     }
 
     [Fact]
@@ -6929,7 +6931,7 @@ public class LlmGoalPolicyTests
     {
         // The server is actively guiding the bot — let it follow the directive.
         Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", hostileInView: false, freshDirective: true));
+            loopKind: "NPC Talk", monsterInView: false, freshDirective: true));
     }
 
     // --- world-object Use-loop egress (cp-2372) ----------------------------
@@ -7026,7 +7028,7 @@ public class LlmGoalPolicyTests
         Assert.True(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: now.AddSeconds(30),
             latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            hostileInView: false, freshDirective: false));
+            monsterInView: false, freshDirective: false));
     }
 
     [Fact]
@@ -7036,7 +7038,7 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: now.AddSeconds(-1),
             latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            hostileInView: false, freshDirective: false));
+            monsterInView: false, freshDirective: false));
     }
 
     [Fact]
@@ -7047,21 +7049,21 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: now.AddSeconds(30),
             latchLandblock: 0xA9B4u, currentLandblock: 0xA9B2u,
-            hostileInView: false, freshDirective: false));
+            monsterInView: false, freshDirective: false));
     }
 
     [Fact]
-    public void TalkLoopEgressActive_InactiveWhenHostileOrDirective()
+    public void TalkLoopEgressActive_InactiveWhenMonsterOrDirective()
     {
         var now = DateTimeOffset.UtcNow;
         Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: now.AddSeconds(30),
             latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            hostileInView: true, freshDirective: false));
+            monsterInView: true, freshDirective: false));
         Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: now.AddSeconds(30),
             latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            hostileInView: false, freshDirective: true));
+            monsterInView: false, freshDirective: true));
     }
 
     [Fact]
@@ -7072,7 +7074,7 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
             nowUtc: now, until: DateTimeOffset.MinValue,
             latchLandblock: null, currentLandblock: 0xA9B4u,
-            hostileInView: false, freshDirective: false));
+            monsterInView: false, freshDirective: false));
     }
 
     [Fact]
