@@ -614,6 +614,18 @@ internal sealed class HandshakeDriver : IDisposable
         // requires real inbound health loss, so it is conservative already.
         const int            EarlyFleeMinEvadedSwings    = 6;
         const double         EarlyFleeHealthLostFraction = 0.25;
+        // Losing-EXCHANGE early flee (cp-2405): catches a fight the bot lands
+        // SOME hits in yet still bleeds out far faster than the target — break
+        // off once it has lost >= half its max HP since the fight high-water
+        // mark WHILE the target is still barely scratched (<= 0.15 lost since
+        // the fight began), over >= 4 swings. Fires earlier than the critical
+        // low-health reflex so the flee can actually escape, and naturally
+        // covers a vitae-weakened respawn (low effective max HP bleeds fast).
+        // Self + target health vitals and own swing counts only — no game
+        // knowledge. See CombatDisengage.ShouldDisengageLosingExchange.
+        const int            LosingExchangeMinSwings = 4;
+        const double         LosingExchangeSelfHealthLostFraction = 0.50;
+        const double         LosingExchangeMaxTargetHealthLostFraction = 0.15;
         const double         CombatReengageHealthFraction = 0.70;
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
@@ -3378,7 +3390,10 @@ internal sealed class HandshakeDriver : IDisposable
                         CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor,
                         combatSwingsLanded, combatDamageDealt, combatSwingsEvaded,
                         EarlyFleeMinEvadedSwings, combatPeakSelfHealthFraction,
-                        EarlyFleeHealthLostFraction)) is not null)
+                        EarlyFleeHealthLostFraction,
+                        LosingExchangeMinSwings, LosingExchangeSelfHealthLostFraction,
+                        firstObservedTargetHealthFraction, lastObservedTargetHealthFraction,
+                        LosingExchangeMaxTargetHealthLostFraction)) is not null)
                 {
                     // Capture the threat position BEFORE clearing combat
                     // state. If the threat already left view, flee from our

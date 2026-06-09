@@ -118,20 +118,99 @@ internal static class CombatDisengage
     }
 
     /// <summary>
+    /// True when the bot should break off NOW because it is LOSING THE DAMAGE
+    /// EXCHANGE — even though it is landing SOME hits. The unwinnable-losing
+    /// reflex above only catches a ZERO-offense fight; this one catches the
+    /// case the bot lands the occasional hit yet bleeds out far faster than the
+    /// target: its OWN health has fallen at least
+    /// <paramref name="selfHealthLostFraction"/> of max below this fight's
+    /// high-water mark WHILE the target has lost at most
+    /// <paramref name="maxTargetHealthLostFraction"/> of its health since the
+    /// fight began, over a sustained run of swings. This trips EARLIER than the
+    /// critical low-health reflex (<see cref="ShouldDisengage"/>) so the bot
+    /// flees while it still has the HP buffer to actually escape, instead of
+    /// disengaging at a hair of health and dying during the retreat.
+    ///
+    /// The target-health comparison is what keeps it from aborting a CLOSE but
+    /// winnable trade: if the target's health is also dropping (it lost MORE
+    /// than the cap) the exchange is contested, not lost, so this stays quiet
+    /// and the low-health reflex owns the endgame. Target health unknown (not
+    /// yet observed) ⇒ does NOT fire (conservative — cannot tell losing from
+    /// trading). Mechanical: keys ONLY on the bot's own health vital, its own
+    /// swing counts, and the target's OBSERVED health fraction — no monster
+    /// KIND, name, wcid, landblock, or server text, and it never chooses a
+    /// target. It naturally covers a vitae-weakened (low effective max HP)
+    /// respawn: a fragile bot loses its HP fraction fast, so it flees fast,
+    /// with NO knowledge of vitae itself.
+    /// </summary>
+    /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
+    /// <param name="swingsEvaded">Swings the target evaded this fight.</param>
+    /// <param name="minSwings">
+    /// Minimum total swings (landed + evaded) before the exchange verdict is
+    /// conclusive, so an unlucky first exchange cannot trip it.
+    /// </param>
+    /// <param name="peakSelfHealthFraction">
+    /// Highest self health fraction observed this engagement (high-water mark),
+    /// or null if not yet sampled.
+    /// </param>
+    /// <param name="selfHealthLostFraction">
+    /// Fraction of max health the bot must have LOST since its high-water mark.
+    /// </param>
+    /// <param name="targetHealthAtStart">
+    /// Target health fraction when the fight began, or null if not observed.
+    /// </param>
+    /// <param name="targetHealthNow">
+    /// Target's latest observed health fraction, or null if not observed.
+    /// </param>
+    /// <param name="maxTargetHealthLostFraction">
+    /// The most the target may have lost (start − now) and still count as
+    /// "barely scratched"; above this the fight is a contested trade, not lost.
+    /// </param>
+    public static bool ShouldDisengageLosingExchange(
+        bool inCombat,
+        int swingsLanded, int swingsEvaded, int minSwings,
+        uint healthCurrent, uint healthMax,
+        double? peakSelfHealthFraction, double selfHealthLostFraction,
+        double? targetHealthAtStart, double? targetHealthNow,
+        double maxTargetHealthLostFraction)
+    {
+        if (!inCombat) return false;
+        if (healthMax == 0u) return false;       // health not yet synced
+        if (healthCurrent == 0u) return false;   // death/respawn path owns this
+        // Sustained engagement only — not the first couple swings.
+        if (swingsLanded + swingsEvaded < minSwings) return false;
+        // Losing: own health dropped a large fraction below the fight's
+        // high-water mark.
+        if (peakSelfHealthFraction is not double peak) return false;
+        var selfNow = (double)healthCurrent / healthMax;
+        if ((peak - selfNow) < selfHealthLostFraction) return false;
+        // ...while the target is barely scratched. Without target-health
+        // knowledge we cannot distinguish a losing fight from an even trade,
+        // so stay quiet (the low-health reflex still backstops).
+        if (targetHealthAtStart is not double tStart) return false;
+        if (targetHealthNow is not double tNow) return false;
+        return (tStart - tNow) <= maxTargetHealthLostFraction;
+    }
+
+    /// <summary>
     /// Combined disengage decision: returns a short reason tag for WHY the bot
     /// should break off combat this tick, or null to keep fighting. The
     /// critical low-health reflex (<see cref="ShouldDisengage"/>) takes
     /// precedence ("low-health"); otherwise the unwinnable-and-losing early
     /// flee (<see cref="ShouldDisengageUnwinnableLosing"/>) may fire
-    /// ("unwinnable-losing"). Pure: same inputs as the two underlying
-    /// decisions; the tag exists only so the caller can log which reflex
-    /// fired.
+    /// ("unwinnable-losing"); otherwise the losing-exchange early flee
+    /// (<see cref="ShouldDisengageLosingExchange"/>) may fire
+    /// ("losing-exchange"). Pure: same inputs as the underlying decisions; the
+    /// tag exists only so the caller can log which reflex fired.
     /// </summary>
     public static string? DisengageReason(
         uint healthCurrent, uint healthMax, bool inCombat,
         double disengageFraction, uint criticalHpFloor,
         int swingsLanded, uint damageDealt, int swingsEvaded, int minEvadedSwings,
-        double? peakHealthFraction, double healthLostFraction)
+        double? peakHealthFraction, double healthLostFraction,
+        int losingExchangeMinSwings, double losingExchangeSelfHealthLostFraction,
+        double? targetHealthAtStart, double? targetHealthNow,
+        double losingExchangeMaxTargetHealthLostFraction)
     {
         if (ShouldDisengage(healthCurrent, healthMax, inCombat, disengageFraction, criticalHpFloor))
             return "low-health";
@@ -139,6 +218,13 @@ internal static class CombatDisengage
                 inCombat, swingsLanded, damageDealt, swingsEvaded, minEvadedSwings,
                 healthCurrent, healthMax, peakHealthFraction, healthLostFraction))
             return "unwinnable-losing";
+        if (ShouldDisengageLosingExchange(
+                inCombat, swingsLanded, swingsEvaded, losingExchangeMinSwings,
+                healthCurrent, healthMax, peakHealthFraction,
+                losingExchangeSelfHealthLostFraction,
+                targetHealthAtStart, targetHealthNow,
+                losingExchangeMaxTargetHealthLostFraction))
+            return "losing-exchange";
         return null;
     }
 
