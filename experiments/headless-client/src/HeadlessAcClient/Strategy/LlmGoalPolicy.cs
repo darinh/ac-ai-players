@@ -5138,13 +5138,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // (whenever the value is KNOWN — no magnitude/significance gate, per
             // the cp-2337 audit), with NO recommendation about which to raise
             // and NO restated mechanics (those live in the SPEND XP rule).
-            var survivalFacts = new List<string>();
+            var spendFacts = new List<string>();
             if ((world.Self.HealthObservedPeak ?? world.Self.HealthCurrent) is int endcapMaxHp)
-                survivalFacts.Add($"your health has peaked at {endcapMaxHp} HP this session (your observed maximum)");
+                spendFacts.Add($"your health has peaked at {endcapMaxHp} HP this session (your observed maximum)");
             if (world.Self.NumDeaths is int endcapDeaths)
-                survivalFacts.Add($"you have died {endcapDeaths} times");
-            if (survivalFacts.Count > 0)
-                sb.AppendLine($"- raw fact: {string.Join("; ", survivalFacts)}.");
+                spendFacts.Add($"you have died {endcapDeaths} times");
+            // cp-2410: the OFFENSE side of the SAME survivability-vs-offense
+            // weighing. cp-2399 surfaced only the survival facts (max HP/deaths),
+            // so live the L9 bot poured XP into endurance yet stayed unable to
+            // KILL — it lands some hits but is out-damaged (0 kills; monster
+            // kinds it fought but could not kill are recorded `ineffective`).
+            // Co-locate the bot's OWN kill/ineffective record beside the spend
+            // decision so the SPEND XP rule's "raise coordination/strength when
+            // swings evade/barely hurt" competes with the survival facts. RAW
+            // counts from the combat-feel ledger, on RAW PRESENCE (an ineffective
+            // kind exists), NO recommendation and NO magnitude gate; no game
+            // knowledge.
+            if (world.CombatHistory is { Count: > 0 } endcapHist)
+            {
+                var endcapKills = endcapHist.Sum(h => h.Kills);
+                var endcapIneffectiveKinds = endcapHist.Count(h => h.Ineffective > 0 && h.Kills == 0);
+                if (endcapIneffectiveKinds > 0)
+                    spendFacts.Add(
+                        $"you have {endcapKills} kill(s) total and have fought {endcapIneffectiveKinds} monster " +
+                        "kind(s) you could not kill (ineffective)");
+            }
+            if (spendFacts.Count > 0)
+                sb.AppendLine($"- raw fact: {string.Join("; ", spendFacts)}.");
             sb.AppendLine(
                 "- raw fact, not a recommendation: see `## Self` above for your current attribute " +
                 "values and trained skills, and the SPEND XP rule for what each verb does and how " +

@@ -9336,6 +9336,62 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenIneffectiveKindNoKill()
+    {
+        // cp-2410: a monster kind the bot fought but could not kill (ineffective,
+        // 0 kills) is the OFFENSE bottleneck — it renders beside the spend
+        // decision so the SPEND XP rule can weigh offense, not just survival.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
+                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains("could not kill (ineffective)", prompt);
+        Assert.Contains("0 kill(s) total", prompt);
+        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
+        var offenseIdx = prompt.IndexOf("could not kill (ineffective)", System.StringComparison.Ordinal);
+        Assert.True(offenseIdx > capsuleIdx, "offense fact should render within the ## Unspent XP capsule");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenKindHasKills()
+    {
+        // A kind the bot HAS killed is not an offense bottleneck -> no offense fact.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Rabbit", 48u, Kills: 3, Deaths: 0,
+                    NearDeaths: 0, Fights: 3, LastOutcome: "kill", Ineffective: 0),
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.DoesNotContain("could not kill (ineffective)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenNoUnspentXp()
+    {
+        // No unspent XP -> the whole capsule (incl. the offense fact) is omitted.
+        var world = BuildXpWorld(69296, 0) with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
+                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("could not kill (ineffective)", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_FreshKillCorpseCapsule_RendersWhenPresent()
     {
         // cp-2357: after a kill the picker abandons the corpse before the LLM
