@@ -10488,8 +10488,14 @@ public class LlmGoalPolicyTests
         // stayed in view. The prompt must tell the LLM that a repeating/rotating
         // conversation is exhausted and to pivot to a NON-Talk verb (Attack a
         // visible monster, Use/Give/Pickup, or Explore) rather than re-Talking.
+        // cp-2400: the rule is now GATED on an observed Talk-goal repeat (it is
+        // only actionable once the bot re-Talks the SAME NPC), so seed two Talk
+        // emissions for the same NPC to render it.
+        var events = new EventStream();
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Buckminster\" item= source=llm:test" });
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Buckminster\" item= source=llm:test" });
         var prompt = LlmGoalPolicy.BuildUserPrompt(
-            BuildExitTokenWorld(), new EventStream(), null);
+            BuildExitTokenWorld(), events, null);
         Assert.Contains("NPC REPEAT EXHAUSTION", prompt);
         // keys off the existing neutral repeated-count telemetry, not a name/wcid
         Assert.Contains("tags an NPC's dialog `repeated xN`", prompt);
@@ -10500,6 +10506,21 @@ public class LlmGoalPolicyTests
         Assert.Contains("Re-Talking the same NPC is NEVER", prompt);
         // Attack is an allowed pivot, but only AFTER exhaustion
         Assert.Contains("only AFTER the conversation is exhausted", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NpcRepeatExhaustionRule_OmittedWhenNoTalkRepeat()
+    {
+        // cp-2400: with no repeated Talk in the recent emissions the rule is
+        // inapplicable preamble noise, so it is omitted (the Motor's mechanical
+        // talk-loop guards backstop loop-breaking regardless). A SINGLE Talk of
+        // an NPC is not yet a repeat; a fresh stream has none at all.
+        var single = new EventStream();
+        single.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Buckminster\" item= source=llm:test" });
+        Assert.DoesNotContain("NPC REPEAT EXHAUSTION",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), single, null));
+        Assert.DoesNotContain("NPC REPEAT EXHAUSTION",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
     }
 
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
@@ -10542,9 +10563,13 @@ public class LlmGoalPolicyTests
         Assert.Contains("PASSAGE-OPENED is not progress", p);
         // loop-break + town-stuck + hunt excursion
         Assert.Contains("LOOP-BREAK", p);
-        // npc repeat exhaustion: a rotating/repeating conversation is a dead end (post-cp-2326)
-        Assert.Contains("NPC REPEAT EXHAUSTION", p);
-        Assert.Contains("Re-Talking the same NPC is NEVER", p);
+        // NOTE: the NPC REPEAT EXHAUSTION rule (post-cp-2326) is now conditional
+        // — cp-2400 gates it on an observed Talk-goal REPEAT in the recent
+        // emissions (it is only actionable once the bot re-Talks the SAME NPC),
+        // which this fresh-EventStream world has none of, so its clauses
+        // ("NPC REPEAT EXHAUSTION", "Re-Talking the same NPC is NEVER") are not
+        // asserted here. Its present/absent rendering is covered by the dedicated
+        // BuildUserPrompt_*NpcRepeatExhaustion* tests.
         // (b) inventory-USE must keep its post-break fallback action ladder
         Assert.Contains("not-yet-talked visible NPC", p);
         // (c) world-object USE must keep the concrete "what changed" exceptions
