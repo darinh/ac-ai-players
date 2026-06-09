@@ -4994,11 +4994,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .ToList();
         if (endcapMonsters.Count > 0)
         {
-            var endcapMonsterList = string.Join(", ", endcapMonsters
+            var endcapGroups = endcapMonsters
                 .GroupBy(v => string.IsNullOrWhiteSpace(v.Name) ? "(unknown)" : v.Name!,
                          StringComparer.OrdinalIgnoreCase)
-                .Select(g => g.Count() > 1 ? $"{g.Key} x{g.Count()}" : g.Key)
-                .Take(6));
+                .Take(6)
+                .ToList();
+            var endcapMonsterList = string.Join(", ", endcapGroups
+                .Select(g => g.Count() > 1 ? $"{g.Key} x{g.Count()}" : g.Key));
             var endcapNearest = endcapMonsters[0];
             var endcapNearestName =
                 string.IsNullOrWhiteSpace(endcapNearest.Name) ? "(unknown)" : endcapNearest.Name!;
@@ -5010,10 +5012,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"- {endcapMonsters.Count} attackable monster(s) in view ({endcapMonsterList}); " +
                 $"nearest '{endcapNearestName}' {endcapNearestDist}. The Attack verb " +
                 "is executable right now, the same as Talk/Use/Pickup/Explore.");
+            // Per-kind LEARNED record, inline in this PROTECTED capsule so the
+            // bot's own combat-feel outcomes survive even when the body
+            // `## Combat readiness` section is hard-cut under the request
+            // ceiling. Live academy failure: `## Combat readiness` (which holds
+            // the per-kind record) was cut in 93% of combat prompts, so the bot
+            // kept attacking a kind its OWN record showed it could not damage
+            // (0 kills, all swings evaded). Raw counts only, from the bot's own
+            // observed outcomes (CombatFeelLedger via FormatCombatRecordFor); no
+            // game knowledge, no priority, no danger label — the existing COMBAT
+            // SAFETY rule supplies the judgment. Only kinds that HAVE a record
+            // render a row (FormatCombatRecordFor returns "" otherwise).
+            foreach (var g in endcapGroups)
+            {
+                var rec = FormatCombatRecordFor(world.CombatHistory, g.First().Wcid, g.Key);
+                if (rec.Length == 0)
+                    continue;
+                var gNearest = g.Min(v => v.Distance ?? float.MaxValue);
+                var gDist = gNearest < float.MaxValue ? $" nearest d={gNearest:F1}u" : "";
+                sb.AppendLine($"- {g.Key} x{g.Count()}{gDist}{rec}");
+            }
             sb.AppendLine(
-                "- raw fact, not a recommendation: see `## Combat readiness` above for your arms/" +
-                "health and your own recorded outcomes per monster kind. Whether to engage, and " +
-                "which target, is your call.");
+                "- raw fact, not a recommendation: any `[your record]` above is your OWN past " +
+                "outcome vs that kind this session and across sessions (see also `## Combat " +
+                "readiness`, when shown, for arms/health). Whether to engage, and which target, " +
+                "is your call.");
         }
 
         // ── ## Nearest objects (protected nearest-object guarantee, cp-2367)

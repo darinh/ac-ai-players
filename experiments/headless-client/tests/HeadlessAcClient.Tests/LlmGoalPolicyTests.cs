@@ -2427,6 +2427,88 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("nearest ''", p);
     }
 
+    // ---- ## Monsters in view: per-kind LEARNED record (cp-2390) -----------
+    // The per-kind combat-feel record lives in the body `## Combat readiness`
+    // section, which is hard-cut under the request ceiling in dense combat
+    // scenes (live academy: cut in 93% of combat prompts). Re-surface each
+    // in-view kind's OWN record inline in the protected `## Monsters in view`
+    // capsule so the bot's learning survives the cut.
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_IncludesPerKindCombatRecord()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true })
+            with
+            {
+                CombatHistory = new[]
+                {
+                    new CombatHistoryEntry("Sparring Golem", 70u, Kills: 0, Deaths: 0,
+                        NearDeaths: 0, Fights: 5, LastOutcome: "ineffective", Ineffective: 5),
+                },
+            };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var capsule = p.Substring(p.IndexOf("## Monsters in view", StringComparison.Ordinal));
+        Assert.Contains("Sparring Golem x1", capsule);
+        Assert.Contains("[your record:", capsule);
+        Assert.Contains("kills 0", capsule);
+        Assert.Contains("ineffective 5", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_NoRecordRowWhenNoHistory()
+    {
+        // No combat history -> no `[your record]` row, just the summary line
+        // (preserves the prior capsule behavior for a never-fought kind).
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        var capsule = p.Substring(p.IndexOf("## Monsters in view", StringComparison.Ordinal));
+        Assert.DoesNotContain("[your record:", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MonstersInViewCapsule_RecordSurvivesDenseSceneCut()
+    {
+        // CORE PROPERTY: in a scene dense enough to overflow the ceiling (so the
+        // body `## Combat readiness` — which normally carries the record — is
+        // hard-cut), the per-kind record still reaches the model via the
+        // protected capsule, and the prompt stays within the hard ceiling.
+        var dense = System.Linq.Enumerable.Range(0, 200)
+            .Select(i => new VisibleObjectProjection
+            {
+                Guid = (uint)(0x900u + i),
+                Name = $"Dense Scene Object {i:D3} occupying prompt budget space here",
+                Wcid = (uint)(1000 + i),
+                Distance = i + 50f,
+            })
+            .Append(new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true })
+            .ToArray();
+        var world = BuildWorldWithMonsters(dense) with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Sparring Golem", 70u, Kills: 0, Deaths: 0,
+                    NearDeaths: 0, Fights: 8, LastOutcome: "ineffective", Ineffective: 8),
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Monsters in view", p);
+        var capsule = p.Substring(p.IndexOf("## Monsters in view", StringComparison.Ordinal));
+        Assert.Contains("[your record:", capsule);
+        Assert.Contains("ineffective 8", capsule);
+        // Prove the dense scene actually overflowed (farthest object dropped).
+        Assert.DoesNotContain("Dense Scene Object 199", p);
+        Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
+    }
+
     // ---- ## Nearest objects protected capsule (cp-2367) -------------------
     // The mid-prompt `## Visible nearby` section is trimmable; in an object-
     // dense scene the global request-size fitter can strip ALL its rows. The
