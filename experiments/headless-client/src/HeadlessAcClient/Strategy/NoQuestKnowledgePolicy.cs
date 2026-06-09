@@ -101,6 +101,14 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     // (tests / LLM-disabled minimal wiring) — treated as "nothing learned".
     private readonly SilentTalkTargetLearner? _silentTalk;
 
+    // cp-2403: containers (chests/corpses) the Motor observed OPENED-and-EMPTY,
+    // with a TTL cooldown. Used ONLY to skip recently-emptied containers in the
+    // openable/chest Use steps so this fallback stops marching the bot to empty
+    // chest after empty chest when the LLM throttles. Read-only here (the Motor
+    // owns marking). May be null (tests / minimal wiring) — treated as "nothing
+    // suppressed". Generic TTL guid-suppression; keys only on guid + expiry.
+    private readonly HeadlessAcClient.World.InteractUnreachableTracker? _emptiedContainers;
+
     public NoQuestKnowledgePolicy() : this(null) { }
 
     public NoQuestKnowledgePolicy(IntentStack? intentStack)
@@ -108,10 +116,22 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
 
     public NoQuestKnowledgePolicy(
         IntentStack? intentStack, SilentTalkTargetLearner? silentTalk)
+        : this(intentStack, silentTalk, null) { }
+
+    public NoQuestKnowledgePolicy(
+        IntentStack? intentStack, SilentTalkTargetLearner? silentTalk,
+        HeadlessAcClient.World.InteractUnreachableTracker? emptiedContainers)
     {
         _intentStack = intentStack;
         _silentTalk = silentTalk;
+        _emptiedContainers = emptiedContainers;
     }
+
+    // cp-2403: true when the Motor has this guid in its recently-emptied-container
+    // cooldown (so the fallback's Use steps skip it). Null tracker -> never
+    // suppressed.
+    private bool IsEmptiedContainer(uint guid)
+        => _emptiedContainers?.IsSuppressed(guid, DateTime.UtcNow) ?? false;
 
     private void RememberProposed(uint guid)
     {
@@ -340,6 +360,11 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // openable/NPC/etc steps; cp-2373 folded in the Pickup step.
         var openable = townTourTapped ? null : world.Visible
             .Where(v => v.IsOpenable && !v.IsDoor)
+            // cp-2403: skip a container the Motor just opened and found EMPTY
+            // (TTL'd) so the fallback stops marching to empty chest after empty
+            // chest when the LLM throttles. Fallback-only; never blocks an LLM
+            // Use goal. The TTL lets a respawned chest be retried later.
+            .Where(v => !IsEmptiedContainer(v.Guid))
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
             // While hunting, only Use an openable we are essentially
