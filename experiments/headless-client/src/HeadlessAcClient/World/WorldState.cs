@@ -102,6 +102,17 @@ internal sealed class WorldState
     private readonly Dictionary<uint, WorldObjectSnapshot> _objects = new();
 
     /// <summary>
+    /// Case-insensitive set of every distinct object name observed via an
+    /// ObjectCreate since login. Unlike <see cref="_objects"/> (pruned on
+    /// ObjectDelete / FOV eviction), this is append-only and never pruned,
+    /// so it answers the session-wide question "has an object by this name
+    /// EVER entered the world model" — distinct from "is it visible now".
+    /// Pure perception memory; carries no priority or game knowledge.
+    /// </summary>
+    private readonly HashSet<string> _everObservedNames =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Per-(32-bit PropertyInt property) byte-sequence high-water
     /// marks. The server keys this sequence by
     /// (SequenceType.UpdatePropertyInt, property) — see
@@ -308,6 +319,21 @@ internal sealed class WorldState
     /// <summary>Read-only view of all known objects, keyed by guid.</summary>
     public IReadOnlyDictionary<uint, WorldObjectSnapshot> Objects => _objects;
 
+    /// <summary>
+    /// Read-only view of every distinct object name observed since login
+    /// (append-only, case-insensitive). See <see cref="_everObservedNames"/>.
+    /// </summary>
+    public IReadOnlySet<string> EverObservedNames => _everObservedNames;
+
+    /// <summary>
+    /// True if an object with this exact name (case-insensitive) has entered
+    /// the world model at any point since login. False for null/empty. Distinct
+    /// from "currently visible" — a phantom name from dialog text that never
+    /// resolves to a real object returns false no matter how long it is sought.
+    /// </summary>
+    public bool WasObjectNameEverObserved(string? name)
+        => !string.IsNullOrEmpty(name) && _everObservedNames.Contains(name);
+
     public WorldObjectSnapshot? TryGet(uint guid)
         => _objects.TryGetValue(guid, out var s) ? s : null;
 
@@ -437,6 +463,8 @@ internal sealed class WorldState
         // Identity fields are intrinsic to the weenie/guid and
         // safe to refresh on every (non-stale-instance) ObjectCreate.
         snap.Name = oc.Weenie.Name;
+        if (!string.IsNullOrEmpty(oc.Weenie.Name))
+            _everObservedNames.Add(oc.Weenie.Name);
         snap.WeenieClassId = oc.Weenie.WeenieClassId;
         snap.ItemType = oc.Weenie.ItemType;
         snap.WeenieFlags = (uint)oc.Weenie.Flags;

@@ -317,6 +317,26 @@ internal sealed record WorldStateProjection
     public int NamedSearchDistinctCells { get; init; }
 
     /// <summary>
+    /// Every distinct object name observed via ObjectCreate since login
+    /// (append-only, case-insensitive; see <see cref="WorldState.EverObservedNames"/>).
+    /// Lets the prompt builder answer "has this name EVER been a real world object"
+    /// for the active objective's named target — distinct from "is it visible now".
+    /// Reference to the live set (read-only use); not serialized into training data.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlySet<string> EverObservedNames { get; init; } =
+        System.Collections.Immutable.ImmutableHashSet<string>.Empty;
+
+    /// <summary>
+    /// True if an object with this exact name (case-insensitive) has entered the
+    /// world model at any point this session. False for null/empty. A dialog-named
+    /// target that never resolves to a real object stays false however long it is
+    /// sought — the signal behind the "## Unseen objective target" capsule.
+    /// </summary>
+    public bool WasNameEverObserved(string? name)
+        => !string.IsNullOrEmpty(name) && EverObservedNames.Contains(name);
+
+    /// <summary>
     /// PhysicsState <c>Ethereal</c> bit (Source/ACE.Entity/Enum/PhysicsState.cs).
     /// An ACE door is Ethereal when open and non-Ethereal when closed.
     /// </summary>
@@ -564,6 +584,7 @@ internal sealed record WorldStateProjection
             NamedSearchTargetName = world.NamedSearchTargetName,
             NamedSearchProbeCount = world.NamedSearchProbeCount,
             NamedSearchDistinctCells = world.NamedSearchDistinctCells,
+            EverObservedNames = world.EverObservedNames,
         };
     }
 
