@@ -3330,6 +3330,28 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ContainsAreaCompleteMoveOnRule()
+    {
+        // cp-2394: live academy — after the Training Master says "you have
+        // completed your combat training, take the portal", the bot grinds
+        // respawning Sparring Golems ("attacking grants XP, no blocking
+        // conditions") instead of taking the exit. A distinct rule must teach
+        // that once an area reports COMPLETE, grinding its respawning monsters
+        // is optional and the named exit/portal is the progression (WEIGH, not
+        // a ban — respects valuing academy XP).
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        var idx = prompt.IndexOf("AREA COMPLETE means MOVE ON", System.StringComparison.Ordinal);
+        Assert.True(idx >= 0, "the AREA COMPLETE rule must be present");
+        var lineEnd = prompt.IndexOf('\n', idx);
+        var line = lineEnd >= 0 ? prompt.Substring(idx, lineEnd - idx) : prompt.Substring(idx);
+        Assert.Contains("respawning", line);
+        Assert.Contains("WEIGH, not a hard ban", line);
+        Assert.Contains("portal", line);
+    }
+
+    [Fact]
     public void BuildUserPrompt_DirectiveRules_PointAtEarlyServerDirectivesCapsule()
     {
         // cp-2384: the durable directive lives in `## Early server directives`
