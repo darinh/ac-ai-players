@@ -2550,10 +2550,33 @@ internal sealed class HandshakeDriver : IDisposable
                             // ItemGuid identifies the target item so
                             // the policy can dedupe by guid, not by
                             // verb/name.
+                            //
+                            // cp-2386 — the server refuses a GIVE the bot
+                            // believes is valid (live: the academy Calling
+                            // Stone the bot holds is not in the server's
+                            // inventory) with a CommunicationTransientString
+                            // ("Item not found!") + InventoryServerSaveFailed
+                            // err=None (0). The original `ErrorType != 0` gate
+                            // DROPPED that None error, so a failing Give
+                            // produced no learning signal and the bot silently
+                            // re-dispatched the SAME give until the sticky cap
+                            // gave up — wasted cycles, no pivot. Surface a None
+                            // error too WHEN the rejected item is the one
+                            // currently being given (pendingGiveItemGuid match),
+                            // so the LLM sees the give failed and picks a
+                            // different action. Mechanical: keyed on the wire
+                            // error event + the in-flight give guid; no game
+                            // knowledge. (Other benign None errors — e.g. the
+                            // source-autonomous auto-equip handled below — are
+                            // unaffected because they do not match the in-flight
+                            // give guid.)
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
-                                isf.ErrorType != 0)
+                                AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(
+                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid))
                             {
-                                var invLabel = WeenieErrorLabels.Label(isf.ErrorType);
+                                var invLabel = isf.ErrorType != 0
+                                    ? WeenieErrorLabels.Label(isf.ErrorType)
+                                    : "rejected by the server (the item was not accepted)";
                                 // cp-2273 — a failure of a SOURCE-AUTONOMOUS
                                 // auto-equip (PHASE7F.4 chose to wield this item;
                                 // the LLM never asked) must not reach the Strategy

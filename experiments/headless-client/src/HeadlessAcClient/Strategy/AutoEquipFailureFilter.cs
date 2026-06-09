@@ -54,4 +54,23 @@ internal sealed class AutoEquipFailureFilter
     /// Returns true at most once per <see cref="MarkAutonomous"/>.
     /// </summary>
     public bool TryConsumeAutonomous(uint itemGuid) => _autonomous.Remove(itemGuid);
+
+    /// <summary>
+    /// Decide whether an <c>InventoryServerSaveFailed</c> game event should be
+    /// surfaced to the Strategy layer as an <c>ActionRejected</c> learning
+    /// signal. A non-zero (specific) <paramref name="errorType"/> always
+    /// surfaces. A <c>None</c> (0) error surfaces ONLY when it names the item
+    /// the bot is currently giving (<paramref name="pendingGiveItemGuid"/>):
+    /// the server refuses a Give it cannot complete (live: the academy Calling
+    /// Stone the bot believes it holds is not in the server's inventory) with a
+    /// transient string + <c>InventoryServerSaveFailed</c> err=None, and
+    /// dropping that left a failing Give with no signal so the bot silently
+    /// re-dispatched the same give. Other benign None failures (e.g. a
+    /// source-autonomous auto-equip) do NOT match the in-flight give guid and
+    /// stay suppressed. Pure: keyed on the wire error code + the in-flight give
+    /// guid; carries no item type, name, wcid, or game knowledge.
+    /// </summary>
+    public static bool ShouldSurfaceInventoryFailure(
+        uint errorType, uint itemGuid, uint? pendingGiveItemGuid)
+        => errorType != 0 || (pendingGiveItemGuid is uint pg && pg == itemGuid);
 }

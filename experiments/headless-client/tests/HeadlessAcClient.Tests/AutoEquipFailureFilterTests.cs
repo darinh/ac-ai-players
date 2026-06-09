@@ -77,4 +77,39 @@ public class AutoEquipFailureFilterTests
         Assert.True(f.TryConsumeAutonomous(0x42u));
         Assert.False(f.TryConsumeAutonomous(0x42u));
     }
+
+    // ---- ShouldSurfaceInventoryFailure (cp-2386) ----
+
+    [Fact]
+    public void ShouldSurface_NonZeroError_AlwaysSurfaces()
+    {
+        // A specific (non-None) error always surfaces regardless of any
+        // in-flight give.
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x420u, 0x1234u, null));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x06u, 0x1234u, 0x9999u));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_NoPendingGive_Suppressed()
+    {
+        // A None (0) error with no in-flight give is a benign teardown — stay
+        // suppressed (preserves the pre-cp-2386 behavior).
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x1234u, null));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_MatchingPendingGive_Surfaces()
+    {
+        // A None error that names the item the bot is currently giving is a
+        // refused Give — surface it so the LLM pivots instead of re-giving.
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008861u, 0x80008861u));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_NonMatchingPendingGive_Suppressed()
+    {
+        // A None error for a DIFFERENT item than the in-flight give stays
+        // suppressed (e.g. a benign auto-equip None failure during a give).
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, 0x80008861u));
+    }
 }
