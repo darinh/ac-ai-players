@@ -6277,6 +6277,45 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsInventoryUseRecentlyDispatched_ItemOnSelfShape_MatchesAfterEcho()
+    {
+        // cp-2417 contract: the exact live (gpt-4o) goal shape that looped 45x —
+        // Use{ target = self (guid + name), item = "Letter From Home" }, dispatched
+        // by the Motor as USEWITHTARGET(source=letter, target=self). That path now
+        // emits the InventoryItemUsed echo (this test's es.Append stands in for
+        // that Motor echo), so the dedup must drop the repeat by the ITEM name even
+        // though the TARGET is the player, not the item.
+        var es = new EventStream();
+        es.Append(InvUsed("Letter From Home", LetterWcid, LetterGuid));
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Guid = 0x500000A6u, Name = "Llama2394a" },
+            Item = new Selector { Name = "Letter From Home" },
+        };
+        Assert.True(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
+    public void IsInventoryUseRecentlyDispatched_ItemOnSelfShape_NoEcho_DoesNotMatch()
+    {
+        // The pre-cp-2417 bug: with NO InventoryItemUsed echo (the USEWITHTARGET
+        // path used to emit none), the same item-on-self goal is NOT deduped —
+        // which is exactly why the bot looped. Guards that the dedup depends on the
+        // Motor echo this slice adds.
+        var es = new EventStream();
+
+        var goal = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Guid = 0x500000A6u, Name = "Llama2394a" },
+            Item = new Selector { Name = "Letter From Home" },
+        };
+        Assert.False(LlmGoalPolicy.IsInventoryUseRecentlyDispatched(goal, es));
+    }
+
+    [Fact]
     public void IsInventoryUseRecentlyDispatched_EmptyEvents_DoesNotMatch()
     {
         var es = new EventStream();
