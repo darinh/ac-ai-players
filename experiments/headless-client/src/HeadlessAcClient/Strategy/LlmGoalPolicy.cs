@@ -4603,9 +4603,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 .Select(g => g.First())
                 .ToList(),
             earliest: 4, newest: 6);
+        // PopupString earliest anchors are sourced from BOTH the recent ring AND
+        // the EventStream's persistent distinct-popup store (PersistentPopupStrings),
+        // so a one-time login/exit directive that has already aged out of the 256-
+        // event ring still surfaces here. The persisted events retain their original
+        // (low) Sequence, so RetainEnds files them under "earliest"; the newest come
+        // from the live ring. Dedup by text collapses a popup present in both.
         var popupHints = RetainEnds(
             hintPool
                 .Where(e => e.Kind == EventKind.PopupString && !string.IsNullOrEmpty(e.Text))
+                .Concat(events.PersistentPopupStrings())
                 .GroupBy(e => e.Text)
                 .Select(g => g.First())
                 .ToList(),
