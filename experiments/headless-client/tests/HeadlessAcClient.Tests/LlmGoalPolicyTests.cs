@@ -2900,6 +2900,43 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_RetainsEarlyExitPopup_AfterRingEviction()
+    {
+        // The bot may not be ready to act on the login exit directive until
+        // hundreds of events later, by which point it has aged out of the
+        // bounded 256-event ring entirely. The EventStream's persistent
+        // distinct-popup store must still surface it in ## Server hints; the
+        // ring-only sourcing could not.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "Go talk to Jonathan in the next room. Once you leave you can never return.",
+        });
+        // Flood well past the ring capacity so the login popup is evicted.
+        for (int i = 0; i < EventStream.DefaultCapacity + 20; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage,
+                Text = $"ambient server chatter {i}",
+            });
+        }
+
+        // Precondition: the login popup is truly gone from the ring.
+        Assert.DoesNotContain(
+            es.Recent(EventStream.DefaultCapacity),
+            e => e.Text is { } t && t.Contains("Once you leave you can never return"));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Server hints", prompt);
+        Assert.Contains("Go talk to Jonathan in the next room", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_ContainsServerInstructionPrecedenceRule()
     {
         var es = new EventStream();

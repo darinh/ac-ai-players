@@ -106,6 +106,51 @@ public class StrategyFoundationTests
         Assert.Equal(29335u, inv[0].Wcid);
     }
 
+    [Fact]
+    public void EventStream_PersistentPopups_SurviveRingEviction()
+    {
+        // A one-time login/exit directive arrives early but the bot may not be
+        // ready to act on it until far later, by which point it has aged out of
+        // the bounded event ring. The persistent distinct-popup store must keep
+        // it even though Recent() no longer has it.
+        var es = new EventStream(8);
+        var login = es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString, Text = "Go talk to Jonathan to leave.",
+        });
+        for (int i = 0; i < 20; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = $"chatter {i}" });
+
+        Assert.DoesNotContain(es.Recent(EventStream.DefaultCapacity), e => e.Text == "Go talk to Jonathan to leave.");
+
+        var persisted = es.PersistentPopupStrings();
+        Assert.Contains(persisted, e => e.Text == "Go talk to Jonathan to leave.");
+        Assert.Equal(login.Sequence, persisted[0].Sequence);
+    }
+
+    [Fact]
+    public void EventStream_PersistentPopups_DistinctFirstSeenAndCapped()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "dup" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "dup" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "not a popup" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "" });
+        for (int i = 0; i < 40; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = $"p{i}" });
+
+        var persisted = es.PersistentPopupStrings();
+        Assert.Equal("dup", persisted[0].Text);
+        Assert.Equal(1, persisted.Count(e => e.Text == "dup"));
+        Assert.DoesNotContain(persisted, e => e.Text == "not a popup");
+        Assert.DoesNotContain(persisted, e => string.IsNullOrEmpty(e.Text));
+        Assert.True(persisted.Count <= 24, $"persistent popups {persisted.Count} exceeds cap");
+        // Cap is reached before all 40 distinct 'pN' popups are captured, so the
+        // earliest anchor 'dup' stays locked in and a late popup does NOT displace it.
+        Assert.DoesNotContain(persisted, e => e.Text == "p39");
+    }
+
     // ---- SelectorResolver ----
 
     private const uint SelfGuid = 0x50000005;

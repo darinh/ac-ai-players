@@ -251,6 +251,21 @@ internal sealed class EventStream
 {
     public const int DefaultCapacity = 256;
 
+    // Server PopupStrings are the server's directed tutorial/instruction text
+    // (low-volume, directed-at-self — NOT the chat firehose). A one-time login
+    // directive ("go talk to X to leave; give the token back") is the bot's
+    // "how to proceed/exit here" guidance, but it ages out of the bounded event
+    // ring long before the bot is ready to act on it (~256 events later). Keep a
+    // SEPARATE, distinct-by-text, first-seen, capped list of the EARLIEST popups
+    // that survives the ring so those durable early anchors can still surface in
+    // the prompt. Server text only; captured by event KIND + age, never by
+    // parsing the text (which would be hardcoded game knowledge). Once the cap is
+    // reached the earliest anchors are locked in; newer popups still surface via
+    // the recent ring.
+    private const int MaxPersistentPopups = 24;
+    private readonly List<StreamEvent> _persistentPopups = new();
+    private readonly HashSet<string> _persistentPopupTexts = new(StringComparer.Ordinal);
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -277,6 +292,18 @@ internal sealed class EventStream
         _events.AddLast(stamped);
         while (_events.Count > _capacity)
             _events.RemoveFirst();
+
+        // Capture the earliest distinct server PopupStrings into a store that
+        // outlives the ring. Gate on event KIND + first-seen text + a hard cap —
+        // no parsing of the text content (that would be hardcoded game knowledge).
+        if (stamped.Kind == EventKind.PopupString
+            && !string.IsNullOrEmpty(stamped.Text)
+            && _persistentPopups.Count < MaxPersistentPopups
+            && _persistentPopupTexts.Add(stamped.Text))
+        {
+            _persistentPopups.Add(stamped);
+        }
+
         return stamped;
     }
 
@@ -302,4 +329,14 @@ internal sealed class EventStream
     /// <summary>True if any event of the given kind exists at or after the given sequence.</summary>
     public bool HasNewSince(EventKind kind, long sequence) =>
         _events.Any(e => e.Kind == kind && e.Sequence >= sequence);
+
+    /// <summary>
+    /// The earliest distinct server PopupString events seen this session, in
+    /// first-seen order, capped at <see cref="MaxPersistentPopups"/>. These
+    /// survive eviction from the bounded event ring so a one-time login/exit
+    /// directive remains available to the prompt long after it ages out of
+    /// <see cref="Recent()"/>. Each retains its original (low) Sequence so a
+    /// consumer can order it as "earliest".
+    /// </summary>
+    public IReadOnlyList<StreamEvent> PersistentPopupStrings() => _persistentPopups;
 }
