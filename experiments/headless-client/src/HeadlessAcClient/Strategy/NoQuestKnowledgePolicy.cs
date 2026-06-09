@@ -186,6 +186,22 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         // proximity matters, so this adds no object-type judgment.
         const float HuntActiveUseNoDetourRadiusUnits = 5.0f;
 
+        // cp-2413: no-hunt optional-interaction detour bound. With NO LLM
+        // (throttled) and NO active hunt, the fallback must not march the bot a
+        // long way to ONE optional interaction — live (cp2412-validate.log) it
+        // walked 65-121u to Use a distant Chest, Talk a distant NPC/scenery, or
+        // Pickup a far item, which is the "bots are slow" symptom. An Explore
+        // egress (a ~72u hop toward UNSEEN area, step 7) discovers more than
+        // marathoning to one already-seen object, so beyond this radius the
+        // optional-interaction steps yield and the bot Explores instead. Same
+        // geometry-only posture as the hunt radius above: object-type-neutral
+        // (chest, lifestone, portal, NPC, ground loot all bound identically),
+        // no name/wcid/landblock, no value judgment. Looser than the 5u hunt
+        // radius because off-hunt there is no mission to detour from — only the
+        // tempo cost of the walk. Bound, never a hard skip: a respawn or a
+        // closer instance inside the radius is still taken next tick.
+        const float FallbackOptionalUseNoDetourRadiusUnits = 40.0f;
+
         // NOTE: this fallback deliberately does NOT gate on a
         // hardcoded self-health threshold. A "flee/rest when wounded
         // below X%" rule is a rule-of-thumb the LLM must own, not
@@ -302,6 +318,10 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => v.ItemType is uint it && (it & ItemTypeMasks.Pickup) != 0)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            // cp-2413: off-hunt, do not marathon to a distant ground item. A
+            // null (unmeasurable) distance is treated as near, never bounded out.
+            .Where(v => huntActive
+                || (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (pickup is not null)
@@ -370,8 +390,12 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             // While hunting, only Use an openable we are essentially
             // already standing next to (own-kill corpse), never a far
             // detour off the hunt (see HuntActiveUseNoDetourRadiusUnits).
-            .Where(v => !huntActive
-                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
+            // cp-2413: off-hunt, still bound the detour to the looser
+            // FallbackOptionalUseNoDetourRadiusUnits (no 100u chest marches);
+            // a null (unmeasurable) distance is treated as near, not far.
+            .Where(v => huntActive
+                ? (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits
+                : (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (openable is not null)
@@ -402,8 +426,11 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
             // No far detour to a lifestone while hunting (see step 5b).
-            .Where(v => !huntActive
-                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
+            // cp-2413: off-hunt, bound to FallbackOptionalUseNoDetourRadiusUnits
+            // (null distance treated as near).
+            .Where(v => huntActive
+                ? (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits
+                : (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (lifestone is not null)
@@ -447,8 +474,11 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
             // No far detour to a portal while hunting (see step 5b).
-            .Where(v => !huntActive
-                || (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits)
+            // cp-2413: off-hunt, bound to FallbackOptionalUseNoDetourRadiusUnits
+            // (null distance treated as near).
+            .Where(v => huntActive
+                ? (v.Distance ?? float.MaxValue) <= HuntActiveUseNoDetourRadiusUnits
+                : (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (portal is not null)
@@ -494,6 +524,9 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
+            // cp-2413: off-hunt, do not marathon to a distant NPC to chat
+            // (null distance treated as near).
+            .Where(v => (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (npc is not null)
@@ -519,6 +552,8 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
                 .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
                 .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+                // cp-2413: off-hunt detour bound applies to the recycle too.
+                .Where(v => (v.Distance ?? 0f) <= FallbackOptionalUseNoDetourRadiusUnits)
                 .OrderBy(v => v.Distance ?? float.MaxValue)
                 .FirstOrDefault();
             if (npcRetry is not null)
