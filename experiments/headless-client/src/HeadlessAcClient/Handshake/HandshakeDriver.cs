@@ -623,6 +623,21 @@ internal sealed class HandshakeDriver : IDisposable
         // skips these so it picks the next-nearest LIVE target.
         var                  recentlyKilledCooldown = TimeSpan.FromSeconds(45);
         var                  recentlyKilledTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
+        // cp-2396 — guids the bot ABANDONED after landing ZERO damage (the
+        // NO-PROGRESS no-damage / all-evaded abandon below). The abandon adds the
+        // guid to visitedTargetGuids, but the name-only Attack resolver
+        // (tactics.ResolveTarget) BYPASSES visitedTargetGuids, so when the LLM
+        // re-emits Attack on the same KIND the resolver re-locks the SAME
+        // un-damageable individual and the bot loops 60s no-damage fights on it
+        // (live: one guid abandoned 7x in a row = ~7 min wasted). Merge these into
+        // the resolver's skip set so it picks the next-nearest DIFFERENT target
+        // instead. TTL'd so a later approach (e.g. after the bot has leveled or
+        // re-armed) may retry. Same generic TTL guid-suppression structure as
+        // recentlyKilledTargets; keyed only on a guid the bot could not damage —
+        // no object type/name/wcid, the combat-feel ledger separately records the
+        // per-KIND ineffective outcome for the LLM.
+        var                  recentlyAbandonedNoDamageCooldown = TimeSpan.FromSeconds(120);
+        var                  recentlyAbandonedNoDamageTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
         // cp-2342 — records the self→target distance at each interaction goal
         // lock, keyed by guid, keeping a short rolling history per target. The
         // most-recent target's history is projected into the prompt's
@@ -3533,6 +3548,8 @@ internal sealed class HandshakeDriver : IDisposable
                             PublishCombatHistory();
                         }
                         visitedTargetGuids.Add(ctgWatch);
+                        recentlyAbandonedNoDamageTargets.MarkUnreachable(
+                            ctgWatch, DateTime.UtcNow, recentlyAbandonedNoDamageCooldown);
                         combatTargetGuid = null;
                         combatStartedAt = null;
                         lastCombatAttackAt = null;
@@ -5394,16 +5411,22 @@ internal sealed class HandshakeDriver : IDisposable
                         // to the next LIVE target instead of the lingering dead
                         // body. Non-Attack goals ignore it (ResolveTarget gates it
                         // on Kind == Attack).
+                        // The Attack resolver (ResolveTarget) bypasses the picker's
+                        // visitedTargetGuids filter, so feed it the union of guids
+                        // it must skip: recently-KILLED bodies (recentlyKilledTargets)
+                        // AND recently-ABANDONED no-damage individuals (cp-2396,
+                        // recentlyAbandonedNoDamageTargets) — both TTL'd. Without the
+                        // latter the resolver re-locks the same un-damageable target
+                        // the bot just abandoned, looping 60s no-damage fights on it.
                         IReadOnlySet<uint>? killedAttackGuids = null;
-                        if (recentlyKilledTargets.Count > 0)
+                        if (recentlyKilledTargets.Count > 0 || recentlyAbandonedNoDamageTargets.Count > 0)
                         {
-                            var killedSnap = recentlyKilledTargets.SnapshotSuppressed(DateTime.UtcNow);
-                            if (killedSnap.Count > 0)
-                            {
-                                var ks = new HashSet<uint>(killedSnap.Count);
-                                foreach (var kv in killedSnap) ks.Add(kv.Key);
+                            var now = DateTime.UtcNow;
+                            var ks = new HashSet<uint>();
+                            foreach (var kv in recentlyKilledTargets.SnapshotSuppressed(now)) ks.Add(kv.Key);
+                            foreach (var kv in recentlyAbandonedNoDamageTargets.SnapshotSuppressed(now)) ks.Add(kv.Key);
+                            if (ks.Count > 0)
                                 killedAttackGuids = ks;
-                            }
                         }
                         var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf, killedAttackGuids);
                         var combatDeferredAttack = false;
