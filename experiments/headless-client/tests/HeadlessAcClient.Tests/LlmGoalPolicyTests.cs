@@ -10568,6 +10568,34 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
     }
 
+    [Fact]
+    public void BuildUserPrompt_BlockedTargetsRule_RendersOnBlockedOrUnreachableRejection()
+    {
+        // cp-2402: the BLOCKED-targets rule renders when a recent ActionRejected
+        // carries the "Blocked" or "Unreachable" ErrorLabel (the Motor's geometry
+        // rejection), the only situation in which the rule is actionable.
+        var blocked = new EventStream();
+        blocked.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "Blocked" });
+        Assert.Contains("BLOCKED targets", LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), blocked, null));
+
+        var unreachable = new EventStream();
+        unreachable.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "Unreachable" });
+        Assert.Contains("BLOCKED targets", LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), unreachable, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_BlockedTargetsRule_OmittedWhenNoBlockedRejection()
+    {
+        // No rejection at all, and an UNRELATED rejection label, both omit the
+        // rule (the Motor routes around blocked geometry mechanically anyway).
+        Assert.DoesNotContain("BLOCKED targets",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
+        var other = new EventStream();
+        other.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "OutOfRange" });
+        Assert.DoesNotContain("BLOCKED targets",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), other, null));
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
@@ -10629,8 +10657,13 @@ public class LlmGoalPolicyTests
         // tapped-out: corrected leveling steer (cp-2270) — prefer beatable, no "tougher for XP"
         Assert.Contains("monsters you can DEFEAT", p);
         Assert.Contains("do NOT chase `tougher` monsters for more XP", p);
-        // blocked targets, transitions, pursue-unseen, server precedence
-        Assert.Contains("BLOCKED targets", p);
+        // NOTE: the BLOCKED-targets rule is now conditional — cp-2402 gates it
+        // on a recent ActionRejected `Blocked`/`Unreachable` (it only tells the
+        // LLM how to react to one), which this fresh-EventStream world has none
+        // of, so "BLOCKED targets" is not asserted here. Its present/absent
+        // rendering is covered by the dedicated BuildUserPrompt_*BlockedTargets*
+        // tests.
+        // pursue-unseen, server precedence
         Assert.Contains("PURSUE UNSEEN OBJECTIVES", p);
         Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", p);
         Assert.Contains("FINISH MULTI-STEP DIRECTIVES", p);
