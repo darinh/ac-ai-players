@@ -812,16 +812,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         // Early Talk-loop egress sustain: while the talk-loop latch is active
-        // (still in the same landblock, no hostile, no fresh server directive),
-        // keep substituting the social dwell-extending verbs the LLM loops on
-        // (Talk/Give) with Explore so the bot actually walks OUT instead of the
-        // picker re-parking it on the dead NPC every tick. The latch self-clears
-        // on a landblock change (loop broken — bot left), a hostile appearing, a
-        // fresh directive, or timeout. Non-social verbs (the bot's own Explore/
-        // Pickup/Attack) pass through and themselves break the loop.
+        // (still in the same landblock, no monster in view, no fresh server
+        // directive), keep substituting the social dwell-extending verbs the LLM
+        // loops on (Talk/Give) with Explore so the bot actually walks OUT instead
+        // of the picker re-parking it on the dead NPC every tick. The latch
+        // self-clears on a landblock change (loop broken — bot left), an
+        // attackable monster appearing (engage it), a fresh directive, or timeout.
+        // Non-social verbs (the bot's own Explore/Pickup/Attack) pass through and
+        // themselves break the loop.
         if (IsTalkLoopEgressActive(
                 nowUtc, _talkLoopEgressUntilUtc, _talkLoopEgressLandblock, lb,
-                AnyHostileInView(world), RecentFreshDirective(events, nowUtc)))
+                AnyAttackableMonsterInView(world), RecentFreshDirective(events, nowUtc)))
         {
             if (IsEgressOverridableVerb(goal.Kind))
             {
@@ -1039,22 +1040,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         // Early Talk-loop egress: a PROVEN stationary NPC Talk fixation is a
         // dead end regardless of dwell time, so break it now (before the 5-min
-        // tapped-out gate the general egress needs) unless a hostile is in view
-        // (defend/flee that) or the server is actively guiding the bot. Latch it
-        // briefly so the picker cannot re-park on the same dead NPC next tick.
+        // tapped-out gate the general egress needs) unless an attackable monster
+        // is in view (engage that XP target) or the server is actively guiding the
+        // bot. Latch it briefly so the picker cannot re-park on the same dead NPC
+        // next tick.
         if (ShouldEarlyEscapeTalkLoop(
-                loopKind, AnyHostileInView(world), RecentFreshDirective(events, nowUtc)))
+                loopKind, AnyAttackableMonsterInView(world), RecentFreshDirective(events, nowUtc)))
         {
             _talkLoopEgressUntilUtc = nowUtc + TalkLoopEgressDuration;
             _talkLoopEgressLandblock = world.Self.Landblock;
             Console.WriteLine(
                 "[llm-override] talk-loop egress: proven stationary NPC Talk fixation, " +
-                "no hostile in view — substituting Explore{anywhere} " +
+                "no monster in view — substituting Explore{anywhere} " +
                 $"(latched {TalkLoopEgressDuration.TotalSeconds:F0}s) to break the loop.");
             return MakeEgressExploreGoal(
                 nowUtc, "override:talk-loop-egress",
                 "mechanical talk-loop egress: proven stationary NPC Talk fixation with no " +
-                "hostile in view; leaving to break the dead-end conversation loop");
+                "monster in view; leaving to break the dead-end conversation loop");
         }
         // cp-2372: a confirmed bare world-object Use churn (this method is only
         // reached AFTER the cp-2354 churn guard fired — the bot has re-Used the
@@ -1095,20 +1097,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
         => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
-    // True iff the bot has any non-corpse monster in view that is actively
-    // hostile (attacking it). Own-perception wire flags only — no game content.
-    private static bool AnyHostileInView(WorldStateProjection world)
-        => world.Visible.Any(v => v.IsMonster && !v.IsCorpse && v.ObservedHostile);
-
     // Pure decision: a freshly PROVEN stationary NPC Talk fixation should break
-    // the loop immediately (early egress) when no hostile is in view and the
-    // server is not actively guiding the bot with a fresh directive. Scoped to
-    // the Talk loop kind ONLY — a world-object Use loop may be a genuine
-    // early-zone progress attempt, so it keeps the dwell-gated path. Extracted
-    // for deterministic unit testing; own-signal only, no game content.
+    // the loop immediately (early egress) when no attackable monster is in view
+    // and the server is not actively guiding the bot with a fresh directive.
+    // Scoped to the Talk loop kind ONLY — a world-object Use loop may be a genuine
+    // early-zone progress attempt, so it keeps the dwell-gated path. The egress
+    // exists to LEAVE and find activity, so it defers when a monster is already in
+    // view — the bot should engage that XP target (defend/flee a hostile, or fight
+    // a non-hostile) rather than wander off (cp-2378 principle, applied to the
+    // third egress path). Extracted for deterministic unit testing; own-signal
+    // only, no game content.
     internal static bool ShouldEarlyEscapeTalkLoop(
-        string loopKind, bool hostileInView, bool freshDirective)
-        => loopKind == NpcTalkLoopKind && !hostileInView && !freshDirective;
+        string loopKind, bool monsterInView, bool freshDirective)
+        => loopKind == NpcTalkLoopKind && !monsterInView && !freshDirective;
 
     // Pure decision: a confirmed bare world-object Use churn should break the
     // loop with a generic Explore (travel through/past the looped object) rather
@@ -1125,14 +1126,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Pure decision: the early Talk-loop egress latch is still ACTIVE this tick.
     // Active while within the latch window AND still in the same landblock the
     // loop was detected in (leaving the landblock means the loop is broken) AND
-    // no hostile has appeared AND the server is not freshly guiding the bot.
+    // no attackable monster has appeared (engage that XP target instead of
+    // continuing to wander) AND the server is not freshly guiding the bot.
     // Extracted for deterministic unit testing; own-signal only, no game content.
     internal static bool IsTalkLoopEgressActive(
         DateTimeOffset nowUtc, DateTimeOffset until, uint? latchLandblock,
-        uint? currentLandblock, bool hostileInView, bool freshDirective)
+        uint? currentLandblock, bool monsterInView, bool freshDirective)
         => nowUtc < until
            && latchLandblock is uint lb && currentLandblock is uint cur && lb == cur
-           && !hostileInView
+           && !monsterInView
            && !freshDirective;
 
     // Returns true while a FRESH, distinct server tutorial/instruction popup is
