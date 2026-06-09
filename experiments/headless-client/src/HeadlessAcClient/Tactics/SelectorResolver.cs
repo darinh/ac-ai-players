@@ -36,6 +36,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.World;
 
@@ -47,12 +48,16 @@ internal static class SelectorResolver
         Selector sel,
         WorldState world,
         IWeenieRepository? weenies = null,
-        WorldObjectSnapshot? actor = null)
+        WorldObjectSnapshot? actor = null,
+        bool excludeCorpses = false,
+        IReadOnlySet<uint>? excludeGuids = null)
     {
         if (sel is null) throw new ArgumentNullException(nameof(sel));
         if (sel.IsEmpty) return Array.Empty<WorldObjectSnapshot>();
 
         return world.Objects.Values
+            .Where(o => !excludeCorpses || !IsCorpse(o))
+            .Where(o => excludeGuids is null || !excludeGuids.Contains(o.Guid))
             .Where(o => MatchesGuid(o, sel))
             .Where(o => MatchesName(o, sel))
             .Where(o => MatchesNameContains(o, sel))
@@ -67,13 +72,16 @@ internal static class SelectorResolver
         Selector sel,
         WorldState world,
         WorldObjectSnapshot? referencePoint = null,
-        IWeenieRepository? weenies = null)
+        IWeenieRepository? weenies = null,
+        bool excludeCorpses = false,
+        IReadOnlySet<uint>? excludeGuids = null)
     {
         // Use referencePoint as the actor for the locality filter:
         // a single-nearest resolution is asking "what should this
         // actor act on?", so confining to the actor's landblock is
         // the right default.
-        var all = Resolve(sel, world, weenies, actor: referencePoint);
+        var all = Resolve(sel, world, weenies, actor: referencePoint,
+            excludeCorpses: excludeCorpses, excludeGuids: excludeGuids);
         if (all.Count == 0) return null;
         if (referencePoint is null) return all[0];
 
@@ -82,6 +90,14 @@ internal static class SelectorResolver
             .OrderBy(t => t.ok ? t.d2 : double.MaxValue)
             .First().o;
     }
+
+    // A corpse retains the slain creature's NAME but is not an attackable
+    // target (the wire ObjectDescriptionFlag.Corpse bit). Callers resolving an
+    // Attack target pass excludeCorpses:true so an Attack{Name} after a kill
+    // resolves to a LIVE name-match, not the corpse the bot is standing on.
+    // Pickup/Use callers leave it false — a corpse IS a valid loot target.
+    private static bool IsCorpse(WorldObjectSnapshot o) =>
+        o.ObjectDescriptionFlags is uint df && (df & (uint)ObjectDescriptionFlag.Corpse) != 0;
 
     private static bool MatchesGuid(WorldObjectSnapshot o, Selector s) =>
         s.Guid is null || o.Guid == s.Guid;
