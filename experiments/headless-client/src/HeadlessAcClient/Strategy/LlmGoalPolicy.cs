@@ -5498,6 +5498,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- raw fact, not a recommendation: these are the server's/NPC's own words, not an " +
                 "instruction from me; greetings and flavor are not tasks. Whether any still applies, " +
                 "and what to do about it, is your call.");
+            // cp-2387 — re-surface the buried PURSUE UNSEEN OBJECTIVES /
+            // SERVER-INSTRUCTION PRECEDENCE guidance in this decision-proximate
+            // slot (the cp-2336/2337 salience pattern: a rule stated once in the
+            // long preamble is reliably ignored; re-stating it next to the
+            // decision changes behavior). Live: with a "go talk to <person>"
+            // directive present the bot correctly stopped grinding but Explored
+            // GENERICALLY instead of NAMING the target, so it never reached the
+            // turn-in. This is a pointer back to existing rules, not a new rule
+            // or any specific NPC/place — the LLM reads the directive's own words
+            // and decides the target. No game knowledge.
+            sb.AppendLine(
+                "- reminder (see the PURSUE UNSEEN OBJECTIVES and SERVER-INSTRUCTION " +
+                "PRECEDENCE rules above): if a directive above names a PERSON or PLACE to " +
+                "reach, talk to, or proceed to (e.g. \"talk to <name>\", \"go to <place>\") and " +
+                "you have NOT yet done so, pursue it by NAMING that exact target in your goal — " +
+                "`Talk`/`Give`/`Explore{target: {name: \"<the named target>\"}}` — even if it is " +
+                "not in `## Visible nearby` yet, INSTEAD of Exploring \"anywhere\" generically or " +
+                "grinding. A generic Explore does not satisfy a directive that names where to go.");
         }
 
         var assembled = sb.ToString();
