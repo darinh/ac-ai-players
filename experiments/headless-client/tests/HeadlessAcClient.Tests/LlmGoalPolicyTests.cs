@@ -10376,6 +10376,29 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_NonHostileRule_CountersExploreForNewObjectiveWhenMonsterVisible()
+    {
+        // cp-2395 (criterion 2): live open-world failure — with monsters in view
+        // AND no active objective, the bot Explored "to find a new objective/
+        // area" PAST killable Drudges instead of hunting them. The rule must now
+        // state that hunting a visible monster IS a valid objective, so being
+        // objective-less is not a reason to wander past it.
+        var world = BuildExitTokenWorld() with
+        {
+            Visible = new[] { Mob(0x901u, "Drudge Skulker", 19257u) },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var idx = prompt.IndexOf("NON-HOSTILE IS NOT NON-TARGET", System.StringComparison.Ordinal);
+        Assert.True(idx >= 0);
+        var lineEnd = prompt.IndexOf('\n', idx);
+        var line = lineEnd >= 0 ? prompt.Substring(idx, lineEnd - idx) : prompt.Substring(idx);
+        Assert.Contains("NO active objective", line);
+        Assert.Contains("to find a new objective", line);
+        Assert.Contains("HUNTING it", line);
+    }
+
+    [Fact]
     public void BuildUserPrompt_NonHostileRule_OmittedWhenNoMonsterVisible()
     {
         // cp-2335: with no monster (or observed-hostile) in view the rule
