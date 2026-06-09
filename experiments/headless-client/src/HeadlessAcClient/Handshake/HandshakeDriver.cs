@@ -598,6 +598,22 @@ internal sealed class HandshakeDriver : IDisposable
         // fight; this only prevents dying mid-swing).
         const double         CombatDisengageHealthFraction = 0.35;
         const uint           CombatDisengageCriticalHpFloor = 2u;
+        // Phase 7f.H — EARLY unwinnable-and-losing flee. Distinct from the
+        // 35% critical reflex above: this trips while health is still well
+        // ABOVE critical when the current fight is BOTH demonstrably
+        // unwinnable (0 landed, 0 damage across >= EarlyFleeMinEvadedSwings
+        // all-evaded swings) AND actively costing health (>=
+        // EarlyFleeHealthLostFraction of max lost since this engagement's
+        // high-water mark). It prevents the bot dying to a foe it cannot hurt
+        // before the critical reflex or the 60s no-damage watchdog fire. A
+        // fight the bot lands ANY hit/damage in, or takes no net damage in,
+        // never trips it (own swing outcomes + own health only; no game
+        // knowledge, no target choice). See
+        // CombatDisengage.ShouldDisengageUnwinnableLosing. Swing count is
+        // lower than AbandonAllEvadedMinSwings(12) because this reflex ALSO
+        // requires real inbound health loss, so it is conservative already.
+        const int            EarlyFleeMinEvadedSwings    = 6;
+        const double         EarlyFleeHealthLostFraction = 0.25;
         const double         CombatReengageHealthFraction = 0.70;
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
@@ -680,6 +696,12 @@ internal sealed class HandshakeDriver : IDisposable
         int                  combatSwingsLanded = 0;
         int                  combatSwingsEvaded = 0;
         uint                 combatDamageDealt = 0;
+        // Phase 7f.H — highest self health fraction observed during the
+        // CURRENT engagement (its high-water mark). Updated each combat tick
+        // and reset by ClearCombatFightStats at every fight start/clear. The
+        // unwinnable-and-losing early-flee reflex measures health LOST against
+        // this so it counts only damage taken since THIS engagement began.
+        double?              combatPeakSelfHealthFraction = null;
         bool                 combatFeedbackSent = false;
         string?              combatTargetName = null;
         uint?                combatStatsForGuid = null;
@@ -1365,6 +1387,7 @@ internal sealed class HandshakeDriver : IDisposable
             combatSwingsLanded = 0;
             combatSwingsEvaded = 0;
             combatDamageDealt = 0;
+            combatPeakSelfHealthFraction = null;
             combatFeedbackSent = false;
             combatTargetName = null;
             combatStatsForGuid = null;
@@ -3269,17 +3292,38 @@ internal sealed class HandshakeDriver : IDisposable
                     Console.WriteLine($"[observe]   -> PHASE7F.0 SEND: SetSingleCharacterOption(AutoRepeatAttacks=on) pktSeq={optPacketSeq} fragSeq={optFragSeq} totalBytes={optSent}");
                 }
 
-                // Phase 7f.D — REACTIVE DISENGAGE (self-preservation
-                // reflex). When the bot's OWN health drops critically low
-                // mid-combat, break off atomically: reset combat state,
-                // drop to NonCombat, and actively flee directly away from
-                // the threat. A ~3s LLM round-trip cannot save a ~5-HP
-                // bot, so this is a mechanical motor reflex (only the
-                // bot's own health vs a threshold; NO game knowledge, NO
-                // target choice). It runs BEFORE the watchdog + re-attack
-                // so it pre-empts a swing re-send in the same tick. The
-                // LLM is told via an ActionRejected event so it
-                // re-deliberates rather than re-issuing the dead Attack.
+                // Phase 7f.H — update this engagement's self-health high-water
+                // mark each tick we are in combat with known health, so the
+                // unwinnable-and-losing early-flee reflex below can measure how
+                // much health the CURRENT fight has cost (damage taken since the
+                // engagement began, independent of any pre-existing low-health
+                // state). Reset to null by ClearCombatFightStats at fight
+                // start/clear.
+                if (combatTargetGuid is not null &&
+                    worldState.Self is WorldObjectSnapshot hwSelf &&
+                    hwSelf.HealthCurrent is uint hwHc && hwSelf.HealthMax is uint hwHm &&
+                    hwHm > 0u)
+                {
+                    var hwFrac = (double)hwHc / hwHm;
+                    combatPeakSelfHealthFraction = combatPeakSelfHealthFraction is double pk
+                        ? Math.Max(pk, hwFrac)
+                        : hwFrac;
+                }
+
+                // Phase 7f.D / 7f.H — REACTIVE DISENGAGE (self-preservation
+                // reflex). Break off atomically when EITHER our OWN health
+                // drops critically low (7f.D, "low-health") OR the fight is
+                // demonstrably unwinnable-and-losing (7f.H,
+                // "unwinnable-losing") — reset combat state, drop to
+                // NonCombat, and actively flee directly away from the threat.
+                // A ~3s LLM round-trip cannot save a dying bot, so this is a
+                // mechanical motor reflex (only the bot's own health + own
+                // swing outcomes; NO game knowledge, NO target choice). It
+                // runs BEFORE the watchdog + re-attack so it pre-empts a swing
+                // re-send in the same tick. The LLM is told via an
+                // ActionRejected event so it re-deliberates rather than
+                // re-issuing the dead Attack.
+                string? dgReason = null;
                 if (combatTargetGuid is uint dgTarget &&
                     // Suppress the flee reflex while a lifestone recall is in
                     // flight: recall IS the escape, and a flee AP would move the
@@ -3293,9 +3337,12 @@ internal sealed class HandshakeDriver : IDisposable
                     dgSelf.HealthCurrent is uint dgHc &&
                     dgSelf.HealthMax is uint dgHm &&
                     dgSelf.CellId is uint dgCell && dgCell != 0u &&
-                    CombatDisengage.ShouldDisengage(
+                    (dgReason = CombatDisengage.DisengageReason(
                         dgHc, dgHm, inCombat: true,
-                        CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor))
+                        CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor,
+                        combatSwingsLanded, combatDamageDealt, combatSwingsEvaded,
+                        EarlyFleeMinEvadedSwings, combatPeakSelfHealthFraction,
+                        EarlyFleeHealthLostFraction)) is not null)
                 {
                     // Capture the threat position BEFORE clearing combat
                     // state. If the threat already left view, flee from our
@@ -3305,9 +3352,10 @@ internal sealed class HandshakeDriver : IDisposable
                         : dgSelf.Position;
 
                     Console.WriteLine(
-                        $"[combat] DISENGAGE low-health reflex: self HP {dgHc}/{dgHm} " +
-                        $"(frac={(double)dgHc / dgHm:F2}); breaking off 0x{dgTarget:X8}, " +
-                        $"NonCombat + flee {CombatFleeDistanceUnits:F0}u");
+                        $"[combat] DISENGAGE {dgReason} reflex: self HP {dgHc}/{dgHm} " +
+                        $"(frac={(double)dgHc / dgHm:F2}, peak={combatPeakSelfHealthFraction?.ToString("F2") ?? "<none>"}, " +
+                        $"landed={combatSwingsLanded} evaded={combatSwingsEvaded} dmg={combatDamageDealt}); " +
+                        $"breaking off 0x{dgTarget:X8}, NonCombat + flee {CombatFleeDistanceUnits:F0}u");
 
                     // combat-feel: record a NEAR-DEATH against the kind we
                     // are breaking off from, using the threat's identity
@@ -3466,18 +3514,31 @@ internal sealed class HandshakeDriver : IDisposable
 
                     // 6) Tell Strategy the Attack goal is dead so it
                     //    re-deliberates (don't silently blackhole). Distinct
-                    //    label so dedup/anti-fixation can reason about it.
+                    //    label so dedup/anti-fixation can reason about it. The
+                    //    reason is carried through so the LLM learns the RIGHT
+                    //    lesson — "I was low on health" vs "I could not damage
+                    //    this foe while it hurt me" lead to different choices.
+                    var dgRejectText = dgReason == "unwinnable-losing"
+                        ? $"DisengageUnwinnable: broke off 0x{dgTarget:X8} — 0 damage landed " +
+                          $"while losing health (self HP {dgHc}/{dgHm}); fled"
+                        : $"DisengageLowHealth: broke off combat at HP {dgHc}/{dgHm} and fled";
                     eventStream.Append(new StreamEvent
                     {
                         Sequence = 0,
                         Utc = DateTimeOffset.UtcNow,
                         Kind = EventKind.ActionRejected,
-                        Text = $"DisengageLowHealth: broke off combat at HP {dgHc}/{dgHm} and fled",
+                        Text = dgRejectText,
                         ItemGuid = dgTarget,
                         ErrorCode = 0xFFFB,
-                        ErrorLabel = "DisengageLowHealth",
+                        ErrorLabel = dgReason == "unwinnable-losing"
+                            ? "DisengageUnwinnable"
+                            : "DisengageLowHealth",
                     });
-                    tactics.Fail("combat disengage: self-health critical", eventStream);
+                    tactics.Fail(
+                        dgReason == "unwinnable-losing"
+                            ? "combat disengage: cannot damage target while taking damage"
+                            : "combat disengage: self-health critical",
+                        eventStream);
                 }
 
                 // Phase 7f.D — per-tick self-suppression flag + health-aware
@@ -7702,6 +7763,22 @@ internal sealed class HandshakeDriver : IDisposable
                             // immediately so the LLM never reads the previous
                             // target's landed/evaded counts during a switch.
                             ClearCombatFightStats();
+                            // Phase 7f.H — seed the self-health high-water mark
+                            // at lock time. The per-tick updater (in the
+                            // disengage section) only samples from the NEXT
+                            // tick, by which point a bursty mob may already have
+                            // landed damage; seeding here from current health
+                            // ensures the unwinnable-and-losing early-flee
+                            // reflex measures health LOST from a near-full
+                            // baseline rather than an already-damaged one. If
+                            // self health is not yet synced, leave it null and
+                            // the per-tick updater initializes it once known.
+                            if (worldState.Self is WorldObjectSnapshot engSelf &&
+                                engSelf.HealthCurrent is uint engHc &&
+                                engSelf.HealthMax is uint engHm && engHm > 0u)
+                            {
+                                combatPeakSelfHealthFraction = (double)engHc / engHm;
+                            }
                             // combat-feel: remember the KIND we are now
                             // fighting (with a timestamp) for later death
                             // attribution, and count the engagement.
