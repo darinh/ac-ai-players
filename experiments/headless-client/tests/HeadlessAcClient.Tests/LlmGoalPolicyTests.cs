@@ -10898,6 +10898,27 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("PERSIST A HUNT EXCURSION", prompt);
     }
 
+    [Fact]
+    public void StackPrompt_PersistHuntExcursion_OmittedWhenMonsterInView()
+    {
+        // cp-2392: PERSIST A HUNT EXCURSION teaches how to START/maintain an
+        // excursion to FIND monsters; it is moot once a monster is already in
+        // view (completing the cp-2368 monster-in-view gating set), which frees
+        // ~1KB of static preamble in exactly the combat scenes where the dynamic
+        // perception sections are hard-cut. The mechanical auto-pop on monster
+        // sighting is predicate-driven, not prompt-driven, so this is
+        // behavior-preserving.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
+
+        Assert.DoesNotContain("PERSIST A HUNT EXCURSION", prompt);
+        // The completion semantics it relied on remain stated in COMPLETION
+        // PREDICATES (always-on in the stack block).
+        Assert.Contains("COMPLETION PREDICATES", prompt);
+    }
+
     // ---- ## Unseen objective target (phantom named-target capsule) ----
 
     private static IntentStack StackWithTopIntent(
