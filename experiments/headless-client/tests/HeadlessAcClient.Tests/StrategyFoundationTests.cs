@@ -1507,6 +1507,80 @@ public class StrategyFoundationTests
         Assert.NotEqual(GoalKind.Use, goal!.Kind);
     }
 
+    // cp-2403: a visible openable Chest at a far distance — the world the
+    // fallback's openable-Use step (5b) acts on. Only the chest is visible, so
+    // with no earlier-step candidate the policy reaches step 5b.
+    private static WorldStateProjection ChestWorld(uint chestGuid) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+            CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+            HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = new[]
+        {
+            new VisibleObjectProjection
+            {
+                Guid = chestGuid, Name = "Chest", Wcid = 33609u,
+                ItemType = 0x200u, Distance = 30.0f,
+                IsOpenable = true, IsChest = true,
+            },
+        },
+    };
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsOpenable_WhenRecentlyEmptied()
+    {
+        // cp-2403: a container the Motor opened and found EMPTY (marked in the
+        // shared TTL tracker) is skipped by the fallback openable-Use step, so
+        // the bot stops marching to empty chests when the LLM throttles. With
+        // only the empty chest visible, the policy falls through to Explore.
+        const uint ChestGuid = 0x7A9B4001u;
+        var emptied = new HeadlessAcClient.World.InteractUnreachableTracker();
+        emptied.MarkUnreachable(ChestGuid, DateTime.UtcNow, TimeSpan.FromSeconds(180));
+        var policy = new NoQuestKnowledgePolicy(null, null, emptied);
+        var goal = policy.ProposeGoal(ChestWorld(ChestGuid), new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Use, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_UsesOpenable_WhenNotEmptied()
+    {
+        // Same world, but the chest is NOT in the emptied tracker -> Use it.
+        const uint ChestGuid = 0x7A9B4001u;
+        var emptied = new HeadlessAcClient.World.InteractUnreachableTracker();
+        var policy = new NoQuestKnowledgePolicy(null, null, emptied);
+        var goal = policy.ProposeGoal(ChestWorld(ChestGuid), new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(ChestGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_UsesOpenable_AfterEmptiedCooldownExpires()
+    {
+        // TTL'd: a chest marked emptied with an already-elapsed cooldown is
+        // retryable — a respawned chest may have refilled loot.
+        const uint ChestGuid = 0x7A9B4001u;
+        var emptied = new HeadlessAcClient.World.InteractUnreachableTracker();
+        emptied.MarkUnreachable(ChestGuid, DateTime.UtcNow - TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(1));
+        var policy = new NoQuestKnowledgePolicy(null, null, emptied);
+        var goal = policy.ProposeGoal(ChestWorld(ChestGuid), new EventStream(), null);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_NullEmptiedTracker_UsesOpenableNormally()
+    {
+        // Back-compat: the tracker is optional; a null one suppresses nothing.
+        var policy = new NoQuestKnowledgePolicy(null, null, null);
+        var goal = policy.ProposeGoal(ChestWorld(0x7A9B4001u), new EventStream(), null);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+    }
+
     [Fact]
     public void NoQuestKnowledgePolicy_DoesNotProposeSameOpenableTwiceInARow()
     {

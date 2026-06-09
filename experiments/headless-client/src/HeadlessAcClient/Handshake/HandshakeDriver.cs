@@ -654,6 +654,19 @@ internal sealed class HandshakeDriver : IDisposable
         // per-KIND ineffective outcome for the LLM.
         var                  recentlyAbandonedNoDamageCooldown = TimeSpan.FromSeconds(120);
         var                  recentlyAbandonedNoDamageTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
+        // cp-2403 — containers (chests/corpses) the bot OPENED and confirmed
+        // EMPTY, with a TTL cooldown. The no-quest fallback's openable/chest Use
+        // steps pick the nearest visible openable, so when the LLM throttles and
+        // the fallback drives, the bot marches (observed: up to 100u) to Use
+        // chest after empty chest. Marking a guid here once its open confirmed no
+        // loot, and skipping it in those fallback steps for the cooldown, stops
+        // the empty-chest tour. TTL'd, not permanent: a chest may refill loot on
+        // a respawn timer, so the guid is retried after the cooldown. Generic TTL
+        // guid-suppression (same structure as recentlyKilledTargets); keyed only
+        // on a guid the bot itself observed empty — no object type/name/wcid. It
+        // ONLY filters the autonomous fallback's Use steps, never an LLM goal.
+        var                  emptiedContainerCooldown = TimeSpan.FromSeconds(180);
+        var                  recentlyEmptiedContainers = new HeadlessAcClient.World.InteractUnreachableTracker();
         // cp-2342 — records the self→target distance at each interaction goal
         // lock, keyed by guid, keeping a short rolling history per target. The
         // most-recent target's history is projected into the prompt's
@@ -904,7 +917,7 @@ internal sealed class HandshakeDriver : IDisposable
         LlmGoalPolicy? llmPolicyForPickerSurface = null;
         if (llmDisabled)
         {
-            goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner);
+            goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner, recentlyEmptiedContainers);
             Console.WriteLine("[strategy] AC_BOTS_LLM_DISABLE=1 -> LLM disabled, using NoQuestKnowledgePolicy fallback only");
         }
         else
@@ -912,7 +925,7 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack, silentTalkLearner), weenies, trainingSink, intentStack, intentIds);
+                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack, silentTalkLearner, recentlyEmptiedContainers), weenies, trainingSink, intentStack, intentIds);
                 goalPolicy = llmPolicy;
                 llmPolicyForPickerSurface = llmPolicy;
                 Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
@@ -920,7 +933,7 @@ internal sealed class HandshakeDriver : IDisposable
             catch (Exception ex)
             {
                 Console.WriteLine($"[strategy] LlmGoalClient unavailable ({ex.GetType().Name}: {ex.Message}); using NoQuestKnowledgePolicy fallback only");
-                goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner);
+                goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner, recentlyEmptiedContainers);
             }
         }
         var eventStream = new EventStream();
@@ -4296,6 +4309,13 @@ internal sealed class HandshakeDriver : IDisposable
                                                 < CorpseEmptyConfirmGraceSec)
                                             continue;
                                         recentlyOpenedContainers.Remove(nearbyCorpse);
+                                        // cp-2403: this container opened with no
+                                        // loot left inside — suppress it in the
+                                        // no-quest fallback's Use steps for a TTL
+                                        // so the fallback stops re-marching the bot
+                                        // to empty chests when the LLM throttles.
+                                        recentlyEmptiedContainers.MarkUnreachable(
+                                            nearbyCorpse, DateTime.UtcNow, emptiedContainerCooldown);
                                         // cp-2358: record an emptied OWN-kill corpse
                                         // (guid -> name + time) so the observed empty-
                                         // loot outcome can be surfaced in the prompt.
