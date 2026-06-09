@@ -51,6 +51,7 @@ internal static class GameMessageDecoder
             GameMessageOpcode.UpdatePosition => DecodeUpdatePosition(payload),
             GameMessageOpcode.Motion => DecodeMotion(payload),
             GameMessageOpcode.ObjectDelete => DecodeObjectDelete(payload),
+            GameMessageOpcode.InventoryRemoveObject => DecodeInventoryRemoveObject(payload),
             GameMessageOpcode.SetState => DecodeSetState(payload),
             GameMessageOpcode.HearSpeech => DecodeHearSpeech(payload),
             GameMessageOpcode.PrivateUpdatePropertyInt => DecodePrivateUpdatePropertyInt(payload),
@@ -74,6 +75,21 @@ internal static class GameMessageDecoder
             var guid    = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
             var instSeq = BinaryPrimitives.ReadUInt16LittleEndian(p.Slice(cursor));
             return new ObjectDeleteMessage(guid, instSeq);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static InventoryRemoveObjectMessage? DecodeInventoryRemoveObject(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            // 4B opcode + 4B guid = 8B.
+            if (p.Length < InventoryRemoveObjectMessage.PackedSize) return null;
+            var guid = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(sizeof(uint)));
+            return new InventoryRemoveObjectMessage(guid);
         }
         catch
         {

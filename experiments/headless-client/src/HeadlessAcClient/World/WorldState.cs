@@ -372,6 +372,7 @@ internal sealed class WorldState
         {
             ObjectCreateMessage oc            => ApplyObjectCreate(oc),
             ObjectDeleteMessage od            => ApplyObjectDelete(od),
+            InventoryRemoveObjectMessage ir   => ApplyInventoryRemove(ir),
             UpdatePositionMessage up          => ApplyUpdatePosition(up),
             MotionMessage mm                  => ApplyMotion(mm),
             SetStateMessage ss                => ApplySetState(ss),
@@ -428,6 +429,33 @@ internal sealed class WorldState
         }
 
         _objects.Remove(od.Guid);
+        return true;
+    }
+
+    /// <summary>
+    /// Remove an item from the snapshot in response to a server
+    /// InventoryRemoveObject (0x0024): the item has left the local-player
+    /// inventory (a successful give, drop, use-consume, or sale). Without
+    /// this the bot keeps a phantom inventory item and a later give/use of
+    /// the removed guid is refused "Item not found!".
+    ///
+    /// No-op if the guid is unknown (returns false). Self-guid protection:
+    /// never remove our own player snapshot (the server would not send an
+    /// inventory-remove for the player object, but guard anyway).
+    /// </summary>
+    private bool ApplyInventoryRemove(InventoryRemoveObjectMessage ir)
+    {
+        if (!_objects.ContainsKey(ir.Guid))
+            return false;
+
+        if (SelfGuid is uint selfGuid && selfGuid == ir.Guid)
+        {
+            Console.Error.WriteLine(
+                $"[worldstate] ignoring InventoryRemoveObject for SelfGuid 0x{ir.Guid:X8}");
+            return false;
+        }
+
+        _objects.Remove(ir.Guid);
         return true;
     }
 

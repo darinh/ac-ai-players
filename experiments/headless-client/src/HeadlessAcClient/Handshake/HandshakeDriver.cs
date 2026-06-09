@@ -2760,6 +2760,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 ClearCombatFightStats();
                             }
                             break;
+                        case InventoryRemoveObjectMessage ir:
+                            Console.WriteLine(
+                                $"[observe]   -> InventoryRemoveObject: guid=0x{ir.Guid:X8} " +
+                                $"[{(applied ? "removed from inventory" : "noop (unknown guid)")}]");
+                            break;
                         case HearSpeechMessage hs:
                             var hsPreview = hs.Message.Length > 80 ? hs.Message.Substring(0, 80) + "..." : hs.Message;
                             Console.WriteLine(
