@@ -33,6 +33,24 @@ using System.Linq;
 
 namespace HeadlessAcClient.Strategy;
 
+/// <summary>
+/// Outcome of a single Talk-dispatch probe record. Returned by
+/// <see cref="SilentTalkTargetLearner.RecordTalkDispatch"/> PURELY so the Motor
+/// can log WHY a probe was (or was not) opened — the learner's behaviour is
+/// unchanged by the caller ignoring it. Diagnoses the unobservable-learner
+/// failure mode where a fallback Talk-tour of inert scenery never concludes
+/// silent (e.g. a null wcid at dispatch silently drops every probe).
+/// </summary>
+internal enum TalkProbeOutcome
+{
+    /// <summary>A fresh dialog-response window opened for this instance.</summary>
+    Recorded,
+    /// <summary>The creature's wcid was unknown (null) — cannot be learned.</summary>
+    IgnoredUnknownWcid,
+    /// <summary>The wcid already proved conversational — not re-probed.</summary>
+    IgnoredImmuneWcid,
+}
+
 internal sealed class SilentTalkTargetLearner
 {
     // How long after a Talk dispatch to wait for a dialog response before
@@ -68,13 +86,16 @@ internal sealed class SilentTalkTargetLearner
     /// Record that the bot just dispatched a Talk against <paramref name="guid"/>
     /// (a creature of <paramref name="wcid"/>). Starts the dialog-response
     /// window for this instance. A null wcid (unknown class) cannot be learned
-    /// and is ignored; an already-proven talker wcid is not re-probed.
+    /// and is ignored; an already-proven talker wcid is not re-probed. Returns
+    /// the <see cref="TalkProbeOutcome"/> so the Motor can log why a probe was
+    /// or was not opened (the learner is unaffected by the caller ignoring it).
     /// </summary>
-    public void RecordTalkDispatch(uint guid, uint? wcid, DateTime nowUtc)
+    public TalkProbeOutcome RecordTalkDispatch(uint guid, uint? wcid, DateTime nowUtc)
     {
-        if (wcid is not uint w) return;
-        if (_dialogCapableWcids.Contains(w)) return;
+        if (wcid is not uint w) return TalkProbeOutcome.IgnoredUnknownWcid;
+        if (_dialogCapableWcids.Contains(w)) return TalkProbeOutcome.IgnoredImmuneWcid;
         _pending[guid] = (w, nowUtc);
+        return TalkProbeOutcome.Recorded;
     }
 
     /// <summary>
@@ -131,8 +152,12 @@ internal sealed class SilentTalkTargetLearner
     /// Promote any pending probe that has aged past the grace window with no
     /// dialog into the silent tally, and conclude a kind silent once enough
     /// distinct instances have. Call once per tick. Cheap (small dictionary).
+    /// Returns the wcids (if any) that crossed the silent threshold on THIS
+    /// call, so the Motor can log the conclusion (a kind being concluded silent
+    /// is the moment the fallback starts skipping it). Empty when nothing new
+    /// concluded; existing callers may ignore the return without behaviour change.
     /// </summary>
-    public void Evaluate(DateTime nowUtc)
+    public IReadOnlyList<uint> Evaluate(DateTime nowUtc)
     {
         List<uint>? matured = null;
         foreach (var kv in _pending)
@@ -140,8 +165,9 @@ internal sealed class SilentTalkTargetLearner
             if ((nowUtc - kv.Value.At).TotalSeconds >= _graceWindowSeconds)
                 (matured ??= new List<uint>()).Add(kv.Key);
         }
-        if (matured is null) return;
+        if (matured is null) return Array.Empty<uint>();
 
+        List<uint>? newlySilent = null;
         foreach (var guid in matured)
         {
             var w = _pending[guid].Wcid;
@@ -152,9 +178,12 @@ internal sealed class SilentTalkTargetLearner
             if (!_countedGuids.Add(guid)) continue;
             var c = _silentCounts.GetValueOrDefault(w) + 1;
             _silentCounts[w] = c;
-            if (c >= _silentConfirmThreshold)
-                _silentWcids.Add(w);
+            // _silentWcids.Add returns true only the FIRST time the kind crosses
+            // the threshold, so report each newly-concluded wcid exactly once.
+            if (c >= _silentConfirmThreshold && _silentWcids.Add(w))
+                (newlySilent ??= new List<uint>()).Add(w);
         }
+        return newlySilent ?? (IReadOnlyList<uint>)Array.Empty<uint>();
     }
 
     /// <summary>
@@ -166,6 +195,15 @@ internal sealed class SilentTalkTargetLearner
 
     /// <summary>Count of kinds currently concluded silent (diagnostics).</summary>
     public int SilentWcidCount => _silentWcids.Count;
+
+    /// <summary>
+    /// Distinct silent instances tallied for a wcid so far (diagnostics:
+    /// progress toward the silent-confirm threshold). 0 for null/unknown or a
+    /// wcid with no matured-silent instances yet. Lets the Motor log how close
+    /// a kind is to being concluded non-conversational.
+    /// </summary>
+    public int DistinctSilentInstances(uint? wcid)
+        => wcid is uint w ? _silentCounts.GetValueOrDefault(w) : 0;
 
     /// <summary>Snapshot of the learned silent wcids (diagnostics/telemetry).</summary>
     public IReadOnlyCollection<uint> SilentWcids => _silentWcids.ToArray();

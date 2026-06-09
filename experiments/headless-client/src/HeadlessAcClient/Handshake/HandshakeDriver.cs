@@ -4552,8 +4552,12 @@ internal sealed class HandshakeDriver : IDisposable
                     // Mature any pending silent-talk probes (Talks that drew no
                     // dialog within the grace window) before the policy
                     // deliberates, so the fallback's Talk step sees the freshest
-                    // learned-silent set.
-                    silentTalkLearner.Evaluate(DateTime.UtcNow);
+                    // learned-silent set. Log each kind the moment it concludes
+                    // silent (the moment the fallback begins skipping it).
+                    foreach (var stConcluded in silentTalkLearner.Evaluate(DateTime.UtcNow))
+                        Console.WriteLine(
+                            $"[silent-talk] CONCLUDED wcid={stConcluded} non-conversational " +
+                            $"(reached distinct-silent threshold); fallback will now skip it");
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
 
                     // Named-target search continuity: the search telemetry
@@ -7672,9 +7676,21 @@ internal sealed class HandshakeDriver : IDisposable
                         // (if no dialog answers within its grace window) that this
                         // creature KIND is non-conversational scenery. Only Talk —
                         // a plain Use of an object is a different interaction.
+                        // The outcome + threshold-progress are logged so a fallback
+                        // Talk-tour of inert scenery that never concludes silent is
+                        // diagnosable (e.g. a null wcid at dispatch drops the probe).
                         if (lockedGoalKind == GoalKind.Talk)
-                            silentTalkLearner.RecordTalkDispatch(
-                                motionTarget.Guid, motionTarget.WeenieClassId, DateTime.UtcNow);
+                        {
+                            var stProbeWcid = motionTarget.WeenieClassId;
+                            var stOutcome = silentTalkLearner.RecordTalkDispatch(
+                                motionTarget.Guid, stProbeWcid, DateTime.UtcNow);
+                            Console.WriteLine(
+                                $"[silent-talk] dispatch guid=0x{motionTarget.Guid:X8} " +
+                                $"wcid={(stProbeWcid is uint stw ? stw.ToString() : "null")} " +
+                                $"outcome={stOutcome} " +
+                                $"distinctSilent={silentTalkLearner.DistinctSilentInstances(stProbeWcid)} " +
+                                $"silentKinds={silentTalkLearner.SilentWcidCount}");
+                        }
 
                         // Slice Q + Slice U — track USE on any openable
                         // loot container (corpse, treasure chest,
