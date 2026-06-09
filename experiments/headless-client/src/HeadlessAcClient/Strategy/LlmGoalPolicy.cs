@@ -3703,6 +3703,40 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
         => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity: null, explorationCandidates: null);
 
+    // cp-2400: cheap pre-pass for the NPC REPEAT EXHAUSTION rule's relevance
+    // gate. Returns true when the recent emission history (last 10 GoalEmitted)
+    // shows the SAME Talk target emitted 2+ times — i.e. a re-Talk loop is
+    // forming and the "stop re-Talking an exhausted NPC" guidance is actionable.
+    // Mirrors the talkByKey parse used by `## Location & recency` (Tactics formats
+    // GoalEmitted Text as `<Kind> target=<Selector> item=<Selector> source=<src>`,
+    // and Selector.ToString() prints `guid=...` before `name="..."`), keying by
+    // the guid token when present else the name token, so re-Talks of the SAME
+    // NPC collapse to one count even when the selector carries a guid. A purely
+    // structural read of the bot's OWN emission history — no server text, no game
+    // knowledge.
+    private static bool HasRecentRepeatedTalkGoal(EventStream events)
+    {
+        var recent = events.Recent(EventStream.DefaultCapacity)
+            .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+            .Take(10);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recent)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Talk ", StringComparison.Ordinal)) continue;
+            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!sm.Success) continue;
+            var sel = sm.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            counts[key] = counts.GetValueOrDefault(key) + 1;
+            if (counts[key] >= 2) return true;
+        }
+        return false;
+    }
+
     internal static string BuildUserPrompt(
         WorldStateProjection world,
         EventStream events,
@@ -3867,6 +3901,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // > 0, so render it ONLY when a monster is actually in view.
         if (monsterInView)
         sb.AppendLine("- NON-HOSTILE IS NOT NON-TARGET: a visible `monster` is a valid XP target whether or not it has attacked you — `0 attacking you now` means none are on you YET, NOT \"nothing to fight\". If `Combat readiness` lists a `nearest monster`, you ALREADY have a target, so do NOT emit `Explore` \"to find monsters\" while `monsters in view` is above 0 — `Attack` a killable/nearest `monster` instead. Having NO active objective is itself NOT a reason to wander: when a `monster` is in view and you have no other task, HUNTING it (killing it for XP and levels) IS a valid objective — so do NOT `Explore` \"to find a new objective\" or \"to find a new area\" PAST a visible killable `monster`; engage it where it is (and `Raise...` any `unspent` XP between fights). (per COMBAT SAFETY: prefer a KIND you can defeat and skip one that has already beaten you; low `health`, a fresh `corpse` to loot, or an explicit server/quest directive still take priority).");
+        // cp-2400: the NPC REPEAT EXHAUSTION rule (~1.1KB) advises against
+        // re-Talking an EXHAUSTED NPC. It is ONLY actionable once the bot has
+        // actually re-Talked the SAME NPC — a Talk-goal repeat in the recent
+        // emissions (which a `## Server hints` dialog `repeated xN` likewise
+        // implies, since a dialog repeat follows a re-Talk). With no such repeat
+        // it is inapplicable noise that buries the applicable rules, so gate it
+        // on the observed repeat (cp-2368/69/92 per-rule relevance-gating). The
+        // Motor's mechanical talk-loop guards (multi-NPC + per-NPC egress)
+        // backstop loop-breaking regardless. A render gate on the bot's OWN
+        // emission history; the LLM still decides; no game knowledge.
+        if (HasRecentRepeatedTalkGoal(events))
         sb.AppendLine("- NPC REPEAT EXHAUSTION — a repeating conversation is not progress: when `## Server hints` tags an NPC's dialog `repeated xN` (the count it shows) with N>=3, OR the recency note shows `recent Talk emissions: <that NPC> xN` with N>=3 (this ALSO covers a SILENT NPC that returns no dialog), OR the SAME NPC keeps producing recent lines that add no new item, hint, inventory, location, or change, that conversation is EXHAUSTED — re-`Talk`ing it will NOT advance anything even if it alternates 2-3 canned lines, so do NOT keep Talking just because the latest line looks new. PIVOT to a DIFFERENT verb/target: if the dialog named a concrete next action, follow it with a NON-Talk verb (`Use` the object it pointed at, `Give` a held item, `Pickup` visible loot, or `Talk` a DIFFERENT not-yet-talked NPC); else `Explore` away. Re-Talking the same NPC is NEVER how you follow an exhausted directive. If killable `monster`s are in view and no concrete non-Talk action is actionable, `Attack` one for XP instead — but only AFTER the conversation is exhausted; an NPC with genuinely NEW dialog still takes priority.");
         // The SPEND XP rule (~1.1KB) is inapplicable when there is nothing to
         // spend, so render it ONLY when unspent XP > 0 — the SAME factual gate
