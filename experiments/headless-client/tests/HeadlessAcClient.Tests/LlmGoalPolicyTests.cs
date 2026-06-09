@@ -2963,6 +2963,41 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("Combat targets:", p);
     }
 
+    // cp-2409: TRANSITIONS (door/portal Use) + CLOSED DOORS (door-only) are
+    // gated on door/portal visibility.
+
+    [Fact]
+    public void BuildUserPrompt_DoorRules_RenderWhenDoorVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection { Guid = 0xD00u, Name = "Wooden Door", Distance = 3f, IsDoor = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("TRANSITIONS — doors and portals", p);
+        Assert.Contains("CLOSED DOORS ARE BARRIERS", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_TransitionsRendersForPortal_ButClosedDoorsDoesNot()
+    {
+        // A portal (no door) makes TRANSITIONS actionable but not the door-only
+        // CLOSED DOORS rule.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection { Guid = 0xD01u, Name = "Portal", Distance = 3f, IsPortal = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("TRANSITIONS — doors and portals", p);
+        Assert.DoesNotContain("CLOSED DOORS ARE BARRIERS", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DoorRules_OmittedWhenNoDoorOrPortalVisible()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection { Guid = 0xD02u, Name = "Town Crier", Distance = 4f, IsMonster = false });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("TRANSITIONS — doors and portals", p);
+        Assert.DoesNotContain("CLOSED DOORS ARE BARRIERS", p);
+    }
+
     [Fact]
     public void BuildUserPrompt_ExcursionRuleGating_ExcludesCorpsesAndCountsObservedHostile()
     {
