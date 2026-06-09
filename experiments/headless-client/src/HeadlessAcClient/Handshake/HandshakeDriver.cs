@@ -991,6 +991,13 @@ internal sealed class HandshakeDriver : IDisposable
         // Use). Cleared together with pendingGiveItemGuid by the
         // cooldown-reset block.
         uint? pendingUseWithItemGuid = null;
+        // cp-2417: the source item's name + wcid captured alongside
+        // pendingUseWithItemGuid so the USEWITHTARGET dispatch can emit the
+        // same InventoryItemUsed dedup echo the plain inventory-USE path emits
+        // (otherwise a Use{target=self,item=<letter>} loops un-deduped). Set,
+        // consumed, and cleared together with pendingUseWithItemGuid.
+        string? pendingUseWithItemName = null;
+        uint? pendingUseWithItemWcid = null;
         // M1.6 — snapshot of the Goal.Kind at the moment the
         // pre-emptor locked motion. Used by the action-send block
         // (combat / use / give branch selection) so we don't read a
@@ -3514,6 +3521,8 @@ internal sealed class HandshakeDriver : IDisposable
                     motionOutdoorApCells.Clear();
                     pendingGiveItemGuid = null;
                     pendingUseWithItemGuid = null;
+                    pendingUseWithItemName = null;
+                    pendingUseWithItemWcid = null;
                     lockedGoalKind = null;
 
                     // 5) Build the synthetic flee destination + an
@@ -4150,6 +4159,8 @@ internal sealed class HandshakeDriver : IDisposable
                     motionOutdoorApCells.Clear();
                     pendingGiveItemGuid = null;
                     pendingUseWithItemGuid = null;
+                    pendingUseWithItemName = null;
+                    pendingUseWithItemWcid = null;
                     lockedGoalKind = null;
 
                     if (actionsCompleted >= MaxActionsPerSession)
@@ -6266,11 +6277,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (goal.Kind == GoalKind.Give)
                                     pendingGiveItemGuid = itemSnap!.Guid;
                                 else if (goal.Kind == GoalKind.Use && itemSnap is not null)
+                                {
                                     // Two-object use: a resolved inventory item
                                     // to be applied to the world target (e.g. a
                                     // key on a locked chest). Dispatched as
                                     // UseWithTarget at the action-send branch.
                                     pendingUseWithItemGuid = itemSnap.Guid;
+                                    // cp-2417: also capture the source item's
+                                    // name + wcid so the dispatch can emit the
+                                    // InventoryItemUsed dedup echo.
+                                    pendingUseWithItemName = itemSnap.Name;
+                                    pendingUseWithItemWcid = itemSnap.WeenieClassId;
+                                }
                                 if (WorldDistance.TrySquaredDistance(tacticsSelf, targetSnap!, out var d2lock))
                                     motionInitialDistance = (float)Math.Sqrt(d2lock);
 
@@ -7685,6 +7703,25 @@ internal sealed class HandshakeDriver : IDisposable
                             sourceGuid: useWithSrc,
                             targetGuid: motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
+
+                        // cp-2417: record this two-object use of an inventory
+                        // SOURCE item in the same InventoryItemUsed echo stream the
+                        // plain inventory-USE path emits (~5863) so
+                        // LlmGoalPolicy.IsInventoryUseRecentlyDispatched can drop a
+                        // repeat Use of the SAME item. A Use{target=self,item=<note>}
+                        // (reading a non-consumable letter) is dispatched HERE as
+                        // USEWITHTARGET and previously emitted no echo, so the dedup
+                        // was blind — live (gpt-4o) the bot re-read one letter 45x.
+                        // Self-emitted bookkeeping echo only; no game knowledge.
+                        eventStream.Append(new StreamEvent
+                        {
+                            Sequence = 0,
+                            Utc      = DateTimeOffset.UtcNow,
+                            Kind     = EventKind.InventoryItemUsed,
+                            ItemGuid = useWithSrc,
+                            Wcid     = pendingUseWithItemWcid,
+                            Name     = pendingUseWithItemName,
+                        });
                     }
                     else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
                     {
