@@ -7152,6 +7152,77 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TalkLoopTtl_NotSuppressed_BeforeAnyRecord()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Scribe" } };
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        Assert.False(policy.IsTalkLoopTtlSuppressed(talk, WorldWithNpc(1, 0, "Scribe", 0x5001u), t0));
+    }
+
+    [Fact]
+    public void TalkLoopTtl_Suppressed_WithinTtl_ThenReprobesAfterExpiry()
+    {
+        // cp-2415: after the roving guard records a suppression, re-Talks to the
+        // SAME resolved NPC are dropped for the TTL (90s) so the bot moves on;
+        // after the TTL the NPC is re-probed (never permanently blocked).
+        var policy = MakeStationaryUsePolicy();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Scribe" } };
+        var world = WorldWithNpc(1, 0, "Scribe", 0x5001u);
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        policy.RecordTalkLoopSuppression(talk, world, t0);
+        Assert.True(policy.IsTalkLoopTtlSuppressed(talk, world, t0.AddSeconds(30)));  // within 90s
+        Assert.True(policy.IsTalkLoopTtlSuppressed(talk, world, t0.AddSeconds(89)));  // still within
+        Assert.False(policy.IsTalkLoopTtlSuppressed(talk, world, t0.AddSeconds(91))); // expired -> re-probe
+        // The expired entry is pruned, so a later check stays false.
+        Assert.False(policy.IsTalkLoopTtlSuppressed(talk, world, t0.AddSeconds(120)));
+    }
+
+    [Fact]
+    public void TalkLoopTtl_NotSuppressed_DifferentNpc()
+    {
+        // Suppressing NPC A (one resolved guid) must not suppress a Talk that
+        // resolves to a DIFFERENT visible NPC guid.
+        var policy = MakeStationaryUsePolicy();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Scribe" } };
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        policy.RecordTalkLoopSuppression(talk, WorldWithNpc(1, 0, "Scribe", 0x5001u), t0);
+        Assert.False(policy.IsTalkLoopTtlSuppressed(talk, WorldWithNpc(1, 0, "Scribe", 0x5002u), t0.AddSeconds(10)));
+    }
+
+    [Fact]
+    public void TalkLoopTtl_NotSuppressed_NonTalkGoal()
+    {
+        // A non-Talk goal to the same NPC (e.g. a Use/Give turn-in) is NEVER
+        // talk-loop-suppressed — only Talk re-greets are.
+        var policy = MakeStationaryUsePolicy();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Scribe" } };
+        var world = WorldWithNpc(1, 0, "Scribe", 0x5001u);
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        policy.RecordTalkLoopSuppression(talk, world, t0);
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Scribe" } };
+        Assert.False(policy.IsTalkLoopTtlSuppressed(use, world, t0.AddSeconds(10)));
+    }
+
+    [Fact]
+    public void TalkLoopTtl_PrunesExpiredEntries_OnRecord_NoUnboundedGrowth()
+    {
+        // The map must not accumulate expired entries that are never re-queried:
+        // recording a new NPC opportunistically prunes any already-expired keys.
+        var policy = MakeStationaryUsePolicy();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Scribe" } };
+        var t0 = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        // Record NPC A, then NPC B 100s later (A's 90s TTL has expired and A is
+        // never re-queried) — the record of B must evict the stale A entry.
+        policy.RecordTalkLoopSuppression(talk, WorldWithNpc(1, 0, "Scribe", 0x5001u), t0);
+        Assert.Equal(1, policy.TalkLoopSuppressionEntryCount);
+        policy.RecordTalkLoopSuppression(talk, WorldWithNpc(1, 0, "Scribe", 0x5002u), t0.AddSeconds(100));
+        Assert.Equal(1, policy.TalkLoopSuppressionEntryCount); // A pruned, only B remains
+    }
+
+    [Fact]
     public void MultiNpcTalkChurn_ResetsWhenBotMoves()
     {
         // Walking between NPCs in different cells is traversal, not a cycle.

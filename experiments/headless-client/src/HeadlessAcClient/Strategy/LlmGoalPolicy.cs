@@ -539,6 +539,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     private const int RovingNpcTalkLoopStaleThreshold = 4;
 
+    // cp-2415: after the roving guard (above) confirms a stale single-NPC Talk
+    // loop and egresses, the LLM's persistent intent often re-targets the SAME
+    // exhausted NPC on the very next tick, so the bot oscillates straight back
+    // (live: one Scribe re-Talked 31x, an earlier NPC 10x — each egress followed
+    // by an immediate re-Talk). Record the fired target's resolved-guid key here
+    // with a short TTL and DROP further Talks to it until the TTL expires, so the
+    // egress STICKS and the bot moves on to new content instead of re-greeting a
+    // dead conversation. The TTL re-probes later in case the NPC gains new
+    // dialog. Keyed by the SAME resolved guid the roving guard uses. Pure
+    // mechanical loop-break bookkeeping from the bot's OWN confirmed no-progress
+    // signal — no NPC names, wcids, or game content.
+    private readonly Dictionary<string, DateTimeOffset> _talkLoopSuppressedUntil = new(StringComparer.Ordinal);
+    private static readonly TimeSpan TalkLoopSuppressionTtl = TimeSpan.FromSeconds(90);
+
     // Server text kinds that count as "dialog" for novelty fingerprinting.
     // Wire-decoded categories only — no per-message content knowledge.
     private static readonly EventKind[] TalkChurnDialogKinds =
@@ -2230,6 +2244,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // regardless of position, and breaks it via the SAME egress so the bot
         // does something else (train / explore / equip) instead of re-greeting a
         // dead conversation.
+        // cp-2415: a Talk to a guid the roving guard recently confirmed as an
+        // exhausted loop is TTL-suppressed — drop it immediately so the LLM's
+        // persistent intent cannot re-drive the bot back to a dead conversation
+        // before the egress has moved it on. Re-probed once the TTL expires.
+        if (IsTalkLoopTtlSuppressed(goal, world, nowUtc))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — exhausted-NPC TTL suppression active; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: TTL-suppressed exhausted-NPC Talk loop");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
         if (IsRovingNpcTalkLoop(goal, world, events))
         {
             Console.WriteLine(
@@ -2237,6 +2264,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — roving single-NPC Talk loop with no progress or dialog novelty; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: roving no-progress single-NPC Talk loop");
+            RecordTalkLoopSuppression(goal, world, nowUtc);
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
@@ -3106,6 +3134,51 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         return false;
     }
+
+    /// <summary>
+    /// cp-2415: true when this Talk goal's resolved NPC is currently within the
+    /// TTL suppression window opened by a recently-confirmed roving Talk loop —
+    /// the LLM's persistent intent should not re-drive the bot back to it yet.
+    /// Side-effect: prunes an expired entry so the next Talk re-probes the NPC.
+    /// Non-Talk goals and name-only-unresolvable targets are never suppressed.
+    /// </summary>
+    internal bool IsTalkLoopTtlSuppressed(Goal goal, WorldStateProjection world, DateTimeOffset nowUtc)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+        var key = RovingTalkTargetGuidKey(goal.Target, world);
+        if (key is null) return false;
+        if (!_talkLoopSuppressedUntil.TryGetValue(key, out var until)) return false;
+        if (nowUtc < until) return true;
+        _talkLoopSuppressedUntil.Remove(key);   // TTL expired — allow a re-probe
+        return false;
+    }
+
+    /// <summary>
+    /// cp-2415: open a TTL suppression window for this Talk goal's resolved NPC
+    /// after the roving guard confirms an exhausted loop on it. Keyed by the same
+    /// resolved guid the roving guard uses; no-op for unresolvable targets.
+    /// </summary>
+    internal void RecordTalkLoopSuppression(Goal goal, WorldStateProjection world, DateTimeOffset nowUtc)
+    {
+        var key = RovingTalkTargetGuidKey(goal.Target, world);
+        if (key is null) return;
+        // Opportunistic prune so the map cannot grow unbounded over a long
+        // session — an expired key is otherwise only removed lazily when that
+        // SAME key is re-queried, so keys recorded once and never re-Talked would
+        // linger. Records happen only on a roving-guard fire (uncommon) and the
+        // map only ever holds the few NPCs suppressed within the last TTL window,
+        // so this stays O(small).
+        if (_talkLoopSuppressedUntil.Count > 0)
+        {
+            foreach (var stale in _talkLoopSuppressedUntil
+                         .Where(kv => nowUtc >= kv.Value).Select(kv => kv.Key).ToList())
+                _talkLoopSuppressedUntil.Remove(stale);
+        }
+        _talkLoopSuppressedUntil[key] = nowUtc + TalkLoopSuppressionTtl;
+    }
+
+    /// <summary>Test-only: current number of live talk-loop suppression entries.</summary>
+    internal int TalkLoopSuppressionEntryCount => _talkLoopSuppressedUntil.Count;
 
     // Normalized dialog fingerprints at sequence >= floor (newest-first source,
     // order irrelevant). A fingerprint is the dialog kind + whitespace-collapsed
