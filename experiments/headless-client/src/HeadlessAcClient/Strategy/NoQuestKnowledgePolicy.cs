@@ -92,11 +92,25 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
     // so observations stay consistent across fallover.
     private readonly IntentStack? _intentStack;
 
+    // Runtime-LEARNED set of creature WCIDs that never answer a Talk with
+    // dialog (e.g. inert "Fishing Hole" scenery). The Motor populates it from
+    // the bot's OWN Talk dispatches + observed dialog source guids; here we use
+    // it ONLY to skip such kinds in the civilian Talk step so the fallback
+    // doesn't march the bot across the map to "Talk" non-conversational
+    // scenery. Read-only from this policy; never mutated here. May be null
+    // (tests / LLM-disabled minimal wiring) — treated as "nothing learned".
+    private readonly SilentTalkTargetLearner? _silentTalk;
+
     public NoQuestKnowledgePolicy() : this(null) { }
 
     public NoQuestKnowledgePolicy(IntentStack? intentStack)
+        : this(intentStack, null) { }
+
+    public NoQuestKnowledgePolicy(
+        IntentStack? intentStack, SilentTalkTargetLearner? silentTalk)
     {
         _intentStack = intentStack;
+        _silentTalk = silentTalk;
     }
 
     private void RememberProposed(uint guid)
@@ -446,8 +460,13 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    greeters, quest-givers) and avoids competing with the
         //    Hunt-intent decomposer (step 6c) for the same wire
         //    objects. Skipped entirely under an active hunt (see above).
+        //    Also skips creature KINDS the bot has LEARNED never answer a
+        //    Talk with dialog (SilentTalkTargetLearner) — e.g. inert
+        //    "Fishing Hole" scenery — so the fallback stops marching across
+        //    the map to Talk non-conversational objects of the same wcid.
         var npc = (huntActive || townTourTapped) ? null : world.Visible
             .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
+            .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
@@ -473,6 +492,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             _recentProposedGuids.Clear();
             var npcRetry = world.Visible
                 .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
+                .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
                 .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
                 .OrderBy(v => v.Distance ?? float.MaxValue)
                 .FirstOrDefault();

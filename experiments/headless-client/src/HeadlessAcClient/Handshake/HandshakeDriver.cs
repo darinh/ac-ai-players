@@ -888,6 +888,14 @@ internal sealed class HandshakeDriver : IDisposable
         }
 
         IGoalPolicy goalPolicy;
+        // Shared, runtime-LEARNED set of creature WCIDs that never answer a
+        // Talk with dialog (e.g. inert "Fishing Hole" scenery). Populated by
+        // the Motor from the bot's OWN Talk dispatches + observed NpcDialog
+        // source guids (below); consumed ONLY by the autonomous fallback's
+        // civilian Talk step so it stops marching the bot to non-conversational
+        // objects when the LLM is unavailable. One instance shared across the
+        // LLM policy's embedded fallback and the standalone fallbacks.
+        var silentTalkLearner = new SilentTalkTargetLearner();
         // Slice V (#86): if the active policy is LlmGoalPolicy, hold
         // an extra typed reference so the picker can publish its
         // autonomous activity into the LLM prompt. NoQuestKnowledgePolicy
@@ -896,7 +904,7 @@ internal sealed class HandshakeDriver : IDisposable
         LlmGoalPolicy? llmPolicyForPickerSurface = null;
         if (llmDisabled)
         {
-            goalPolicy = new NoQuestKnowledgePolicy(intentStack);
+            goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner);
             Console.WriteLine("[strategy] AC_BOTS_LLM_DISABLE=1 -> LLM disabled, using NoQuestKnowledgePolicy fallback only");
         }
         else
@@ -904,7 +912,7 @@ internal sealed class HandshakeDriver : IDisposable
             try
             {
                 var llmClient = new LlmGoalClient();
-                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack), weenies, trainingSink, intentStack, intentIds);
+                var llmPolicy = new LlmGoalPolicy(llmClient, new NoQuestKnowledgePolicy(intentStack, silentTalkLearner), weenies, trainingSink, intentStack, intentIds);
                 goalPolicy = llmPolicy;
                 llmPolicyForPickerSurface = llmPolicy;
                 Console.WriteLine($"[strategy] LlmGoalPolicy ready (model={llmClient.Model} endpoint={llmClient.Endpoint}) intent-stack=enabled max-depth={intentStack.MaxDepth}");
@@ -912,7 +920,7 @@ internal sealed class HandshakeDriver : IDisposable
             catch (Exception ex)
             {
                 Console.WriteLine($"[strategy] LlmGoalClient unavailable ({ex.GetType().Name}: {ex.Message}); using NoQuestKnowledgePolicy fallback only");
-                goalPolicy = new NoQuestKnowledgePolicy(intentStack);
+                goalPolicy = new NoQuestKnowledgePolicy(intentStack, silentTalkLearner);
             }
         }
         var eventStream = new EventStream();
@@ -1992,6 +2000,13 @@ internal sealed class HandshakeDriver : IDisposable
                                     Kind = EventKind.PopupString,
                                     Text = popup.Message,
                                 });
+                                // A PopupString carries no source guid, but it
+                                // IS an NPC/world reply. If it lands within the
+                                // window of a pending Talk, treat it as that
+                                // target answering so the silent-talk learner
+                                // never blacklists a kind that replies via popup
+                                // rather than a Tell.
+                                silentTalkLearner.RecordUnattributedDialog(DateTime.UtcNow);
                             }
                             // M1.6 — Tell is per-character chat,
                             // also frequently used by NPCs to deliver
@@ -2008,7 +2023,15 @@ internal sealed class HandshakeDriver : IDisposable
                                     Kind = EventKind.NpcDialog,
                                     Text = tell.Message,
                                     Name = sourceSnap?.Name ?? tell.SenderName,
+                                    ItemGuid = tell.SenderId,
                                 });
+                                // This guid DID answer with dialog — immunise its
+                                // kind so the silent-talk learner never blacklists
+                                // a real talker (wcid from the live snapshot when
+                                // still in view; the learner falls back to the
+                                // wcid it remembered at dispatch otherwise).
+                                silentTalkLearner.RecordDialogFrom(
+                                    tell.SenderId, sourceSnap?.WeenieClassId);
                             }
                             // Slice M — quest book / scroll / parchment
                             // contents. The server returns this when the
@@ -4506,6 +4529,11 @@ internal sealed class HandshakeDriver : IDisposable
                             });
                         }
                     }
+                    // Mature any pending silent-talk probes (Talks that drew no
+                    // dialog within the grace window) before the policy
+                    // deliberates, so the fallback's Talk step sees the freshest
+                    // learned-silent set.
+                    silentTalkLearner.Evaluate(DateTime.UtcNow);
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
 
                     // Named-target search continuity: the search telemetry
@@ -7618,6 +7646,15 @@ internal sealed class HandshakeDriver : IDisposable
                         payloadLen = GameActionUseMessage.Pack(actionBuf, motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
                         worldInteractDispatched = lockedGoalKind == GoalKind.Use;
+
+                        // Silent-talk learning: a Talk is dispatched as a Use of
+                        // the target. Record it so the learner can later conclude
+                        // (if no dialog answers within its grace window) that this
+                        // creature KIND is non-conversational scenery. Only Talk —
+                        // a plain Use of an object is a different interaction.
+                        if (lockedGoalKind == GoalKind.Talk)
+                            silentTalkLearner.RecordTalkDispatch(
+                                motionTarget.Guid, motionTarget.WeenieClassId, DateTime.UtcNow);
 
                         // Slice Q + Slice U — track USE on any openable
                         // loot container (corpse, treasure chest,
