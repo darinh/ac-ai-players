@@ -9570,6 +9570,61 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_InlinesAttributeValues()
+    {
+        // cp-2419: the bot's RAW attribute values render INSIDE the ## Unspent XP
+        // capsule (not only pointed-to in ## Self), so the WHICH-to-raise decision
+        // sees e.g. a low coordination beside the spendable XP + offense facts.
+        var baseWorld = BuildXpWorld(69296, 1000);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                Attributes = new[]
+                {
+                    new SelfAttributeProjection { Name = "strength", Base = 47 },
+                    new SelfAttributeProjection { Name = "coordination", Base = 10 },
+                    new SelfAttributeProjection { Name = "endurance", Base = 31 },
+                },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains("your attributes are strength 47, coordination 10, endurance 31", prompt);
+        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
+        var attrIdx = prompt.IndexOf("your attributes are strength 47", System.StringComparison.Ordinal);
+        Assert.True(attrIdx > capsuleIdx, "attribute values should render within the ## Unspent XP capsule");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_NoAttributes_NoCrashNoAttrLine()
+    {
+        // Attributes unknown (null): the capsule still renders and just omits the
+        // attribute fact (no crash, no dangling "your attributes are").
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 1000), new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.DoesNotContain("your attributes are", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_AttributesOmittedWhenNoUnspentXp()
+    {
+        // The whole capsule is gated on unspent > 0, so the inlined attributes do
+        // not render when there is nothing to spend.
+        var baseWorld = BuildXpWorld(69296, 0);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                Attributes = new[] { new SelfAttributeProjection { Name = "coordination", Base = 10 } },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Unspent XP", prompt);
+        Assert.DoesNotContain("your attributes are", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenNoUnspentXp()
     {
         // No unspent XP -> the whole capsule (incl. the can't-win fact) is omitted.

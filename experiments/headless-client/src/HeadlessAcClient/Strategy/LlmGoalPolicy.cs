@@ -5254,6 +5254,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 spendFacts.Add($"your health has peaked at {endcapMaxHp} HP this session (your observed maximum)");
             if (world.Self.NumDeaths is int endcapDeaths)
                 spendFacts.Add($"you have died {endcapDeaths} times");
+            // cp-2419: inline the bot's RAW base attribute values — the SAME
+            // `{Name} {Base}` list the `## Self` section renders — beside the
+            // spend decision. cp-2399 showed the LLM acts on a VALUE inlined in
+            // THIS capsule, not the same value pointed-to in `## Self` ~22KB
+            // earlier: surfacing max HP HERE flipped a mono-Strength bot to raise
+            // Endurance. The OFFENSE side had the outcome (kills below) but its
+            // attribute VALUES were only pointed-to, so the LLM could not weigh
+            // (e.g.) a low coordination against its evaded swings when choosing
+            // WHICH attribute to raise. ALL attributes, with NO offense/survival
+            // selection in source (the SPEND XP rule supplies that mapping); RAW
+            // values, no recommendation, no magnitude gate; no game knowledge.
+            if (world.Self.Attributes is { Count: > 0 } endcapAttrs)
+                spendFacts.Add(
+                    $"your attributes are {string.Join(", ", endcapAttrs.Select(a => $"{a.Name} {a.Base}"))}");
             // cp-2410/cp-2411: the OFFENSE side of the SAME survivability-vs-
             // offense weighing. cp-2399 surfaced only the survival facts (max
             // HP/deaths), so live the L9 bot poured XP into endurance yet stayed
@@ -5288,10 +5302,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (spendFacts.Count > 0)
                 sb.AppendLine($"- raw fact: {string.Join("; ", spendFacts)}.");
             sb.AppendLine(
-                "- raw fact, not a recommendation: see `## Self` above for your current attribute " +
-                "values and trained skills, and the SPEND XP rule for what each verb does and how " +
-                "attributes affect survivability versus offense. Whether, how much, and which to " +
-                "raise is your call.");
+                "- raw fact, not a recommendation: see `## Self` above for your trained skills, and " +
+                "the SPEND XP rule for what each verb does and how attributes affect survivability " +
+                "versus offense. Whether, how much, and which to raise is your call.");
         }
 
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
