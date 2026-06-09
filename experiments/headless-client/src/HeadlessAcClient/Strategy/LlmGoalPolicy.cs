@@ -4055,9 +4055,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // relevance-gating). The Motor's nav already routes around blocked
         // geometry mechanically, so the advisory rule is behaviour-preserving.
         // A render gate on the bot's OWN rejection events; no game knowledge.
+        // cp-2408: the STUCK ESCAPE (Recall last-resort) rule is paired in here
+        // too — it is ALSO only actionable when the bot is physically held
+        // against geometry (the same Blocked/Unreachable signal: "the server
+        // held you at the same position across repeated attempts"). Gating both
+        // frees ~600 bytes when the bot moves freely; Recall stays an LLM
+        // decision (the Motor never auto-Recalls).
         if (HasRecentBlockedRejection(events))
-        sb.AppendLine("- BLOCKED targets: `ActionRejected` label `Blocked`/`Unreachable` = server physics held the bot against geometry (wall, closed door, barrier). Do NOT re-emit the same target. Prefer a visible Door (walk to / Use it — it likely leads where you were going); else `Explore` to route around. The bot cannot clip through obstacles.");
-        sb.AppendLine("- STUCK ESCAPE (last resort): `Recall{}` teleports you to your attuned lifestone. Use it ONLY when you are physically unable to move at all — e.g. the movement report (when shown) says the server held you at the same position across repeated attempts AND no visible Door or `Explore` route frees you (a ledge/cliff with your target far BELOW is a classic trap: every step is mid-air and rejected). It requires an attuned lifestone (Use a `Life Stone` to attune); the server refuses it inside the training academy and right after PvP, and it costs half your mana — so it is an escape hatch, NOT routine travel. Try a Door or `Explore` first; reach for `Recall` only when those cannot move you.");
+        {
+            sb.AppendLine("- BLOCKED targets: `ActionRejected` label `Blocked`/`Unreachable` = server physics held the bot against geometry (wall, closed door, barrier). Do NOT re-emit the same target. Prefer a visible Door (walk to / Use it — it likely leads where you were going); else `Explore` to route around. The bot cannot clip through obstacles.");
+            sb.AppendLine("- STUCK ESCAPE (last resort): `Recall{}` teleports you to your attuned lifestone. Use it ONLY when you are physically unable to move at all — e.g. the movement report (when shown) says the server held you at the same position across repeated attempts AND no visible Door or `Explore` route frees you (a ledge/cliff with your target far BELOW is a classic trap: every step is mid-air and rejected). It requires an attuned lifestone (Use a `Life Stone` to attune); the server refuses it inside the training academy and right after PvP, and it costs half your mana — so it is an escape hatch, NOT routine travel. Try a Door or `Explore` first; reach for `Recall` only when those cannot move you.");
+        }
         // cp-2346 — does the recent event window carry server/NPC text the LLM
         // might need to compile (a task directive)? Pure presence check on the
         // same dialog kinds the `## Server hints` section renders; gates the
