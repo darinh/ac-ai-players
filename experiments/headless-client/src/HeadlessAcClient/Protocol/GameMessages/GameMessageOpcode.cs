@@ -53,6 +53,11 @@ internal enum GameMessageOpcode : uint
     SetState                 = 0xF74B,
     Motion                   = 0xF74C,
     ObjectDelete             = 0xF747,
+    // Server removes an item from the local-player inventory (give, drop,
+    // use-consume, sell). Distinct from ObjectDelete (world-space removal).
+    // Server encoder: GameMessageInventoryRemoveObject (UIQueue, 8 bytes:
+    // u32 opcode + u32 guid).
+    InventoryRemoveObject    = 0x0024,
     GameEvent                = 0xF7B0,
     CharacterEnterWorldServerReady = 0xF7DF,
     ServerMessage            = 0xF7E0,
