@@ -1,5 +1,6 @@
 namespace HeadlessAcClient.Tests;
 
+using System.Collections.Generic;
 using HeadlessAcClient.Strategy;
 using Xunit;
 
@@ -78,23 +79,25 @@ public class AutoEquipFailureFilterTests
         Assert.False(f.TryConsumeAutonomous(0x42u));
     }
 
-    // ---- ShouldSurfaceInventoryFailure (cp-2386) ----
+    // ---- ShouldSurfaceInventoryFailure (cp-2386 give + cp-2418 wield) ----
+
+    private static readonly IReadOnlySet<uint> NoWields = new HashSet<uint>();
 
     [Fact]
     public void ShouldSurface_NonZeroError_AlwaysSurfaces()
     {
         // A specific (non-None) error always surfaces regardless of any
         // in-flight give.
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x420u, 0x1234u, null));
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x06u, 0x1234u, 0x9999u));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x420u, 0x1234u, null, NoWields));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x06u, 0x1234u, 0x9999u, NoWields));
     }
 
     [Fact]
     public void ShouldSurface_NoneError_NoPendingGive_Suppressed()
     {
-        // A None (0) error with no in-flight give is a benign teardown — stay
-        // suppressed (preserves the pre-cp-2386 behavior).
-        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x1234u, null));
+        // A None (0) error with no in-flight give and no matching wield is a
+        // benign teardown — stay suppressed (preserves the pre-cp-2386 behavior).
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x1234u, null, NoWields));
     }
 
     [Fact]
@@ -102,7 +105,7 @@ public class AutoEquipFailureFilterTests
     {
         // A None error that names the item the bot is currently giving is a
         // refused Give — surface it so the LLM pivots instead of re-giving.
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008861u, 0x80008861u));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008861u, 0x80008861u, NoWields));
     }
 
     [Fact]
@@ -110,6 +113,25 @@ public class AutoEquipFailureFilterTests
     {
         // A None error for a DIFFERENT item than the in-flight give stays
         // suppressed (e.g. a benign auto-equip None failure during a give).
-        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, 0x80008861u));
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, 0x80008861u, NoWields));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_GuidInWieldSet_Surfaces()
+    {
+        // cp-2418: a None error for an item the bot dispatched a wield for is a
+        // CheckWeaponCollision refusal (a weapon is already equipped) — surface it
+        // so the LLM learns the wield failed and stops re-emitting it.
+        var wields = new HashSet<uint> { 0x80008A8Eu };
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008A8Eu, null, wields));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_GuidNotInWieldSet_Suppressed()
+    {
+        // A None error for an item NOT in the wield set (and not the in-flight
+        // give) stays suppressed.
+        var wields = new HashSet<uint> { 0x80008A8Eu };
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, null, wields));
     }
 }
