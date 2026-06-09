@@ -2530,7 +2530,95 @@ public class LlmGoalPolicyTests
         Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
     }
 
-    // ---- Monster-in-view rule gating (cp-2368) ---------------------------
+    // ---- ## Early server directives protected capsule (cp-2383) -----------
+    // A one-time server PopupString (login/exit directive) is persisted past
+    // the EventStream ring (cp-2382) AND re-surfaced in the protected salience
+    // tail so it survives even when the `## Server hints` section is itself
+    // hard-cut by the request-size fitter in a dense scene.
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_RendersPersistedPopup()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "Return the Academy Token to the Training Master in the Practice Area.",
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        Assert.Contains("Return the Academy Token to the Training Master", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_OmittedWhenNoPopups()
+    {
+        // No PopupString ever seen -> nothing to persist -> capsule omitted.
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "ambient" });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+        Assert.DoesNotContain("## Early server directives", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_BoundedToEarliestN()
+    {
+        // More distinct popups than the cap -> only the EARLIEST render in the
+        // capsule. (A late popup may still appear in `## Server hints` newest,
+        // so scope the assertion to the `## Early server directives` section.)
+        var es = new EventStream();
+        for (int i = 0; i < 12; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = $"directive number {i:D2}" });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        var start = p.IndexOf("## Early server directives", System.StringComparison.Ordinal);
+        var rest = p.Substring(start + "## Early server directives".Length);
+        var nextHdr = rest.IndexOf("\n## ", System.StringComparison.Ordinal);
+        var capsule = nextHdr >= 0 ? rest.Substring(0, nextHdr) : rest;
+        Assert.Contains("directive number 00", capsule); // earliest anchor
+        Assert.DoesNotContain("directive number 11", capsule); // beyond the earliest-N cap
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_SurvivesHardCutAndRingEviction()
+    {
+        // END-TO-END (cp-2382 persistence + cp-2383 protected tail): an early
+        // login directive that has BOTH aged out of the 256-event ring AND a
+        // body large enough to force the hard-cut (which deletes `## Server
+        // hints`) must STILL surface — via the persistent store rendered in the
+        // protected salience tail — and the prompt must respect the ceiling.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "Skip the tutorial: talk to the exit guide in the next room to leave.",
+        });
+        for (int i = 0; i < EventStream.DefaultCapacity + 20; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = $"ambient chatter {i}" });
+
+        // Precondition: the popup is gone from the ring.
+        Assert.DoesNotContain(es.Recent(EventStream.DefaultCapacity), e => e.Text is { } t && t.Contains("exit guide"));
+
+        var dense = System.Linq.Enumerable.Range(0, 200)
+            .Select(i => new VisibleObjectProjection
+            {
+                Guid = (uint)(0x900u + i),
+                Name = $"Dense Scene Object {i:D3} occupying prompt budget space here",
+                Wcid = (uint)(1000 + i),
+                Distance = i + 1f,
+            })
+            .ToArray();
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(dense), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        Assert.Contains("talk to the exit guide in the next room", p);
+        Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
+    }
+
     // The HUNT EXCURSION / STEER A BARREN EXCURSION / LOOP-BREAK (town-stuck)
     // rules are entirely about the NO-monster-in-view case, so they are gated
     // OFF when a monster is visible (behaviour-preserving, frees ~2.5KB of

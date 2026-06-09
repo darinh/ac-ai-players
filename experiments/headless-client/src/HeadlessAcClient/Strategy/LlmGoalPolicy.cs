@@ -5463,6 +5463,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "leave this landblock or your inventory changes.");
         }
 
+        // ── ## Early server directives (protected-tail salience capsule) ──
+        // A one-time directed instruction (how to proceed past or leave the
+        // starting area) arrives as a server PopupString at login, but the
+        // `## Server hints` section that carries it renders mid-prompt and, in
+        // an object-dense scene, is itself hard-cut by the request-size fitter
+        // before its PopupString lines render (live-observed: the section
+        // truncated after its first ServerMessage, dropping every PopupString).
+        // Re-surface the EARLIEST persisted distinct PopupStrings
+        // (EventStream.PersistentPopupStrings — kept past the bounded event
+        // ring) in the PROTECTED salience tail so the server's own directed
+        // text always survives the cut. Server text only, selected by event
+        // KIND + AGE, rendered verbatim and truncated — NEVER parsed or
+        // branched on by content (that would be hardcoded game knowledge). RAW
+        // facts + an explicit not-a-recommendation disclaimer; the LLM reads the
+        // words and decides whether any still applies. Mirrors the cp-2366
+        // `## Monsters in view` re-surface pattern; no game knowledge.
+        var earlyServerDirectives = events.PersistentPopupStrings();
+        if (earlyServerDirectives.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Early server directives");
+            sb.AppendLine(
+                "- directed text the server sent you earlier this session (re-surfaced here " +
+                "because one-time instructions arrive early and can scroll out of " +
+                "`## Server hints` above before you act on them):");
+            foreach (var d in earlyServerDirectives.Take(EarlyServerDirectiveCount))
+                sb.AppendLine($"  - \"{Truncate(d.Text, 240)}\"");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: these are the server's own words, not an " +
+                "instruction from me. Whether any still applies, and what to do about it, is your call.");
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
@@ -5665,6 +5697,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // head preamble, which the hard-cut preserves) to fit. ~450 chars fits
     // several short rows (nearest-first) while leaving ample body headroom.
     private const int NearestObjectsProtectedCharBudget = 450;
+
+    // How many of the EARLIEST persisted distinct server PopupStrings the
+    // `## Early server directives` protected-tail capsule re-surfaces. The
+    // ring-evicted earliest directives that `## Server hints` tries to keep
+    // (its earliest:6) are the durable onboarding/exit anchors; mirror that
+    // count here so they survive even when `## Server hints` is itself hard-cut
+    // by the request-size fitter. Each line is truncated, so the capsule stays
+    // bounded (~6 * ~250 chars + framing) and the protected tail stays well
+    // under the request ceiling.
+    private const int EarlyServerDirectiveCount = 6;
 
     private static string ClampRow(string row) =>
         row.Length <= VisibleRowMaxChars
