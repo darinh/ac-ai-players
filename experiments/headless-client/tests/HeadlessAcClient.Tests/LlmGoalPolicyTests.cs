@@ -9186,6 +9186,76 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_SurfacesSurvivalFacts_WhenMaxHpAndDeathsKnown()
+    {
+        // Survivability slice: co-locate the bot's OWN max-HP + death facts with
+        // the spend decision (cp-2336 burial pattern) so the SPEND XP rule can
+        // weigh survivability. RAW facts only — the max HP value + death count
+        // are echoed verbatim; no threshold, no "raise endurance" recommendation.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            Self = BuildXpWorld(69296, 5475).Self with { HealthObservedPeak = 7, NumDeaths = 5 },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains("peaked at 7 HP this session", prompt);
+        Assert.Contains("you have died 5 times", prompt);
+        // The survival fact must sit INSIDE the decision-proximate capsule.
+        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
+        var survivalIdx = prompt.IndexOf("peaked at 7 HP", System.StringComparison.Ordinal);
+        Assert.True(survivalIdx > capsuleIdx, "survival fact should render within the ## Unspent XP capsule");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_SurvivalFact_FallsBackToCurrentHpWhenNoPeak()
+    {
+        var world = BuildXpWorld(69296, 100) with
+        {
+            Self = BuildXpWorld(69296, 100).Self with { HealthObservedPeak = null, HealthCurrent = 6 },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("peaked at 6 HP this session", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_SurvivalFact_RendersOnRawPresence_NoMagnitudeGate()
+    {
+        // cp-2337/audit: the fact renders whenever the value is KNOWN, with NO
+        // source-side magnitude gate (no `> 0` significance filter). A known 0
+        // still renders as a raw fact.
+        var world = BuildXpWorld(69296, 100) with
+        {
+            Self = BuildXpWorld(69296, 100).Self with { HealthObservedPeak = 0, HealthCurrent = 0 },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("peaked at 0 HP this session", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OmitsSurvivalFacts_WhenUnknown()
+    {
+        // BuildXpWorld sets neither max HP nor deaths -> no survival line, but
+        // the capsule itself still renders (gated only on unspent > 0).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.DoesNotContain("peaked at", prompt);
+        Assert.DoesNotContain("you have died", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_NoSurvivalFacts_WhenNoUnspentXp()
+    {
+        // No unspent XP -> the whole capsule (incl. survival facts) is omitted,
+        // so survival facts never leak outside the spend context.
+        var world = BuildXpWorld(69296, 0) with
+        {
+            Self = BuildXpWorld(69296, 0).Self with { HealthObservedPeak = 7, NumDeaths = 5 },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Unspent XP", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_FreshKillCorpseCapsule_RendersWhenPresent()
     {
         // cp-2357: after a kill the picker abandons the corpse before the LLM

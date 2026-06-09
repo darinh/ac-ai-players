@@ -4982,10 +4982,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"- you have {endcapUnspent} unspent experience available this tick; the goal " +
                 "verbs RaiseAttribute, RaiseVital, and RaiseSkill are executable right now, the " +
                 "same as Talk/Use/Pickup/Attack/Explore.");
+            // Co-locate the decision-proximate SURVIVABILITY facts with the
+            // spend decision. The SAME max-HP and death facts already render in
+            // `## Self`, but cp-2336 showed the LLM acts on end-capsule facts,
+            // not the same facts buried earlier; surfacing them HERE, beside the
+            // spendable XP, is exactly when the SPEND XP rule weighs
+            // survivability against offense. RAW facts only, on RAW PRESENCE
+            // (whenever the value is KNOWN — no magnitude/significance gate, per
+            // the cp-2337 audit), with NO recommendation about which to raise
+            // and NO restated mechanics (those live in the SPEND XP rule).
+            var survivalFacts = new List<string>();
+            if ((world.Self.HealthObservedPeak ?? world.Self.HealthCurrent) is int endcapMaxHp)
+                survivalFacts.Add($"your health has peaked at {endcapMaxHp} HP this session (your observed maximum)");
+            if (world.Self.NumDeaths is int endcapDeaths)
+                survivalFacts.Add($"you have died {endcapDeaths} times");
+            if (survivalFacts.Count > 0)
+                sb.AppendLine($"- raw fact: {string.Join("; ", survivalFacts)}.");
             sb.AppendLine(
                 "- raw fact, not a recommendation: see `## Self` above for your current attribute " +
-                "values and trained skills, and the SPEND XP rule for what each verb does. Whether, " +
-                "how much, and which to raise is your call.");
+                "values and trained skills, and the SPEND XP rule for what each verb does and how " +
+                "attributes affect survivability versus offense. Whether, how much, and which to " +
+                "raise is your call.");
         }
 
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
