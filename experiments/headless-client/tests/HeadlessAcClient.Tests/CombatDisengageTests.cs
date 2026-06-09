@@ -229,10 +229,12 @@ public class CombatDisengageTests
 
     private static string? Reason(
         uint hc, uint hm, int landed, uint dmg, int evaded, double? peak,
-        bool inCombat = true)
+        bool inCombat = true,
+        double? tgtStart = null, double? tgtNow = null)
         => CombatDisengage.DisengageReason(
             hc, hm, inCombat, DisengageFrac, CriticalFloor,
-            landed, dmg, evaded, MinEvaded, peak, LostFrac);
+            landed, dmg, evaded, MinEvaded, peak, LostFrac,
+            LxMinSwings, LxSelfLost, tgtStart, tgtNow, LxMaxTgtLost);
 
     [Fact]
     public void Reason_CriticalLowHealth_ReturnsLowHealth()
@@ -257,4 +259,103 @@ public class CombatDisengageTests
     [Fact]
     public void Reason_NotInCombat_ReturnsNull()
         => Assert.Null(Reason(10u, 100u, 0, 0u, 10, 1.0, inCombat: false));
+
+    [Fact]
+    public void Reason_LosingExchange_ReturnsLosingExchange()
+        // 50/100 above critical, landed 1 (not unwinnable), but lost 50% self
+        // while the target barely dropped (1.0→0.95) over 4 swings.
+        => Assert.Equal(
+            "losing-exchange",
+            Reason(50u, 100u, 1, 5u, 3, 1.0, tgtStart: 1.0, tgtNow: 0.95));
+
+    [Fact]
+    public void Reason_LowHealthTakesPrecedenceOverLosingExchange()
+        // Both critical (30%) and losing-exchange hold — low-health wins.
+        => Assert.Equal(
+            "low-health",
+            Reason(30u, 100u, 1, 5u, 3, 1.0, tgtStart: 1.0, tgtNow: 0.95));
+
+    // ---- ShouldDisengageLosingExchange (losing damage-race early flee) ----
+
+    private const int LxMinSwings = 4;
+    private const double LxSelfLost = 0.50;
+    private const double LxMaxTgtLost = 0.15;
+
+    private static bool LosingExchange(
+        int landed, int evaded, uint hc, uint hm, double? peak,
+        double? tgtStart, double? tgtNow, bool inCombat = true)
+        => CombatDisengage.ShouldDisengageLosingExchange(
+            inCombat, landed, evaded, LxMinSwings, hc, hm, peak, LxSelfLost,
+            tgtStart, tgtNow, LxMaxTgtLost);
+
+    [Fact]
+    public void LosingExchange_LandsSomeHitsButBleedingOut_Fires()
+        // The verified Creeper Mosswart shape: landed 1, lost 50% self HP
+        // (12→6), target barely scratched (1.0→0.95), 4 swings.
+        => Assert.True(LosingExchange(1, 3, 6u, 12u, 1.0, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_TargetAlsoDropping_DoesNotFire()
+        // A contested trade: self lost 50% but the target also lost 50% — this
+        // is a close fight, not a lost one; the low-health reflex owns the end.
+        => Assert.False(LosingExchange(1, 3, 6u, 12u, 1.0, 1.0, 0.50));
+
+    [Fact]
+    public void LosingExchange_TargetHealthUnknown_DoesNotFire()
+        // Without target health we cannot tell losing from trading — stay quiet.
+        => Assert.False(LosingExchange(1, 3, 6u, 12u, 1.0, null, null));
+
+    [Fact]
+    public void LosingExchange_TooFewSwings_DoesNotFire()
+        // Only 2 swings (< 4) — not yet conclusive.
+        => Assert.False(LosingExchange(1, 1, 6u, 12u, 1.0, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_SelfNotLostEnough_DoesNotFire()
+        // Lost only 33% self HP (12→8), below the 50% threshold.
+        => Assert.False(LosingExchange(1, 3, 8u, 12u, 1.0, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_NullPeak_DoesNotFire()
+        => Assert.False(LosingExchange(1, 3, 6u, 12u, null, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_NotInCombat_DoesNotFire()
+        => Assert.False(LosingExchange(1, 3, 6u, 12u, 1.0, 1.0, 0.95, inCombat: false));
+
+    [Fact]
+    public void LosingExchange_AlreadyDead_DoesNotFire()
+        => Assert.False(LosingExchange(1, 3, 0u, 12u, 1.0, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_UnknownMaxHealth_DoesNotFire()
+        => Assert.False(LosingExchange(1, 3, 6u, 0u, 1.0, 1.0, 0.95));
+
+    [Fact]
+    public void LosingExchange_AtSelfLossBoundary_Fires()
+        // self lost exactly 0.50 (1.0→0.50, exact in FP) with the target well
+        // inside the cap → fires (self loss uses >=).
+        => Assert.True(LosingExchange(1, 3, 50u, 100u, 1.0, 1.0, 0.90));
+
+    [Fact]
+    public void LosingExchange_TargetLostJustOverCap_DoesNotFire()
+        // Target lost 0.16 (> 0.15 cap) → contested, does not fire.
+        => Assert.False(LosingExchange(1, 3, 50u, 100u, 1.0, 1.0, 0.84));
+
+    [Fact]
+    public void LosingExchange_FiresWhileWellAboveCriticalReflex()
+    {
+        // The decisive property: trips at 50% health, far above the 35%
+        // critical reflex, so the bot flees with the HP buffer to escape.
+        Assert.False(CombatDisengage.ShouldDisengage(6u, 12u, inCombat: true, DisengageFrac, CriticalFloor));
+        Assert.True(LosingExchange(1, 3, 6u, 12u, 1.0, 1.0, 0.95));
+    }
+
+    [Fact]
+    public void LosingExchange_VitaeWeakenedLowMaxHp_Fires()
+        // A vitae-weakened respawn (effective max HP 4): peak 1.0, current 1/4
+        // = 0.25 (lost 0.75 >= 0.50) while the target barely dropped. The
+        // reflex needs NO knowledge of vitae — the fast HP-fraction loss is
+        // enough.
+        => Assert.True(LosingExchange(1, 3, 1u, 4u, 1.0, 1.0, 0.95));
 }
