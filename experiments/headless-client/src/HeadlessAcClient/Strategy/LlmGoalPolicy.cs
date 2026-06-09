@@ -5223,6 +5223,70 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "so it requires that item to still be in `## Inventory` above; the goal verbs Talk, Use, " +
                 "Pickup, Attack, and Explore also remain executable right now. Your call.");
         }
+        // ── ## Recent Pickup (end-of-prompt salience capsule) ────────────
+        // Mirrors ## Recent Use/## Recent Give/## Recent Talk for the Pickup
+        // verb. Live academy runs show the LLM re-emitting Pickup of the SAME
+        // ground item many times when the pickup never sticks (the item stays on
+        // the ground, 0 inventory add). The cp-2290 `## Recently interacted
+        // objects` capsule (which cp-2375 annotates) does NOT cover this: a Pickup
+        // does not emit a WorldObjectInteracted echo (only Use/Talk do), so that
+        // capsule never renders the looped item. Re-surface the recent Pickup
+        // emission history — keyed by the item identity (the goal's target) — in
+        // the decision-proximate slot so the repeat is visible right before the
+        // model answers. Same construction as useByKey. RAW counts + a
+        // not-a-recommendation disclaimer pointing to ## Inventory / ## Visible
+        // nearby (where the LLM can see whether the item actually arrived); no
+        // urgency, no "loop", no game knowledge.
+        var pickupByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Pickup ", StringComparison.Ordinal)) continue;
+            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!sm.Success) continue;
+            var sel = sm.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            var display = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : sel);
+            if (pickupByKey.TryGetValue(key, out var cur))
+            {
+                var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
+                    ? display : cur.Display;
+                pickupByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null));
+            }
+            else
+            {
+                pickupByKey[key] = (1, display, gm.Success ? gm.Value : null);
+            }
+        }
+        if (pickupByKey.Count > 0)
+        {
+            var endcapPickupDupDisplays = pickupByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endcapPickupList = string.Join(", ", pickupByKey
+                .OrderByDescending(p => p.Value.Count)
+                .Select(p =>
+                {
+                    var label = endcapPickupDupDisplays.Contains(p.Value.Display) && p.Value.Guid is not null
+                        ? $"{p.Value.Display} ({p.Value.Guid})"
+                        : p.Value.Display;
+                    return $"{label} x{p.Value.Count}";
+                }));
+            sb.AppendLine();
+            sb.AppendLine("## Recent Pickup");
+            sb.AppendLine(
+                $"- in your last 10 emitted goals you emitted Pickup on: {endcapPickupList}.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation. A successful Pickup moves the item OFF the ground and INTO " +
+                "`## Inventory` above; an item you keep picking that still appears in `## Visible nearby` and never " +
+                "in `## Inventory` is not entering your bag. The goal verbs Talk, Use, Attack, and Explore also " +
+                "remain executable right now. Your call.");
+        }
         // The cp-2338 InteractUnreachableTracker is a Motor-only guard: when
         // the server refuses an interaction as out-of-reach, the Motor marks
         // that guid and treats any goal that resolves to it as unresolved for

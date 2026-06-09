@@ -9120,6 +9120,78 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Recent Use", prompt);
     }
 
+    // ── ## Recent Pickup endcap (mirrors ## Recent Use) ──────────────
+    // Live academy runs (gpt-4o-mini) show the LLM re-emitting Pickup of the SAME
+    // un-acquirable ground item many times (0 inventory add). cp-2375's failed-
+    // pickup annotation does NOT cover it (Pickup emits no WorldObjectInteracted
+    // echo). This re-surfaces the raw recent-Pickup counts at the decision slot.
+    private static EventStream BuildPickupStream(string itemSelector, int times)
+    {
+        var events = new EventStream();
+        for (var i = 0; i < times; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(times - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Pickup target={itemSelector} item= source=llm:test",
+            });
+        }
+        return events;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentPickupEndcap_RendersWhenPickupPresent()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildPickupStream("name=\"Bruised Apple\"", 6), null);
+        Assert.Contains("## Recent Pickup", prompt);
+        Assert.Contains("in your last 10 emitted goals you emitted Pickup on: Bruised Apple x6", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentPickupEndcap_RendersForSinglePickup()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildPickupStream("name=\"Leather Cap\"", 1), null);
+        Assert.Contains("## Recent Pickup", prompt);
+        Assert.Contains("Leather Cap x1", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentPickupEndcap_OmittedWhenNoPickup()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Recent Pickup", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentPickupEndcap_KeysByItemGuidDisplaysName()
+    {
+        // A picker-resolved Pickup goal reads `target=guid=0x.. name="X"`; the
+        // capsule keys by the guid but DISPLAYS the human name.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildPickupStream("guid=0x80008203 name=\"Bruised Apple\"", 5), null);
+        var capsuleIdx = prompt.IndexOf("## Recent Pickup", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx >= 0, "capsule missing");
+        Assert.Contains("Bruised Apple x5", prompt.Substring(capsuleIdx));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentPickupEndcap_IndependentOfRecentUseAndGive()
+    {
+        // A Pickup emission must parse ONLY under ## Recent Pickup.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), BuildPickupStream("name=\"Bruised Apple\"", 3), null);
+        Assert.Contains("## Recent Pickup", prompt);
+        Assert.DoesNotContain("## Recent Use", prompt);
+        Assert.DoesNotContain("## Recent Give", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
