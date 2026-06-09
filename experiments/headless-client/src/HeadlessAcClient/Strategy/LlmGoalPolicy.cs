@@ -974,14 +974,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     // Pure gate for the stuck-loop egress substitution (below). A combat-ready
     // bot that is ALSO tapped out (dwelled past the threshold here with 0 levels
-    // gained) and faces no active attacker has nothing left to gain in this
-    // zone, so a proven no-progress interaction loop should send it away rather
-    // than to the fallback (which re-picks the same dead-end class of object).
-    // Extracted for deterministic unit testing. Own signals only — no game
+    // gained) and has NO attackable monster in view has nothing left to gain in
+    // this zone, so a proven no-progress interaction loop should send it away
+    // rather than to the fallback (which re-picks the same dead-end class of
+    // object). When a monster IS in view the egress must defer — the bot should
+    // engage the visible XP target, not wander off to "find monsters" it already
+    // sees. Extracted for deterministic unit testing. Own signals only — no game
     // content.
     internal static bool ShouldEscapeStuckLoop(
-        bool combatReady, bool tappedOut, bool hostileInView)
-        => combatReady && tappedOut && !hostileInView;
+        bool combatReady, bool tappedOut, bool monsterInView)
+        => combatReady && tappedOut && !monsterInView;
 
     // When a fixation guard has detected a proven no-progress interaction loop
     // (a door/forge/chest/NPC re-tried with no movement and no inventory
@@ -997,9 +999,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     //   - tapped out (HuntTappedOutFact: dwelled past EgressDwellMinutes with 0
     //     levels gained since arriving) — early in a zone a Use loop may be a
     //     genuine progress attempt.
-    //   - no ObservedHostile attacker in view — defend/flee a real fight, never
-    //     turn away from it.
-    // Own signals only (typed wield, own dwell/level, own ObservedHostile
+    //   - no attackable monster in view — engage a visible monster (defend/flee a
+    //     hostile, or fight a non-hostile XP target) instead of wandering off to
+    //     find one that is already in view.
+    // Own signals only (typed wield, own dwell/level, own monster-in-view
     // perception); the trigger is the already-audited fixation guard. No
     // door/chest/monster-kind knowledge; substitutes a generic Explore.
     private bool ShouldEscapeStuckLoopWithExplore(WorldStateProjection world, DateTimeOffset nowUtc)
@@ -1013,9 +1016,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var tappedOut = HuntTappedOutFact(
             combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
             dwellMin, EgressDwellMinutes) is not null;
-        var hostileInView = world.Visible.Any(
-            v => v.IsMonster && !v.IsCorpse && v.ObservedHostile);
-        return ShouldEscapeStuckLoop(combatReady, tappedOut, hostileInView);
+        return ShouldEscapeStuckLoop(combatReady, tappedOut, AnyAttackableMonsterInView(world));
     }
 
     // A fixation guard fired (proven no-progress interaction loop). Either send
@@ -1029,7 +1030,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             Console.WriteLine(
                 "[llm-override] stuck-loop egress: tapped-out combat-ready bot looping " +
-                $"{loopKind} with no progress and no hostile attacker in view — " +
+                $"{loopKind} with no progress and no monster in view — " +
                 "substituting Explore{anywhere} to leave the zone.");
             return MakeEgressExploreGoal(
                 nowUtc, "override:stuck-loop-egress",
@@ -1064,22 +1065,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // instead of deferring to the fallback (which just re-picks the same
         // interior objects). Unlike a Talk loop — which may be following a fresh
         // NPC instruction — re-Using one object cannot be "finishing guided
-        // training", so this fires even within FreshDirectiveGrace; a hostile in
-        // view still takes priority (defend/flee, never turn away from a fight).
-        if (ShouldEscapeWorldUseLoop(loopKind, AnyHostileInView(world)))
+        // training", so this fires even within FreshDirectiveGrace; an attackable
+        // monster in view still takes priority (engage the visible XP target —
+        // defend/flee a hostile or fight a non-hostile — never wander off to find
+        // a monster already in view).
+        if (ShouldEscapeWorldUseLoop(loopKind, AnyAttackableMonsterInView(world)))
         {
             Console.WriteLine(
                 "[llm-override] use-loop egress: confirmed world-object Use churn with no " +
-                "hostile in view — substituting Explore{anywhere} to travel through/past the " +
+                "monster in view — substituting Explore{anywhere} to travel through/past the " +
                 "looped object (enforces the LOOP-BREAK / PASSAGE-OPENED rules).");
             return MakeEgressExploreGoal(
                 nowUtc, "override:use-loop-egress",
                 "mechanical use-loop egress: confirmed bare world-object Use churn with no " +
-                "egress, no inventory gain, no hostile in view; Exploring to travel through " +
+                "egress, no inventory gain, no monster in view; Exploring to travel through " +
                 "instead of re-Using the same object");
         }
         return _fallback.ProposeGoal(world, events, currentGoal);
     }
+
+    // True iff the bot has any non-corpse monster in view that it can attack —
+    // hostile (already attacking it) OR a non-hostile creature that still grants
+    // XP. The Explore-egress substitutions above exist to LEAVE and FIND monsters,
+    // so they must DEFER when a monster is ALREADY in view: the bot should engage
+    // it (defend/flee a hostile, or fight a non-hostile XP target), not wander off
+    // to look for one it can already see. Mirrors the `## Monsters in view`
+    // capsule predicate (cp-2335/2366). Own-perception wire flags only — no game
+    // content.
+    internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
+        => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
     // True iff the bot has any non-corpse monster in view that is actively
     // hostile (attacking it). Own-perception wire flags only — no game content.
@@ -1100,11 +1114,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // loop with a generic Explore (travel through/past the looped object) rather
     // than defer to the fallback. NOT gated on freshDirective — re-Using the
     // SAME object cannot be "finishing guided training", so a confirmed churn
-    // overrides the directive grace (unlike a Talk loop). Only a hostile in view
-    // suppresses it (defend/flee first). Extracted for deterministic unit
-    // testing; own-signal only, no game content.
-    internal static bool ShouldEscapeWorldUseLoop(string loopKind, bool hostileInView)
-        => loopKind == WorldUseLoopKind && !hostileInView;
+    // overrides the directive grace (unlike a Talk loop). Only an attackable
+    // monster in view suppresses it: the egress exists to LEAVE and find monsters,
+    // so when one is already in view the bot should engage it (defend/flee a
+    // hostile or fight a non-hostile XP target) instead of wandering. Extracted
+    // for deterministic unit testing; own-signal only, no game content.
+    internal static bool ShouldEscapeWorldUseLoop(string loopKind, bool monsterInView)
+        => loopKind == WorldUseLoopKind && !monsterInView;
 
     // Pure decision: the early Talk-loop egress latch is still ACTIVE this tick.
     // Active while within the latch window AND still in the same landblock the
