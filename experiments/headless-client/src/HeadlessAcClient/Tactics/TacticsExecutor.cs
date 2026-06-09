@@ -18,6 +18,7 @@
 // runtime-only constraint.
 
 using System;
+using System.Collections.Generic;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.World;
 
@@ -75,9 +76,24 @@ internal sealed class TacticsExecutor
     /// nearest world object (relative to <paramref name="self"/>).
     /// Returns null if no goal or no live match.
     /// </summary>
-    public WorldObjectSnapshot? ResolveTarget(WorldState world, WorldObjectSnapshot? self)
+    public WorldObjectSnapshot? ResolveTarget(
+        WorldState world, WorldObjectSnapshot? self,
+        IReadOnlySet<uint>? killedAttackGuids = null)
     {
         if (CurrentGoal is null) return null;
+        // For an Attack goal exclude (a) corpses — a corpse keeps the slain
+        // creature's name but is not attackable — and (b) recently-killed creature
+        // guids: a slain creature can LINGER in the world model (no ObjectDelete,
+        // health=0 known only to the combat layer, not corpse-flagged), so a
+        // name-only Attack would re-resolve the dead body the bot is standing on
+        // (a repeated 60s no-damage abandon) instead of the next LIVE match.
+        // Pickup/Use deliberately keep corpses + killed guids (loot the body).
+        if (CurrentGoal.Kind == GoalKind.Attack)
+        {
+            return SelectorResolver.ResolveSingleNearest(
+                CurrentGoal.Target, world, self, _weenies,
+                excludeCorpses: true, excludeGuids: killedAttackGuids);
+        }
         return SelectorResolver.ResolveSingleNearest(CurrentGoal.Target, world, self, _weenies);
     }
 

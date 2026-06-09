@@ -613,6 +613,16 @@ internal sealed class HandshakeDriver : IDisposable
         // succeed). Mechanical nav bookkeeping; no game knowledge.
         var                  interactUnreachableCooldown = TimeSpan.FromSeconds(60);
         var                  interactUnreachable = new HeadlessAcClient.World.InteractUnreachableTracker();
+        // Recently-killed creature guids (combat saw health reach 0), TTL'd. A
+        // slain creature can LINGER in the world model (no ObjectDelete, health=0
+        // known only here, NOT corpse-flagged), so without suppression the
+        // name-only Attack resolver re-locks the dead body the bot is standing on
+        // (a repeated 60s no-damage abandon) instead of the next LIVE match.
+        // Reuses the generic TTL guid-suppression structure; keyed only on a guid
+        // the combat layer saw die — no object type/name/wcid. The Attack resolver
+        // skips these so it picks the next-nearest LIVE target.
+        var                  recentlyKilledCooldown = TimeSpan.FromSeconds(45);
+        var                  recentlyKilledTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
         // cp-2342 — records the self→target distance at each interaction goal
         // lock, keyed by guid, keeping a short rolling history per target. The
         // most-recent target's history is projected into the prompt's
@@ -2100,6 +2110,14 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"[combat] target 0x{ctgHealth:X8} DEAD (health={updHealth.HealthFraction:F3}); " +
                                             $"clearing combat lock.");
                                         visitedTargetGuids.Add(ctgHealth);
+                                        // Suppress this slain guid from Attack
+                                        // target resolution for a cooldown so the
+                                        // resolver picks the next LIVE match, not
+                                        // the lingering dead body (a non-corpse-
+                                        // flagged creature the server has not yet
+                                        // deleted).
+                                        recentlyKilledTargets.MarkUnreachable(
+                                            ctgHealth, DateTime.UtcNow, recentlyKilledCooldown);
                                         // combat-feel: record a KILL against
                                         // the kind we were fighting. Prefer the
                                         // live snapshot's identity; fall back to
@@ -5343,7 +5361,23 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Wield ||
                          goal.Kind == GoalKind.Pickup))
                     {
-                        var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf);
+                        // Build the recently-killed guid suppression set (lazily,
+                        // only when non-empty) so an Attack after a kill resolves
+                        // to the next LIVE target instead of the lingering dead
+                        // body. Non-Attack goals ignore it (ResolveTarget gates it
+                        // on Kind == Attack).
+                        IReadOnlySet<uint>? killedAttackGuids = null;
+                        if (recentlyKilledTargets.Count > 0)
+                        {
+                            var killedSnap = recentlyKilledTargets.SnapshotSuppressed(DateTime.UtcNow);
+                            if (killedSnap.Count > 0)
+                            {
+                                var ks = new HashSet<uint>(killedSnap.Count);
+                                foreach (var kv in killedSnap) ks.Add(kv.Key);
+                                killedAttackGuids = ks;
+                            }
+                        }
+                        var targetSnap = tactics.ResolveTarget(worldState, tacticsSelf, killedAttackGuids);
                         var combatDeferredAttack = false;
                         // interact-unreachable guard: if the server recently
                         // refused this exact guid as out-of-reach (recorded at the

@@ -367,6 +367,63 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void SelectorResolver_ExcludeCorpses_SkipsCorpseFlaggedMatch()
+    {
+        // Attack resolution passes excludeCorpses:true. A corpse keeps the
+        // creature's name; the NEAR match is a corpse, the FAR one is live — the
+        // resolver must return the LIVE (far) one, not the corpse it stands on.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, MobGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(10f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable | (uint)ObjectDescriptionFlag.Corpse);
+        SeedSnapshot(ws, ItemGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(50f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var self = ws.TryGet(SelfGuid);
+        var sel = new Selector { Name = "Sparring Golem" };
+        // Default (no exclusion) picks the NEAR corpse.
+        Assert.Equal(MobGuid, SelectorResolver.ResolveSingleNearest(sel, ws, self)!.Guid);
+        // excludeCorpses skips the corpse and returns the LIVE far one.
+        Assert.Equal(ItemGuid,
+            SelectorResolver.ResolveSingleNearest(sel, ws, self, excludeCorpses: true)!.Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_ExcludeGuids_SkipsKilledGuid_PicksNextNearest()
+    {
+        // Attack resolution passes the recently-killed guid set. The NEAR golem
+        // was just killed (lingering, not corpse-flagged); the resolver must skip
+        // its guid and return the next-nearest LIVE golem instead of re-locking
+        // the dead body.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, MobGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(6f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+        SeedSnapshot(ws, ItemGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(50f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var self = ws.TryGet(SelfGuid);
+        var sel = new Selector { Name = "Sparring Golem" };
+        // Default picks the NEAR (just-killed) golem.
+        Assert.Equal(MobGuid, SelectorResolver.ResolveSingleNearest(sel, ws, self)!.Guid);
+        // Suppressing the near guid returns the next-nearest LIVE golem.
+        var killed = new HashSet<uint> { MobGuid };
+        Assert.Equal(ItemGuid,
+            SelectorResolver.ResolveSingleNearest(sel, ws, self, excludeGuids: killed)!.Guid);
+        // If ALL matches are suppressed, the resolver returns null (unresolved).
+        var allKilled = new HashSet<uint> { MobGuid, ItemGuid };
+        Assert.Null(SelectorResolver.ResolveSingleNearest(sel, ws, self, excludeGuids: allKilled));
+    }
+
+    [Fact]
     public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
     {
         // De-hardcoding contract: the projection sees IsDoor / IsPortal /
