@@ -5143,25 +5143,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 spendFacts.Add($"your health has peaked at {endcapMaxHp} HP this session (your observed maximum)");
             if (world.Self.NumDeaths is int endcapDeaths)
                 spendFacts.Add($"you have died {endcapDeaths} times");
-            // cp-2410: the OFFENSE side of the SAME survivability-vs-offense
-            // weighing. cp-2399 surfaced only the survival facts (max HP/deaths),
-            // so live the L9 bot poured XP into endurance yet stayed unable to
-            // KILL — it lands some hits but is out-damaged (0 kills; monster
-            // kinds it fought but could not kill are recorded `ineffective`).
-            // Co-locate the bot's OWN kill/ineffective record beside the spend
-            // decision so the SPEND XP rule's "raise coordination/strength when
-            // swings evade/barely hurt" competes with the survival facts. RAW
-            // counts from the combat-feel ledger, on RAW PRESENCE (an ineffective
-            // kind exists), NO recommendation and NO magnitude gate; no game
-            // knowledge.
+            // cp-2410/cp-2411: the OFFENSE side of the SAME survivability-vs-
+            // offense weighing. cp-2399 surfaced only the survival facts (max
+            // HP/deaths), so live the L9 bot poured XP into endurance yet stayed
+            // unable to KILL — it lands some hits but is out-damaged (0 kills).
+            // cp-2410 counted only kinds recorded `ineffective` (the no-progress
+            // stalemate), but live the kinds that WALL the bot record a `death`
+            // or `near-death`, NOT `ineffective`, so that narrow gate never fired
+            // and the offense signal stayed absent while the bot hoarded XP.
+            // cp-2411 broadens it to every kind in the bot's OWN combat history
+            // it has engaged but never killed (Kills == 0). Snapshot only keeps
+            // rows with kills/deaths/near-deaths/ineffective > 0, so Kills == 0
+            // here already means "fought it significantly, never beat it" — the
+            // full can't-win-fights signal the LLM weighs (with the survival
+            // facts above) when splitting XP between offense and endurance.
+            // Co-locate it beside the spend decision so the SPEND XP rule's
+            // "raise coordination/strength when swings evade/barely hurt"
+            // competes with the survival facts. RAW counts from the combat-feel
+            // ledger, on RAW PRESENCE (an unkilled kind exists), NO recommendation
+            // and NO magnitude gate; no game knowledge.
             if (world.CombatHistory is { Count: > 0 } endcapHist)
             {
+                // endcapHist is the recency-capped Snapshot (most-recently-active
+                // kinds), NOT the full ledger, so both counts are scoped to RECENT
+                // combat and the wording must not overclaim a session "total".
                 var endcapKills = endcapHist.Sum(h => h.Kills);
-                var endcapIneffectiveKinds = endcapHist.Count(h => h.Ineffective > 0 && h.Kills == 0);
-                if (endcapIneffectiveKinds > 0)
+                var endcapUnkilledKinds = endcapHist.Count(h => h.Kills == 0);
+                if (endcapUnkilledKinds > 0)
                     spendFacts.Add(
-                        $"you have {endcapKills} kill(s) total and have fought {endcapIneffectiveKinds} monster " +
-                        "kind(s) you could not kill (ineffective)");
+                        $"in recent combat you have {endcapKills} kill(s) and have fought " +
+                        $"{endcapUnkilledKinds} monster kind(s) you have not killed");
             }
             if (spendFacts.Count > 0)
                 sb.AppendLine($"- raw fact: {string.Join("; ", spendFacts)}.");

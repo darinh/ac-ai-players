@@ -9338,9 +9338,10 @@ public class LlmGoalPolicyTests
     [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenIneffectiveKindNoKill()
     {
-        // cp-2410: a monster kind the bot fought but could not kill (ineffective,
-        // 0 kills) is the OFFENSE bottleneck — it renders beside the spend
+        // cp-2410/cp-2411: a monster kind the bot fought but never killed is
+        // the can't-win-fights bottleneck — it renders beside the spend
         // decision so the SPEND XP rule can weigh offense, not just survival.
+        // An `ineffective` stalemate (cp-2410's original case) still qualifies.
         var world = BuildXpWorld(69296, 5475) with
         {
             CombatHistory = new[]
@@ -9351,17 +9352,45 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("## Unspent XP", prompt);
-        Assert.Contains("could not kill (ineffective)", prompt);
-        Assert.Contains("0 kill(s) total", prompt);
+        Assert.Contains("monster kind(s) you have not killed", prompt);
+        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
+        // Exact full clause (guards the middle "and have fought N" half too).
+        Assert.Contains(
+            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
+            prompt);
         var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
-        var offenseIdx = prompt.IndexOf("could not kill (ineffective)", System.StringComparison.Ordinal);
+        var offenseIdx = prompt.IndexOf("monster kind(s) you have not killed", System.StringComparison.Ordinal);
         Assert.True(offenseIdx > capsuleIdx, "offense fact should render within the ## Unspent XP capsule");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenDiedToKindNoIneffective()
+    {
+        // cp-2411: the kinds that WALL the live bot record a `death` (or
+        // `near-death`), NOT `ineffective` — cp-2410's `Ineffective > 0` gate
+        // MISSED them. A died-to kind with 0 kills and 0 ineffective must now
+        // surface as the can't-win-fights bottleneck beside the spend decision.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CombatHistory = new[]
+            {
+                new CombatHistoryEntry("Mite Scion", 22600u, Kills: 0, Deaths: 2,
+                    NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0),
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains("1 monster kind(s) you have not killed", prompt);
+        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
+        Assert.Contains(
+            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
+            prompt);
     }
 
     [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenKindHasKills()
     {
-        // A kind the bot HAS killed is not an offense bottleneck -> no offense fact.
+        // A kind the bot HAS killed is not a bottleneck -> no can't-win fact.
         var world = BuildXpWorld(69296, 5475) with
         {
             CombatHistory = new[]
@@ -9372,13 +9401,13 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("## Unspent XP", prompt);
-        Assert.DoesNotContain("could not kill (ineffective)", prompt);
+        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
     }
 
     [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenNoUnspentXp()
     {
-        // No unspent XP -> the whole capsule (incl. the offense fact) is omitted.
+        // No unspent XP -> the whole capsule (incl. the can't-win fact) is omitted.
         var world = BuildXpWorld(69296, 0) with
         {
             CombatHistory = new[]
@@ -9388,7 +9417,7 @@ public class LlmGoalPolicyTests
             },
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("could not kill (ineffective)", prompt);
+        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
     }
 
     [Fact]
