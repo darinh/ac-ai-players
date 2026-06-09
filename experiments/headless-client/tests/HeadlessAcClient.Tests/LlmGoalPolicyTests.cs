@@ -2923,6 +2923,32 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("NON-HOSTILE IS NOT NON-TARGET", p);
     }
 
+    // cp-2406: the "Combat targets" rule is only actionable with a monster in
+    // view (nothing to Attack otherwise), so it is gated on monsterInView like
+    // the NON-HOSTILE rule.
+
+    [Fact]
+    public void BuildUserPrompt_CombatTargetsRule_PresentWhenMonsterInView()
+    {
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB00u, Name = "Sparring Golem", Wcid = 70u, Distance = 5f, IsMonster = true });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("Combat targets:", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CombatTargetsRule_OmittedWhenNoMonsterInView()
+    {
+        // No monster visible -> the monster-vs-npc targeting rule is moot
+        // (Attack has no candidate) and is gated off to free prompt budget.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0xB01u, Name = "Town Crier", Wcid = 90u, Distance = 4f, IsMonster = false });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("Combat targets:", p);
+    }
+
     [Fact]
     public void BuildUserPrompt_ExcursionRuleGating_ExcludesCorpsesAndCountsObservedHostile()
     {

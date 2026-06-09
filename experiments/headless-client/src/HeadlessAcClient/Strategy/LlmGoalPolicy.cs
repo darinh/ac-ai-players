@@ -3887,6 +3887,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- If an inventory item's short_desc says what to do with it, follow it. 'Give' requires BOTH target (the NPC) and item (the thing given).");
         sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite). Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a blocked combo.");
         sb.AppendLine("- Read `## Server hints` and `## Early server directives`: phrases like \"Double click X\" or \"Use X to ...\" tell you the exact verb+target. If that object is visible AND the server instructed it, emit `Use{target: name=\"X\"}`. The server is your tutorial; don't ignore it for pure exploration.");
+        // Whether a monster is in view — the SAME wire fact (`!IsCorpse &&
+        // (IsMonster || ObservedHostile)`) that produces the `monsters in view`/
+        // `nearest monster` lines. Computed HERE (moved up from below) so the
+        // combat-targeting rule directly under it can also be gated on it.
+        // Several rules are entirely about ONE side of this fact, so they are
+        // gated on it (cp-2331/cp-2335/cp-2369 per-rule relevance-gating):
+        // render a rule ONLY when its telemetry is present, so the applicable
+        // rules are not buried by inapplicable ones. A render gate on an
+        // observed fact; the LLM still decides; no game knowledge.
+        var monsterInView =
+            world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
+        // cp-2406: the Combat targets rule (monster = valid XP target; npc =
+        // do-not-attack; combat = primary XP source) is only ACTIONABLE when a
+        // monster is actually in view — with none visible there is nothing to
+        // Attack, the npc-do-not-attack guardrail is moot (Attack is not a
+        // candidate selector), and the LEVELING rule below already steers
+        // exploration toward monsters when none are in view. Gate it on
+        // monsterInView to free prompt budget in the common no-monster scene.
+        if (monsterInView)
         sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
         // SELF-ARM is entirely about getting armed: it applies ONLY when the bot
         // is NOT yet combat-effective (no melee weapon wielded, and no wielded
@@ -3912,15 +3931,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!selfArmCombatEffective)
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
-        // Whether a monster is in view — the SAME wire fact (`!IsCorpse &&
-        // (IsMonster || ObservedHostile)`) that produces the `monsters in view`/
-        // `nearest monster` lines. Several rules are entirely about ONE side of
-        // this fact, so they are gated on it (cp-2331/cp-2335 section-presence
-        // gating): render a rule ONLY when its telemetry is present, so the
-        // applicable rules are not buried by inapplicable ones. A render gate on
-        // an observed fact; the LLM still decides; no game knowledge.
-        var monsterInView =
-            world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
+        // monsterInView is computed ABOVE (moved up so the Combat targets rule
+        // can be gated on it too). The rules below reuse it.
         // The NON-HOSTILE rule references `nearest monster`/`monsters in view`
         // > 0, so render it ONLY when a monster is actually in view.
         if (monsterInView)
