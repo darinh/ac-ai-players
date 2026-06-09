@@ -169,15 +169,29 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_SchemaAndRules_AdvertiseRecallVerb()
+    public void BuildUserPrompt_Schema_AdvertisesRecallVerb()
     {
+        // The Recall verb must appear in the kind enum so the LLM may emit it —
+        // always present, independent of the cp-2408-gated STUCK ESCAPE rule.
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);
-
-        // The verb must appear in the kind enum so the LLM may emit it,
         Assert.Contains("\"Recall\"", prompt);
-        // and the STUCK ESCAPE rule must explain when/how to use it.
-        Assert.Contains("STUCK ESCAPE", prompt);
-        Assert.Contains("Recall{}", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_StuckEscapeRule_RendersOnBlockedRejection_OmittedOtherwise()
+    {
+        // cp-2408: the STUCK ESCAPE (Recall last-resort) rule is paired with the
+        // BLOCKED rule and gated on a recent Blocked/Unreachable geometry
+        // rejection — the only situation in which Recall-to-escape is actionable.
+        var blocked = new EventStream();
+        blocked.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "Blocked" });
+        var stuck = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), blocked, null);
+        Assert.Contains("STUCK ESCAPE", stuck);
+        Assert.Contains("Recall{}", stuck);
+
+        // Moving freely (no geometry rejection) -> the rule is gated off.
+        Assert.DoesNotContain("STUCK ESCAPE",
+            LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
     }
 
     [Fact]
