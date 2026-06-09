@@ -151,6 +151,29 @@ public class StrategyFoundationTests
         Assert.DoesNotContain(persisted, e => e.Text == "p39");
     }
 
+    [Fact]
+    public void EventStream_PersistentNpcDialogs_SurviveRingEviction_FirstSeenCapped()
+    {
+        var es = new EventStream(8);
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Guide", Text = "Go to the next room." });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Guide", Text = "Go to the next room." }); // dup
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "not an npc line" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Guide", Text = "" }); // empty ignored
+        for (int i = 0; i < 20; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = $"NPC{i}", Text = $"line {i:D2}" });
+
+        var persisted = es.PersistentNpcDialogs();
+        // Survives ring eviction (ring holds 8; the first line is long gone from Recent).
+        Assert.DoesNotContain(es.Recent(EventStream.DefaultCapacity), e => e.Text == "Go to the next room.");
+        Assert.Equal("Go to the next room.", persisted[0].Text);
+        Assert.Equal("Guide", persisted[0].Name);
+        Assert.Equal(1, persisted.Count(e => e.Text == "Go to the next room."));
+        Assert.DoesNotContain(persisted, e => e.Text == "not an npc line");
+        Assert.DoesNotContain(persisted, e => string.IsNullOrEmpty(e.Text));
+        Assert.True(persisted.Count <= 8, $"persistent npc dialogs {persisted.Count} exceeds cap");
+        Assert.DoesNotContain(persisted, e => e.Text == "line 19"); // beyond the earliest-N cap
+    }
+
     // ---- SelectorResolver ----
 
     private const uint SelfGuid = 0x50000005;

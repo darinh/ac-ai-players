@@ -266,6 +266,21 @@ internal sealed class EventStream
     private readonly List<StreamEvent> _persistentPopups = new();
     private readonly HashSet<string> _persistentPopupTexts = new(StringComparer.Ordinal);
 
+    // NPC-spoken directives arrive as NpcDialog events (the server's Tell from a
+    // non-self guid — see HandshakeDriver). They carry the same kind of "how to
+    // proceed/where to go next" guidance as PopupStrings ("go talk to X in the
+    // next room", a quest assignment), but they too age out of the bounded ring
+    // before the bot acts AND the `## Server hints` section that carries them is
+    // hard-cut in dense scenes. Persist the EARLIEST distinct NpcDialog lines the
+    // same way, with a SMALLER cap because NPC speech is chattier than the
+    // low-volume directed PopupStrings. Captured by event KIND + first-seen text
+    // + cap only — never by parsing the content (that would be hardcoded game
+    // knowledge); the LLM and the prompt's "greetings/flavor are not tasks" rule
+    // filter non-directives.
+    private const int MaxPersistentNpcDialogs = 8;
+    private readonly List<StreamEvent> _persistentNpcDialogs = new();
+    private readonly HashSet<string> _persistentNpcDialogTexts = new(StringComparer.Ordinal);
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -304,6 +319,15 @@ internal sealed class EventStream
             _persistentPopups.Add(stamped);
         }
 
+        // Same durability for the earliest distinct NPC-spoken directives.
+        if (stamped.Kind == EventKind.NpcDialog
+            && !string.IsNullOrEmpty(stamped.Text)
+            && _persistentNpcDialogs.Count < MaxPersistentNpcDialogs
+            && _persistentNpcDialogTexts.Add(stamped.Text))
+        {
+            _persistentNpcDialogs.Add(stamped);
+        }
+
         return stamped;
     }
 
@@ -339,4 +363,13 @@ internal sealed class EventStream
     /// consumer can order it as "earliest".
     /// </summary>
     public IReadOnlyList<StreamEvent> PersistentPopupStrings() => _persistentPopups;
+
+    /// <summary>
+    /// The earliest distinct NPC-spoken directive lines (NpcDialog) seen this
+    /// session, in first-seen order, capped at <see cref="MaxPersistentNpcDialogs"/>.
+    /// Like <see cref="PersistentPopupStrings"/> these survive ring eviction so an
+    /// early "go to X / do Y" NPC instruction stays available to the prompt. Each
+    /// retains its original (low) Sequence and its <c>Name</c> (the speaking NPC).
+    /// </summary>
+    public IReadOnlyList<StreamEvent> PersistentNpcDialogs() => _persistentNpcDialogs;
 }
