@@ -3049,14 +3049,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         if (goal.Kind != GoalKind.Talk) return false;
 
-        var key = CanonicalUseTargetKey(goal.Target);
+        // GUID-backed identity. An LLM Talk goal carries a NAME only (the guid
+        // is resolved downstream by the Motor), so a guid-only key — as this
+        // guard previously required — skipped EVERY LLM Talk goal and never
+        // fired on the roving single-NPC loops it exists to catch (live: the
+        // bot Talked one silent NPC 10x because this guard sat out the whole
+        // loop). RovingTalkTargetGuidKey re-keys a name-only target to the
+        // NEAREST visible object of that name: a STABLE guid while the bot
+        // loops one stationary NPC (correct break), and one that CHANGES —
+        // resetting the streak — if the bot genuinely moves to a different
+        // instance, so distinct same-named NPCs are never conflated. Skip when
+        // the target resolves to no visible object (the bot is not at it).
+        var key = RovingTalkTargetGuidKey(goal.Target, world);
         if (key is null) return false;
-        // GUID-backed identity ONLY. CanonicalUseTargetKey falls back to a
-        // name when no guid is present; because this guard (unlike the
-        // stationary ones) does NOT reset on movement, a name-only key would
-        // conflate DISTINCT same-named NPC instances into one bogus loop. Skip
-        // name-only targets entirely.
-        if (!key.StartsWith("guid=", StringComparison.Ordinal)) return false;
 
         var ep = _rovingNpcTalkLoop;
         bool sameTarget = ep is not null &&
@@ -3140,6 +3145,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (sel.Guid is { } g) return $"guid=0x{g:X8}";
         if (!string.IsNullOrEmpty(sel.Name)) return $"name=\"{sel.Name}\"";
         return null;
+    }
+
+    /// <summary>
+    /// Stable guid key for the roving Talk-loop guard. A guid-bearing selector
+    /// keys directly. A NAME-only selector — what an LLM Talk goal always is,
+    /// since the Motor resolves the guid downstream — is re-keyed to the
+    /// NEAREST visible object of that name (deterministic: nearest distance,
+    /// ties broken by the lowest guid). That yields a STABLE key while the bot
+    /// loops one stationary NPC (so the guard can fire) yet a DIFFERENT key if
+    /// the bot moves to a genuinely distinct instance (so the streak resets and
+    /// distinct same-named NPCs are never conflated). Returns null when the
+    /// selector is unusable or matches no visible object. Pure mechanical
+    /// identity resolution from the bot's OWN visible-object projection — no NPC
+    /// names, wcids, or quest content are hardcoded.
+    /// </summary>
+    private static string? RovingTalkTargetGuidKey(Selector? sel, WorldStateProjection world)
+    {
+        if (sel is null) return null;
+        if (sel.Guid is { } g) return $"guid=0x{g:X8}";
+
+        var name = sel.Name?.Trim();
+        if (string.IsNullOrEmpty(name)) return null;
+
+        VisibleObjectProjection? best = null;
+        foreach (var v in world.Visible)
+        {
+            if (!string.Equals(v.Name?.Trim(), name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (best is null) { best = v; continue; }
+            var vd = v.Distance ?? float.MaxValue;
+            var bd = best.Distance ?? float.MaxValue;
+            if (vd < bd || (vd == bd && v.Guid < best.Guid)) best = v;
+        }
+        return best is null ? null : $"guid=0x{best.Guid:X8}";
     }
     /// (which was generated against an older world snapshot) unsafe
     /// to act on. INTENTIONALLY narrower than the "wake the LLM"
