@@ -7704,24 +7704,33 @@ internal sealed class HandshakeDriver : IDisposable
                             targetGuid: motionTarget.Guid);
                         fragSeq    = nextOutboundFragmentSequence++;
 
-                        // cp-2417: record this two-object use of an inventory
-                        // SOURCE item in the same InventoryItemUsed echo stream the
-                        // plain inventory-USE path emits (~5863) so
-                        // LlmGoalPolicy.IsInventoryUseRecentlyDispatched can drop a
-                        // repeat Use of the SAME item. A Use{target=self,item=<note>}
-                        // (reading a non-consumable letter) is dispatched HERE as
-                        // USEWITHTARGET and previously emitted no echo, so the dedup
-                        // was blind — live (gpt-4o) the bot re-read one letter 45x.
+                        // cp-2417: when this two-object use targets SELF (reading
+                        // a non-consumable inventory item on yourself, e.g. a
+                        // tutorial letter), record an InventoryItemUsed echo in the
+                        // same stream the plain inventory-USE path emits (~5863) so
+                        // LlmGoalPolicy.IsInventoryUseRecentlyDispatched can drop the
+                        // repeat (deferring to fallback). This path previously
+                        // emitted no echo, so the dedup was blind — live (gpt-4o) the
+                        // bot re-read one letter 45x.
+                        //
+                        // Scoped to a SELF target on purpose: the dedup matches by
+                        // item identity ALONE (no target), so echoing for a
+                        // world-target two-object use (e.g. the same key on chest A
+                        // then chest B) would wrongly drop the second, legitimate
+                        // use. A self-use has no such distinct-target axis.
                         // Self-emitted bookkeeping echo only; no game knowledge.
-                        eventStream.Append(new StreamEvent
+                        if (motionTarget.Guid == chosenCharacterGuid)
                         {
-                            Sequence = 0,
-                            Utc      = DateTimeOffset.UtcNow,
-                            Kind     = EventKind.InventoryItemUsed,
-                            ItemGuid = useWithSrc,
-                            Wcid     = pendingUseWithItemWcid,
-                            Name     = pendingUseWithItemName,
-                        });
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.InventoryItemUsed,
+                                ItemGuid = useWithSrc,
+                                Wcid     = pendingUseWithItemWcid,
+                                Name     = pendingUseWithItemName,
+                            });
+                        }
                     }
                     else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
                     {
