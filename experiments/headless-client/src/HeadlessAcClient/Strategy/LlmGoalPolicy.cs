@@ -3750,6 +3750,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
+    // cp-2402: cheap pre-pass for the BLOCKED-targets rule's relevance gate.
+    // Returns true when the recent event history carries an ActionRejected
+    // whose ErrorLabel is "Blocked" or "Unreachable" (the Motor surfaces these
+    // when server physics held the bot against geometry). The rule only tells
+    // the LLM how to react to such a rejection, so it is inapplicable noise
+    // without one. A purely structural read of the bot's OWN rejection events —
+    // the SAME ErrorLabels the Motor emits (HandshakeDriver) — no game knowledge.
+    private static bool HasRecentBlockedRejection(EventStream events)
+        => events.RecentOfKind(EventKind.ActionRejected, 16)
+            .Any(e => e.ErrorLabel is "Blocked" or "Unreachable");
+
     internal static string BuildUserPrompt(
         WorldStateProjection world,
         EventStream events,
@@ -4001,6 +4012,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- HUNT EXCURSION (leave a tapped-out safe zone to find monsters): monsters do NOT spawn in safe zones — you must travel OUT to surrounding open country. When combat-ready, NO `monster` anywhere in `Visible nearby`, NO un-acted server/quest directive naming a specific next target (re-talking an NPC with no NEW dialog and browsing vendors do NOT count), AND `minutes in current landblock` is more than a few with local progress dried up (no new level, quest item, or unique hint), the zone is TAPPED OUT. Emit `Explore{target: {name: \"anywhere\"}}` — crossing out takes MANY ticks, so KEEP emitting it every cycle (your own recent `Explore` does NOT mean the excursion is done; do NOT revert to talking the same town NPCs mid-excursion) until your `landblock` actually changes OR a `monster` appears (then `Attack` it). A NEW server/quest directive, quest item, danger, or fresh dialog step interrupts the hunt — act on it. Quest progress outranks an optional hunt.");
         if (!monsterInView)
         sb.AppendLine("- STEER A BARREN EXCURSION: `Explore` accepts an OPTIONAL `direction` — one of `north`, `northeast`, `east`, `southeast`, `south`, `southwest`, `west`, `northwest` — that biases WHICH way the excursion heads (the motor walks roughly that bearing toward unexplored ground). Plain `Explore{target: {name: \"anywhere\"}}` wanders UNDIRECTED, which can keep drifting the SAME way and re-cover empty country. So if a hunt excursion has already crossed SEVERAL `landblock`s (watch `minutes in current landblock` resetting and your own repeated recent `Explore`s) and STILL no `monster` has appeared, that bearing is barren — emit `Explore{target: {name: \"anywhere\"}, direction: \"<a DIFFERENT or opposite compass heading>\"}` to search NEW country instead of drifting the same way. Vary the heading across excursions until a `monster` appears (then `Attack` it). You have NO map — you are choosing a SEARCH direction to try, not a known monster location; `direction` is optional and only steers, so an undirected `Explore` still works when you have no reason to prefer a bearing.");
+        // cp-2402: the BLOCKED-targets rule (~370 chars) only tells the LLM how
+        // to react to an ActionRejected `Blocked`/`Unreachable` (server physics
+        // held the bot against geometry). It is inapplicable noise without such
+        // a rejection, so gate it on one (cp-2368/69/92/2400/2401 per-rule
+        // relevance-gating). The Motor's nav already routes around blocked
+        // geometry mechanically, so the advisory rule is behaviour-preserving.
+        // A render gate on the bot's OWN rejection events; no game knowledge.
+        if (HasRecentBlockedRejection(events))
         sb.AppendLine("- BLOCKED targets: `ActionRejected` label `Blocked`/`Unreachable` = server physics held the bot against geometry (wall, closed door, barrier). Do NOT re-emit the same target. Prefer a visible Door (walk to / Use it — it likely leads where you were going); else `Explore` to route around. The bot cannot clip through obstacles.");
         sb.AppendLine("- STUCK ESCAPE (last resort): `Recall{}` teleports you to your attuned lifestone. Use it ONLY when you are physically unable to move at all — e.g. the movement report (when shown) says the server held you at the same position across repeated attempts AND no visible Door or `Explore` route frees you (a ledge/cliff with your target far BELOW is a classic trap: every step is mid-air and rejected). It requires an attuned lifestone (Use a `Life Stone` to attune); the server refuses it inside the training academy and right after PvP, and it costs half your mana — so it is an escape hatch, NOT routine travel. Try a Door or `Explore` first; reach for `Recall` only when those cannot move you.");
         // cp-2346 — does the recent event window carry server/NPC text the LLM
