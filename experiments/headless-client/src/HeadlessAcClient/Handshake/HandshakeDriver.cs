@@ -75,6 +75,14 @@ internal sealed class HandshakeDriver : IDisposable
     // separates the two without risking false negatives on real crossings.
     private const float OnFootSeamMaxMeters = 48f;
 
+    // Fixed powerLevel the Motor fills into every TargetedMeleeAttack opcode.
+    // The opcode requires a powerLevel float in [0,1]; the LLM's "Attack" goal
+    // does not provide one, so the Motor uses a single fixed default. 0.5 is
+    // the documented real-client value for an unmodified click (see the
+    // powerLevel note in GameActionMessages.cs). Was hardcoded to 1.0 at each
+    // melee send site; centralized here as one constant.
+    private const float MeleeAttackPowerLevel = 0.5f;
+
     private readonly IPEndPoint _serverPort0;
     private readonly IPEndPoint _serverPort1;
     private readonly string _account;
@@ -3738,7 +3746,7 @@ internal sealed class HandshakeDriver : IDisposable
                             ffBuf,
                             targetGuid: ffCtg,
                             attackHeight: 2u /* Medium */,
-                            powerLevel: 1.0f);
+                            powerLevel: MeleeAttackPowerLevel);
                     }
 
                     var ffMsg = new OutboundPacket();
@@ -7605,7 +7613,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 combatBufB,
                                 targetGuid: motionTarget.Guid,
                                 attackHeight: 2u /* Medium */,
-                                powerLevel: 1.0f);
+                                powerLevel: MeleeAttackPowerLevel);
                         }
                         fragSeqB   = nextOutboundFragmentSequence++;
                         // First swing on this target → also send
