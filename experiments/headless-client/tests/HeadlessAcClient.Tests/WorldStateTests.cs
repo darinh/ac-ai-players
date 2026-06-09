@@ -468,6 +468,47 @@ public class WorldStateTests
         Assert.Equal(0, ws.ObjectCount);
     }
 
+    // ---- ever-observed-names (session-wide perception memory) ----
+
+    [Fact]
+    public void EverObservedNames_RecordsObjectCreateName_CaseInsensitive()
+    {
+        var ws = new WorldState();
+        Assert.False(ws.WasObjectNameEverObserved("Jonathan"));
+
+        Assert.True(ws.Apply(BuildObjectCreate(guid: TestGuid, name: "Jonathan")));
+
+        Assert.True(ws.WasObjectNameEverObserved("Jonathan"));
+        Assert.True(ws.WasObjectNameEverObserved("jonathan")); // case-insensitive
+        Assert.Contains("Jonathan", ws.EverObservedNames);
+    }
+
+    [Fact]
+    public void EverObservedNames_NeverObservedName_ReturnsFalse()
+    {
+        var ws = new WorldState();
+        ws.Apply(BuildObjectCreate(guid: TestGuid, name: "Society Greeter"));
+
+        // A name that only ever appears in dialog text, never as an object.
+        Assert.False(ws.WasObjectNameEverObserved("Agent"));
+        Assert.False(ws.WasObjectNameEverObserved(null));
+        Assert.False(ws.WasObjectNameEverObserved(""));
+    }
+
+    [Fact]
+    public void EverObservedNames_SurvivesObjectDelete()
+    {
+        var ws = new WorldState();
+        ws.Apply(BuildObjectCreate(guid: TestGuid, name: "Sparring Golem", seqInstance: 1));
+        Assert.True(ws.WasObjectNameEverObserved("Sparring Golem"));
+
+        // Deleting the live object must NOT erase the session-wide observation:
+        // the name was genuinely seen at some point this session.
+        ws.Apply(new ObjectDeleteMessage(TestGuid, 2));
+        Assert.Null(ws.TryGet(TestGuid));
+        Assert.True(ws.WasObjectNameEverObserved("Sparring Golem"));
+    }
+
     // ---- Helpers ----
 
     private static ObjectCreateMessage BuildObjectCreate(

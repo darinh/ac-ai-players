@@ -10279,7 +10279,100 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("PERSIST A HUNT EXCURSION", prompt);
     }
 
-    // ---- Source re-drive of an LLM-authored hunt excursion ----
+    // ---- ## Unseen objective target (phantom named-target capsule) ----
+
+    private static IntentStack StackWithTopIntent(
+        WorldStateProjection world, EventStream events,
+        string? targetName, uint? targetGuid, double pushedSecondsAgo)
+    {
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001",
+            Kind = "reach-objective",
+            TargetName = targetName,
+            TargetGuid = targetGuid,
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(
+                world, events, DateTime.UtcNow.AddSeconds(-pushedSecondsAgo)),
+        });
+        return stack;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersUnseenObjectiveTarget_WhenNamedTargetNeverObserved()
+    {
+        // The top intent names a target that has never entered the world model
+        // (a dialog-only phantom) and has been pursued past the settle window.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = StackWithTopIntent(world, events, "Agent", targetGuid: null, pushedSecondsAgo: 60);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.Contains("## Unseen objective target", prompt);
+        Assert.Contains("no object named 'Agent' has been observed", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsUnseenObjectiveTarget_WhenTargetWasObserved()
+    {
+        // Same intent, but the target name HAS been observed as a real object —
+        // the bot just has not reached it yet; do not flag it as a phantom.
+        var world = BuildExitTokenWorld() with
+        {
+            EverObservedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Agent" },
+        };
+        var events = new EventStream();
+        var stack = StackWithTopIntent(world, events, "Agent", targetGuid: null, pushedSecondsAgo: 60);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Unseen objective target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsUnseenObjectiveTarget_WithinSettleWindow()
+    {
+        // Freshly pushed objective (within the grace window): the bot may still
+        // be travelling to a not-yet-loaded room, so do not flag it yet.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = StackWithTopIntent(world, events, "Agent", targetGuid: null, pushedSecondsAgo: 1);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Unseen objective target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsUnseenObjectiveTarget_WhenTargetGuidResolved()
+    {
+        // The intent carries a resolved TargetGuid — it is bound to a concrete
+        // object, not a free-floating name, so the phantom signal must not fire.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = StackWithTopIntent(world, events, "Agent", targetGuid: 0x80001234u, pushedSecondsAgo: 60);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Unseen objective target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_OmitsUnseenObjectiveTarget_WhenTopIntentHasNoNamedTarget()
+    {
+        // A top intent with no target_name (e.g. a generic hunt) is never a
+        // phantom-named-target chase.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = StackWithTopIntent(world, events, targetName: null, targetGuid: null, pushedSecondsAgo: 60);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Unseen objective target", prompt);
+    }
+
     //
     // When the LLM emits an inert Explore goal AND pushes a new TOP
     // intent that carries a liveness deadline, the policy captures that

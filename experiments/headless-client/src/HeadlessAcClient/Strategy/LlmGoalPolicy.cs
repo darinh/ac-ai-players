@@ -148,6 +148,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // server/quest directive … interrupts the hunt") in BuildUserPrompt; if
     // that bullet is removed, revisit this veto so it stays prompt-anchored.
     private static readonly TimeSpan FreshDirectiveGrace = TimeSpan.FromMinutes(2);
+
+    // Debounce for the `## Unseen objective target` salience capsule: only flag
+    // an active objective whose named target has never been observed AFTER it has
+    // been pursued at least this long, so a just-pushed objective whose target the
+    // bot is still travelling toward (its room not yet loaded) is not flagged on
+    // the very first tick. Temporal scoping (a settle window), not a behavioural
+    // threshold; the bot re-deliberates every few seconds, so this is a few
+    // decisions of grace before the never-observed fact surfaces.
+    private static readonly TimeSpan UnseenObjectiveTargetGrace = TimeSpan.FromSeconds(20);
     // Liveness backstop for the monster-in-view egress veto. Once the bot is
     // tapped out, a NON-HOSTILE monster KIND that stays visible-but-unengaged
     // (the bot keeps choosing overridable social/stationary goals instead of
@@ -4879,6 +4888,52 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- raw fact, not a recommendation: whether to set a persistent objective, what kind/target/" +
                 "completion to use, and what per-tick goal to emit are your strategic choices from the facts above.");
+        }
+
+        // ── ## Unseen objective target (end-of-prompt salience capsule) ──────
+        // Complements `## No active objective`: here there IS an Active top
+        // intent, but its named target has NEVER entered the world model since
+        // login (WasNameEverObserved == false) and the intent carries no resolved
+        // TargetGuid — the bot is pursuing a name that has only ever appeared in
+        // text, never as a real world object. Live runs show the LLM compiling a
+        // dialog referral ("go talk to <name> in the next room") into an intent
+        // and then Exploring indefinitely for a target that does not exist as an
+        // object, burning decisions. Re-surface the raw never-observed fact in the
+        // decision-proximate slot so it competes with the QUEST-DIALOG / SERVER-
+        // INSTRUCTION rules that (correctly, in general) push toward a not-yet-
+        // visible named target. Gated on raw presence (Active top + named target +
+        // no resolved guid + never observed) plus a short settle window
+        // (UnseenObjectiveTargetGrace) so a freshly-pushed objective whose room the
+        // bot is still walking to is not flagged on the first tick. RAW fact + a
+        // mechanical truth + explicit not-a-recommendation; no game knowledge, no
+        // name list, no urgency — the LLM decides whether the name is real, was
+        // flavour, or should be replaced.
+        if (stack?.Top is { Status: IntentLifecycle.Active } unseenTop
+            && unseenTop.TargetGuid is null
+            && !string.IsNullOrEmpty(unseenTop.TargetName)
+            && !world.WasNameEverObserved(unseenTop.TargetName))
+        {
+            var pursued = DateTime.UtcNow - unseenTop.Baseline.PushedAtUtc;
+            if (pursued >= UnseenObjectiveTargetGrace)
+            {
+                var rawName = unseenTop.TargetName!;
+                var name = rawName.Length > 60 ? rawName.Substring(0, 60) : rawName;
+                var pursuedSec = (int)pursued.TotalSeconds;
+                sb.AppendLine();
+                sb.AppendLine("## Unseen objective target");
+                sb.AppendLine(
+                    $"- raw fact: your active objective (intent [{unseenTop.Id}] \"{unseenTop.Kind}\") names the " +
+                    $"target '{name}', but no object named '{name}' has been observed anywhere in the world since " +
+                    $"you logged in, across {pursuedSec}s of pursuing it.");
+                sb.AppendLine(
+                    "- mechanical fact: a Talk/Use/Attack/Pickup/Give goal can only act on an object that exists " +
+                    "in the world; a name that appears only in text and never as a world object cannot be reached " +
+                    "or acted on.");
+                sb.AppendLine(
+                    "- raw fact, not a recommendation: whether this name refers to a real object you have not " +
+                    "reached yet, was flavour/lore in some text, or should be replaced (`stack_ops` replace_top/" +
+                    "pop_top) is your strategic call from the facts above.");
+            }
         }
         if (world.Self.AvailableExperience is long endcapUnspent && endcapUnspent > 0)
         {
