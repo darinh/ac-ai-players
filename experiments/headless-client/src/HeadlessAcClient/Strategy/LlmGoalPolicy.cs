@@ -5933,7 +5933,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
-        return FitPromptToCeiling(body, salienceTail);
+        return FitPromptToCeiling(body, salienceTail, EffectivePromptCeilingChars);
     }
 
     // Some GitHub Models endpoints reject an over-large request body with
@@ -5947,6 +5947,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // order the sections already render in — no row is kept or dropped by
     // its in-game type.
     private const int HardUserPromptCeilingChars = 26000;
+
+    // Deploy-time override of the prompt ceiling via the AC_BOTS_PROMPT_CEILING
+    // env var. Some GitHub Models endpoints (e.g. openai/gpt-4o, deepseek-v3)
+    // reject a request body near 26000 chars with HTTP 413 even though their
+    // token context is large; a 413 drops the bot into the knowledge-free
+    // fallback for the rest of the run. Setting a smaller, model-appropriate cap
+    // lets such a (often more capable) model accept the prompt. Read once at
+    // load; clamp + fallback live in ResolvePromptCeiling. This is request-size
+    // management keyed to a model endpoint's limits, NOT strategy or game
+    // knowledge — no row is kept or dropped by its in-game type.
+    private static readonly int EffectivePromptCeilingChars =
+        ResolvePromptCeiling(Environment.GetEnvironmentVariable("AC_BOTS_PROMPT_CEILING"));
+
+    // Parse the AC_BOTS_PROMPT_CEILING override. A value that parses as an int in
+    // [MinConfigurablePromptCeilingChars, HardUserPromptCeilingChars] is used;
+    // anything else (null, unset, unparseable, or out of range) falls back to the
+    // HardUserPromptCeilingChars default. The lower bound guards against a typo
+    // shrinking the prompt below the point where the fixed decision sections fit.
+    internal const int MinConfigurablePromptCeilingChars = 10000;
+
+    internal static int ResolvePromptCeiling(string? envValue) =>
+        int.TryParse(envValue, out var ceiling)
+            && ceiling >= MinConfigurablePromptCeilingChars
+            && ceiling <= HardUserPromptCeilingChars
+            ? ceiling
+            : HardUserPromptCeilingChars;
 
     // Lowest-value variable row-sections first. Out-of-view sightings are
     // the least actionable, then historical events, then the FAR end of

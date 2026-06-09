@@ -12639,4 +12639,43 @@ public class LlmGoalPolicyTests
         Assert.True(result.Length <= 100, $"len={result.Length}");
         Assert.EndsWith(suffix, result); // capsule suffix still intact
     }
+
+    // ---- ResolvePromptCeiling (AC_BOTS_PROMPT_CEILING deploy-time override) ----
+
+    [Theory]
+    [InlineData(null)]         // unset
+    [InlineData("")]           // empty
+    [InlineData("   ")]        // whitespace only
+    [InlineData("abc")]        // unparseable
+    [InlineData("24000abc")]   // trailing garbage -> TryParse fails
+    [InlineData("0")]          // below min
+    [InlineData("9999")]       // just below min bound
+    [InlineData("26001")]      // just above the hard ceiling
+    [InlineData("40000")]      // well above the hard ceiling
+    [InlineData("-24000")]     // negative
+    public void ResolvePromptCeiling_InvalidOrOutOfRange_FallsBackToDefault(string? envValue)
+    {
+        Assert.Equal(26000, LlmGoalPolicy.ResolvePromptCeiling(envValue));
+    }
+
+    [Theory]
+    [InlineData("24000", 24000)]   // the gpt-4o-fitting deploy value
+    [InlineData("10000", 10000)]   // inclusive lower bound
+    [InlineData("26000", 26000)]   // inclusive upper bound (the default)
+    [InlineData("  24500  ", 24500)] // int.TryParse tolerates surrounding whitespace
+    [InlineData("18000", 18000)]
+    public void ResolvePromptCeiling_ValidInRange_IsHonoured(string envValue, int expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolvePromptCeiling(envValue));
+    }
+
+    [Fact]
+    public void ResolvePromptCeiling_MinBound_IsAccepted()
+    {
+        // Guards the documented [MinConfigurablePromptCeilingChars, 26000] window:
+        // the min itself resolves to itself, one below it falls back to default.
+        var min = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(min, LlmGoalPolicy.ResolvePromptCeiling(min.ToString()));
+        Assert.Equal(26000, LlmGoalPolicy.ResolvePromptCeiling((min - 1).ToString()));
+    }
 }
