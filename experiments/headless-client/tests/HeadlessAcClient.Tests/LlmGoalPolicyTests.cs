@@ -10622,6 +10622,57 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), other, null));
     }
 
+    // cp-2407: the reactive ActionRejected-recovery guidance is gated on ANY
+    // recent rejection (HasRecentActionRejected, broader than the cp-2402
+    // Blocked/Unreachable gate); the pre-emptive double-click-self guidance
+    // stays always-on.
+
+    [Fact]
+    public void BuildUserPrompt_ActionRejectedRecoveryRule_RendersOnAnyRecentRejection()
+    {
+        // Any ActionRejected label (even an unrelated one) makes the recovery
+        // guidance actionable — it is broader than the BLOCKED gate.
+        var rej = new EventStream();
+        rej.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "OutOfRange" });
+        Assert.Contains("Do NOT immediately retry the same combo",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), rej, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActionRejectedRecoveryRule_OmittedWhenNoRejection()
+        => Assert.DoesNotContain("Do NOT immediately retry the same combo",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
+
+    [Fact]
+    public void BuildUserPrompt_ActionRejectedRecoveryRule_DecaysAfterWindow()
+    {
+        // A rejection older than the recovery window has decayed -> the reactive
+        // guidance is gated off again so it stops costing prompt bytes.
+        var stale = new EventStream();
+        stale.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(120),
+            Kind = EventKind.ActionRejected,
+            ErrorLabel = "OutOfRange",
+        });
+        Assert.DoesNotContain("Do NOT immediately retry the same combo",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), stale, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DoubleClickSelfGuidance_AlwaysPresent()
+    {
+        // Pre-emptive: it must render even with NO rejection (the bot should
+        // self-Use an activatable item BEFORE the Give/Talk it gates).
+        Assert.Contains("Use'd on yourself FIRST",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
+        var rej = new EventStream();
+        rej.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, ErrorLabel = "OutOfRange" });
+        Assert.Contains("Use'd on yourself FIRST",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), rej, null));
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
