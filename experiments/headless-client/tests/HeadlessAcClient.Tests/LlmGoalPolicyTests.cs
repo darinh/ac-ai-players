@@ -8137,7 +8137,12 @@ public class LlmGoalPolicyTests
     [Fact]
     public void BuildUserPrompt_IncludesInventoryUseLoopBreakRule()
     {
+        // cp-2401: the main LOOP-BREAK rule (incl. its (b) inventory-USE
+        // sub-case) is now gated on an observed Talk/Use repeat, so seed a Use
+        // repeat to render it.
         var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Use target=name=\"Door\" item= source=llm:test" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Use target=name=\"Door\" item= source=llm:test" });
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
         Assert.Contains("(b) inventory-USE", prompt);
     }
@@ -10523,6 +10528,46 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
     }
 
+    [Fact]
+    public void BuildUserPrompt_MainLoopBreakRule_RendersOnTalkRepeat()
+    {
+        // cp-2401: the action-repeat LOOP-BREAK rule renders when the SAME Talk
+        // target repeats. Assert a clause UNIQUE to the main rule (the town-stuck
+        // LOOP-BREAK, gated on !monsterInView, also renders here but lacks it).
+        var events = new EventStream();
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Buckminster\" item= source=llm:test" });
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Buckminster\" item= source=llm:test" });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), events, null);
+        Assert.Contains("an `ActionRejected` told you to retry", prompt);
+        Assert.Contains("not-yet-talked visible NPC", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MainLoopBreakRule_RendersOnUseRepeat()
+    {
+        // A world-object Use repeat (cp-2401's (c) sub-case) also renders it.
+        var events = new EventStream();
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Use target=name=\"Door\" item= source=llm:test" });
+        events.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Use target=name=\"Door\" item= source=llm:test" });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), events, null);
+        Assert.Contains("an `ActionRejected` told you to retry", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_MainLoopBreakRule_OmittedWhenNoActionRepeat()
+    {
+        // cp-2401: with no repeated Talk/Use the action-repeat LOOP-BREAK is
+        // omitted (its 3 sub-cases are all Motor-backstopped). A single Use or
+        // a Talk+Use of the same target (distinct verbs) is not a repeat.
+        var single = new EventStream();
+        single.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Use target=name=\"Door\" item= source=llm:test" });
+        single.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted, Text = "Talk target=name=\"Door\" item= source=llm:test" });
+        Assert.DoesNotContain("an `ActionRejected` told you to retry",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), single, null));
+        Assert.DoesNotContain("an `ActionRejected` told you to retry",
+            LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), new EventStream(), null));
+    }
+
     // Semantic canary: compaction must remove RATIONALE/duplication only, NOT
     // the concrete trigger->action clauses or forbidden-action guidance that
     // each RULES bullet encodes (every one was added to fix an observed bot
@@ -10570,10 +10615,14 @@ public class LlmGoalPolicyTests
         // ("NPC REPEAT EXHAUSTION", "Re-Talking the same NPC is NEVER") are not
         // asserted here. Its present/absent rendering is covered by the dedicated
         // BuildUserPrompt_*NpcRepeatExhaustion* tests.
-        // (b) inventory-USE must keep its post-break fallback action ladder
-        Assert.Contains("not-yet-talked visible NPC", p);
-        // (c) world-object USE must keep the concrete "what changed" exceptions
-        Assert.Contains("an `ActionRejected` told you to retry", p);
+        // NOTE: the MAIN LOOP-BREAK rule (action-repeat sub-cases a/b/c) is now
+        // conditional too — cp-2401 gates it on an observed Talk-OR-Use goal
+        // repeat, which this fresh-EventStream world has none of, so its clauses
+        // ("not-yet-talked visible NPC", "an ActionRejected told you to retry")
+        // are not asserted here. The string "LOOP-BREAK" above still renders via
+        // the separate town-stuck LOOP-BREAK rule (gated on !monsterInView, which
+        // BuildExitTokenWorld satisfies). The main rule's present/absent rendering
+        // is covered by the dedicated BuildUserPrompt_*LoopBreak* tests.
         Assert.Contains("town-stuck", p);
         Assert.Contains("HUNT EXCURSION", p);
         Assert.Contains("KEEP emitting it", p);
