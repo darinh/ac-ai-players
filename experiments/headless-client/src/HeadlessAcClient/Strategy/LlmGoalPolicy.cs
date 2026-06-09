@@ -5138,7 +5138,73 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- raw fact, not a recommendation. The goal verbs Talk, Use, Pickup, Attack, and " +
                 "Explore all remain executable right now. See `## Location & recency` above. Your call.");
         }
-        // ── ## Server-refused interaction targets (end-of-prompt capsule) ─
+        // ── ## Recent Give (end-of-prompt salience capsule) ──────────────
+        // Mirrors ## Recent Use/## Recent Talk for the Give verb. Live academy
+        // runs show the LLM re-emitting Give of the SAME item to the SAME
+        // recipient many times even AFTER the give succeeded and the item left
+        // inventory (it reasons as if the give is still pending). Re-surface the
+        // recent Give emission history — keyed by the item identity, displayed as
+        // "<item> to <recipient>" — in the decision-proximate slot so the repeat
+        // is visible right before the model answers. Same construction as
+        // useByKey but parsing the item selector (the give subject). RAW counts +
+        // a not-a-recommendation disclaimer that points to ## Inventory (where the
+        // LLM can see whether it still holds the item); no urgency, no "loop", no
+        // game knowledge.
+        var giveByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Give ", StringComparison.Ordinal)) continue;
+            var im = System.Text.RegularExpressions.Regex.Match(txt, "item=(.*?) source=");
+            if (!im.Success) continue;
+            var itemSel = im.Groups[1].Value.Trim();
+            if (itemSel.Length == 0 || itemSel == "<empty>") continue;
+            // Recipient name (for display only) from the target selector.
+            var tsel = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=");
+            var tnm = tsel.Success
+                ? System.Text.RegularExpressions.Regex.Match(tsel.Groups[1].Value, "name=\"([^\"]+)\"")
+                : System.Text.RegularExpressions.Match.Empty;
+            var gm = System.Text.RegularExpressions.Regex.Match(itemSel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(itemSel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : itemSel);
+            var itemDisplay = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : itemSel);
+            var display = tnm.Success ? $"{itemDisplay} to {tnm.Groups[1].Value}" : itemDisplay;
+            if (giveByKey.TryGetValue(key, out var cur))
+            {
+                var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
+                    ? display : cur.Display;
+                giveByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null));
+            }
+            else
+            {
+                giveByKey[key] = (1, display, gm.Success ? gm.Value : null);
+            }
+        }
+        if (giveByKey.Count > 0)
+        {
+            var endcapGiveDupDisplays = giveByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endcapGiveList = string.Join(", ", giveByKey
+                .OrderByDescending(p => p.Value.Count)
+                .Select(p =>
+                {
+                    var label = endcapGiveDupDisplays.Contains(p.Value.Display) && p.Value.Guid is not null
+                        ? $"{p.Value.Display} ({p.Value.Guid})"
+                        : p.Value.Display;
+                    return $"{label} x{p.Value.Count}";
+                }));
+            sb.AppendLine();
+            sb.AppendLine("## Recent Give");
+            sb.AppendLine(
+                $"- in your last 10 emitted goals you emitted Give on: {endcapGiveList}.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation. A Give moves an item from your inventory to a recipient, " +
+                "so it requires that item to still be in `## Inventory` above; the goal verbs Talk, Use, " +
+                "Pickup, Attack, and Explore also remain executable right now. Your call.");
+        }
         // The cp-2338 InteractUnreachableTracker is a Motor-only guard: when
         // the server refuses an interaction as out-of-reach, the Motor marks
         // that guid and treats any goal that resolves to it as unresolved for

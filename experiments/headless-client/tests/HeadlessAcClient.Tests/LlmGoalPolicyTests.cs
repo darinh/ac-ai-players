@@ -8982,6 +8982,82 @@ public class LlmGoalPolicyTests
         Assert.Contains("Old Wooden Door (guid=0x80000BBB) x1", capsule);
     }
 
+    // ── ## Recent Give endcap (mirrors ## Recent Use) ────────────────
+    // Live academy runs show the LLM re-emitting Give of the SAME item to the
+    // SAME recipient many times after the give already succeeded and the item
+    // left inventory. This re-surfaces the raw recent-Give counts (item →
+    // recipient) at the decision-proximate end slot.
+    private static EventStream BuildGiveStream(string itemSelector, string recipientSelector, int times)
+    {
+        var events = new EventStream();
+        for (var i = 0; i < times; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(times - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Give target={recipientSelector} item={itemSelector} source=llm:test",
+            });
+        }
+        return events;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGiveEndcap_RendersWhenGivePresent()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildGiveStream("name=\"Calling Stone\"", "name=\"Society Greeter\"", 5), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.Contains("in your last 10 emitted goals you emitted Give on: Calling Stone to Society Greeter x5", prompt);
+        Assert.Contains("raw fact, not a recommendation", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGiveEndcap_RendersForSingleGive()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildGiveStream("name=\"Oil of Rendering\"", "name=\"Jonathan\"", 1), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.Contains("Oil of Rendering to Jonathan x1", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGiveEndcap_OmittedWhenNoGive()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Recent Give", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGiveEndcap_KeysByItemGuidDisplaysName()
+    {
+        // A resolved Give goal reads `item=guid=0x.. name="X"`; the capsule keys
+        // identity by the item guid but DISPLAYS the human name and recipient.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildGiveStream("guid=0x80007FD8 name=\"Calling Stone\"", "guid=0x8000814F name=\"Society Greeter\"", 4), null);
+        var capsuleIdx = prompt.IndexOf("## Recent Give", System.StringComparison.Ordinal);
+        Assert.True(capsuleIdx >= 0, "capsule missing");
+        var capsule = prompt.Substring(capsuleIdx);
+        Assert.Contains("Calling Stone to Society Greeter x4", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGiveEndcap_IndependentOfRecentUse()
+    {
+        // A Give emission must NOT show up under ## Recent Use and vice versa —
+        // the two capsules parse distinct verbs.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0),
+            BuildGiveStream("name=\"Calling Stone\"", "name=\"Society Greeter\"", 3), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.DoesNotContain("## Recent Use", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
