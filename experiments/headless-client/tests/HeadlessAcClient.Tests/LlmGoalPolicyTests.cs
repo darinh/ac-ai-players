@@ -6374,6 +6374,21 @@ public class LlmGoalPolicyTests
         Visible = Array.Empty<VisibleObjectProjection>(),
     };
 
+    // WorldAt with a single visible NPC of the given name+guid, for the roving
+    // Talk-loop name-resolution tests (the bot stays in the same landblock/cell
+    // but drifts in x,y while the visible NPC's guid stays stable).
+    private static WorldStateProjection WorldWithNpc(float x, float y, string npcName, uint npcGuid) =>
+        WorldAt(0x8602u, 0x860201B3u, x, y) with
+        {
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = npcGuid, Name = npcName, Distance = 1.0f, IsCreature = true,
+                },
+            },
+        };
+
     private static StreamEvent InvAdded(string name) => new()
     {
         Sequence = -1, Utc = DateTimeOffset.UtcNow,
@@ -7083,17 +7098,57 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void RovingNpcTalkLoop_DoesNotGuard_NameOnlyTarget()
+    public void RovingNpcTalkLoop_DoesNotFire_NameOnlyTarget_WhenNoVisibleMatch()
     {
-        // A Talk target with no guid (name-only) is NOT guarded — without a
-        // stable guid, distinct same-named NPC instances could be conflated into
-        // a bogus loop. Such a target never fires regardless of repetition.
+        // A name-only Talk target that matches NO visible object cannot be
+        // resolved to a stable guid, so the guard stays out — the bot is not
+        // standing at the NPC (e.g. it is still walking toward it).
         var policy = MakeStationaryUsePolicy();
         var es = new EventStream();
         var nameOnly = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Town Crier" } };
 
         for (var i = 0; i < 10; i++)
             Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldAt(0x8602u, 0x860201B3u, i, 0), es));
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_Fires_NameOnlyTarget_ResolvedToVisibleNpc()
+    {
+        // cp-2412: an LLM Talk goal is NAME-only (the Motor resolves the guid
+        // downstream), which made this guard sit out every LLM Talk loop. It now
+        // re-keys the name to the nearest visible object of that name, so a
+        // roving loop on ONE silent NPC fires at the stale threshold instead of
+        // slipping past (live: the bot re-Talked one silent NPC ~10x). The bot
+        // drifts (x,y change) but the resolved guid is stable, so the streak
+        // accrues across movement just like the guid-backed case.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var nameOnly = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Alcott" } };
+        const uint alcottGuid = 0x8000ACE8u;
+
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(10, -30, "Alcott", alcottGuid), es)); // start
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(12, -28, "Alcott", alcottGuid), es)); // stale 1
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(9, -31, "Alcott", alcottGuid), es));  // stale 2
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(14, -27, "Alcott", alcottGuid), es)); // stale 3
+        Assert.True(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(11, -29, "Alcott", alcottGuid), es));  // stale 4 -> fire
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_NameOnly_ResetsWhenNearestInstanceChanges()
+    {
+        // Distinct same-named NPC instances must NOT be conflated into a bogus
+        // loop: when the resolved nearest guid CHANGES (the bot moved to a
+        // different instance), the streak restarts — so a legitimate greet of
+        // several same-named NPCs once each is never falsely suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var nameOnly = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Town Guard" } };
+
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(1, 0, "Town Guard", 0x1001u), es)); // start A
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(2, 0, "Town Guard", 0x1001u), es)); // A stale 1
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(3, 0, "Town Guard", 0x1001u), es)); // A stale 2
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(4, 0, "Town Guard", 0x2002u), es)); // switch to B -> restart
+        Assert.False(policy.IsRovingNpcTalkLoop(nameOnly, WorldWithNpc(5, 0, "Town Guard", 0x2002u), es)); // B stale 1 (not fired)
     }
 
     [Fact]
