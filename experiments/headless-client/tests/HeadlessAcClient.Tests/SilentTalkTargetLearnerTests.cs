@@ -236,10 +236,12 @@ public class SilentTalkTargetLearnerTests
             Visible = new[]
             {
                 // A non-monster, non-hostile creature (e.g. a "Fishing Hole").
+                // Within the cp-2413 no-hunt detour bound so these tests isolate
+                // the silent-learner behaviour from the distance bound.
                 new VisibleObjectProjection
                 {
                     Guid = guid, Name = "Fishing Hole", Wcid = wcid,
-                    ItemType = 0x10u, Distance = 67f,
+                    ItemType = 0x10u, Distance = 10f,
                     IsCreature = true, IsMonster = false, ObservedHostile = false,
                 },
             },

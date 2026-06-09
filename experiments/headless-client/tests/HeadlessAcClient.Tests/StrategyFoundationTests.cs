@@ -977,6 +977,85 @@ public class StrategyFoundationTests
         Assert.Equal("fallback:no-quest-knowledge", goal.Source);
     }
 
+    private static WorldStateProjection FallbackWorldWith(params VisibleObjectProjection[] visible) =>
+        new()
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
+                CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsDistantOpenable_WhenNotHunting()
+    {
+        // cp-2413: with no LLM and no active hunt, the fallback must NOT march
+        // the bot a long way (here 80u) to Use an optional openable. It yields
+        // and the bot Explores toward new area instead of marathoning to a
+        // single far chest (live: 65-121u chest marches).
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = FallbackWorldWith(new VisibleObjectProjection
+        {
+            Guid = 0x71000099u, Name = "Chest", Distance = 80f, IsOpenable = true,
+        });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_UsesNearOpenable_WithinDetourBound()
+    {
+        // A nearby openable (within the no-hunt detour bound) is still Used —
+        // the bound only stops marathons, it does not disable the openable step.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = FallbackWorldWith(new VisibleObjectProjection
+        {
+            Guid = 0x71000099u, Name = "Chest", Distance = 20f, IsOpenable = true,
+        });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(0x71000099u, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_SkipsDistantNpcTalk_WhenNotHunting()
+    {
+        // A distant non-hostile NPC (80u) is not worth marching to chat with in
+        // the fallback; bounded out, the bot Explores instead.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = FallbackWorldWith(new VisibleObjectProjection
+        {
+            Guid = 0x90000099u, Name = "Town Crier", Distance = 80f, IsCreature = true,
+        });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Talk, goal!.Kind);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_UsesNullDistanceOpenable_NotBoundedOut()
+    {
+        // A visible object can have a NULL (unmeasurable) Distance in the real
+        // projection. The detour bound must NOT treat that as "far" and exclude
+        // it — an adjacent object whose distance just couldn't be computed would
+        // then be unreachable. Null distance is treated as near (included).
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = FallbackWorldWith(new VisibleObjectProjection
+        {
+            Guid = 0x71000099u, Name = "Chest", Distance = null, IsOpenable = true,
+        });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(0x71000099u, goal.Target.Guid);
+    }
+
     [Fact]
     public void NoQuestKnowledgePolicy_LowHealth_StillFightsHostile_NoHardcodedFloor()
     {
