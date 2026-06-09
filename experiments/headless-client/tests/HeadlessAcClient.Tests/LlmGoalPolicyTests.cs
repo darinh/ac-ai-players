@@ -2561,7 +2561,26 @@ public class LlmGoalPolicyTests
         var es = new EventStream();
         es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "ambient" });
         var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
-        Assert.DoesNotContain("directed text the server sent you earlier this session", p);
+        Assert.DoesNotContain("directed text the server/NPCs sent you earlier this session", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_RendersPersistedNpcDirective()
+    {
+        // cp-2385: NPC-spoken directives (NpcDialog) are persisted past the ring
+        // and re-surfaced in the same protected capsule, attributed to the NPC.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.NpcDialog, Name = "Society Greeter",
+            Text = "Go talk to the trainer in the next room to continue.",
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        Assert.Contains("from \"Society Greeter\"", p);
+        Assert.Contains("Go talk to the trainer in the next room", p);
     }
 
     [Fact]
@@ -2575,7 +2594,7 @@ public class LlmGoalPolicyTests
             es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = $"directive number {i:D2}" });
         var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
 
-        var marker = "directed text the server sent you earlier this session";
+        var marker = "directed text the server/NPCs sent you earlier this session";
         var start = p.IndexOf(marker, System.StringComparison.Ordinal);
         Assert.True(start >= 0, "the capsule must render");
         var rest = p.Substring(start);
