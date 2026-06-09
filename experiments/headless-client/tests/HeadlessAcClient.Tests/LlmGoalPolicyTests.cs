@@ -3277,6 +3277,28 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_PrecedenceRule_RecognizesOptionalSkipAdvanceDirective()
+    {
+        // cp-2391: live academy failure — gpt-4.1 reasoned "no active server
+        // directive is pending" and grinded killable golems while an
+        // optional-phrased skip directive ("if you wish to skip this tutorial,
+        // go talk to <NPC>") was present at d=2.5u. The precedence rule must now
+        // recognize SKIP/COMPLETE and that an optional framing or equivalent-
+        // reward promise does NOT make the directive "absent" / "no directive
+        // pending".
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        var precIdx = prompt.IndexOf("SERVER-INSTRUCTION PRECEDENCE", System.StringComparison.Ordinal);
+        Assert.True(precIdx >= 0);
+        var precLineEnd = prompt.IndexOf('\n', precIdx);
+        var precLine = precLineEnd >= 0 ? prompt.Substring(precIdx, precLineEnd - precIdx) : prompt.Substring(precIdx);
+        Assert.Contains("SKIP", precLine);
+        Assert.Contains("no directive pending", precLine);
+        Assert.Contains("if you wish", precLine);
+    }
+
+    [Fact]
     public void BuildUserPrompt_DirectiveRules_PointAtEarlyServerDirectivesCapsule()
     {
         // cp-2384: the durable directive lives in `## Early server directives`
