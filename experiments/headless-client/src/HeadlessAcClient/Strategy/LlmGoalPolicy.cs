@@ -5530,6 +5530,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"  - \"{Truncate(d.Text, 240)}\"");
             foreach (var d in earlyNpcDirectives.Take(EarlyNpcDirectiveCount))
                 sb.AppendLine($"  - from \"{d.Name}\": \"{Truncate(d.Text, 240)}\"");
+            // cp-2393 — ALSO surface the MOST-RECENT distinct directives that the
+            // earliest-capped stores never captured (a late "you have completed
+            // X, now take the portal" instruction), deduped against the earliest
+            // lines above, so the CURRENT actionable instruction reaches the LLM
+            // even after it is evicted from the ring and `## Server hints` is
+            // hard-cut. Server/NPC text only, KIND+age selected, never parsed.
+            var shownDirectiveTexts = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var d in earlyServerDirectives.Take(EarlyServerDirectiveCount))
+                if (d.Text is not null) shownDirectiveTexts.Add(d.Text);
+            foreach (var d in earlyNpcDirectives.Take(EarlyNpcDirectiveCount))
+                if (d.Text is not null) shownDirectiveTexts.Add(d.Text);
+            var recentPopupDirectives = events.RecentPersistentPopupStrings()
+                .Where(d => !string.IsNullOrEmpty(d.Text) && !shownDirectiveTexts.Contains(d.Text!))
+                .ToList();
+            var recentNpcDirectives = events.RecentPersistentNpcDialogs()
+                .Where(d => !string.IsNullOrEmpty(d.Text) && !shownDirectiveTexts.Contains(d.Text!))
+                .ToList();
+            if (recentPopupDirectives.Count > 0 || recentNpcDirectives.Count > 0)
+            {
+                sb.AppendLine(
+                    "- most recent directed text this session (the CURRENT instruction — what to do " +
+                    "NOW — is most likely here, and SUPERSEDES an earlier directive you have already " +
+                    "satisfied):");
+                foreach (var d in recentPopupDirectives)
+                    sb.AppendLine($"  - \"{Truncate(d.Text, 240)}\"");
+                foreach (var d in recentNpcDirectives)
+                    sb.AppendLine($"  - from \"{d.Name}\": \"{Truncate(d.Text, 240)}\"");
+            }
             sb.AppendLine(
                 "- raw fact, not a recommendation: these are the server's/NPC's own words, not an " +
                 "instruction from me; greetings and flavor are not tasks. Whether any still applies, " +

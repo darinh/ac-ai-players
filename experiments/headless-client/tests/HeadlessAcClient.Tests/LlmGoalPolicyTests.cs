@@ -2730,6 +2730,30 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_EarlyServerDirectivesCapsule_SurfacesLatestDirectivePastEarliestCap()
+    {
+        // cp-2393: the capsule must ALSO surface the most-recent directive so a
+        // LATE "you are done, now do X" instruction (which the earliest-capped
+        // store never captured) still reaches the LLM. Fill the earliest NpcDialog
+        // store (cap 8), then add a late completion directive, and assert it is
+        // rendered under the "most recent directed text" block.
+        var es = new EventStream();
+        for (int i = 0; i < 8; i++)
+            es.Append(new StreamEvent
+            { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Greeter", Text = $"early greeting line {i:D2}" });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Master",
+            Text = "Excellent work! You have completed your training. You may now take the portal.",
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        Assert.Contains("most recent directed text", p);
+        Assert.Contains("You may now take the portal", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_EarlyServerDirectivesCapsule_RemindsToPursueNamedTarget()
     {
         // cp-2387: when a directive is present the capsule re-surfaces the
@@ -2814,8 +2838,15 @@ public class LlmGoalPolicyTests
         var rest = p.Substring(start);
         var nextHdr = rest.IndexOf("\n## ", System.StringComparison.Ordinal);
         var capsule = nextHdr >= 0 ? rest.Substring(0, nextHdr) : rest;
-        Assert.Contains("directive number 00", capsule); // earliest anchor
-        Assert.DoesNotContain("directive number 11", capsule); // beyond the earliest-N cap
+        // The EARLIEST sub-block is bounded to N: scope this assertion to the
+        // text BEFORE the cp-2393 "most recent directed text" block.
+        var recentMarker = capsule.IndexOf("most recent directed text", System.StringComparison.Ordinal);
+        var earliestBlock = recentMarker >= 0 ? capsule.Substring(0, recentMarker) : capsule;
+        Assert.Contains("directive number 00", earliestBlock); // earliest anchor
+        Assert.DoesNotContain("directive number 11", earliestBlock); // beyond the earliest-N cap
+        // cp-2393: the LATEST directive is now surfaced in the most-recent block.
+        Assert.True(recentMarker >= 0, "the most-recent block must render");
+        Assert.Contains("directive number 11", capsule);
     }
 
     [Fact]

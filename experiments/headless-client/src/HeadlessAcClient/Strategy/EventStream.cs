@@ -281,6 +281,20 @@ internal sealed class EventStream
     private readonly List<StreamEvent> _persistentNpcDialogs = new();
     private readonly HashSet<string> _persistentNpcDialogTexts = new(StringComparer.Ordinal);
 
+    // The EARLIEST stores above lock in once their cap is reached, so a LATE
+    // directive (e.g. a "you have completed your training, take the portal"
+    // NpcDialog that only fires after a long onboarding) is never persisted and
+    // is then evicted from the bounded event ring by intervening combat — it
+    // reaches the prompt ONLY via `## Server hints`, which is hard-cut in dense
+    // scenes (cp-2382/2383/2385 lineage). Keep a SEPARATE sliding window of the
+    // MOST-RECENT distinct directives (newest pushes out oldest) so the CURRENT
+    // actionable instruction also survives ring eviction and the prompt hard-cut.
+    // Captured by event KIND + text only — never parsed (no game knowledge).
+    private const int MaxRecentPopups = 4;
+    private const int MaxRecentNpcDialogs = 4;
+    private readonly List<StreamEvent> _recentPopups = new();
+    private readonly List<StreamEvent> _recentNpcDialogs = new();
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -328,6 +342,24 @@ internal sealed class EventStream
             _persistentNpcDialogs.Add(stamped);
         }
 
+        // Sliding window of the MOST-RECENT distinct directives (both kinds), so
+        // a late actionable instruction survives ring eviction even after the
+        // earliest store is full. Move-to-newest on a repeat, then trim oldest.
+        if (stamped.Kind == EventKind.PopupString && !string.IsNullOrEmpty(stamped.Text))
+        {
+            _recentPopups.RemoveAll(e => string.Equals(e.Text, stamped.Text, StringComparison.Ordinal));
+            _recentPopups.Add(stamped);
+            while (_recentPopups.Count > MaxRecentPopups)
+                _recentPopups.RemoveAt(0);
+        }
+        if (stamped.Kind == EventKind.NpcDialog && !string.IsNullOrEmpty(stamped.Text))
+        {
+            _recentNpcDialogs.RemoveAll(e => string.Equals(e.Text, stamped.Text, StringComparison.Ordinal));
+            _recentNpcDialogs.Add(stamped);
+            while (_recentNpcDialogs.Count > MaxRecentNpcDialogs)
+                _recentNpcDialogs.RemoveAt(0);
+        }
+
         return stamped;
     }
 
@@ -372,4 +404,21 @@ internal sealed class EventStream
     /// retains its original (low) Sequence and its <c>Name</c> (the speaking NPC).
     /// </summary>
     public IReadOnlyList<StreamEvent> PersistentNpcDialogs() => _persistentNpcDialogs;
+
+    /// <summary>
+    /// The MOST-RECENT distinct server PopupString directives seen this session,
+    /// oldest-first, capped at <see cref="MaxRecentPopups"/>. Complements
+    /// <see cref="PersistentPopupStrings"/> (the earliest anchors): once the
+    /// earliest store is full this sliding window keeps the CURRENT directive
+    /// available past ring eviction and the prompt hard-cut.
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentPersistentPopupStrings() => _recentPopups;
+
+    /// <summary>
+    /// The MOST-RECENT distinct NPC-spoken directives (NpcDialog), oldest-first,
+    /// capped at <see cref="MaxRecentNpcDialogs"/>. Complements
+    /// <see cref="PersistentNpcDialogs"/> so a late "you are done, now do X"
+    /// instruction survives even after the earliest store is full.
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentPersistentNpcDialogs() => _recentNpcDialogs;
 }

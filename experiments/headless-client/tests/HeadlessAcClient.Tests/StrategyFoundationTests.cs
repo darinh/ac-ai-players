@@ -174,6 +174,43 @@ public class StrategyFoundationTests
         Assert.DoesNotContain(persisted, e => e.Text == "line 19"); // beyond the earliest-N cap
     }
 
+    [Fact]
+    public void EventStream_RecentDirectives_KeepLatestPastEarliestCap()
+    {
+        // cp-2393: a LATE directive (e.g. "you have completed your training, take
+        // the portal") arrives after the earliest store is already full, so it is
+        // never added there — yet it is the CURRENT instruction. The recent
+        // sliding window must keep it even though the earliest store does not.
+        var es = new EventStream(8);
+        // Fill the earliest NpcDialog cap (8) with distinct early lines.
+        for (int i = 0; i < 8; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Greeter", Text = $"early line {i:D2}" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Master", Text = "You have finished. Take the portal." });
+
+        // Earliest store is full and locked — the late line is NOT there.
+        Assert.DoesNotContain(es.PersistentNpcDialogs(), e => e.Text == "You have finished. Take the portal.");
+        // The recent window DOES carry the current instruction.
+        Assert.Contains(es.RecentPersistentNpcDialogs(), e => e.Text == "You have finished. Take the portal.");
+        Assert.Equal("Master", es.RecentPersistentNpcDialogs().Last(e => e.Text == "You have finished. Take the portal.").Name);
+    }
+
+    [Fact]
+    public void EventStream_RecentDirectives_MostRecentDistinctAndCapped()
+    {
+        // The recent window keeps the most-recent distinct directives, capped,
+        // newest last; a repeat moves to newest rather than duplicating.
+        var es = new EventStream();
+        for (int i = 0; i < 10; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = $"hint {i:D2}" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "hint 09" }); // repeat of latest
+
+        var recent = es.RecentPersistentPopupStrings();
+        Assert.True(recent.Count <= 4, $"recent popups {recent.Count} exceeds cap");
+        Assert.Equal("hint 09", recent[^1].Text);           // newest last
+        Assert.Equal(1, recent.Count(e => e.Text == "hint 09")); // repeat not duplicated
+        Assert.DoesNotContain(recent, e => e.Text == "hint 00"); // oldest evicted
+    }
+
     // ---- SelectorResolver ----
 
     private const uint SelfGuid = 0x50000005;
