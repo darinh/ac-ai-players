@@ -139,4 +139,122 @@ public class CombatDisengageTests
         Assert.Equal(7f, dest.Y, 3);
         Assert.Equal(3f, dest.Z, 3);
     }
+
+    // ---- ShouldDisengageUnwinnableLosing (early flee) ----
+
+    private const int MinEvaded = 6;
+    private const double LostFrac = 0.25;
+
+    private static bool Unwinnable(
+        int landed, uint dmg, int evaded, uint hc, uint hm, double? peak,
+        bool inCombat = true)
+        => CombatDisengage.ShouldDisengageUnwinnableLosing(
+            inCombat, landed, dmg, evaded, MinEvaded, hc, hm, peak, LostFrac);
+
+    [Fact]
+    public void Unwinnable_NotInCombat_NeverFires()
+        => Assert.False(Unwinnable(0, 0u, 10, 50u, 100u, 1.0, inCombat: false));
+
+    [Fact]
+    public void Unwinnable_UnknownMaxHealth_DoesNotFire()
+        => Assert.False(Unwinnable(0, 0u, 10, 50u, 0u, 1.0));
+
+    [Fact]
+    public void Unwinnable_AlreadyDead_DoesNotFire()
+        // Zero health is owned by the death/respawn path, not flee.
+        => Assert.False(Unwinnable(0, 0u, 10, 0u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_ZeroLanded_ZeroDamage_EnoughEvaded_AndLosing_Fires()
+        // 0 landed, 0 damage, 6 evaded, health fell 100%→75% (lost 25%).
+        => Assert.True(Unwinnable(0, 0u, 6, 75u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_SomeSwingLanded_DoesNotFire()
+        // Landed a hit → the fight is not unwinnable, regardless of health.
+        => Assert.False(Unwinnable(1, 0u, 10, 50u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_SomeDamageDealt_DoesNotFire()
+        // Dealt damage (even with landed==0 bookkeeping) → not unwinnable.
+        => Assert.False(Unwinnable(0, 3u, 10, 50u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_TooFewEvadedSwings_DoesNotFire()
+        // Only 5 evaded (< 6) — not yet conclusive it cannot damage.
+        => Assert.False(Unwinnable(0, 0u, 5, 50u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_LosingTooLittleHealth_DoesNotFire()
+        // 0 landed and plenty evaded, but only 10% health lost (a harmless
+        // can't-hit stalemate, not a death risk) — the no-damage watchdog
+        // owns that tempo case, not this flee reflex.
+        => Assert.False(Unwinnable(0, 0u, 12, 90u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_NullPeak_DoesNotFire()
+        // No high-water mark sampled yet → cannot measure health lost.
+        => Assert.False(Unwinnable(0, 0u, 10, 50u, 100u, null));
+
+    [Fact]
+    public void Unwinnable_AtLossBoundary_Fires()
+        // peak 1.00 - current 0.75 == 0.25 == threshold → fires (>=).
+        => Assert.True(Unwinnable(0, 0u, 6, 75u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_JustBelowLossBoundary_DoesNotFire()
+        // peak 1.00 - current 0.76 == 0.24 < 0.25 → does not fire.
+        => Assert.False(Unwinnable(0, 0u, 6, 76u, 100u, 1.0));
+
+    [Fact]
+    public void Unwinnable_PeakBelowCurrent_DoesNotFire()
+        // Health gained since the stored peak (loss negative) → not losing.
+        => Assert.False(Unwinnable(0, 0u, 10, 90u, 100u, 0.50));
+
+    [Fact]
+    public void Unwinnable_FiresWhileWellAboveCriticalReflex()
+    {
+        // The decisive property: this trips while health (75%) is far above
+        // the 35% critical reflex, so the bot flees with a safety margin.
+        Assert.False(CombatDisengage.ShouldDisengage(75u, 100u, inCombat: true, DisengageFrac, CriticalFloor));
+        Assert.True(Unwinnable(0, 0u, 6, 75u, 100u, 1.0));
+    }
+
+    [Fact]
+    public void Unwinnable_LowMaxHealthChar_Fires()
+        // 30-max char: peak 1.0, current 21/30 = 0.70 (lost 0.30 >= 0.25).
+        => Assert.True(Unwinnable(0, 0u, 6, 21u, 30u, 1.0));
+
+    // ---- DisengageReason (combined decision + reason tag) ----
+
+    private static string? Reason(
+        uint hc, uint hm, int landed, uint dmg, int evaded, double? peak,
+        bool inCombat = true)
+        => CombatDisengage.DisengageReason(
+            hc, hm, inCombat, DisengageFrac, CriticalFloor,
+            landed, dmg, evaded, MinEvaded, peak, LostFrac);
+
+    [Fact]
+    public void Reason_CriticalLowHealth_ReturnsLowHealth()
+        // 30/100 is below the 35% critical reflex.
+        => Assert.Equal("low-health", Reason(30u, 100u, 5, 40u, 0, 1.0));
+
+    [Fact]
+    public void Reason_UnwinnableLosing_ReturnsUnwinnableLosing()
+        // 75/100 is above critical, but 0 landed + 6 evaded + lost 25%.
+        => Assert.Equal("unwinnable-losing", Reason(75u, 100u, 0, 0u, 6, 1.0));
+
+    [Fact]
+    public void Reason_BothConditionsTrue_LowHealthTakesPrecedence()
+        // 20/100 (critical) AND unwinnable-losing — low-health wins.
+        => Assert.Equal("low-health", Reason(20u, 100u, 0, 0u, 8, 1.0));
+
+    [Fact]
+    public void Reason_Neither_ReturnsNull()
+        // Healthy and landing hits — keep fighting.
+        => Assert.Null(Reason(90u, 100u, 3, 25u, 1, 1.0));
+
+    [Fact]
+    public void Reason_NotInCombat_ReturnsNull()
+        => Assert.Null(Reason(10u, 100u, 0, 0u, 10, 1.0, inCombat: false));
 }
