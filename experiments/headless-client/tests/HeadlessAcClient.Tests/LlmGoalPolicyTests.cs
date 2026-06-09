@@ -2556,10 +2556,12 @@ public class LlmGoalPolicyTests
     public void BuildUserPrompt_EarlyServerDirectivesCapsule_OmittedWhenNoPopups()
     {
         // No PopupString ever seen -> nothing to persist -> capsule omitted.
+        // (The phrase "## Early server directives" also appears in the rules
+        // prose, so assert on the capsule's unique body line instead.)
         var es = new EventStream();
         es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "ambient" });
         var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
-        Assert.DoesNotContain("## Early server directives", p);
+        Assert.DoesNotContain("directed text the server sent you earlier this session", p);
     }
 
     [Fact]
@@ -2567,15 +2569,16 @@ public class LlmGoalPolicyTests
     {
         // More distinct popups than the cap -> only the EARLIEST render in the
         // capsule. (A late popup may still appear in `## Server hints` newest,
-        // so scope the assertion to the `## Early server directives` section.)
+        // so scope the assertion to the capsule via its unique body line.)
         var es = new EventStream();
         for (int i = 0; i < 12; i++)
             es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = $"directive number {i:D2}" });
         var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
 
-        Assert.Contains("## Early server directives", p);
-        var start = p.IndexOf("## Early server directives", System.StringComparison.Ordinal);
-        var rest = p.Substring(start + "## Early server directives".Length);
+        var marker = "directed text the server sent you earlier this session";
+        var start = p.IndexOf(marker, System.StringComparison.Ordinal);
+        Assert.True(start >= 0, "the capsule must render");
+        var rest = p.Substring(start);
         var nextHdr = rest.IndexOf("\n## ", System.StringComparison.Ordinal);
         var capsule = nextHdr >= 0 ? rest.Substring(0, nextHdr) : rest;
         Assert.Contains("directive number 00", capsule); // earliest anchor
@@ -3032,6 +3035,26 @@ public class LlmGoalPolicyTests
 
         Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", prompt);
         Assert.Contains("irreversible", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_DirectiveRules_PointAtEarlyServerDirectivesCapsule()
+    {
+        // cp-2384: the durable directive lives in `## Early server directives`
+        // (the protected tail), because `## Server hints` is hard-cut in dense
+        // scenes. The directive-locating rules must point the LLM at BOTH so it
+        // does not look only at a section that may be absent.
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        // The precedence rule now references the durable capsule and extends its
+        // precedence over optional grinding (not just re-looping local steps).
+        var precIdx = prompt.IndexOf("SERVER-INSTRUCTION PRECEDENCE", System.StringComparison.Ordinal);
+        Assert.True(precIdx >= 0, "precedence rule must be present");
+        var precLineEnd = prompt.IndexOf('\n', precIdx);
+        var precLine = precLineEnd >= 0 ? prompt.Substring(precIdx, precLineEnd - precIdx) : prompt.Substring(precIdx);
+        Assert.Contains("## Early server directives", precLine);
+        Assert.Contains("grinding", precLine);
     }
 
     [Fact]
