@@ -3761,6 +3761,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         => events.RecentOfKind(EventKind.ActionRejected, 16)
             .Any(e => e.ErrorLabel is "Blocked" or "Unreachable");
 
+    // True when the bot has had an ActionRejected within the recovery WINDOW —
+    // recent enough that the reactive "how to recover from a refusal" guidance
+    // is still actionable. TIME-based (not a raw event-count window) so it is
+    // independent of the per-tick event rate: it reliably covers the next few
+    // ~7s LLM decisions after a refusal, then DECAYS so the rule costs zero
+    // prompt bytes once recovery is moot (a raw `.Any()` over retained
+    // rejections would stay latched until they age out of the 256-event ring).
+    // Structural read of the bot's OWN rejection events; no game knowledge.
+    private static readonly TimeSpan ActionRejectedRecoveryWindow = TimeSpan.FromSeconds(30);
+    private static bool HasRecentActionRejected(EventStream events)
+        => events.RecentOfKind(EventKind.ActionRejected, 16)
+            .Any(e => DateTimeOffset.UtcNow - e.Utc <= ActionRejectedRecoveryWindow);
+
     internal static string BuildUserPrompt(
         WorldStateProjection world,
         EventStream events,
@@ -3885,7 +3898,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("RULES:");
         sb.AppendLine("- Reason ONLY from the observed world below. Do NOT invent NPCs, items, or wcids not listed. Prefer NAME selectors over wcid (wcids change between sessions).");
         sb.AppendLine("- If an inventory item's short_desc says what to do with it, follow it. 'Give' requires BOTH target (the NPC) and item (the thing given).");
-        sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite). Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a blocked combo.");
+        // cp-2407: split the old combined ActionRejected rule. The pre-emptive
+        // double-click-Use-on-self half stays ALWAYS-on (it tells the bot to
+        // self-Use an activatable item BEFORE a related Give/Talk so the
+        // rejection never happens — gating it on a prior rejection would defeat
+        // its purpose). The REACTIVE recovery half (how to respond to a refusal)
+        // is only actionable once a rejection has occurred, so it is gated on
+        // HasRecentActionRejected (cp-2402 per-rule relevance-gating). A render
+        // gate on the bot's OWN rejection events; the LLM still decides; no game
+        // knowledge.
+        sb.AppendLine("- Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a refused combo.");
+        if (HasRecentActionRejected(events))
+        sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite).");
         sb.AppendLine("- Read `## Server hints` and `## Early server directives`: phrases like \"Double click X\" or \"Use X to ...\" tell you the exact verb+target. If that object is visible AND the server instructed it, emit `Use{target: name=\"X\"}`. The server is your tutorial; don't ignore it for pure exploration.");
         // Whether a monster is in view — the SAME wire fact (`!IsCorpse &&
         // (IsMonster || ObservedHostile)`) that produces the `monsters in view`/
