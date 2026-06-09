@@ -2530,6 +2530,101 @@ public class LlmGoalPolicyTests
         Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
     }
 
+    // ---- ## Held items protected capsule (cp-2389) ------------------------
+    // The body `## Inventory` section is trimmed first when the prompt
+    // overflows the request ceiling (live: in a dense academy scene it was
+    // "omitted to fit prompt budget", so the bot could not see a server-given
+    // quest item — the Academy Exit Token it had to give back to leave). A
+    // compact held-items list re-surfaces the bot's OWN inventory in the
+    // protected salience tail so it always survives the hard-cut.
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_RendersHeldInventoryWithShortDesc()
+    {
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x4001u, Name = "Quest Token", Wcid = 29335u,
+                ShortDesc = "Give this token back to the gatekeeper to leave.",
+            },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Held items", p);
+        Assert.Contains("- Quest Token — Give this token back to the gatekeeper to leave.", p);
+        // It rides the protected tail: the capsule renders AFTER the body
+        // `## Inventory` section, so even when that body section is cut the
+        // held item still reaches the model.
+        Assert.True(p.IndexOf("## Held items", StringComparison.Ordinal)
+            > p.IndexOf("## Self", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_OmittedWhenInventoryEmpty()
+    {
+        var world = BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>());
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Held items", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_DedupesIdenticalRows()
+    {
+        // Two items with the same name + short_desc collapse to one row so a
+        // duplicate stack cannot consume the protected char budget.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x10u, Name = "Healing Kit", Wcid = 1u, ShortDesc = "Restores health." },
+            new InventoryItemProjection { Guid = 0x11u, Name = "Healing Kit", Wcid = 1u, ShortDesc = "Restores health." },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var capsuleStart = p.IndexOf("## Held items", StringComparison.Ordinal);
+        Assert.True(capsuleStart >= 0);
+        var capsule = p.Substring(capsuleStart);
+        var occurrences = capsule.Split(new[] { "- Healing Kit" }, StringSplitOptions.None).Length - 1;
+        Assert.Equal(1, occurrences);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_SurvivesGlobalTrimInDenseScene()
+    {
+        // CORE PROPERTY: in a scene dense enough to overflow the request
+        // ceiling (so the body `## Inventory`/`## Visible nearby` is trimmed by
+        // the global fitter), the protected `## Held items` capsule still
+        // carries the held quest item, and the prompt stays within the hard
+        // ceiling.
+        var dense = System.Linq.Enumerable.Range(0, 200)
+            .Select(i => new VisibleObjectProjection
+            {
+                Guid = (uint)(0x900u + i),
+                Name = $"Dense Scene Object {i:D3} occupying prompt budget space here",
+                Wcid = (uint)(1000 + i),
+                Distance = i + 1f,
+            })
+            .ToArray();
+        var world = BuildInventoryWorld(
+            new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = 0x4002u, Name = "Exit Token", Wcid = 29335u,
+                    ShortDesc = "Carry this back to the gatekeeper to leave.",
+                },
+            },
+            dense);
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Held items", p);
+        // The held item is carried by the protected capsule (after its header).
+        var capsuleStart = p.IndexOf("## Held items", StringComparison.Ordinal);
+        Assert.Contains("Exit Token", p.Substring(capsuleStart));
+        // Prove the dense scene actually overflowed (farthest object dropped).
+        Assert.DoesNotContain("Dense Scene Object 199", p);
+        Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
+    }
+
     // ---- ## Early server directives protected capsule (cp-2383) -----------
     // A one-time server PopupString (login/exit directive) is persisted past
     // the EventStream ring (cp-2382) AND re-surfaced in the protected salience
@@ -2868,9 +2963,15 @@ public class LlmGoalPolicyTests
         var rowOccurrences = System.Text.RegularExpressions.Regex.Matches(
             prompt, @"- A List of Items \(wcid=30491\)").Count;
         Assert.Equal(1, rowOccurrences);
-        // short_desc renders once for the group, not 30 times.
+        // short_desc renders once for the group, not 30 times. The protected
+        // `## Held items` capsule (cp-2389) re-surfaces it once more by design
+        // for cut-survival, so scope this body-dedup assertion to the body
+        // (before the capsule).
+        var bodyBeforeHeld = prompt.IndexOf("## Held items", StringComparison.Ordinal) is int hi && hi >= 0
+            ? prompt.Substring(0, hi)
+            : prompt;
         var sdOccurrences = System.Text.RegularExpressions.Regex.Matches(
-            prompt, "Holtburg Redoubt").Count;
+            bodyBeforeHeld, "Holtburg Redoubt").Count;
         Assert.Equal(1, sdOccurrences);
     }
 

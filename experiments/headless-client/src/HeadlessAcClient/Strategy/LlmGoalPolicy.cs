@@ -5518,6 +5518,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "grinding. A generic Explore does not satisfy a directive that names where to go.");
         }
 
+        // ── ## Held items (protected-tail cut-proof inventory, cp-2389) ──
+        // The full `## Inventory` section renders in the BODY and is among the
+        // first things the request-size fitter omits when the prompt overflows
+        // (live: in a dense academy scene `## Inventory` was "omitted to fit
+        // prompt budget", so the bot could not see a server-given quest item —
+        // the Academy Exit Token it had to give back to leave — and grinded
+        // instead of finishing the step). Re-surface a COMPACT held-items list
+        // (name + short_desc, deduped, char-bounded) in the PROTECTED salience
+        // tail so the bot always knows what it is carrying even when the body
+        // `## Inventory` is trimmed. Purely the bot's OWN inventory wire data,
+        // deduped by rendered text; no item-type/wcid/NPC heuristic, no game
+        // knowledge. The existing FINISH MULTI-STEP DIRECTIVES / pursue-target
+        // rules supply what to DO with a held item; this only guarantees the
+        // bot can SEE it.
+        if (world.Inventory.Count > 0)
+        {
+            var heldSeen = new HashSet<string>(StringComparer.Ordinal);
+            var heldRows = new List<string>();
+            var heldBudget = HeldItemsProtectedCharBudget;
+            foreach (var i in world.Inventory)
+            {
+                var sd = string.IsNullOrWhiteSpace(i.ShortDesc) ? "" : i.ShortDesc!.Trim();
+                var key = i.Name + "\u0001" + sd;
+                if (!heldSeen.Add(key)) continue;
+                var row = sd.Length > 0 ? $"- {i.Name} — {Truncate(sd, 120)}" : $"- {i.Name}";
+                if (heldBudget - row.Length < 0) break;
+                heldBudget -= row.Length;
+                heldRows.Add(row);
+            }
+            if (heldRows.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Held items (you are carrying these — re-surfaced because `## Inventory` above can be trimmed to fit the prompt)");
+                foreach (var r in heldRows) sb.AppendLine(r);
+            }
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
@@ -5720,6 +5757,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // head preamble, which the hard-cut preserves) to fit. ~450 chars fits
     // several short rows (nearest-first) while leaving ample body headroom.
     private const int NearestObjectsProtectedCharBudget = 450;
+
+    // Total char budget for the protected `## Held items` capsule ROWS (cp-2389)
+    // — bounds the rendered inventory rows so a huge bag cannot bloat the
+    // protected salience tail. ~1200 chars fits roughly a dozen item rows
+    // (name + truncated short_desc), enough to surface the academy's quest
+    // items; deduped first so duplicate stacks don't consume the budget.
+    private const int HeldItemsProtectedCharBudget = 1200;
 
     // How many of the EARLIEST persisted distinct server PopupStrings the
     // `## Early server directives` protected-tail capsule re-surfaces. The
