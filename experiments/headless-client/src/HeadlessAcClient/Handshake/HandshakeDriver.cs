@@ -2673,7 +2673,7 @@ internal sealed class HandshakeDriver : IDisposable
                             // give guid.)
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
                                 AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(
-                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid))
+                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryEquipSent))
                             {
                                 var invLabel = isf.ErrorType != 0
                                     ? WeenieErrorLabels.Label(isf.ErrorType)
@@ -2696,16 +2696,18 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"(source-autonomous wield; not an LLM goal)");
                                     break;
                                 }
-                                // Look up the item's name from the
-                                // visible-world snapshot so the LLM
-                                // sees a human-readable rejection.
-                                string? isfName = null;
-                                if (worldState.Self is WorldObjectSnapshot isfSelf)
-                                {
-                                    isfName = worldState.WithinRadius(isfSelf, 999f)
-                                        .FirstOrDefault(s => s.Guid == isf.ItemGuid)?.Name;
-                                }
-                                isfName ??= "(unknown)";
+                                // Look up the failed item by guid in the full
+                                // object set (worldState.TryGet), NOT a spatial
+                                // radius scan: a bagged inventory item (e.g. a
+                                // weapon the LLM tried to wield) has no world
+                                // position and is missed by WithinRadius, leaving
+                                // the rejection name "(unknown)" so the policy's
+                                // IsGoalRecentlyRejected (matches by item name/wcid)
+                                // could not dedup the repeat. TryGet covers both
+                                // spatial and inventory objects. Carry the wcid too
+                                // so a wcid-bearing goal matches precisely.
+                                var isfSnap = worldState.TryGet(isf.ItemGuid);
+                                string isfName = isfSnap?.Name ?? "(unknown)";
                                 eventStream.Append(new StreamEvent
                                 {
                                     Sequence = 0,
@@ -2713,6 +2715,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     Kind = EventKind.ActionRejected,
                                     Text = $"Inventory action failed on '{isfName}': {invLabel}",
                                     ItemGuid = isf.ItemGuid,
+                                    Wcid = isfSnap?.WeenieClassId,
                                     Name = isfName,
                                     ErrorCode = isf.ErrorType,
                                     ErrorLabel = invLabel,

@@ -59,18 +59,30 @@ internal sealed class AutoEquipFailureFilter
     /// Decide whether an <c>InventoryServerSaveFailed</c> game event should be
     /// surfaced to the Strategy layer as an <c>ActionRejected</c> learning
     /// signal. A non-zero (specific) <paramref name="errorType"/> always
-    /// surfaces. A <c>None</c> (0) error surfaces ONLY when it names the item
-    /// the bot is currently giving (<paramref name="pendingGiveItemGuid"/>):
-    /// the server refuses a Give it cannot complete (live: the academy Calling
-    /// Stone the bot believes it holds is not in the server's inventory) with a
-    /// transient string + <c>InventoryServerSaveFailed</c> err=None, and
-    /// dropping that left a failing Give with no signal so the bot silently
-    /// re-dispatched the same give. Other benign None failures (e.g. a
-    /// source-autonomous auto-equip) do NOT match the in-flight give guid and
-    /// stay suppressed. Pure: keyed on the wire error code + the in-flight give
-    /// guid; carries no item type, name, wcid, or game knowledge.
+    /// surfaces. A <c>None</c> (0) error surfaces ONLY when it names either the
+    /// item the bot is currently giving (<paramref name="pendingGiveItemGuid"/>)
+    /// or an item the bot has dispatched a wield for
+    /// (<paramref name="wieldDispatchedGuids"/>):
+    /// <list type="bullet">
+    /// <item>Give: the server refuses a Give it cannot complete (live: an
+    /// academy Calling Stone the bot believes it holds is not in the server's
+    /// inventory) with a transient string + err=None; dropping it left a failing
+    /// Give with no signal so the bot silently re-dispatched the same give.</item>
+    /// <item>Wield: the server's CheckWeaponCollision refuses to wield a weapon
+    /// while another is equipped with a silent err=None (live: gpt-4o re-emitted
+    /// Wield{Training Spadone} 33x because the refusal produced no signal).</item>
+    /// </list>
+    /// Other benign None failures (e.g. a source-autonomous auto-equip teardown)
+    /// match neither set and stay suppressed; an autonomous auto-equip whose guid
+    /// IS in the wield set still gets dropped one-shot by
+    /// <see cref="TryConsumeAutonomous"/> downstream. Pure: keyed on the wire
+    /// error code + the in-flight give/wield guids; carries no item type, name,
+    /// wcid, or game knowledge.
     /// </summary>
     public static bool ShouldSurfaceInventoryFailure(
-        uint errorType, uint itemGuid, uint? pendingGiveItemGuid)
-        => errorType != 0 || (pendingGiveItemGuid is uint pg && pg == itemGuid);
+        uint errorType, uint itemGuid, uint? pendingGiveItemGuid,
+        IReadOnlySet<uint> wieldDispatchedGuids)
+        => errorType != 0
+           || (pendingGiveItemGuid is uint pg && pg == itemGuid)
+           || wieldDispatchedGuids.Contains(itemGuid);
 }
