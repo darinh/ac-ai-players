@@ -2409,6 +2409,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "unreachable Attack");
         }
 
+        // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
+        // ledger shows it keeps LOSING to (the IsBeatenKind verdict the
+        // autonomous picker and the COMBAT SAFETY prompt rule already apply). A
+        // weak model may misread its own record and re-pick such a kind;
+        // re-attacking just loses again (often near-0 hit-rate), and left
+        // unchecked the bot can die to the same kind repeatedly. Drop the
+        // OPTIONAL (non-self-defense) engagement and defer to the fallback — it
+        // Explores away or autonomously picks a NOT-beaten target. The veto is
+        // gated on the bot NOT having out-leveled the loss, so an explicit order
+        // can re-attempt the kind once the bot is demonstrably stronger. A
+        // self-defense Attack on an actively-hostile beaten kind is also exempt
+        // (predicate returns false). Bot-owned outcomes + own level only; no
+        // game knowledge.
+        if (IsOptionalAttackOnBeatenKind(goal, world))
+        {
+            Console.WriteLine(
+                $"[llm-override] beaten-kind veto: dropping LLM Attack target={goal.Target}" +
+                " — own combat ledger marks this kind beaten (losses, no kills); deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-override: LLM Attack on a beaten kind (own ledger: losses, no kills)");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "beaten-kind Attack");
+        }
+
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -2631,6 +2654,55 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (++count >= UnreachableRepeatThreshold) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// True iff an LLM <see cref="GoalKind.Attack"/> OPTIONALLY targets a KIND
+    /// the bot's OWN combat ledger marks <see cref="IsBeatenKind"/> — it has
+    /// died / near-died / been ineffective against that kind with no kills
+    /// (level-aware: a non-lethal loss is re-testable once the bot out-levels
+    /// it; a lethal loss stays beaten). This is the SAME verdict the autonomous
+    /// kill-commitment picker and the COMBAT SAFETY prompt rule already apply;
+    /// a weak model can still misread its own record and re-pick such a kind,
+    /// where re-attacking just loses again (often near-0 hit-rate).
+    ///
+    /// "OPTIONAL" excludes self-defense: when the named kind is currently an
+    /// ACTIVE HOSTILE in view (attacking the bot now) the Attack is left alone
+    /// — the Motor's losing-fight disengage and self-preservation reflexes own
+    /// that case (mirroring the town-egress rule that never overrides a
+    /// self-defense Attack). So only a CHOSEN, non-threatened engagement of a
+    /// kind that keeps beating the bot is vetoed.
+    ///
+    /// Pure; bot-owned outcomes + own level only — no wcid/NPC/landblock, no
+    /// game knowledge. Extracted for deterministic unit testing. The caller
+    /// drops the goal and defers to <see cref="EscapeOrFallback"/>, which
+    /// Explores away or lets the fallback autonomously pick a NOT-beaten target
+    /// — it never re-attacks this kind.
+    /// </summary>
+    internal static bool IsOptionalAttackOnBeatenKind(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Attack) return false;
+        var target = goal.Target;
+        if (target is null) return false;
+        // Attack selectors are name-first; fall back to the substring hook, and
+        // keep any wcid so the ledger lookup can match by either identity (a
+        // name-only check would silently miss a wcid- or substring-only target).
+        var targetName = target.Name ?? target.NameContains;
+        if (string.IsNullOrWhiteSpace(targetName) && target.Wcid is null) return false;
+
+        // Self-defense exemption: a kind actively hostile in view is attacking
+        // the bot now; fighting back (and the Motor's flee reflexes) own that —
+        // do not veto. Only a non-threatened, chosen engagement is overridable.
+        if (world.Visible.Any(v => !v.IsCorpse && v.ObservedHostile
+                                   && VisibleMatchesSelector(target, v)))
+            return false;
+
+        // This is an explicit, deliberate order, so a lethal-loss kind is
+        // re-testable once the bot has out-leveled the loss (the autonomous
+        // picker stays conservative and keeps such kinds permanently beaten).
+        // Bot-owned outcomes + own level only; no game knowledge.
+        return IsBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
+            world.Self.Level, lethalRetestableWhenOutleveled: true);
     }
 
     /// <summary>
@@ -6639,21 +6711,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// (Deaths==0) and the bot's <paramref name="currentLevel"/> now exceeds the
     /// highest level it lost at, in which case it is re-testable (the bot is
     /// stronger now). Kinds that have EVER killed the bot (Deaths&gt;0) stay
-    /// beaten regardless of level (protects the no-death record). Aggregates by
+    /// beaten regardless of level for autonomous picks (protects the no-death
+    /// record); a caller acting on an explicit, deliberate order may set
+    /// <paramref name="lethalRetestableWhenOutleveled"/> to let a lethal kind be
+    /// re-tested too once the bot out-levels the loss. Aggregates by
     /// wcid OR normalized name via <see cref="FindCombatRecord"/>. Shared by the
     /// fallback hunt-target skip AND the outdoor frontier mob-bias so both avoid
     /// the SAME kinds. Bot-owned outcomes + own level only; no game knowledge.
     /// Null/empty history or no matching record =&gt; not beaten.
     /// </summary>
     internal static bool IsBeatenKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel,
+        bool lethalRetestableWhenOutleveled = false)
     {
         var record = FindCombatRecord(history, wcid, name);
         if (record is null) return false;
         var lost = record.Kills == 0
             && (record.Deaths > 0 || record.NearDeaths > 0 || record.Ineffective > 0);
         if (!lost) return false;
-        if (record.Deaths == 0
+        // Re-testable once the bot has out-grown the level it last lost at.
+        // Non-lethal losses (Deaths==0) re-test this way by default; a lethal
+        // loss only re-tests when the caller opts in (explicit, deliberate
+        // order), otherwise it stays beaten to protect the no-death record.
+        var retestable = record.Deaths == 0 || lethalRetestableWhenOutleveled;
+        if (retestable
             && currentLevel is int cur
             && record.MaxLossBotLevel is int maxLossLevel
             && cur > maxLossLevel)
