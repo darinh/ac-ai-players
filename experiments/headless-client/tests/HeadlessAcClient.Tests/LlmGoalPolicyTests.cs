@@ -10227,6 +10227,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SpendXpRule_StatesOffenseIsLimitWhenKindsUnkilled()
+    {
+        // c2-coordination-doom-loop: live evidence (gpt-4o natural play) showed
+        // the bot raising endurance 117/152 times while coordination stayed
+        // neglected, so its swings kept missing and it never killed even weak
+        // monsters (the criterion-2 wall). 127/152 of those spend decisions had
+        // NO active-fight swing data present, so the existing accuracy trigger
+        // ("if `current fight` shows hits `evaded`") never fired and the bot
+        // defaulted to survival. The rule now also keys the offense diagnosis off
+        // the PERSISTENT "kinds you have not killed" / combat-history evidence
+        // (present between fights) and states survival and offense are NOT
+        // co-equal HP-picked defaults. Prompt guidance only; the LLM still
+        // decides which attribute to raise.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("NOT co-equal defaults", prompt);
+        Assert.Contains("the binding limit is OFFENSE, not max HP", prompt);
+        // The clause must NOT force offense unconditionally: it distinguishes
+        // surviving-but-not-killing (raise offense) from dying-fast (raise
+        // survival or Explore to a weaker area), so it never traps a low-HP bot.
+        Assert.Contains("max HP survivability IS the limit", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_OffenseLimitClause_OmittedWhenNoUnspentXp()
+    {
+        // The doom-loop clause lives inside the unspent-gated SPEND XP rule, so it
+        // disappears with the rule when there is nothing to invest (no prompt-byte
+        // cost in the common zero-unspent case).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("the binding limit is OFFENSE, not max HP", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SpendXpRule_StatesFullUnspentAmountRange()
     {
         // Tempo (reduce-llm-call-volume): live evidence (cp2352-livefire) showed the
