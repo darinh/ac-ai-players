@@ -2184,7 +2184,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     Console.WriteLine(
                         $"[intent-stack] result={outcome.Result} ops={stackOps.Count} " +
                         $"applied={outcome.AppliedLog.Count} " +
-                        $"revision_after={_stack.Revision} depth_after={_stack.Depth}");
+                        $"revision_after={_stack.Revision} depth_after={_stack.Depth}" +
+                        (outcome.StaleRevisionTolerated ? " stale_revision_tolerated=push-only" : ""));
                     if (outcome.Result != BatchApplyResult.Ok)
                     {
                         _training?.RecordParseError(decisionId,

@@ -29,7 +29,17 @@ internal enum BatchApplyResult
 internal sealed record BatchApplyOutcome(
     BatchApplyResult Result,
     string? RejectReason,
-    IReadOnlyList<string> AppliedLog);
+    IReadOnlyList<string> AppliedLog)
+{
+    /// <summary>
+    /// True when the batch applied despite a stale echoed revision because it was
+    /// PUSH-only. The reachable cause is a root whose deadline elapsed mid-call
+    /// (marked Blocked in place, revision bumped, no event) — see the TryApply
+    /// stale-revision comment for the full reachability argument. Surfaced for
+    /// diagnostics so a deploy log can show the tolerance firing.
+    /// </summary>
+    public bool StaleRevisionTolerated { get; init; }
+}
 
 internal static class IntentStackOpsApplier
 {
@@ -58,12 +68,37 @@ internal static class IntentStackOpsApplier
             return new BatchApplyOutcome(BatchApplyResult.Ok, null, Array.Empty<string>());
         }
 
+        // A stale echoed revision means the stack changed between when the LLM
+        // saw it (prompt render) and now (apply). The decision loop runs at most
+        // ONE LLM call in flight (LlmGoalPolicy._inflight gates it), so the only
+        // stack mutations in that window come from IntentStack.CheckTopForCompletion
+        // on the Motor tick — never another LLM op. Of those, a child auto-pop and
+        // an in-place root Completed mark both emit a GoalCompleted event, which
+        // LlmGoalPolicy discards (HasPlanInvalidatingSince) BEFORE reaching this
+        // apply — so the stale revision that actually arrives here is the no-event
+        // bump: a root whose deadline elapsed, marked Blocked in place (depth
+        // unchanged). A PUSH does not depend on that: it adds a new frame above the
+        // CURRENT top, so it lands validly above the Blocked root (which resurfaces
+        // for the LLM to REPLACE_TOP once the pushed child completes — the LLM's
+        // just-computed decision is honored rather than wasted on a deadline that
+        // happened to elapse mid-call). So a PUSH-ONLY batch is applied — the
+        // dry-run below still re-validates depth + duplicate-id against the live
+        // state. A batch containing REPLACE_TOP/POP_TOP/MARK_TOP_BLOCKED targets the
+        // top BY IDENTITY, which the intervening mutation can change, so it stays
+        // strictly revision-guarded. Mechanical optimistic-concurrency bookkeeping;
+        // no game knowledge.
+        var staleRevisionTolerated = false;
         if (echoedRevision is long er && er != stack.Revision)
         {
-            return new BatchApplyOutcome(
-                BatchApplyResult.RejectedRevision,
-                $"echoed revision {er} != current stack revision {stack.Revision}",
-                Array.Empty<string>());
+            var pushOnly = ops.All(o => o.Op == IntentStackOpKind.Push);
+            if (!pushOnly)
+            {
+                return new BatchApplyOutcome(
+                    BatchApplyResult.RejectedRevision,
+                    $"echoed revision {er} != current stack revision {stack.Revision}",
+                    Array.Empty<string>());
+            }
+            staleRevisionTolerated = true;
         }
 
         // Dry-run against a logical-only mirror of the stack so we can
@@ -161,7 +196,10 @@ internal static class IntentStackOpsApplier
                 }
             }
         }
-        return new BatchApplyOutcome(BatchApplyResult.Ok, null, log);
+        return new BatchApplyOutcome(BatchApplyResult.Ok, null, log)
+        {
+            StaleRevisionTolerated = staleRevisionTolerated,
+        };
 
         static BatchApplyOutcome Reject(BatchApplyResult result, string reason) =>
             new(result, reason, Array.Empty<string>());
