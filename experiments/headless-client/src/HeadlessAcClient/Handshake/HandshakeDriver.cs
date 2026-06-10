@@ -1163,6 +1163,26 @@ internal sealed class HandshakeDriver : IDisposable
         uint                 motionLockedCellId = 0;
         bool                 motionDone = false;
         bool                 useSent = false;
+        // Decision-starvation watchdog (tick-path) state. The packet path
+        // owns goal re-deliberation + the motor-gate reset cascade, and BOTH
+        // are skipped on a tick-wake (the receive timed out, so the try body
+        // never ran). lastInboundPacketAt is refreshed on every received
+        // datagram; the walk-tick watchdog uses the gap since then to detect
+        // a quiet-area livelock and re-assert position. consecutiveStarvation-
+        // Pokes counts self-pokes not yet answered by an inbound packet
+        // (reset on any receive); past the reconnect threshold we escalate so
+        // recovery never depends on the server acking a no-op position.
+        DateTime             lastInboundPacketAt = DateTime.UtcNow;
+        DateTime             lastStarvationPokeAt = DateTime.MinValue;
+        int                  consecutiveStarvationPokes = 0;
+        int                  starvationPokesSent = 0;
+        // Timestamp of the last REAL outbound action dispatch (USE / portal /
+        // give / pickup) — set ONLY at the actual opcode-send sites, NOT at the
+        // synthetic useSent raised by an arrival / no-target-timeout / stale-
+        // goal park / deliberation-race skip. The starvation watchdog uses this
+        // (not the broad useSent bit) to stay quiescent during a real action
+        // cooldown without delaying recovery from those synthetic idle states.
+        DateTime?            lastActionDispatchAt = null;
         // visible-recent-interaction: set ONLY when a spatial Use/Pickup
         // opcode is actually dispatched against motionTarget (not merely
         // when useSent is raised by an arrival/deliberation-race-guard
@@ -1294,6 +1314,28 @@ internal sealed class HandshakeDriver : IDisposable
         // a new goal ~5x sooner. Productive motions (locked target, remembered
         // sighting, or explored-route follow) keep the long timeout.
         const int            MotionNoLockTimeoutSec = 6;
+        // Decision-starvation watchdog thresholds. After motion stops, if no
+        // inbound datagram arrives for DecisionStarvationMs while the bot is
+        // idle, the walk-tick re-asserts the current position to elicit a
+        // server ack (which re-enters the packet path and re-arms the
+        // deliberation + reset cascade). Pokes are spaced StarvationPoke-
+        // IntervalMs apart; after StarvationPokeReconnectThreshold unanswered
+        // pokes we force a reconnect so recovery is robust even if a no-op
+        // position is never acked. See Strategy/DecisionStarvationWatchdog.cs.
+        const int            DecisionStarvationMs = 4000;
+        const int            StarvationPokeIntervalMs = 2000;
+        const int            StarvationPokeReconnectThreshold = 5;
+        // Suppress the starvation poke while a just-dispatched REAL action is
+        // still inside its expected cooldown so a no-op position can't abort a
+        // portal/teleport or move the bot off an interaction target. The guard
+        // is single-sourced from the longest real-action cooldown (portal
+        // windup) plus a network-jitter margin; past it a genuinely stuck
+        // post-action wedge (cooldown over-ran with no inbound packet to run
+        // the reset cascade) can still be poked free.
+        const int            StarvationPokeNetworkMarginMs = 2000;
+        int                  actionQuiesceGuardMs =
+            (int)Strategy.MotorPostActionCooldown.PortalWindup.TotalMilliseconds
+            + StarvationPokeNetworkMarginMs;
         // Slice S — blocked-motion detection. Server-authoritative
         // walkSelf.Position is updated by UpdatePosition packets from
         // the server. After we send an AP(intent), if the server's
@@ -1513,6 +1555,15 @@ internal sealed class HandshakeDriver : IDisposable
                 // trigger pathological allocations via huge Count).
                 if (!verified)
                     continue;
+
+                // Decision-starvation watchdog: only a CRC-VALID datagram
+                // proves the link is delivering packets that actually reach
+                // the deliberation/reset path, so refresh the idle clock and
+                // clear the unanswered-poke escalation counter here (after
+                // validation), not on raw/short/corrupt traffic that would
+                // `continue` above without ever re-arming a decision.
+                lastInboundPacketAt = DateTime.UtcNow;
+                consecutiveStarvationPokes = 0;
 
                 foreach (var (fh, data) in pkt.Fragments)
                 {
@@ -4341,6 +4392,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 motionLockedCellId = lootSelfCell;
                                 useSent = true;
                                 useSentAt = DateTime.UtcNow;
+                                lastActionDispatchAt = useSentAt;
                             }
                             else
                             {
@@ -7538,6 +7590,7 @@ internal sealed class HandshakeDriver : IDisposable
 
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
+                    lastActionDispatchAt = useSentAt;
                     var itemType = motionTarget.ItemType ?? 0u;
                     // Slice W.3 — wire-type bits no longer choose the
                     // verb. itemType is still computed because the
@@ -8112,6 +8165,106 @@ internal sealed class HandshakeDriver : IDisposable
                         Console.WriteLine(
                             "[motion] walk-tick: no-lock idle motion timed out (no target) — " +
                             "resetting motion state to re-deliberate");
+                    }
+                }
+
+                // Decision-starvation watchdog (tick-path). The packet path
+                // owns goal re-deliberation + the motor-gate reset cascade,
+                // and both are SKIPPED on a tick-wake (the receive timed out,
+                // so the try body never ran). When motion has stopped in a
+                // quiet area the server sends nothing, so the bot can livelock
+                // idle indefinitely (observed: 16+ min of total silence after
+                // a blocked/unreachable-target stop). Detect a sustained idle-
+                // with-no-inbound-traffic gap and re-assert our CURRENT
+                // position (a no-op "stand here"); the server acks the
+                // sequenced packet and that inbound ack re-enters the packet
+                // path and re-arms deliberation. If several pokes go unanswered
+                // we escalate to a reconnect, so recovery never depends on the
+                // server replying. Pure motor/network bookkeeping: no target is
+                // chosen or interacted with, and no game knowledge is used.
+                // The gate uses lastActionDispatchAt (REAL action dispatches
+                // only) for its quiesce window, so a portal/USE cooldown is
+                // protected while the synthetic useSent of an arrival / no-
+                // target-timeout / park does NOT delay recovery. Decision logic
+                // lives in the pure helper Strategy/DecisionStarvationWatchdog.cs
+                // (unit-tested).
+                if (worldState.Self is WorldObjectSnapshot pokeSelf &&
+                    pokeSelf.CellId is uint pokeCell && pokeCell != 0)
+                {
+                    var starveAction = Strategy.DecisionStarvationWatchdog.Evaluate(
+                        motionStopped:        motionDone,
+                        inCombat:             combatTargetGuid is not null,
+                        recallQuiescing:      recallQuiescing,
+                        actionQuiesceActive:  lastActionDispatchAt is DateTime quiesceSince &&
+                                              (DateTime.UtcNow - quiesceSince).TotalMilliseconds < actionQuiesceGuardMs,
+                        haveSelfCell:         true,
+                        msSinceInboundPacket: (DateTime.UtcNow - lastInboundPacketAt).TotalMilliseconds,
+                        msSinceLastPoke:      (DateTime.UtcNow - lastStarvationPokeAt).TotalMilliseconds,
+                        consecutivePokes:     consecutiveStarvationPokes,
+                        starvationMs:         DecisionStarvationMs,
+                        pokeIntervalMs:       StarvationPokeIntervalMs,
+                        reconnectThreshold:   StarvationPokeReconnectThreshold);
+                    if (starveAction != Strategy.DecisionStarvationWatchdog.Action.None)
+                    {
+                        lastStarvationPokeAt = DateTime.UtcNow;
+                        consecutiveStarvationPokes++;
+                        var starveIdleMs = (int)(DateTime.UtcNow - lastInboundPacketAt).TotalMilliseconds;
+                        if (starveAction == Strategy.DecisionStarvationWatchdog.Action.Reconnect)
+                        {
+                            // Self-pokes are not being answered — the link may
+                            // be half-dead. Force a clean reconnect (the loop
+                            // breaks on reconnectRequested at the top of the
+                            // next pass).
+                            reconnectRequested = true;
+                            Console.WriteLine(
+                                $"[motion] decision-starvation: {consecutiveStarvationPokes} self-pokes unanswered over " +
+                                $"{starveIdleMs}ms idle — requesting reconnect");
+                        }
+                        else
+                        {
+                            var pokeSeq  = nextOutboundPacketSequence++;
+                            var pokeFrag = nextOutboundFragmentSequence++;
+                            var pokeBuf  = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                            var pokeLen  = GameActionAutonomousPositionMessage.Pack(
+                                pokeBuf,
+                                cellId: pokeCell,
+                                pos:    pokeSelf.Position,
+                                rot:    pokeSelf.Rotation,
+                                instanceSequence:      pokeSelf.SeqInstance      ?? 0,
+                                serverControlSequence: pokeSelf.SeqServerControl ?? 0,
+                                teleportSequence:      pokeSelf.SeqTeleport      ?? 0,
+                                forcePositionSequence: pokeSelf.SeqForcePosition ?? 0,
+                                contact: true);
+                            var pokeMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                pokeMsg.AddAckSequence(lastReceivedSeq);
+                            pokeMsg.AddBlobFragment(
+                                fragSequence: pokeFrag,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: pokeBuf.AsSpan(0, pokeLen));
+                            var pokeSentLen = pokeMsg.Pack(sendBuf, myClientId,
+                                                           sequence: pokeSeq, iteration: 1,
+                                                           encrypt: true, cryptoSend: cryptoSend);
+                            try
+                            {
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, pokeSentLen),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                starvationPokesSent++;
+                                Console.WriteLine(
+                                    $"[motion] decision-starvation poke #{consecutiveStarvationPokes}: idle {starveIdleMs}ms with " +
+                                    $"no inbound packet while motion stopped — re-asserting position to re-arm deliberation");
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                throw;
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine(
+                                    $"[motion] decision-starvation poke: SendToAsync FAILED ({ex.GetType().Name}: {ex.Message})");
+                            }
+                        }
                     }
                 }
 
@@ -9150,7 +9303,7 @@ internal sealed class HandshakeDriver : IDisposable
         {
             Console.WriteLine("[spatial] self snapshot has no CellId — skipping spatial queries");
         }
-        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}, walkTickAps={walkTickAps}");
+        Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}, walkTickAps={walkTickAps}, starvationPokes={starvationPokesSent}");
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
