@@ -101,12 +101,15 @@ internal sealed record IntentBaseline
             .GroupBy(i => i.Wcid)
             .ToImmutableDictionary(g => g.Key, g => g.Count());
 
-        // Per-kind kill snapshot from the combat-feel history so a
+        // Per-kind kill snapshot from the UNCAPPED combat-feel history so a
         // name-filtered kill_count_since_push predicate can subtract the
-        // pre-push kills of a SPECIFIC kind. Keyed by trimmed/lowered display
-        // name to match the predicate's case-insensitive lookup.
+        // pre-push kills of a SPECIFIC kind. Must use CombatHistoryFull (not the
+        // prompt's recency-capped CombatHistory): a kind that has aged out of
+        // the capped snapshot at push would otherwise snapshot 0 here and then
+        // over-count its pre-push kills when re-engaged. Keyed by trimmed/lowered
+        // display name to match the predicate's case-insensitive lookup.
         var killsByName = ImmutableDictionary<string, long>.Empty;
-        if (world.CombatHistory is { Count: > 0 } combatHist)
+        if (world.CombatHistoryFull is { Count: > 0 } combatHist)
         {
             killsByName = combatHist
                 .Where(h => !string.IsNullOrWhiteSpace(h.Name))

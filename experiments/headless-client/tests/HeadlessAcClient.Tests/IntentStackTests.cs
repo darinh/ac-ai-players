@@ -271,14 +271,14 @@ public class IntentStackTests
         // cp-2384: a name-filtered kill_count_since_push must count PER-KIND
         // kills (combat-feel history) minus the per-kind baseline at push — NOT
         // the kind-agnostic lifetime total (which would falsely complete).
-        var atPush = BuildWorld() with { CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 2) } };
+        var atPush = BuildWorld() with { CombatHistoryFull = new[] { Ch("Drudge Skulker", 19257u, 2) } };
         var events = new EventStream();
         var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
 
         // 5 Drudge Skulker total (3 since push) + 8 Rabbit (must NOT count).
         var now = BuildWorld() with
         {
-            CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 5), Ch("Black Rabbit", 2566u, 8) },
+            CombatHistoryFull = new[] { Ch("Drudge Skulker", 19257u, 5), Ch("Black Rabbit", 2566u, 8) },
         };
         var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
 
@@ -294,11 +294,27 @@ public class IntentStackTests
         var atPush = BuildWorld();
         var events = new EventStream();
         var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
-        var now = BuildWorld() with { CombatHistory = new[] { Ch("Black Rabbit", 2566u, 10) } };
+        var now = BuildWorld() with { CombatHistoryFull = new[] { Ch("Black Rabbit", 2566u, 10) } };
         var stats = new BotStatistics();
         var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = stats };
 
         Assert.False(new KillCountSincePushAtLeastPredicate(5, "Drudge").IsSatisfied(ctx));
+    }
+
+    [Fact]
+    public void KillCountSincePush_NameFiltered_SubtractsPrePushKills_NoOvercount()
+    {
+        // The over-count guard (why CombatHistoryFull is used, not the capped
+        // snapshot): a kind with many PRE-PUSH kills must subtract its true
+        // pre-push count, so only kills SINCE push count — never the cumulative.
+        var atPush = BuildWorld() with { CombatHistoryFull = new[] { Ch("Drudge Skulker", 19257u, 8) } };
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
+        var now = BuildWorld() with { CombatHistoryFull = new[] { Ch("Drudge Skulker", 19257u, 10) } };
+        var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
+
+        Assert.True(new KillCountSincePushAtLeastPredicate(2, "Drudge").IsSatisfied(ctx));
+        Assert.False(new KillCountSincePushAtLeastPredicate(3, "Drudge").IsSatisfied(ctx));
     }
 
     [Fact]
@@ -310,7 +326,7 @@ public class IntentStackTests
         // "Drudge" substring matches Skulker(3) + Slinker(2) = 5.
         var now = BuildWorld() with
         {
-            CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 3), Ch("Drudge Slinker", 19258u, 2) },
+            CombatHistoryFull = new[] { Ch("Drudge Skulker", 19257u, 3), Ch("Drudge Slinker", 19258u, 2) },
         };
         var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
 

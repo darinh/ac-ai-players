@@ -424,11 +424,13 @@ internal sealed record KillCountSincePushAtLeastPredicate(
         // lifetime BotStatistics.Kills (a kind-agnostic Attack-completion
         // proxy) cannot provide it — using it would FALSELY satisfy "kill 10
         // Drudges" after 10 kills of ANY kind. Count actual per-kind kills from
-        // the combat-feel history snapshot (current minus the per-kind baseline
+        // the UNCAPPED combat-feel history (current minus the per-kind baseline
         // captured at push). Substring match on the kind's display name, summed
         // across every matching kind (e.g. "Drudge" covers Skulker + Slinker).
+        // CombatHistoryFull (not the capped CombatHistory) is required so a kind
+        // that aged out of the prompt snapshot still counts correctly.
         if (!string.IsNullOrWhiteSpace(NameContains) &&
-            ctx.World.CombatHistory is { Count: > 0 } hist)
+            ctx.World.CombatHistoryFull is { Count: > 0 } hist)
         {
             long delta = 0;
             foreach (var h in hist)

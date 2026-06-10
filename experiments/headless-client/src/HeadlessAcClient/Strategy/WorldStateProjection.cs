@@ -277,6 +277,16 @@ internal sealed record WorldStateProjection
     public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; init; }
 
     /// <summary>
+    /// UNCAPPED combat-feel outcomes (every kind, not just the prompt's
+    /// most-recent 6). Copied from <see cref="WorldState.CombatHistoryFull"/>.
+    /// Runtime-only (not serialized): consumed by the
+    /// <c>kill_count_since_push</c> predicate's per-kind baseline so an
+    /// aged-out kind is not mis-counted. Not surfaced to the LLM.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<CombatHistoryEntry>? CombatHistoryFull { get; init; }
+
+    /// <summary>
     /// cold-start egress: kind-keys (<see cref="CombatFeelLedger.KeyOf"/>
     /// form) of monster kinds the bot has killed since entering the current
     /// landblock. Copied from <see cref="WorldState.KilledKindsThisDwell"/>.
@@ -579,6 +589,7 @@ internal sealed record WorldStateProjection
             RecentInboundDamage = world.RecentInboundDamage,
             OpenedCorpseGuids = world.OpenedCorpseGuids,
             CombatHistory = world.CombatHistory,
+            CombatHistoryFull = world.CombatHistoryFull,
             KilledKindsThisDwell = world.KilledKindsThisDwell,
             MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,
             NamedSearchTargetName = world.NamedSearchTargetName,

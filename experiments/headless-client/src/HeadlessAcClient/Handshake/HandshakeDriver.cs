@@ -1386,6 +1386,7 @@ internal sealed class HandshakeDriver : IDisposable
         void PublishCombatHistory()
         {
             worldState.CombatHistory = combatFeel.Snapshot();
+            worldState.CombatHistoryFull = combatFeel.Snapshot(int.MaxValue);
             Strategy.CombatFeelStore.SaveIfDirty(combatFeel, combatFeelPath);
         }
         // Surface any persisted (prior-session) combat history immediately so
