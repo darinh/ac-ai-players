@@ -90,9 +90,32 @@ internal sealed class TacticsExecutor
         // Pickup/Use deliberately keep corpses + killed guids (loot the body).
         if (CurrentGoal.Kind == GoalKind.Attack)
         {
-            return SelectorResolver.ResolveSingleNearest(
+            var resolved = SelectorResolver.ResolveSingleNearest(
                 CurrentGoal.Target, world, self, _weenies,
                 excludeCorpses: true, excludeGuids: killedAttackGuids);
+            // Perception-bounded Attack resolution. The Strategy chose WHAT to
+            // attack from the projection's visible set, which is capped at
+            // WorldStateProjection.DefaultVisibleRadiusUnits. Once the nearby
+            // creature the LLM named is excluded above (a corpse, or a guid that
+            // died mid-deliberation during LLM latency), the NEXT live name-match
+            // can be a SAME-NAME creature clear across the zone — one the LLM
+            // never saw and did not choose. Committing a name-only Attack to a
+            // target beyond the perception radius marches the bot to something
+            // outside its own sensor window instead of re-deciding over what it
+            // can actually see. Treat such an out-of-perception match as
+            // unresolved so the policy re-picks from the CURRENT visible set next
+            // tick. Sensor range, not game knowledge: it reuses the SAME radius
+            // that built the LLM's view and encodes nothing about mob
+            // danger/type/level. self==null or an unknown target distance leaves
+            // the resolution intact (no basis to reject).
+            if (resolved is not null && self is not null &&
+                WorldDistance.TrySelectionSquaredDistance(self, resolved, out var d2) &&
+                d2 > (double)WorldStateProjection.DefaultVisibleRadiusUnits
+                     * WorldStateProjection.DefaultVisibleRadiusUnits)
+            {
+                return null;
+            }
+            return resolved;
         }
         return SelectorResolver.ResolveSingleNearest(CurrentGoal.Target, world, self, _weenies);
     }
