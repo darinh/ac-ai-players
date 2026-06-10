@@ -1413,7 +1413,7 @@ internal sealed class HandshakeDriver : IDisposable
                 CombatDeathAttribution.IsFresh(foe.At, DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness) &&
                 CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name)) is not null)
             {
-                combatFeel.RecordDeath(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name));
+                combatFeel.RecordDeath(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name), ReadSelfLevel(worldState));
                 Console.WriteLine(
                     $"[combat-feel] self DEATH attributed to '{foe.Name ?? "?"}' " +
                     $"wcid={(foe.Wcid?.ToString() ?? "?")}");
@@ -3434,7 +3434,7 @@ internal sealed class HandshakeDriver : IDisposable
                     var dgIdentity = new CombatFeelLedger.MobIdentity(
                         dgFoe?.WeenieClassId ?? lastCombatFoe?.Wcid,
                         dgFoe?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
-                    combatFeel.RecordNearDeath(dgIdentity);
+                    combatFeel.RecordNearDeath(dgIdentity, ReadSelfLevel(worldState));
                     PublishCombatHistory();
                     // combat-feel: the disengage is the last confirmed moment we
                     // were fighting this foe. Anchor the death-attribution foe
@@ -3677,7 +3677,8 @@ internal sealed class HandshakeDriver : IDisposable
                         if (lastCombatFoe is { } abandonFoe)
                         {
                             combatFeel.RecordIneffective(
-                                new CombatFeelLedger.MobIdentity(abandonFoe.Wcid, abandonFoe.Name));
+                                new CombatFeelLedger.MobIdentity(abandonFoe.Wcid, abandonFoe.Name),
+                                ReadSelfLevel(worldState));
                             PublishCombatHistory();
                         }
                         visitedTargetGuids.Add(ctgWatch);
@@ -9625,6 +9626,22 @@ internal sealed class HandshakeDriver : IDisposable
     }
 
     /// <summary>
+    /// PropertyInt id 25 = Level (see WorldStateProjection / ACE-bots
+    /// Source/ACE.Entity/Enum/Properties/PropertyInt.cs). Pure wire-field id.
+    /// </summary>
+    private const uint LevelPropertyIntId = 25u;
+
+    /// <summary>
+    /// The bot's current Level from the self snapshot's PropertyInts, or null
+    /// when self/level is not yet known. Used to stamp combat-feel loss
+    /// records with the level at which a loss occurred (the fallback's
+    /// adaptive beaten-kind re-test reads it back).
+    /// </summary>
+    private static int? ReadSelfLevel(WorldState worldState) =>
+        worldState.Self?.PropertyInts is { } pi && pi.TryGetValue(LevelPropertyIntId, out var lv)
+            ? lv : (int?)null;
+
+    /// <summary>
     /// Read the bot's current self facts from <paramref name="worldState"/>
     /// and, whenever unspent XP takes a new value, append a SelfProgressChanged
     /// event to <paramref name="eventStream"/>. No-op when self/XP is unknown
@@ -9643,10 +9660,7 @@ internal sealed class HandshakeDriver : IDisposable
         long? total = self.PropertyInt64s is { } p64t &&
             p64t.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var tx)
                 ? tx : (long?)null;
-        // PropertyInt id 25 = Level (see WorldStateProjection / ACE-bots
-        // Source/ACE.Entity/Enum/Properties/PropertyInt.cs).
-        int? level = self.PropertyInts is { } pi &&
-            pi.TryGetValue(25u, out var lv) ? lv : (int?)null;
+        int? level = ReadSelfLevel(worldState);
 
         if (TryBuildSelfProgressEvent(
                 unspent, total, level, self.HealthCurrent, self.HealthMax,

@@ -663,11 +663,14 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         };
 
     // True iff the bot's OWN combat-feel record marks this monster's KIND as a
-    // repeated loss — recorded death/near-death/ineffective with NO kill (the
-    // same "it out-defends you" signal the prompt's combat-history rule gives
-    // the LLM). Uses the UNCAPPED CombatHistoryFull so an older loss is not
-    // missed by the prompt's recency cap. No hardcoded kind/wcid: a kind is
-    // avoidable ONLY after the bot itself loses to it.
+    // repeated loss the bot has NOT yet out-leveled — recorded
+    // death/near-death/ineffective with NO kill (the same "it out-defends you"
+    // signal the prompt's combat-history rule gives the LLM). Uses the UNCAPPED
+    // CombatHistoryFull so an older loss is not missed by the prompt's recency
+    // cap. No hardcoded kind/wcid: a kind is avoidable ONLY after the bot
+    // itself loses to it, and (for non-lethal losses) the bot RE-TESTS it once
+    // it levels past the loss (see the in-body comment) — the avoid is a
+    // temporary safety rail, not a permanent ban.
     //
     // Delegates identity-matching to LlmGoalPolicy.FindCombatRecord so the
     // verdict is computed from the SAME AGGREGATE the prompt surfaces to the
@@ -680,7 +683,28 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         if (world.CombatHistoryFull is not { } hist) return false;
         var record = LlmGoalPolicy.FindCombatRecord(hist, v.Wcid, v.Name);
         if (record is null) return false;
-        return record.Kills == 0
+        var lost = record.Kills == 0
             && (record.Deaths > 0 || record.NearDeaths > 0 || record.Ineffective > 0);
+        if (!lost) return false;
+        // Adaptive re-test (north-star: bots LEARN and ADAPT; the avoid is a
+        // temporary SAFETY RAIL, not a permanent strategy). A kind the bot only
+        // ever lost to NON-LETHALLY (near-death/ineffective, NEVER an actual
+        // death) stops counting as beaten once the bot has LEVELED UP past the
+        // highest level at which it recorded such a loss: it is stronger now,
+        // so the fallback re-tests it. A win records Kills>0 -> permanently
+        // un-beaten; another loss re-records MaxLossBotLevel at the new higher
+        // level, so the verdict re-stands one level up. Kinds that have EVER
+        // killed the bot (Deaths>0) stay beaten regardless of level to protect
+        // the no-death record — the flee reflexes are reactive and cannot
+        // prevent a first-hit burst. Uses ONLY the bot's own outcomes and its
+        // own level; no hardcoded kind/level danger.
+        if (record.Deaths == 0
+            && world.Self.Level is int currentLevel
+            && record.MaxLossBotLevel is int maxLossLevel
+            && currentLevel > maxLossLevel)
+        {
+            return false;
+        }
+        return true;
     }
 }

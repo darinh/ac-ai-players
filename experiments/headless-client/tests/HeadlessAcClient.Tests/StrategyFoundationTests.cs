@@ -2595,14 +2595,15 @@ public class StrategyFoundationTests
 
     private static WorldStateProjection MakeHuntProjection(
         InventoryItemProjection[] inventory,
-        VisibleObjectProjection[] visible) =>
+        VisibleObjectProjection[] visible,
+        int? selfLevel = null) =>
         new()
         {
             Self = new SelfProjection
             {
                 Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u,
                 CellId = 0x86020001u, PositionX = 0, PositionY = 0, PositionZ = 0,
-                HealthFraction = 1.0f,
+                HealthFraction = 1.0f, Level = selfLevel,
             },
             Inventory = inventory,
             Visible = visible,
@@ -2850,6 +2851,169 @@ public class StrategyFoundationTests
         // Aggregate Kills(0+5)=5 > 0 => name NOT beaten => attack the NEARER drudge,
         // not the farther rabbit (proves aggregation, not first-row short-circuit).
         Assert.Equal(DrudgeGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_RetestsNonLethalLoss_AfterLevelUp()
+    {
+        // The bot only ever NON-LETHALLY lost to "Drudge Skulker" (near-deaths,
+        // never an actual death) at level 3. It is now level 8 — stronger — so
+        // the fallback RE-TESTS the kind (adaptive learning) instead of skipping
+        // it forever. Only that kind is visible -> it gets attacked.
+        const uint DrudgeGuid = 0x80000070;
+        const uint WeaponGuid = 0x80000071;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            },
+            selfLevel: 8) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 0, NearDeaths: 3, Fights: 3, LastOutcome: "near-death", MaxLossBotLevel: 3),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind); // out-leveled non-lethal loss -> re-test
+        Assert.Equal(DrudgeGuid, goal.Target.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_KeepsBeaten_NonLethalLoss_NotYetLeveled()
+    {
+        // Same non-lethal loss, but the bot is STILL at the loss level (8, not
+        // > 8) -> the kind stays beaten and is skipped (no re-test until the bot
+        // genuinely out-levels its highest loss).
+        const uint DrudgeGuid = 0x80000080;
+        const uint WeaponGuid = 0x80000081;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            },
+            selfLevel: 8) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 0, NearDeaths: 3, Fights: 3, LastOutcome: "near-death", MaxLossBotLevel: 8),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Attack, goal!.Kind); // not yet out-leveled -> skip
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_KeepsBeaten_DeathKind_EvenAfterLevelUp()
+    {
+        // A kind that has EVER killed the bot (Deaths>0) stays permanently
+        // beaten regardless of level — protects the no-death record (flee
+        // reflexes are reactive and cannot stop a first-hit burst). Even though
+        // the bot (level 8) has out-leveled the loss (level 3), it is skipped.
+        const uint DrudgeGuid = 0x80000090;
+        const uint WeaponGuid = 0x80000091;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            },
+            selfLevel: 8) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 2, NearDeaths: 1, Fights: 3, LastOutcome: "death", MaxLossBotLevel: 3),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Attack, goal!.Kind); // death-kind stays beaten
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_KeepsBeaten_WhenSelfLevelUnknown()
+    {
+        // With the bot's level unknown (null) the re-test cannot fire, so a
+        // non-lethal beaten kind stays beaten (safe default — never re-feeds on
+        // missing data).
+        const uint DrudgeGuid = 0x800000A0;
+        const uint WeaponGuid = 0x800000A1;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            },
+            selfLevel: null) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 0, NearDeaths: 3, Fights: 3, LastOutcome: "near-death", MaxLossBotLevel: 3),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Attack, goal!.Kind); // unknown level -> stay beaten
     }
 
     [Fact]

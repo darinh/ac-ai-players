@@ -6444,6 +6444,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var normName = CombatFeelLedger.NormalizeName(name);
 
         int fights = 0, kills = 0, deaths = 0, nearDeaths = 0, ineffective = 0;
+        int? maxLossBotLevel = null; // highest loss level across matched rows
         string? lastOutcome = null;   // history is recency-ordered: first match is newest
         string? displayName = null;   // representative name: first (newest) matched row
         var matched = false;
@@ -6460,6 +6461,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             deaths += h.Deaths;
             nearDeaths += h.NearDeaths;
             ineffective += h.Ineffective;
+            if (h.MaxLossBotLevel is int hl)
+                maxLossBotLevel = maxLossBotLevel is int cur ? (hl > cur ? hl : cur) : hl;
             lastOutcome ??= h.LastOutcome;
             displayName ??= h.Name;
         }
@@ -6472,7 +6475,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             NearDeaths: nearDeaths,
             Ineffective: ineffective,
             Fights: fights,
-            LastOutcome: lastOutcome ?? "");
+            LastOutcome: lastOutcome ?? "",
+            MaxLossBotLevel: maxLossBotLevel);
     }
 
     /// <summary>

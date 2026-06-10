@@ -95,7 +95,11 @@ internal sealed record CombatHistoryEntry(
     int NearDeaths,
     int Fights,
     string LastOutcome,
-    int Ineffective = 0);
+    int Ineffective = 0,
+    // Highest bot level at which a LOSS to this kind was recorded (null when
+    // unknown — e.g. ledgers persisted before this field existed). Drives the
+    // fallback's adaptive beaten-kind re-test; never rendered to the LLM.
+    int? MaxLossBotLevel = null);
 
 internal sealed class WorldState
 {
