@@ -1681,9 +1681,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 ownPlayerSeen = true;
                             break;
                         case ServerMessageMessage sm:
-                            // Trim huge welcome banners for log readability.
-                            var preview = sm.Text.Length > 80 ? sm.Text.Substring(0, 80) + "..." : sm.Text;
-                            Console.WriteLine($"[observe]   -> ServerMessage(chatType=0x{sm.ChatMessageType:X}): \"{preview}\"");
+                            // Show server text generously (DialogLogPreview):
+                            // a task an NPC assigns can arrive on this channel
+                            // and the old 80-char cap hid the actionable words.
+                            Console.WriteLine($"[observe]   -> ServerMessage(chatType=0x{sm.ChatMessageType:X}): \"{DialogLogPreview(sm.Text)}\"");
                             eventStream.Append(new StreamEvent
                             {
                                 Sequence = 0,
@@ -2034,6 +2035,10 @@ internal sealed class HandshakeDriver : IDisposable
                             // Always surface to the LLM event stream.
                             if (ge.Payload?.PopupString is { } popup)
                             {
+                                // Surface the actual popup text in the deploy log
+                                // (criterion-2 diagnostics): a quest-accept / "you
+                                // cannot" reply arrives here and was never logged.
+                                Console.WriteLine($"[observe]   -> PopupString: \"{DialogLogPreview(popup.Message)}\"");
                                 eventStream.Append(new StreamEvent
                                 {
                                     Sequence = 0,
@@ -2057,6 +2062,12 @@ internal sealed class HandshakeDriver : IDisposable
                                 tell.SenderId != chosenCharacterGuid)
                             {
                                 var sourceSnap = worldState.TryGet(tell.SenderId);
+                                // Surface NPC dialog text in the deploy log
+                                // (criterion-2 diagnostics): a kill/fetch/reach
+                                // task an NPC assigns arrives here as a Tell and
+                                // was previously appended to the event stream but
+                                // never logged, so it was invisible post-run.
+                                Console.WriteLine($"[observe]   -> NpcDialog from=\"{sourceSnap?.Name ?? tell.SenderName}\" (0x{tell.SenderId:X8}): \"{DialogLogPreview(tell.Message)}\"");
                                 eventStream.Append(new StreamEvent
                                 {
                                     Sequence = 0,
@@ -2871,9 +2882,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"[{(applied ? "removed from inventory" : "noop (unknown guid)")}]");
                             break;
                         case HearSpeechMessage hs:
-                            var hsPreview = hs.Message.Length > 80 ? hs.Message.Substring(0, 80) + "..." : hs.Message;
                             Console.WriteLine(
-                                $"[observe]   -> HearSpeech: <{hs.SenderName}> (0x{hs.SenderId:X8}, chatType=0x{hs.ChatMessageType:X}): \"{hsPreview}\"");
+                                $"[observe]   -> HearSpeech: <{hs.SenderName}> (0x{hs.SenderId:X8}, chatType=0x{hs.ChatMessageType:X}): \"{DialogLogPreview(hs.Message)}\"");
                             break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
@@ -9220,6 +9230,29 @@ internal sealed class HandshakeDriver : IDisposable
         var clientSeed = body.Slice(24, 4).ToArray();
 
         return new ConnectRequestData(serverTime, cookie, clientId, serverSeed, clientSeed);
+    }
+
+    // Diagnostics-only preview cap for server/NPC text in the [observe]
+    // log. Deliberately well above the prompt's own `## Server hints`
+    // truncation so a task an NPC assigns (kill/fetch/reach) is visible
+    // in FULL in the deploy log. The earlier 80-char cap hid task text,
+    // and NpcDialog/PopupString were not logged at all — that blinded
+    // diagnosis of whether the prompt-side hint truncation drops the
+    // actionable words a quest compiler must copy. Newlines are collapsed
+    // to a literal "\n" so a multi-line emote stays one greppable line.
+    // Logging only; never read by decision-making.
+    internal const int DialogLogPreviewMaxChars = 600;
+
+    internal static string DialogLogPreview(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        // Normalize CRLF and lone CR to LF first so every line break becomes
+        // exactly one literal "\n" (a lone "\r" must keep the boundary, not
+        // vanish), then escape so a multi-line emote stays one greppable line.
+        var oneLine = text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\\n");
+        return oneLine.Length > DialogLogPreviewMaxChars
+            ? oneLine.Substring(0, DialogLogPreviewMaxChars) + "..."
+            : oneLine;
     }
 
     private static string Hex(byte[] bytes) => Hex(bytes.AsSpan());
