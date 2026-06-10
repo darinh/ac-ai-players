@@ -378,6 +378,103 @@ public class LlmGoalPolicyTests
         Assert.Contains("Talk each once", prompt);
     }
 
+    // ---- ## Untalked NPCs nearby (protected discovery capsule) ------------
+    // The distance-capped `## Nearest objects` capsule surfaces only the
+    // closest few objects, so a not-yet-talked NPC beyond that cutoff vanishes
+    // from the model's view once `## Visible nearby` is trimmed under budget,
+    // even though the "untalked npcs in view: N" line says such NPCs exist.
+    // This capsule re-surfaces the nearest not-yet-talked NPCs that are NOT
+    // already in `## Nearest objects`, so each stays targetable by name.
+
+    private static VisibleObjectProjection[] NearTalkedNpcs(int count)
+        => Enumerable.Range(0, count)
+            .Select(i => CivilianNpc((uint)(0x90000000u + (uint)i)) with { Distance = 1f + i })
+            .ToArray();
+
+    [Fact]
+    public void BuildUserPrompt_UntalkedNpcsCapsule_SurfacesFarUntalkedNpcBeyondNearestObjects()
+    {
+        // 25 near NPCs (all already Talked) saturate the distance-capped
+        // `## Nearest objects` capsule; one not-yet-talked NPC sits far beyond
+        // that cutoff. It must still be re-surfaced by name in the capsule.
+        var near = NearTalkedNpcs(25);
+        var farUntalked = CivilianNpc(0x800000FFu) with { Distance = 80f };
+        var world = BuildVisibleWorld(near.Append(farUntalked).ToArray());
+        var talked = new HashSet<uint>(near.Select(n => n.Guid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: talked);
+
+        Assert.Contains("## Untalked NPCs nearby", prompt);
+        Assert.Contains("Npc 800000FF", CapsuleSection(prompt, "## Untalked NPCs nearby"));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenAllNpcsTalked()
+    {
+        var npcs = NearTalkedNpcs(25);
+        var world = BuildVisibleWorld(npcs);
+        var talked = new HashSet<uint>(npcs.Select(n => n.Guid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: talked);
+
+        Assert.DoesNotContain("## Untalked NPCs nearby", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
+    {
+        // A single not-yet-talked NPC that is the nearest object is already in
+        // `## Nearest objects`; the discovery capsule adds nothing, so it is
+        // omitted (no pure duplication).
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u) with { Distance = 3f });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: new HashSet<uint>());
+
+        Assert.Contains("## Nearest objects", prompt);
+        Assert.DoesNotContain("## Untalked NPCs nearby", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UntalkedNpcsCapsule_SurvivesBodyTrimAtTinyCeiling()
+    {
+        // The capsule lives in the protected salience tail, so a far not-yet-
+        // talked NPC stays visible by name even at a tight request ceiling that
+        // forces the trimmable `## Visible nearby` body section to be shed.
+        var near = NearTalkedNpcs(25);
+        var farUntalked = CivilianNpc(0x800000FFu) with { Distance = 80f };
+        var world = BuildVisibleWorld(near.Append(farUntalked).ToArray());
+        var talked = new HashSet<uint>(near.Select(n => n.Guid));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: talked, promptCeiling: 10000);
+
+        Assert.Contains("## Untalked NPCs nearby", prompt);
+        Assert.Contains("Npc 800000FF", CapsuleSection(prompt, "## Untalked NPCs nearby"));
+        Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
+    }
+
+    // Returns the text of a `## `-headed section: from the header up to the
+    // next `## ` header (or end of prompt). Bounds Contains assertions to the
+    // intended capsule so a name appearing in a later section can't pass.
+    private static string CapsuleSection(string prompt, string header)
+    {
+        int start = prompt.IndexOf(header, StringComparison.Ordinal);
+        if (start < 0) return string.Empty;
+        int next = prompt.IndexOf("\n## ", start + header.Length, StringComparison.Ordinal);
+        return next < 0 ? prompt.Substring(start) : prompt.Substring(start, next - start);
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_TalkedNpcPersistsAfterEmissionAgesOut()
     {

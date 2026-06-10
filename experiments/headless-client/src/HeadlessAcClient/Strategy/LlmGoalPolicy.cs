@@ -5758,6 +5758,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // force the body hard-cut to eat the fixed rules preamble. Pure request-
         // size management by structural position (cp-2343 class); no game
         // knowledge.
+        var nearestShownGuids = new HashSet<uint>();
         if (world.Visible.Count > 0)
         {
             var nearestRows = new List<string>();
@@ -5770,6 +5771,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     break;
                 nearestRows.Add(row);
                 nearestChars += row.Length + 1;
+                nearestShownGuids.Add(v.Guid);
             }
             sb.AppendLine();
             sb.AppendLine("## Nearest objects");
@@ -5779,6 +5781,63 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "list is there when it fits:");
             foreach (var row in nearestRows)
                 sb.AppendLine(row);
+        }
+
+        // ── ## Untalked NPCs nearby (protected salience capsule) ──────────
+        // The same established salience fix as the `## Monsters in view`,
+        // `## Recent Talk`, and `## Nearest objects` protected capsules: re-
+        // surface an ALREADY-COMPUTED perception in the protected tail so it
+        // survives the request-size fitter. The "untalked npcs in view: N"
+        // recency line (CountUntalkedNpcsInView) already exposes this exact
+        // perception class — visible creatures the bot has not Talked this
+        // session — as a COUNT; this capsule lists their NAMES so that count is
+        // actionable, because the model names its Talk target and a name it
+        // never sees is a target it cannot reach. `## Nearest objects` above is
+        // distance-capped and object-type-neutral, so in a creature-dense scene
+        // a not-yet-Talked NPC beyond that cutoff is dropped once the body
+        // `## Visible nearby` section is trimmed. Identity is mechanical only:
+        // wire creature flags plus the session talked-set bookkeeping (the
+        // bot's own emissions) — the same signals behind the count line. Rows
+        // already shown by `## Nearest objects` are skipped to avoid pure
+        // duplication. No object-type priority and no urgency in source: the
+        // existing RULES (the same ones that already act on the untalked-npc
+        // count) supply the judgment of whether and when to Talk, and the LLM
+        // decides. Self-bounded char budget so the protected tail stays well
+        // under the ceiling. Perception re-positioned for salience; no game
+        // knowledge.
+        if (world.Visible.Count > 0)
+        {
+            var untalkedRows = new List<string>();
+            int untalkedChars = 0;
+            foreach (var v in world.Visible
+                         .Where(v =>
+                             v.IsCreature && !v.IsMonster && !v.IsCorpse && !v.ObservedHostile
+                             && !nearestShownGuids.Contains(v.Guid)
+                             && !IsNpcAlreadyTalked(v, talkedNpcGuids, talkedNpcNames))
+                         .OrderBy(v => v.Distance ?? float.MaxValue))
+            {
+                var row = ClampRow(RenderVisibleRow(v, world.CombatHistory, world.OpenedCorpseGuids));
+                if (untalkedRows.Count > 0 &&
+                    untalkedChars + row.Length + 1 > UntalkedNpcsProtectedCharBudget)
+                    break;
+                untalkedRows.Add(row);
+                untalkedChars += row.Length + 1;
+            }
+            if (untalkedRows.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Untalked NPCs nearby");
+                sb.AppendLine(
+                    $"- {untalkedRows.Count} visible npc(s) you have NOT Talked this session that are " +
+                    "not already listed above, kept here so they stay legible by name even when " +
+                    "`## Visible nearby` is trimmed; nearest-first by distance:");
+                foreach (var row in untalkedRows)
+                    sb.AppendLine(row);
+                sb.AppendLine(
+                    "- raw fact, not a recommendation: these are the same not-yet-Talked visible npcs " +
+                    "as the `untalked npcs in view` count above. The goal verbs Talk, Use, Pickup, " +
+                    "Attack, and Explore all remain executable right now. Your call.");
+            }
         }
 
         // ── ## Recent Talk (end-of-prompt salience capsule) ──────────────
@@ -6608,6 +6667,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // head preamble, which the hard-cut preserves) to fit. ~450 chars fits
     // several short rows (nearest-first) while leaving ample body headroom.
     private const int NearestObjectsProtectedCharBudget = 450;
+
+    // Total char budget for the protected `## Untalked NPCs nearby` capsule
+    // ROWS — bounds the not-yet-talked NPC rows re-surfaced because they fell
+    // outside the distance-capped `## Nearest objects` capsule. Because it
+    // renders only the not-yet-talked-NPC subset (filtered by own talked-set
+    // bookkeeping + wire creature flags), ~450 chars reaches several rows
+    // deeper into the by-distance object rank than the same budget spent on all
+    // object types would, while keeping the combined protected salience tail
+    // well under the request ceiling so the body hard-cut never eats the head
+    // preamble. Same sizing rationale as `## Nearest objects`.
+    private const int UntalkedNpcsProtectedCharBudget = 450;
 
     // Total char budget for the protected `## Held items` capsule ROWS (cp-2389)
     // — bounds the rendered inventory rows so a huge bag cannot bloat the
