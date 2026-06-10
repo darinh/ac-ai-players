@@ -5449,7 +5449,9 @@ internal sealed class HandshakeDriver : IDisposable
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
                                 frontierCellCooldownUntil, huntBiasAuthorized, goal.Direction, out var outdoorPathCells,
-                                fallbackSweepHeading: exploreSweepHeading);
+                                fallbackSweepHeading: exploreSweepHeading,
+                                avoidBeatenHistory: worldState.CombatHistoryFull,
+                                selfLevelForBeaten: ReadSelfLevel(worldState));
                             if (outdoorFrontier is not null)
                             {
                                 exploreTarget = outdoorFrontier;
@@ -9380,7 +9382,10 @@ internal sealed class HandshakeDriver : IDisposable
     /// When <paramref name="huntBiasAuthorized"/> is true (the active Explore
     /// belongs to an LLM/operator-authorized HUNT excursion — see the call
     /// site), the bot's OWN remembered recent Mob sightings break a near-tie
-    /// in the geometric direction score toward a known hunt bearing. This is
+    /// in the geometric direction score toward a known hunt bearing — EXCLUDING
+    /// kinds the bot's own combat-feel (<paramref name="avoidBeatenHistory"/> +
+    /// <paramref name="selfLevelForBeaten"/>) marks as beaten-and-not-out-leveled,
+    /// so the walk is never biased back toward mobs it cannot beat. This is
     /// mechanical execution of an already-authorized hunt (the LLM still owns
     /// WHETHER to hunt and emits the Attack when a Mob enters view); it never
     /// fires for a non-hunt Explore, and it cannot override a clearly-more-
@@ -9394,7 +9399,9 @@ internal sealed class HandshakeDriver : IDisposable
         bool huntBiasAuthorized,
         string? headingDirection,
         out IReadOnlySet<uint>? pathCells,
-        string? fallbackSweepHeading = null)
+        string? fallbackSweepHeading = null,
+        IReadOnlyList<CombatHistoryEntry>? avoidBeatenHistory = null,
+        int? selfLevelForBeaten = null)
     {
         pathCells = null;
         if (Strategy.AcCoords.IsIndoor(currentCellId))
@@ -9438,6 +9445,16 @@ internal sealed class HandshakeDriver : IDisposable
             {
                 if (s.Kind != EntityKind.Mob) continue;
                 if (s.LastSeenUtc < ttlCutoff) continue;
+                // Don't bias the hunt-walk toward a kind the bot's OWN
+                // combat-feel says it loses to and has not out-leveled (the SAME
+                // beaten verdict cp-2385/cp-2420 use to skip ATTACKING it).
+                // Without this, the explore-bias walks the bot back into an area
+                // dense with mobs it cannot beat, contradicting the attack-time
+                // avoidance. Bot-owned outcomes + own level only; no game
+                // knowledge. Null history (caller passed none) => no exclusion.
+                if (Strategy.LlmGoalPolicy.IsBeatenKind(
+                        avoidBeatenHistory, s.Wcid, s.Name, selfLevelForBeaten))
+                    continue;
                 (mobSightings ??= new()).Add(
                     new Strategy.OutdoorFrontierExplorer.MonsterSighting(s.WorldX, s.WorldY));
             }

@@ -6480,6 +6480,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
+    /// True iff the bot's OWN combat-feel <paramref name="history"/> marks the
+    /// kind (<paramref name="wcid"/>/<paramref name="name"/>) as a repeated loss
+    /// the bot has NOT out-leveled. "Beaten" = Kills==0 with a recorded loss
+    /// (death/near-death/ineffective) — UNLESS that loss was NON-LETHAL
+    /// (Deaths==0) and the bot's <paramref name="currentLevel"/> now exceeds the
+    /// highest level it lost at, in which case it is re-testable (the bot is
+    /// stronger now). Kinds that have EVER killed the bot (Deaths&gt;0) stay
+    /// beaten regardless of level (protects the no-death record). Aggregates by
+    /// wcid OR normalized name via <see cref="FindCombatRecord"/>. Shared by the
+    /// fallback hunt-target skip AND the outdoor frontier mob-bias so both avoid
+    /// the SAME kinds. Bot-owned outcomes + own level only; no game knowledge.
+    /// Null/empty history or no matching record =&gt; not beaten.
+    /// </summary>
+    internal static bool IsBeatenKind(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+    {
+        var record = FindCombatRecord(history, wcid, name);
+        if (record is null) return false;
+        var lost = record.Kills == 0
+            && (record.Deaths > 0 || record.NearDeaths > 0 || record.Ineffective > 0);
+        if (!lost) return false;
+        if (record.Deaths == 0
+            && currentLevel is int cur
+            && record.MaxLossBotLevel is int maxLossLevel
+            && cur > maxLossLevel)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Renders the inline raw-record annotation for a visible monster (or
     /// the empty string when there is no matching history). Raw counts
     /// only — the LLM judges danger from them via the COMBAT SAFETY rule.
