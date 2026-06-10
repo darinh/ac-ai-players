@@ -32,6 +32,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using HeadlessAcClient.Protocol.GameMessages;
 
 namespace HeadlessAcClient.World;
@@ -205,6 +206,14 @@ internal sealed class WorldState
     /// </summary>
     public WorldObjectSnapshot? Self
         => SelfGuid is uint g && _objects.TryGetValue(g, out var s) ? s : null;
+
+    /// <summary>
+    /// The bot's current fellowship membership, set/refreshed from the server's
+    /// FellowshipFullUpdate (0x02BE) snapshot and cleared on Disband (0x02BF) or
+    /// a self-targeted Quit/Dismiss. Null when the bot is not in a fellowship.
+    /// Pure perception memory; the LLM owns any decision about the fellowship.
+    /// </summary>
+    public FellowshipMembership? Fellowship { get; private set; }
 
     public int ObjectCount => _objects.Count;
 
@@ -423,6 +432,64 @@ internal sealed class WorldState
     private bool ApplyPlayerCreate(PlayerCreateMessage pc)
     {
         SetSelf(pc.Guid);
+        return true;
+    }
+
+    /// <summary>
+    /// Record the server's whole-fellowship snapshot (FellowshipFullUpdate,
+    /// 0x02BE). Replaces any prior membership wholesale — the snapshot is
+    /// authoritative. Maps each wire fellow to a <see cref="FellowshipMember"/>
+    /// (identity/name/level only). Always returns true. Wire projection only;
+    /// assigns no priority or game meaning.
+    /// </summary>
+    public bool ApplyFellowshipFullUpdate(FellowshipFullUpdatePayload payload)
+    {
+        var members = payload.Members
+            .Select(m => new FellowshipMember(m.Guid, m.Name, m.Level))
+            .ToList();
+        Fellowship = new FellowshipMembership(
+            payload.FellowshipName,
+            payload.LeaderGuid,
+            members,
+            payload.ShareXp,
+            payload.EvenShare,
+            payload.Open,
+            payload.IsLocked);
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a fellowship departure (FellowshipQuit 0x00A3 or FellowshipDismiss
+    /// 0x00A4). If the departing guid is the bot's own, the bot has left → clear
+    /// the whole membership. Otherwise drop that member from the snapshot so the
+    /// perceived roster stays exact between full snapshots (a non-leader quit
+    /// sends remaining members only a Quit, no FullUpdate). No-op (returns false)
+    /// when not in a fellowship or the guid is not a current member.
+    /// </summary>
+    public bool ApplyFellowshipDeparture(uint departedGuid)
+    {
+        if (Fellowship is null)
+            return false;
+        if (SelfGuid is uint self && departedGuid == self)
+            return ClearFellowship();
+        var remaining = Fellowship.Members
+            .Where(m => m.Guid != departedGuid)
+            .ToList();
+        if (remaining.Count == Fellowship.Members.Count)
+            return false; // departed guid was not a current member
+        Fellowship = Fellowship with { Members = remaining };
+        return true;
+    }
+
+    /// <summary>
+    /// Clear the bot's fellowship membership (FellowshipDisband 0x02BF, or a
+    /// self-targeted Quit/Dismiss). Returns false if there was nothing to clear.
+    /// </summary>
+    public bool ClearFellowship()
+    {
+        if (Fellowship is null)
+            return false;
+        Fellowship = null;
         return true;
     }
 

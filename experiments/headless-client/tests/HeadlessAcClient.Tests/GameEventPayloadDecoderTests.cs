@@ -546,4 +546,57 @@ public class GameEventPayloadDecoderTests
         Assert.Equal("Café", p!.FellowshipFullUpdate!.Members[0].Name);
         Assert.Equal("Naïve", p.FellowshipFullUpdate.FellowshipName);
     }
+
+    // ---- FellowshipQuit (0x00A3) / FellowshipDismiss (0x00A4) / FellowshipDisband (0x02BF) ----
+
+    private static byte[] U32Body(uint v)
+    {
+        var b = new byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(b, v);
+        return b;
+    }
+
+    [Fact]
+    public void Decode_FellowshipQuit_ReadsDepartedGuid()
+    {
+        // Server writes a single u32 — the guid of the player who quit.
+        var p = GameEventPayloadDecoder.Decode(U32Body(0xABCD1234u), GameEventType.FellowshipQuit);
+        Assert.NotNull(p?.FellowshipQuit);
+        Assert.Equal(0xABCD1234u, p!.FellowshipQuit!.DepartedGuid);
+        Assert.Null(p.FellowshipFullUpdate);
+        Assert.Null(p.FellowshipDismiss);
+    }
+
+    [Fact]
+    public void Decode_FellowshipDismiss_ReadsDismissedGuid()
+    {
+        // Server writes a single u32 — the guid of the dismissed player.
+        var p = GameEventPayloadDecoder.Decode(U32Body(0x00112233u), GameEventType.FellowshipDismiss);
+        Assert.NotNull(p?.FellowshipDismiss);
+        Assert.Equal(0x00112233u, p!.FellowshipDismiss!.DismissedGuid);
+        Assert.Null(p.FellowshipFullUpdate);
+        Assert.Null(p.FellowshipQuit);
+    }
+
+    [Fact]
+    public void Decode_FellowshipDisband_EmptyPayloadCarriesEventType()
+    {
+        // Disband has no body; the EventType alone signals the dissolution. The
+        // decoder returns a non-null payload with no fellowship sub-record set.
+        var p = GameEventPayloadDecoder.Decode(Array.Empty<byte>(), GameEventType.FellowshipDisband);
+        Assert.NotNull(p);
+        Assert.Equal(GameEventType.FellowshipDisband, p!.EventType);
+        Assert.Null(p.FellowshipFullUpdate);
+        Assert.Null(p.FellowshipQuit);
+        Assert.Null(p.FellowshipDismiss);
+    }
+
+    [Fact]
+    public void Decode_FellowshipQuit_ShortBody_ReturnsNull()
+    {
+        // A truncated quit body (< 4 bytes) is rejected by the decoder guard;
+        // the outer catch returns null so the caller falls back to PayloadBytes.
+        var p = GameEventPayloadDecoder.Decode(new byte[] { 0x01, 0x02 }, GameEventType.FellowshipQuit);
+        Assert.Null(p);
+    }
 }

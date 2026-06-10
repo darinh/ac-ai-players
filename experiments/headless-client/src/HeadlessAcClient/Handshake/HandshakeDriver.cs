@@ -1935,6 +1935,39 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"{(seededSkills ? "" : "(skip)")}");
                                 MaybeEmitSelfProgress(ref lastObservedUnspentXp, worldState, eventStream);
                             }
+                            // fellowship-perception: route the server's
+                            // fellowship snapshot / departure events into
+                            // WorldState so the LLM prompt can perceive "you
+                            // are in a fellowship with X". Guard on the
+                            // GameEvent recipient matching self so an event
+                            // addressed elsewhere can't corrupt our membership.
+                            // Projection-only: source records the membership;
+                            // it never decides to join/leave/act on a fellowship.
+                            if (worldState.SelfGuid is uint felSelf && ge.ReceiverGuid == felSelf)
+                            {
+                                if (ge.Payload?.FellowshipFullUpdate is { } fellowFull)
+                                {
+                                    worldState.ApplyFellowshipFullUpdate(fellowFull);
+                                    Console.WriteLine(
+                                        $"[fellowship] full update: \"{fellowFull.FellowshipName}\" " +
+                                        $"members={fellowFull.Members.Count} leader=0x{fellowFull.LeaderGuid:X8}");
+                                }
+                                else if (ge.EventType == GameEventType.FellowshipDisband)
+                                {
+                                    if (worldState.ClearFellowship())
+                                        Console.WriteLine("[fellowship] disbanded");
+                                }
+                                else if (ge.Payload?.FellowshipQuit is { } fellowQuit)
+                                {
+                                    if (worldState.ApplyFellowshipDeparture(fellowQuit.DepartedGuid))
+                                        Console.WriteLine($"[fellowship] quit: 0x{fellowQuit.DepartedGuid:X8}");
+                                }
+                                else if (ge.Payload?.FellowshipDismiss is { } fellowDismiss)
+                                {
+                                    if (worldState.ApplyFellowshipDeparture(fellowDismiss.DismissedGuid))
+                                        Console.WriteLine($"[fellowship] dismissed: 0x{fellowDismiss.DismissedGuid:X8}");
+                                }
+                            }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh
                             // packet now that the server reports the

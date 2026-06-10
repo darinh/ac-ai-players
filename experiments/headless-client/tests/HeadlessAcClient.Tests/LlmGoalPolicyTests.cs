@@ -4435,6 +4435,117 @@ public class LlmGoalPolicyTests
         Assert.Equal(4, proj.MovementBlockStopsSinceSelfMoved);
     }
 
+    // ── fellowship perception ("## Fellowship" section) ──────────────────
+    private static WorldStateProjection BuildFellowshipWorld(FellowshipProjection? fellow) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        Fellowship = fellow,
+    };
+
+    [Fact]
+    public void Fellowship_NotInOne_SectionOmitted()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(null), new EventStream(), null);
+        Assert.DoesNotContain("## Fellowship", prompt);
+    }
+
+    [Fact]
+    public void Fellowship_AsLeader_RendersMembersAndLeaderClause()
+    {
+        var fellow = new FellowshipProjection
+        {
+            Name = "Crew", AmLeader = true, LeaderName = "Headless", MemberCount = 2,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Headless", Level = 10u, IsSelf = true, IsLeader = true },
+                new FellowshipMemberProjection { Name = "Pal", Level = 12u, IsSelf = false, IsLeader = false },
+            },
+            ShareXp = true, EvenShare = false, Open = true, Locked = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Fellowship", prompt);
+        Assert.Contains("you are in a fellowship \"Crew\"", prompt);
+        Assert.Contains("2 member(s)", prompt);
+        Assert.Contains("you are the leader", prompt);
+        Assert.Contains("Headless (L10, you, leader)", prompt);
+        Assert.Contains("Pal (L12)", prompt);
+        Assert.Contains("shares XP yes", prompt);
+        Assert.Contains("open yes", prompt);
+        Assert.Contains("locked no", prompt);
+    }
+
+    [Fact]
+    public void Fellowship_AsMember_RendersLedByLeaderName()
+    {
+        var fellow = new FellowshipProjection
+        {
+            Name = "Squad", AmLeader = false, LeaderName = "Boss", MemberCount = 2,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Boss", Level = 20u, IsSelf = false, IsLeader = true },
+                new FellowshipMemberProjection { Name = "Headless", Level = 8u, IsSelf = true, IsLeader = false },
+            },
+            ShareXp = false, EvenShare = true, Open = false, Locked = true,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Fellowship", prompt);
+        Assert.Contains("led by Boss", prompt);
+        Assert.DoesNotContain("you are the leader", prompt);
+        Assert.Contains("Headless (L8, you)", prompt);
+        Assert.Contains("Boss (L20, leader)", prompt);
+        Assert.Contains("locked yes", prompt);
+    }
+
+    [Fact]
+    public void Fellowship_FromWorldState_DerivesAmLeaderAndSelfFlags()
+    {
+        var ws = new HeadlessAcClient.World.WorldState();
+        ws.SetSelf(SelfGuid);
+        // Materialize the self snapshot so FromWorldState returns a projection.
+        ws.Apply(new HeadlessAcClient.Protocol.GameMessages.PrivateUpdatePropertyIntMessage(
+            Sequence: 1, Property: 25, Value: 5));
+        ws.ApplyFellowshipFullUpdate(new HeadlessAcClient.Protocol.GameMessages.FellowshipFullUpdatePayload(
+            new[]
+            {
+                new HeadlessAcClient.Protocol.GameMessages.FellowMember(SelfGuid, 5u, 0u, 0u, 0u, 0u, 0u, 0u, "Headless"),
+                new HeadlessAcClient.Protocol.GameMessages.FellowMember(0x90000010u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, "Pal"),
+            },
+            FellowshipName: "Crew", LeaderGuid: SelfGuid,
+            ShareXp: true, EvenShare: false, Open: false, IsLocked: false));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        Assert.NotNull(proj!.Fellowship);
+        Assert.Equal("Crew", proj.Fellowship!.Name);
+        Assert.True(proj.Fellowship.AmLeader);
+        Assert.Equal("Headless", proj.Fellowship.LeaderName);
+        Assert.Equal(2, proj.Fellowship.MemberCount);
+        var me = proj.Fellowship.Members.Single(m => m.IsSelf);
+        Assert.Equal("Headless", me.Name);
+        Assert.True(me.IsLeader);
+        var pal = proj.Fellowship.Members.Single(m => !m.IsSelf);
+        Assert.Equal("Pal", pal.Name);
+        Assert.False(pal.IsLeader);
+    }
+
+    [Fact]
+    public void Fellowship_FromWorldState_NoFellowship_NullProjection()
+    {
+        var ws = new HeadlessAcClient.World.WorldState();
+        ws.SetSelf(SelfGuid);
+        ws.Apply(new HeadlessAcClient.Protocol.GameMessages.PrivateUpdatePropertyIntMessage(
+            Sequence: 1, Property: 25, Value: 5));
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        Assert.Null(proj!.Fellowship);
+    }
+
     // ── named-target search telemetry ("## Search progress" section) ─────
     private static WorldStateProjection BuildNamedSearchWorld(
         string? targetName, int probes, int distinctCells) => new()

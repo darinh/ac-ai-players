@@ -223,6 +223,38 @@ internal sealed record SelfSkillProjection
     [JsonPropertyName("raised_ranks")] public uint RaisedRanks { get; init; }
 }
 
+/// <summary>One fellowship member as surfaced to the LLM prompt.</summary>
+internal sealed record FellowshipMemberProjection
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    [JsonPropertyName("level")] public uint Level { get; init; }
+    /// <summary>True when this member is the bot itself.</summary>
+    [JsonPropertyName("is_self")] public bool IsSelf { get; init; }
+    /// <summary>True when this member is the fellowship leader.</summary>
+    [JsonPropertyName("is_leader")] public bool IsLeader { get; init; }
+}
+
+/// <summary>
+/// The bot's fellowship as perceived by the LLM: whether it is in one, who is
+/// in it, who leads, and the share/open/lock flags. Null on the parent
+/// projection ⇒ the bot is not in a fellowship. Raw membership facts only — no
+/// advice about whether or how to use the fellowship.
+/// </summary>
+internal sealed record FellowshipProjection
+{
+    [JsonPropertyName("name")] public required string Name { get; init; }
+    /// <summary>True when the bot itself is the fellowship leader.</summary>
+    [JsonPropertyName("am_leader")] public bool AmLeader { get; init; }
+    /// <summary>Display name of the leader, or null if the leader is not in the roster.</summary>
+    [JsonPropertyName("leader_name")] public string? LeaderName { get; init; }
+    [JsonPropertyName("member_count")] public int MemberCount { get; init; }
+    [JsonPropertyName("members")] public required IReadOnlyList<FellowshipMemberProjection> Members { get; init; }
+    [JsonPropertyName("share_xp")] public bool ShareXp { get; init; }
+    [JsonPropertyName("even_share")] public bool EvenShare { get; init; }
+    [JsonPropertyName("open")] public bool Open { get; init; }
+    [JsonPropertyName("locked")] public bool Locked { get; init; }
+}
+
 internal sealed record WorldStateProjection
 {
     [JsonPropertyName("self")]
@@ -233,6 +265,16 @@ internal sealed record WorldStateProjection
 
     [JsonPropertyName("visible")]
     public required IReadOnlyList<VisibleObjectProjection> Visible { get; init; }
+
+    /// <summary>
+    /// fellowship-perception: the bot's current fellowship (membership, leader,
+    /// flags), or null when not in one. Built from <see cref="WorldState.Fellowship"/>.
+    /// Surfaced in the "## Fellowship" prompt section as raw facts so the LLM can
+    /// reason about fellowship goals; source assigns no priority and never decides
+    /// to join/leave/act on a fellowship.
+    /// </summary>
+    [JsonPropertyName("fellowship")]
+    public FellowshipProjection? Fellowship { get; init; }
 
     /// <summary>
     /// combat-damage-output: the live outcome of the current melee
@@ -590,6 +632,41 @@ internal sealed record WorldStateProjection
             if (raisable.Count > 0) skillProj = raisable;
         }
 
+        // fellowship-perception: map WorldState's membership snapshot into the
+        // prompt projection, deriving "am I the leader" and each member's
+        // self/leader flags from the bot's own guid (known here — Self is
+        // non-null above). Raw facts only; no priority or game meaning.
+        FellowshipProjection? fellowshipProj = null;
+        if (world.Fellowship is { } fel)
+        {
+            string? leaderName = null;
+            var memberProj = new List<FellowshipMemberProjection>(fel.Members.Count);
+            foreach (var m in fel.Members)
+            {
+                var isLeader = m.Guid == fel.LeaderGuid;
+                if (isLeader) leaderName = m.Name;
+                memberProj.Add(new FellowshipMemberProjection
+                {
+                    Name = m.Name,
+                    Level = m.Level,
+                    IsSelf = m.Guid == self.Guid,
+                    IsLeader = isLeader,
+                });
+            }
+            fellowshipProj = new FellowshipProjection
+            {
+                Name = fel.Name,
+                AmLeader = fel.LeaderGuid == self.Guid,
+                LeaderName = leaderName,
+                MemberCount = fel.Members.Count,
+                Members = memberProj,
+                ShareXp = fel.ShareXp,
+                EvenShare = fel.EvenShare,
+                Open = fel.Open,
+                Locked = fel.IsLocked,
+            };
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -615,6 +692,7 @@ internal sealed record WorldStateProjection
             },
             Inventory = inv,
             Visible = visible,
+            Fellowship = fellowshipProj,
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,

@@ -20,6 +20,7 @@
 //      same guid (merge preserves PropertyInts).
 
 using System;
+using System.Linq;
 using System.Numerics;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.World;
@@ -553,5 +554,102 @@ public class WorldStateTests
             CooldownId: null, CooldownDuration: null, PetOwner: null);
 
         return new ObjectCreateMessage(guid, model, physics, weenie);
+    }
+
+    // ---- Fellowship membership ----
+
+    private static FellowshipFullUpdatePayload BuildFellowship(
+        uint leaderGuid, params (uint guid, string name, uint level)[] members)
+        => new(
+            members.Select(m => new FellowMember(
+                m.guid, m.level, 0u, 0u, 0u, 0u, 0u, 0u, m.name)).ToList(),
+            FellowshipName: "Crew", LeaderGuid: leaderGuid,
+            ShareXp: true, EvenShare: false, Open: true, IsLocked: false);
+
+    [Fact]
+    public void Fellowship_FullUpdate_SetsMembership()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        Assert.True(ws.ApplyFellowshipFullUpdate(
+            BuildFellowship(TestGuid, (TestGuid, "Me", 10u), (OtherGuid, "Pal", 12u))));
+        Assert.NotNull(ws.Fellowship);
+        Assert.Equal("Crew", ws.Fellowship!.Name);
+        Assert.Equal(TestGuid, ws.Fellowship.LeaderGuid);
+        Assert.Equal(2, ws.Fellowship.Members.Count);
+        Assert.True(ws.Fellowship.ShareXp);
+        Assert.False(ws.Fellowship.EvenShare);
+        Assert.True(ws.Fellowship.Open);
+        Assert.False(ws.Fellowship.IsLocked);
+    }
+
+    [Fact]
+    public void Fellowship_FullUpdate_ReplacesPriorSnapshotWholesale()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.ApplyFellowshipFullUpdate(
+            BuildFellowship(TestGuid, (TestGuid, "Me", 10u), (OtherGuid, "Pal", 12u)));
+        // A later snapshot with one member must REPLACE, not merge.
+        ws.ApplyFellowshipFullUpdate(BuildFellowship(TestGuid, (TestGuid, "Me", 11u)));
+        Assert.Single(ws.Fellowship!.Members);
+        Assert.Equal(11u, ws.Fellowship.Members[0].Level);
+    }
+
+    [Fact]
+    public void Fellowship_Departure_Self_ClearsMembership()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.ApplyFellowshipFullUpdate(
+            BuildFellowship(OtherGuid, (TestGuid, "Me", 10u), (OtherGuid, "Boss", 12u)));
+        // The bot itself quit / was dismissed → the whole membership clears.
+        Assert.True(ws.ApplyFellowshipDeparture(TestGuid));
+        Assert.Null(ws.Fellowship);
+    }
+
+    [Fact]
+    public void Fellowship_Departure_OtherMember_RemovesOnlyThatMember()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.ApplyFellowshipFullUpdate(
+            BuildFellowship(TestGuid, (TestGuid, "Me", 10u), (OtherGuid, "Pal", 12u)));
+        // A DIFFERENT member quit → drop just them; the bot stays in the fellowship.
+        Assert.True(ws.ApplyFellowshipDeparture(OtherGuid));
+        Assert.NotNull(ws.Fellowship);
+        Assert.Single(ws.Fellowship!.Members);
+        Assert.Equal(TestGuid, ws.Fellowship.Members[0].Guid);
+    }
+
+    [Fact]
+    public void Fellowship_Departure_UnknownGuid_NoOp()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.ApplyFellowshipFullUpdate(BuildFellowship(TestGuid, (TestGuid, "Me", 10u)));
+        Assert.False(ws.ApplyFellowshipDeparture(0xDEADBEEFu));
+        Assert.Single(ws.Fellowship!.Members);
+    }
+
+    [Fact]
+    public void Fellowship_Departure_WhenNotInFellowship_NoOp()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        Assert.False(ws.ApplyFellowshipDeparture(TestGuid));
+        Assert.Null(ws.Fellowship);
+    }
+
+    [Fact]
+    public void Fellowship_Clear_OnDisband_AndIdempotent()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.ApplyFellowshipFullUpdate(BuildFellowship(TestGuid, (TestGuid, "Me", 10u)));
+        Assert.True(ws.ClearFellowship());
+        Assert.Null(ws.Fellowship);
+        // Already clear ⇒ returns false (no-op).
+        Assert.False(ws.ClearFellowship());
     }
 }
