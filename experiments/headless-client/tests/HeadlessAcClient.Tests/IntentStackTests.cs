@@ -178,6 +178,37 @@ public class IntentStackTests
     }
 
     [Fact]
+    public void CheckTopForCompletion_ChildPops_ParentResurfacesAsActiveTop()
+    {
+        // Criterion-2 turn-in shape: a parent "return-to-giver" intent with a
+        // child "kill-count" on top of it. When the child's completion predicate
+        // fires and it auto-pops, the parent must resurface as the ACTIVE top so
+        // the bot drives the turn-in — it must NOT be left buried, Blocked, or
+        // Completed. This locks the FILO transition the QUEST-DIALOG COMPILER
+        // turn-in guidance (cp-2615) and recent-history rationale (cp-2614) rely
+        // on. A satisfied LevelAtLeast predicate stands in for any auto-popping
+        // completion (e.g. kill_count_*); the resurface behavior is identical.
+        var s = new IntentStack();
+        var world = BuildWorld(level: 1);
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+
+        s.TryPush(NewIntent("i-001", "return-to-giver", baseline, new AlwaysFalsePredicate()));
+        s.TryPush(NewIntent("i-002", "kill-count",      baseline, new LevelAtLeastPredicate(5)));
+
+        var leveled = world with { Self = world.Self with { Level = 5 } };
+        var popped = s.CheckTopForCompletion(leveled, events, DateTime.UtcNow);
+
+        // The child popped...
+        Assert.NotNull(popped);
+        Assert.Equal("kill-count", popped!.Kind);
+        // ...and the parent is now the top AND Active (ready to drive turn-in).
+        Assert.Equal(1, s.Depth);
+        Assert.Equal("return-to-giver", s.Top!.Kind);
+        Assert.Equal(IntentLifecycle.Active, s.Top!.Status);
+    }
+
+    [Fact]
     public void CheckTopForCompletion_DeadlineElapsed_PopsAsExpired()
     {
         var s = new IntentStack();
