@@ -184,10 +184,11 @@ restart it to deploy bot changes; you only need it up
   to restart the session are NOT stop conditions — loop back to Phase 1
   and pick the next gap. See `.github/copilot-instructions.md`.
 - **Treating an LLM 429 / daily-quota wall as a blocker.** It is an
-  expected operating condition. Switch `AC_BOTS_LLM_MODEL` to a
-  quota-fresh model, or do non-LLM loop work (tests, call-volume
-  reduction, Motor/Tactics fallback, diagnostics). Never stop mid-slice
-  for quota.
+  expected operating condition. Set `AC_BOTS_LLM_FALLBACK_MODELS` (a
+  comma/semicolon list) so `LlmGoalClient` auto-rotates to a quota-fresh
+  model on a 429, or manually switch `AC_BOTS_LLM_MODEL`, or do non-LLM
+  loop work (tests, call-volume reduction, Motor/Tactics fallback,
+  diagnostics). Never stop mid-slice for quota.
 
 ## True blockers (acceptable reasons to stop and notify)
 

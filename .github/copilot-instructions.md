@@ -115,14 +115,20 @@ The bot's brain uses GitHub Models, which is rate-limited
 or an exhausted daily quota is an EXPECTED operating condition, not a
 reason to stop. Mitigations, in order:
 
-1. Switch `AC_BOTS_LLM_MODEL` to a quota-fresh model (probe candidates:
-   `openai/gpt-4o`, `meta/llama-3.3-70b-instruct`,
+1. Set `AC_BOTS_LLM_FALLBACK_MODELS` (comma/semicolon-separated) before
+   launching the bot so `LlmGoalClient` auto-rotates to the next
+   quota-fresh model on a 429 within one call — no restart, no manual
+   switching, and it sticks to whatever works (e.g.
+   `openai/gpt-4.1-mini,openai/gpt-4o,mistral-ai/mistral-small-2503`).
+   This is the preferred unattended mitigation.
+2. Or manually switch `AC_BOTS_LLM_MODEL` to a quota-fresh model (probe
+   candidates: `openai/gpt-4o`, `meta/llama-3.3-70b-instruct`,
    `mistral-ai/mistral-small-2503`, `deepseek/deepseek-v3-0324`).
-2. If ALL useful models are exhausted, do NON-LLM-dependent work that
+3. If ALL useful models are exhausted, do NON-LLM-dependent work that
    still advances the loop: write/verify unit tests, reduce LLM call
    volume, improve the autonomous Motor/Tactics fallback, refactor,
    add diagnostics — then checkpoint and let the daily quota reset.
-3. Only treat a full-quota wall as a stop AFTER exhausting (1) and (2),
+4. Only treat a full-quota wall as a stop AFTER exhausting (1)–(3),
    and only by checkpointing with the reset time — never mid-slice.
 
 The standing tempo goal (`reduce-llm-call-volume`) exists precisely so
