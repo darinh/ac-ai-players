@@ -1872,6 +1872,60 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return sticky;
         }
 
+        // Autonomous kill-intent decomposition (reduce-llm-call-volume).
+        // [INVARIANT — audit] The Motor only DECOMPOSES an LLM-authored TYPED
+        // kill-count commitment ("kill N [of X]") into the next Attack; it never
+        // ORIGINATES a combat commitment. We fire ONLY on the quiescent
+        // post-kill path: currentGoal == null AND no decision-worthy change has
+        // arrived since the last LLM look (!HasNewChainInterruptingEvent — an
+        // inventory change, NPC dialog, zone change, readable text, or an action
+        // rejection incl. a fresh disengage all route to the LLM instead; a
+        // kill's own combat ServerMessage/feedback/damage do NOT, so the chain
+        // is not made inert by its own kills) AND no picker discovery/arrival
+        // (!pickerArrived / !pickerStartWake also route to the LLM). So a
+        // genuinely decision-worthy event is never masked by one more autonomous
+        // Attack. If the stack top is a kill-count commitment and a matching,
+        // in-perception, not-beaten hostile is visible, mint that Attack WITHOUT
+        // the LLM round-trip (returning it as currentGoal so the Motor drives
+        // it). Flee precedence is enforced downstream by the Motor's dispatch
+        // self-preservation gate (it refuses the Attack while health is low /
+        // the threat is on the avoid cooldown) and the losing-fight disengage
+        // reflexes. Bounded by MaxCombatChainAttacks (periodic forced LLM
+        // re-check), the intent's completion predicate + deadline, and the
+        // stuck-timeout.
+        if (currentGoal is null && !stuck
+            && !HasNewChainInterruptingEvent(events) && !pickerArrived && !pickerStartWake)
+        {
+            var chainTarget = ChooseCombatChainTarget(
+                _stack?.Top,
+                world.Visible,
+                world.CombatHistoryFull,
+                world.Self.Level,
+                CombatChainEnabled,
+                _combatChainCount,
+                MaxCombatChainAttacks);
+            if (chainTarget is not null)
+            {
+                _combatChainCount++;
+                var commitmentSummary = _stack?.Top?.Completion.Summary() ?? "kill-count";
+                Console.WriteLine(
+                    $"[combat-chain] mint #{_combatChainCount}/{MaxCombatChainAttacks} " +
+                    $"Attack target=0x{chainTarget.Guid:X8} '{chainTarget.Name}' " +
+                    $"d={(chainTarget.Distance is float cd ? cd.ToString("F1") : "?")} " +
+                    $"until={commitmentSummary} " +
+                    "(no LLM call — decomposing LLM-authored kill-count commitment)");
+                return new Goal
+                {
+                    Id = Guid.NewGuid(),
+                    Kind = GoalKind.Attack,
+                    Target = new Selector { Guid = chainTarget.Guid, Name = chainTarget.Name },
+                    Priority = 7,
+                    Rationale =
+                        $"autonomous kill-intent decomposition (#{_combatChainCount}/{MaxCombatChainAttacks}): {commitmentSummary}",
+                };
+            }
+        }
+
         _lastCalledAtUtc = nowUtc;
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
@@ -2361,6 +2415,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // re-emit budget.
         _lastLlmGoal = goal;
         _stickyReEmitCount = 0;
+        // Reset the autonomous combat-chain budget ONLY here — when a USABLE LLM
+        // decision has actually been consumed. Doing it at call kickoff would
+        // refresh the cap even when the call later FAILS (429/timeout) or is
+        // discarded as stale, letting the bot chain another MaxCombatChainAttacks
+        // with no real oversight under intermittent LLM failure. Gating the reset
+        // on a successful consume keeps the cap meaningful: with no usable LLM
+        // result the count stays at the cap and the chain stays parked (the
+        // fallback policy still drives combat).
+        _combatChainCount = 0;
 
         // Source re-drive capture (execution persistence). Every accepted
         // LLM response either re-captures or CLEARS provenance, so a fresh
@@ -3634,6 +3697,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         kind is EventKind.GoalCompleted
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
+
+    // Events that must ROUTE TO THE LLM rather than let the autonomous combat
+    // chain (ChooseCombatChainTarget) mint another Attack toward an active
+    // kill-count commitment. A NARROW allowlist of genuinely decision-worthy
+    // changes: an inventory change (loot/give), NPC dialog, a zone change,
+    // readable popup/book text, and ANY action rejection (which INCLUDES the
+    // Motor's DisengageLowHealth refusal, so a fresh disengage stops the chain).
+    // It deliberately EXCLUDES the events a kill emits every time as ordinary
+    // combat progress — ServerMessage ("you have slain ..."), CombatFeedback,
+    // InboundDamageTaken — and SelfProgressChanged, so the chain is not made
+    // inert by its own kills. Combat SAFETY is owned by the Motor's dispatch
+    // self-preservation gate and the losing-fight disengage reflexes (not by
+    // this routing gate); the kill-count completion predicate + the
+    // MaxCombatChainAttacks cap also bound the chain. Pure wire-event-kind
+    // classification; no game-content knowledge.
+    internal static bool IsChainInterruptingKind(EventKind kind) =>
+        kind is EventKind.InventoryItemAdded
+             or EventKind.InventoryItemRemoved
+             or EventKind.NpcDialog
+             or EventKind.LandblockChanged
+             or EventKind.PopupString
+             or EventKind.BookText
+             or EventKind.ActionRejected;
+
+    private bool HasNewChainInterruptingEvent(EventStream events) =>
+        events.Recent()
+            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
+            .Any(e => IsChainInterruptingKind(e.Kind));
 
     // Untargeted-Explore discriminator (call-volume reduction): true iff the
     // goal is an Explore whose target is the schema "anywhere" sentinel — it
@@ -6063,6 +6154,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             ? ceiling
             : HardUserPromptCeilingChars;
 
+    // Kill-switch for the autonomous kill-intent decomposition
+    // (ChooseCombatChainTarget). When the LLM has pushed a TYPED kill-count
+    // commitment ("kill N [of X]"), the Motor may mint the next Attack toward
+    // that count WITHOUT a per-monster LLM round-trip — the standing
+    // reduce-llm-call-volume tempo/quota goal. Set AC_BOTS_COMBAT_CHAIN to
+    // 0 / false / off to disable instantly if a regression appears; any other
+    // value (including unset) leaves it ON. Request-tempo management, not
+    // strategy: the LLM authored the commitment; source only decomposes it.
+    private static readonly bool CombatChainEnabled =
+        ResolveCombatChainEnabled(Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_CHAIN"));
+
+    internal static bool ResolveCombatChainEnabled(string? envValue) =>
+        !(string.Equals(envValue, "0", StringComparison.Ordinal)
+          || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
+          || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
+
+    // Max consecutive autonomous Attacks the Motor may mint before it MUST
+    // route a real LLM decision. A periodic oversight + hard liveness cap so a
+    // never-completing commitment cannot chain forever. Reset to 0 whenever a
+    // real LLM call is made (so each grind run gets a fresh budget).
+    internal const int MaxCombatChainAttacks = 6;
+    private int _combatChainCount;
+
     // Decide the new adaptive prompt ceiling after an LLM call failure. On an
     // HTTP 413 (Payload Too Large) — by structured status OR an error string
     // containing "413" — collapse to <paramref name="floor"/> so the next
@@ -6512,6 +6626,58 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Pure target selection for the Motor's autonomous kill-intent
+    /// decomposition. Returns the visible hostile the Motor may Attack NEXT
+    /// toward an LLM-authored kill-count commitment WITHOUT a per-monster LLM
+    /// round-trip — or null when no autonomous Attack should be minted (caller
+    /// then falls through to a real LLM decision).
+    ///
+    /// INVARIANT (audit): this NEVER originates combat. It fires ONLY while the
+    /// stack top is an LLM-authored TYPED kill-count commitment
+    /// (<see cref="CombatCommitment.IsActiveKillCommitment"/>) — the LLM itself
+    /// committed to "kill N [of X]" with a numeric predicate. It then picks the
+    /// nearest in-PERCEPTION (<paramref name="perceptionRadius"/>) hostile
+    /// creature that is not a corpse, matches the LLM's authored name filter
+    /// (when the commitment carried one), and is not an <see cref="IsBeatenKind"/>
+    /// the bot keeps losing to. It assigns NO object-type urgency and names no
+    /// wcid/NPC/landblock. Flee precedence is NOT enforced here — the Motor's
+    /// dispatch self-preservation gate refuses the Attack while health is low /
+    /// the threat is on the avoid cooldown, and the CALLER only invokes this on
+    /// the quiescent "nothing external happened" path (a fresh disengage is an
+    /// ActionRejected external event, which keeps the caller out of here). The
+    /// chain is bounded: it yields once
+    /// <paramref name="chainCount"/> reaches <paramref name="maxChain"/> so the
+    /// LLM re-checks at least every maxChain autonomous kills (the intent's own
+    /// completion predicate + deadline and the stuck-timeout also end it).
+    /// Disabled via <paramref name="enabled"/>.
+    /// </summary>
+    internal static VisibleObjectProjection? ChooseCombatChainTarget(
+        Intent.Intent? top,
+        IReadOnlyList<VisibleObjectProjection>? visible,
+        IReadOnlyList<CombatHistoryEntry>? history,
+        int? selfLevel,
+        bool enabled,
+        int chainCount,
+        int maxChain,
+        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits)
+    {
+        if (!enabled) return null;
+        if (chainCount >= maxChain) return null; // periodic forced LLM re-check
+        if (visible is null || visible.Count == 0) return null;
+        if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) return null;
+
+        return visible
+            .Where(v => v.IsCreature && v.ObservedHostile && !v.IsCorpse)
+            .Where(v => (v.Distance ?? float.MaxValue) <= perceptionRadius)
+            .Where(v => nameFilter is null
+                        || (v.Name is { Length: > 0 } n
+                            && n.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) >= 0))
+            .Where(v => !IsBeatenKind(history, v.Wcid, v.Name, selfLevel))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
     }
 
     /// <summary>
