@@ -1,0 +1,241 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Unit tests for the autonomous kill-intent decomposition
+// (reduce-llm-call-volume): CombatCommitment.IsActiveKillCommitment (the
+// typed-predicate authorization gate), LlmGoalPolicy.ChooseCombatChainTarget
+// (the pure target selection), the kill-switch (ResolveCombatChainEnabled), and
+// the chain-interrupt routing classifier (IsChainInterruptingKind). The Motor
+// only DECOMPOSES an LLM-authored typed kill-count commitment — these pin that
+// it never fires on a generic hunt/visible_tag intent, never re-attacks a
+// beaten kind, honors the name filter, perception bound, corpse exclusion, and
+// chain cap, and that decision-worthy events (not combat noise) interrupt it.
+// Knowledge-free: domain-neutral placeholder names only.
+
+using System;
+using System.Collections.Generic;
+using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
+using HeadlessAcClient.World;
+using Xunit;
+
+namespace HeadlessAcClient.Tests;
+
+public class CombatChainTests
+{
+    private static WorldStateProjection BuildWorld() =>
+        new()
+        {
+            Self = new SelfProjection
+            {
+                Guid = 0x50000005, Name = "Headless",
+                Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0,
+                Level = 1, HealthFraction = 1.0f,
+            },
+            Visible = Array.Empty<VisibleObjectProjection>(),
+            Inventory = Array.Empty<InventoryItemProjection>(),
+        };
+
+    private static Intent NewIntent(
+        IntentPredicate completion,
+        IntentLifecycle status = IntentLifecycle.Active) =>
+        new()
+        {
+            Id = "i-001",
+            Kind = "quest:kill-task",
+            Rationale = "test",
+            Completion = completion,
+            Baseline = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow),
+            Status = status,
+        };
+
+    private static VisibleObjectProjection Mob(
+        uint guid, string name, float distance,
+        bool hostile = true, bool corpse = false, uint? wcid = null) =>
+        new()
+        {
+            Guid = guid, Name = name, Wcid = wcid, Distance = distance,
+            IsCreature = true, ObservedHostile = hostile, IsCorpse = corpse,
+        };
+
+    // ---- CombatCommitment.IsActiveKillCommitment ----------------------------
+
+    [Fact]
+    public void IsActiveKillCommitment_KillCountSincePush_True_NoNameFilter()
+    {
+        var ok = CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3)), out var filter);
+        Assert.True(ok);
+        Assert.Null(filter);
+    }
+
+    [Fact]
+    public void IsActiveKillCommitment_KillCountSincePush_ExtractsNameFilter()
+    {
+        var ok = CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new KillCountSincePushAtLeastPredicate(5, "Quarry")), out var filter);
+        Assert.True(ok);
+        Assert.Equal("Quarry", filter);
+    }
+
+    [Fact]
+    public void IsActiveKillCommitment_KillCountTotal_True_NoNameFilter()
+    {
+        var ok = CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new KillCountTotalAtLeastPredicate(10)), out var filter);
+        Assert.True(ok);
+        Assert.Null(filter);
+    }
+
+    [Fact]
+    public void IsActiveKillCommitment_Null_False()
+        => Assert.False(CombatCommitment.IsActiveKillCommitment(null, out _));
+
+    [Fact]
+    public void IsActiveKillCommitment_BlockedKillCount_False()
+        => Assert.False(CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3), IntentLifecycle.Blocked), out _));
+
+    [Fact]
+    public void IsActiveKillCommitment_GenericHuntVisibleTag_False()
+        => Assert.False(CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new VisibleTagPredicate("monster")), out _));
+
+    [Fact]
+    public void IsActiveKillCommitment_AlwaysFalse_False()
+        => Assert.False(CombatCommitment.IsActiveKillCommitment(
+            NewIntent(new AlwaysFalsePredicate()), out _));
+
+    // ---- ResolveCombatChainEnabled (kill-switch) ----------------------------
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("FALSE", false)]
+    [InlineData("off", false)]
+    [InlineData("Off", false)]
+    public void ResolveCombatChainEnabled_RespectsEnv(string? env, bool expected)
+        => Assert.Equal(expected, LlmGoalPolicy.ResolveCombatChainEnabled(env));
+
+    // ---- IsChainInterruptingKind --------------------------------------------
+
+    [Fact]
+    public void IsChainInterruptingKind_DecisionWorthy_True()
+    {
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemAdded));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemRemoved));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.NpcDialog));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.LandblockChanged));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.PopupString));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.BookText));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.ActionRejected));
+    }
+
+    [Fact]
+    public void IsChainInterruptingKind_CombatNoise_False()
+    {
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.ServerMessage));   // "you have slain ..."
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.CombatFeedback));
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InboundDamageTaken));
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.GoalCompleted));   // the kill's own lifecycle
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.SelfProgressChanged));
+    }
+
+    // ---- ChooseCombatChainTarget --------------------------------------------
+
+    private static readonly IReadOnlyList<VisibleObjectProjection> OneCloseMob =
+        new[] { Mob(0x8001, "Quarry Alpha", 20f) };
+
+    [Fact]
+    public void ChooseChainTarget_PicksNearestMatchingHostile()
+    {
+        var visible = new[]
+        {
+            Mob(0x8001, "Quarry Alpha", 40f),
+            Mob(0x8002, "Quarry Beta", 12f),
+            Mob(0x8003, "Bystander Gamma", 5f),
+        };
+        var top = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            top, visible, history: null, selfLevel: 5,
+            enabled: true, chainCount: 0, maxChain: 6);
+        Assert.NotNull(chosen);
+        Assert.Equal(0x8002u, chosen!.Guid); // nearest "Quarry"; the closer Bystander is filtered out
+    }
+
+    [Fact]
+    public void ChooseChainTarget_NoNameFilter_PicksNearestAnyHostile()
+    {
+        var visible = new[]
+        {
+            Mob(0x8001, "Quarry Alpha", 40f),
+            Mob(0x8003, "Bystander Gamma", 5f),
+        };
+        var top = NewIntent(new KillCountTotalAtLeastPredicate(10));
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            top, visible, history: null, selfLevel: 5,
+            enabled: true, chainCount: 0, maxChain: 6);
+        Assert.Equal(0x8003u, chosen!.Guid); // nearest hostile, no kind filter
+    }
+
+    [Fact]
+    public void ChooseChainTarget_Null_WhenDisabled()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3)), OneCloseMob,
+            null, 5, enabled: false, chainCount: 0, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_Null_WhenChainCapReached()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3)), OneCloseMob,
+            null, 5, enabled: true, chainCount: 6, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_Null_WhenNoKillCommitment()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new VisibleTagPredicate("monster")), OneCloseMob,
+            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_Null_WhenNoVisibleHostiles()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3)),
+            new[] { Mob(0x8001, "Bystander", 5f, hostile: false) },
+            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_ExcludesCorpses()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
+            new[] { Mob(0x8001, "Quarry Alpha", 5f, corpse: true) },
+            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_ExcludesBeyondPerception()
+        => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
+            new[] { Mob(0x8001, "Quarry Alpha", 200f) },
+            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+
+    [Fact]
+    public void ChooseChainTarget_ExcludesBeatenKind()
+    {
+        // The bot has lost to (and never killed) this kind, with a death -> stays
+        // beaten regardless of level: the chain must not re-engage it.
+        var history = new[]
+        {
+            new CombatHistoryEntry(
+                Name: "Quarry Alpha", Wcid: 0x4242, Kills: 0, Deaths: 2,
+                NearDeaths: 0, Fights: 2, LastOutcome: "death", Ineffective: 0),
+        };
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
+            new[] { Mob(0x8001, "Quarry Alpha", 10f, wcid: 0x4242) },
+            history, selfLevel: 5,
+            enabled: true, chainCount: 0, maxChain: 6);
+        Assert.Null(chosen);
+    }
+}
