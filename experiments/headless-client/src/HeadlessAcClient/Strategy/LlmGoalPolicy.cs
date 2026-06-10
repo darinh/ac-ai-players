@@ -2176,8 +2176,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"[llm-call] FAILED id={decisionId} latency={result.LatencyMs}ms " +
                 $"error={result.Error ?? "(null)"}");
             // HTTP 413 Payload Too Large — the model endpoint rejected the
-            // request body as too large. Auto-lower the session prompt ceiling to
-            // the floor so the NEXT call fits, letting a payload-limited but
+            // request body as too large. Auto-lower the session prompt ceiling —
+            // stepping it down toward the floor — so subsequent calls shrink to a
+            // fitting size, letting a payload-limited but
             // capable model (e.g. deepseek-v3 at the default 26000 ceiling)
             // self-adapt without a manual AC_BOTS_PROMPT_CEILING. One-way (never
             // raised) so a persistent endpoint limit is honoured for the run.
@@ -2189,8 +2190,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Console.WriteLine(
                     $"[llm-call] 413 Payload Too Large at prompt-ceiling={_adaptivePromptCeiling} -> " +
-                    $"lowering to {loweredCeiling} for the rest of the session " +
-                    $"(model payload limit; subsequent prompts auto-fit).");
+                    $"backing off to {loweredCeiling} " +
+                    $"(model payload limit; subsequent prompts auto-fit; repeats step down further).");
                 _adaptivePromptCeiling = loweredCeiling;
             }
             // Slice T (extended) — 429 / rate-limit backoff trigger.
@@ -6391,19 +6392,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal const int MaxCombatChainAttacks = 6;
     private int _combatChainCount;
 
+    // On an HTTP 413 the adaptive prompt ceiling steps DOWN by this factor
+    // rather than collapsing straight to the floor. A single 413 — e.g. from a
+    // fallback-rotation model whose request-size limit is below the active
+    // model's — should not crater the whole session's prompt budget to the
+    // minimum and starve perception for every subsequent call. Repeated 413s
+    // walk it down; the floor clamp keeps it at or above the minimum. ~0.8 backs
+    // a ~26000 ceiling off to ~20800 in one step, clearing the measured payload
+    // cliff of the common endpoints while preserving far more context than the
+    // floor would.
+    private const double PromptCeilingPayloadStepDownFactor = 0.8;
+
     // Decide the new adaptive prompt ceiling after an LLM call failure. On an
     // HTTP 413 (Payload Too Large) — by structured status OR an error string
-    // containing "413" — collapse to <paramref name="floor"/> so the next
-    // request fits the endpoint's payload limit. One-way: never raises, and a
-    // no-413 failure (or already-at-floor) returns the current ceiling
-    // unchanged. Request-size management keyed to the endpoint, not game logic.
+    // containing "413" — step the ceiling DOWN toward (never below)
+    // <paramref name="floor"/> so the next request is smaller and more likely to
+    // fit the endpoint's payload limit, WITHOUT discarding all context at once.
+    // One-way: never raises; a no-413 failure (or already-at-floor) returns the
+    // current ceiling unchanged. Request-size management keyed to the endpoint,
+    // not game logic.
     internal static int LowerCeilingOnPayloadTooLarge(
         int currentCeiling, System.Net.HttpStatusCode? status, string? error, int floor)
     {
         var is413 =
             status == System.Net.HttpStatusCode.RequestEntityTooLarge ||
             (error is not null && error.Contains("413"));
-        return is413 && currentCeiling > floor ? floor : currentCeiling;
+        if (!is413 || currentCeiling <= floor)
+            return currentCeiling;
+        var stepped = (int)(currentCeiling * PromptCeilingPayloadStepDownFactor);
+        return Math.Max(stepped, floor);
     }
 
     // Lowest-value variable row-sections first. Out-of-view sightings are
