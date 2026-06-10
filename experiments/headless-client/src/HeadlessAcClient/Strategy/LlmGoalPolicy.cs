@@ -269,6 +269,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private Goal? _lastLlmGoal;
     private int _stickyReEmitCount;
 
+    // Diagnostic-only tempo meter (reduce-llm-call-volume). Counts the LLM
+    // round-trips spent per kill so the per-monster call cost is measurable.
+    // Pure observability — never consulted by any decision. See LlmTempoMeter.
+    private readonly LlmTempoMeter _tempo = new();
+
     // SOURCE RE-DRIVE of an LLM-authored exploration commitment
     // (execution persistence — NOT game knowledge). When a single LLM
     // response BOTH pushes a new strategic intent that becomes TOP AND
@@ -778,7 +783,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public string Source => $"llm:{_client.Model}";
 
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
-        => ApplyHuntEgressOverride(ProposeGoalCore(world, events, currentGoal), world, events);
+    {
+        // Diagnostic tempo: detect new kills from the bot's OWN combat-feel
+        // total and, when it rises, log the LLM round-trips spent since the
+        // prior kill. Read-only; never affects the goal returned below. Anchor
+        // only on a NON-NULL snapshot: CombatHistoryFull is published at init
+        // (after the persisted ledger loads) so it is normally present from the
+        // first tick, but skipping the null case keeps the baseline from
+        // anchoring at 0 and then reporting a persisted total as a spurious
+        // burst if the publish ever lands after the first ProposeGoal.
+        if (world.CombatHistoryFull is { } tempoHist
+            && _tempo.ObserveTotalKills(tempoHist.Sum(h => (long)h.Kills), DateTimeOffset.UtcNow) is string tempoLine)
+            Console.WriteLine($"[tempo] {tempoLine}");
+        return ApplyHuntEgressOverride(ProposeGoalCore(world, events, currentGoal), world, events);
+    }
 
     // Mechanical hunt-egress enforcement. Applied to EVERY goal this policy
     // would return (LLM-accepted, fallback, held, or re-driven) so it also
@@ -1891,6 +1909,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Console.WriteLine(
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
             $"prompt-bytes={userPrompt.Length} dwell-min={dwellMinStr} model={_client.Model}");
+        _tempo.RecordLlmCall();
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
