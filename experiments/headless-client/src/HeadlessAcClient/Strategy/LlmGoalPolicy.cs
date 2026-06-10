@@ -6763,11 +6763,61 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
     }
 
+    /// <summary>
+    /// Strip a Markdown code fence wrapper from an LLM response, if present, so
+    /// the JSON inside can be parsed. Some chat models (observed: deepseek-v3)
+    /// return their JSON goal wrapped as <c>```json\n{...}\n```</c> despite the
+    /// prompt asking for raw JSON, which makes the response start with a
+    /// backtick and fail JSON parsing at byte 0. This is response sanitisation
+    /// (request/response handling, the cp-2391 class), NOT game knowledge.
+    ///
+    /// ONLY activates when the trimmed content starts with a fence (```), so a
+    /// raw-JSON response from every other model is returned byte-for-byte
+    /// unchanged (zero behaviour change off the fenced path). Handles a fence
+    /// on its own line (with or without a language tag like <c>json</c>) and a
+    /// single-line <c>```{...}```</c>. The language-tag guard never consumes
+    /// JSON (it bails if the first line contains a brace). Idempotent: a second
+    /// call on already-stripped content returns it unchanged.
+    /// </summary>
+    internal static string StripJsonCodeFence(string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return content ?? string.Empty;
+        var s = content.Trim();
+        if (!s.StartsWith("```", StringComparison.Ordinal))
+            return content; // not fenced — return the ORIGINAL unchanged
+
+        var inner = s.Substring(3); // drop the opening ```
+        var firstNl = inner.IndexOf('\n');
+        if (firstNl >= 0)
+        {
+            // Text before the first newline is an optional language tag (e.g.
+            // "json"). Only drop it as a tag if it carries no JSON braces, so a
+            // single-line fenced object is never truncated here.
+            var tag = inner.Substring(0, firstNl);
+            if (!tag.Contains('{') && !tag.Contains('}'))
+                inner = inner.Substring(firstNl + 1);
+        }
+        else
+        {
+            // Single-line fence: drop a leading inline language tag (letters).
+            var i = 0;
+            while (i < inner.Length && char.IsLetter(inner[i])) i++;
+            inner = inner.Substring(i);
+        }
+
+        inner = inner.TrimEnd();
+        if (inner.EndsWith("```", StringComparison.Ordinal))
+            inner = inner.Substring(0, inner.Length - 3);
+
+        return inner.Trim();
+    }
+
     internal static bool TryParseGoal(string json, out Goal? goal, out string? error)
     {
         goal = null; error = null;
         try
         {
+            json = StripJsonCodeFence(json);
             var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
             var parsed = JsonSerializer.Deserialize<Goal>(json, opts);
@@ -6833,6 +6883,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         error = null;
         try
         {
+            json = StripJsonCodeFence(json);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return true; // no stack info — fine

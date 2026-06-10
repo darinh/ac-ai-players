@@ -66,6 +66,80 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_ParsesJsonWrappedInLabeledCodeFence()
+    {
+        // Some chat models (observed: deepseek-v3) wrap their goal JSON in a
+        // Markdown ```json fence despite the prompt asking for raw JSON.
+        var json = "```json\n" + """
+        {
+          "kind": "Attack",
+          "target": { "name": "Drudge Slinker" },
+          "rationale": "winnable",
+          "priority": 7
+        }
+        """ + "\n```";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Attack, g!.Kind);
+        Assert.Equal("Drudge Slinker", g.Target.Name);
+    }
+
+    [Fact]
+    public void TryParseGoal_ParsesJsonWrappedInBareCodeFence()
+    {
+        var json = "```\n" + """
+        {
+          "kind": "Explore",
+          "target": { "name": "anywhere" },
+          "rationale": "scout",
+          "priority": 4
+        }
+        """ + "\n```";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+    }
+
+    [Fact]
+    public void TryParseGoal_ParsesSingleLineFencedJson()
+    {
+        var json = """```{"kind":"Recall","rationale":"escape","priority":9}```""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Recall, g!.Kind);
+    }
+
+    [Fact]
+    public void StripJsonCodeFence_LeavesRawJsonUnchanged()
+    {
+        var raw = """{"kind":"Recall","rationale":"x","priority":3}""";
+        Assert.Equal(raw, LlmGoalPolicy.StripJsonCodeFence(raw));
+    }
+
+    [Fact]
+    public void StripJsonCodeFence_IsIdempotent()
+    {
+        var fenced = "```json\n{\"kind\":\"Recall\"}\n```";
+        var once = LlmGoalPolicy.StripJsonCodeFence(fenced);
+        var twice = LlmGoalPolicy.StripJsonCodeFence(once);
+        Assert.Equal(once, twice);
+        Assert.Equal("{\"kind\":\"Recall\"}", once);
+    }
+
+    [Fact]
+    public void StripJsonCodeFence_HandlesNullAndEmpty()
+    {
+        Assert.Equal(string.Empty, LlmGoalPolicy.StripJsonCodeFence(null));
+        Assert.Equal(string.Empty, LlmGoalPolicy.StripJsonCodeFence(""));
+    }
+
+    [Fact]
+    public void StripJsonCodeFence_DoesNotEatBraceWhenTagLineCarriesJson()
+    {
+        // A fence whose first line already carries the object (no language tag)
+        // must keep the braces intact.
+        var fenced = "```{\"kind\":\"Recall\"}\n```";
+        Assert.Equal("{\"kind\":\"Recall\"}", LlmGoalPolicy.StripJsonCodeFence(fenced));
+    }
+
+    [Fact]
     public void TryParseGoal_RecallParsesWithoutTarget()
     {
         // Recall is a self-action with no world target; it must parse even
