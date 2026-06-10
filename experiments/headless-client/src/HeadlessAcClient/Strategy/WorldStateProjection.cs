@@ -352,10 +352,21 @@ internal sealed record WorldStateProjection
     /// </summary>
     private const uint PhysicsStateEthereal = 0x00000004u;
 
+    /// <summary>
+    /// Default perception radius (world units) for the projection's visible
+    /// set: objects farther than this from self are NOT surfaced to the
+    /// Strategy. This is the bot's sensor window — what the LLM can "see"
+    /// when it chooses a goal. Exposed as a named constant so the Motor can
+    /// bound target resolution to the SAME window the Strategy decided from
+    /// (see <c>TacticsExecutor.ResolveTarget</c>). Sensor range only; encodes
+    /// nothing about game content.
+    /// </summary>
+    public const float DefaultVisibleRadiusUnits = 120f;
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
-        float visibleRadius = 120f,
+        float visibleRadius = DefaultVisibleRadiusUnits,
         int maxVisible = 48)
     {
         if (world.Self is not WorldObjectSnapshot self) return null;

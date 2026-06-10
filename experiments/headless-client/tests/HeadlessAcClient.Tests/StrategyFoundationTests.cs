@@ -528,6 +528,122 @@ public class StrategyFoundationTests
         Assert.Null(SelectorResolver.ResolveSingleNearest(sel, ws, self, excludeGuids: allKilled));
     }
 
+    // ---- TacticsExecutor.ResolveTarget perception-bounded Attack ----
+
+    private sealed class FixedGoalPolicy : IGoalPolicy
+    {
+        private readonly Goal _goal;
+        public FixedGoalPolicy(Goal goal) => _goal = goal;
+        public string Source => "test-fixed";
+        public Goal? ProposeGoal(WorldStateProjection projection, EventStream events, Goal? current) => _goal;
+    }
+
+    private static TacticsExecutor TacticsWithGoal(Goal goal)
+    {
+        var tactics = new TacticsExecutor(new FixedGoalPolicy(goal), new FakeWeenieRepo());
+        // CurrentGoal is set only via Tick(projection, ...); the stub returns the
+        // fixed goal regardless of the projection passed.
+        tactics.Tick(FallbackWorldWith(), new EventStream());
+        return tactics;
+    }
+
+    [Fact]
+    public void ResolveTarget_Attack_NextMatchBeyondPerceptionRadius_ReturnsNull()
+    {
+        // Live repro (cp2385-deploy.log): the LLM named Attack{"Gnawer Shreth"}
+        // with a near one visible+hostile; that creature died during the ~3.5s LLM
+        // latency and was excluded as recently-killed, so the resolver fell to a
+        // SAME-NAME creature 220u away — OUTSIDE the projection's visibleRadius
+        // (the LLM never saw it). ResolveTarget must NOT commit the Attack to a
+        // target beyond perception; it returns null so the policy re-picks from
+        // the CURRENT visible set.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        // Near golem the LLM saw + named — but just killed (in excludeGuids).
+        SeedSnapshot(ws, MobGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(6f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+        // Far same-name golem ~145u away (> DefaultVisibleRadiusUnits=120u).
+        SeedSnapshot(ws, ItemGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(150f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var self = ws.TryGet(SelfGuid);
+        var tactics = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "Sparring Golem" },
+            Source = "test",
+        });
+
+        // Sanity: with NOTHING excluded the near in-radius golem resolves (the
+        // gate is transparent for a perceivable target).
+        Assert.Equal(MobGuid, tactics.ResolveTarget(ws, self, null)!.Guid);
+
+        // The near golem just died: the only remaining match is 145u away,
+        // beyond perception -> unresolved (re-deliberate), NOT a 145u march.
+        var killed = new HashSet<uint> { MobGuid };
+        Assert.Null(tactics.ResolveTarget(ws, self, killed));
+    }
+
+    [Fact]
+    public void ResolveTarget_Attack_NextMatchWithinPerceptionRadius_Resolves()
+    {
+        // The gate rejects ONLY matches beyond the perception radius. A live
+        // same-name match still within visibleRadius (here ~95u < 120u) is a
+        // valid target the LLM could see, so after the near one is excluded the
+        // resolver returns it.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, MobGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(6f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+        SeedSnapshot(ws, ItemGuid, "Sparring Golem", wcid: 12698u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(100f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var self = ws.TryGet(SelfGuid);
+        var tactics = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "Sparring Golem" },
+            Source = "test",
+        });
+
+        var killed = new HashSet<uint> { MobGuid };
+        Assert.Equal(ItemGuid, tactics.ResolveTarget(ws, self, killed)!.Guid);
+    }
+
+    [Fact]
+    public void ResolveTarget_NonAttack_BeyondPerceptionRadius_StillResolves()
+    {
+        // The perception bound is Attack-only. A Use/Pickup target (e.g. the
+        // bot's own kill corpse one landblock over) must STILL resolve beyond the
+        // radius — those goals are not perception-gated and the cross-seam loot
+        // path (SelectorResolver same-or-adjacent landblock) depends on it.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, ItemGuid, "Chest", wcid: 9000u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(150f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Openable);
+
+        var self = ws.TryGet(SelfGuid);
+        var tactics = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Chest" },
+            Source = "test",
+        });
+
+        Assert.Equal(ItemGuid, tactics.ResolveTarget(ws, self, null)!.Guid);
+    }
+
     [Fact]
     public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
     {
