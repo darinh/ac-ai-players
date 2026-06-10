@@ -701,4 +701,78 @@ public class GameEventPayloadDecoderTests
         var p = GameEventPayloadDecoder.Decode(new byte[20], GameEventType.ApproachVendor);
         Assert.Null(p);
     }
+
+    // ---- SendClientContractTracker (0x0315) / Table (0x0314) ----
+
+    private static void WriteTracker(System.Collections.Generic.List<byte> w,
+        uint version, uint contractId, uint stage, double timeWhenDone, double timeWhenRepeats)
+    {
+        void U32(uint v) { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void F64(double v) { Span<byte> b = stackalloc byte[8]; BinaryPrimitives.WriteDoubleLittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        U32(version); U32(contractId); U32(stage); F64(timeWhenDone); F64(timeWhenRepeats);
+    }
+
+    [Fact]
+    public void Decode_ContractTracker_ReadsEntryAndFlags()
+    {
+        var w = new System.Collections.Generic.List<byte>();
+        WriteTracker(w, version: 3u, contractId: 12345u, stage: 2u, timeWhenDone: 100.0, timeWhenRepeats: 0.0);
+        void U32(uint v) { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        U32(0u); // deleteContract = false
+        U32(1u); // setAsDisplayContract = true
+
+        var p = GameEventPayloadDecoder.Decode(w.ToArray(), GameEventType.SendClientContractTracker);
+
+        Assert.NotNull(p?.ContractTracker);
+        var c = p!.ContractTracker!;
+        Assert.Equal(3u, c.Entry.Version);
+        Assert.Equal(12345u, c.Entry.ContractId);
+        Assert.Equal(2u, c.Entry.Stage);
+        Assert.Equal(100.0, c.Entry.TimeWhenDone);
+        Assert.False(c.DeleteContract);
+        Assert.True(c.SetAsDisplayContract);
+        Assert.Null(p.ContractTrackerTable);
+    }
+
+    [Fact]
+    public void Decode_ContractTrackerTable_TwoEntries()
+    {
+        var w = new System.Collections.Generic.List<byte>();
+        void U16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void U32(uint v) { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        U16(2); U16(32); // PackableHashTable header: count + numBuckets
+        U32(111u); WriteTracker(w, 1u, 111u, 1u, 0.0, 0.0);     // key + tracker
+        U32(222u); WriteTracker(w, 1u, 222u, 3u, 500.0, 600.0);
+
+        var p = GameEventPayloadDecoder.Decode(w.ToArray(), GameEventType.SendClientContractTrackerTable);
+
+        Assert.NotNull(p?.ContractTrackerTable);
+        var t = p!.ContractTrackerTable!;
+        Assert.Equal(2, t.Contracts.Count);
+        Assert.Equal(111u, t.Contracts[0].ContractId);
+        Assert.Equal(1u, t.Contracts[0].Stage);
+        Assert.Equal(222u, t.Contracts[1].ContractId);
+        Assert.Equal(3u, t.Contracts[1].Stage);
+        Assert.Equal(600.0, t.Contracts[1].TimeWhenRepeats);
+    }
+
+    [Fact]
+    public void Decode_ContractTrackerTable_Empty()
+    {
+        var w = new System.Collections.Generic.List<byte>();
+        void U16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        U16(0); U16(32); // empty table: count 0
+        var p = GameEventPayloadDecoder.Decode(w.ToArray(), GameEventType.SendClientContractTrackerTable);
+        Assert.NotNull(p?.ContractTrackerTable);
+        Assert.Empty(p!.ContractTrackerTable!.Contracts);
+    }
+
+    [Fact]
+    public void Decode_ContractTracker_ShortBody_ReturnsNull()
+    {
+        // Less than the 36B single-tracker payload; outer catch returns null so
+        // the caller falls back to PayloadBytes.
+        var p = GameEventPayloadDecoder.Decode(new byte[10], GameEventType.SendClientContractTracker);
+        Assert.Null(p);
+    }
 }
