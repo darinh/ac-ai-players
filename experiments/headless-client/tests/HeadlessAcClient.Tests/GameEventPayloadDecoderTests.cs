@@ -599,4 +599,106 @@ public class GameEventPayloadDecoderTests
         var p = GameEventPayloadDecoder.Decode(new byte[] { 0x01, 0x02 }, GameEventType.FellowshipQuit);
         Assert.Null(p);
     }
+
+    // ---- ApproachVendor / VendorInfoEvent (0x0062) ----
+
+    private static byte[] BuildApproachVendor(
+        uint vendorGuid, uint merchandiseItemTypes, uint minValue, uint maxValue,
+        uint dealMagical, float buyPrice, float sellPrice,
+        uint altCurrency, uint altCurrencyAmount, string altCurrencyName,
+        int numItems, byte[]? trailingItems = null)
+    {
+        var w = new System.Collections.Generic.List<byte>();
+        void U16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void U32(uint v)   { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void I32(int v)    { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void F32(float v)  { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteSingleLittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void Str16(string s) { var nb = Encoding.Latin1.GetBytes(s); U16((ushort)nb.Length); foreach (var x in nb) w.Add(x); while (w.Count % 4 != 0) w.Add(0); }
+        U32(vendorGuid); U32(merchandiseItemTypes); U32(minValue); U32(maxValue);
+        U32(dealMagical); F32(buyPrice); F32(sellPrice);
+        U32(altCurrency); U32(altCurrencyAmount); Str16(altCurrencyName);
+        I32(numItems);
+        if (trailingItems != null) w.AddRange(trailingItems);
+        return w.ToArray();
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_ReadsTradeTermsAndItemCount()
+    {
+        var body = BuildApproachVendor(
+            vendorGuid: 0x7A9B46A9u, merchandiseItemTypes: 0x10u, minValue: 1u, maxValue: 999u,
+            dealMagical: 1u, buyPrice: 1.15f, sellPrice: 0.75f,
+            altCurrency: 0u, altCurrencyAmount: 0u, altCurrencyName: "",
+            numItems: 5);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.ApproachVendor);
+
+        Assert.NotNull(p?.VendorInfo);
+        var v = p!.VendorInfo!;
+        Assert.Equal(0x7A9B46A9u, v.VendorGuid);
+        Assert.Equal(0x10u, v.MerchandiseItemTypes);
+        Assert.Equal(1u, v.MerchandiseMinValue);
+        Assert.Equal(999u, v.MerchandiseMaxValue);
+        Assert.True(v.DealMagicalItems);
+        Assert.Equal(1.15f, v.BuyPrice);
+        Assert.Equal(0.75f, v.SellPrice);
+        Assert.Equal(0u, v.AlternateCurrency);
+        Assert.Equal("", v.AlternateCurrencyName);
+        Assert.Equal(5, v.ItemCount);
+        // The decode-only primitive does not touch the other variants.
+        Assert.Null(p.FellowshipFullUpdate);
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_ReadsAlternateCurrencyBlock()
+    {
+        // With an alternate currency the server writes the player's alt-currency
+        // amount and the currency's plural name; the string16L padding must keep
+        // the trailing numItems word aligned.
+        var body = BuildApproachVendor(
+            vendorGuid: 0x12345678u, merchandiseItemTypes: 0x4u, minValue: 0u, maxValue: 0u,
+            dealMagical: 0u, buyPrice: 1.0f, sellPrice: 0.5f,
+            altCurrency: 0xABCDu, altCurrencyAmount: 42u, altCurrencyName: "Notes",
+            numItems: 3);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.ApproachVendor);
+
+        Assert.NotNull(p?.VendorInfo);
+        var v = p!.VendorInfo!;
+        Assert.Equal(0x12345678u, v.VendorGuid);
+        Assert.Equal(0xABCDu, v.AlternateCurrency);
+        Assert.Equal(42u, v.AlternateCurrencyAmount);
+        Assert.Equal("Notes", v.AlternateCurrencyName);
+        Assert.False(v.DealMagicalItems);
+        Assert.Equal(3, v.ItemCount);
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_IgnoresTrailingItemList()
+    {
+        // The for-sale item blobs (packed stackSize + weenie data) follow
+        // numItems. This slice decodes the header through the count and leaves
+        // the item bytes unread (mirroring the FellowshipFullUpdate early-stop).
+        var trailing = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00 };
+        var body = BuildApproachVendor(
+            vendorGuid: 0x1u, merchandiseItemTypes: 0u, minValue: 0u, maxValue: 0u,
+            dealMagical: 0u, buyPrice: 1.0f, sellPrice: 1.0f,
+            altCurrency: 0u, altCurrencyAmount: 0u, altCurrencyName: "",
+            numItems: 1, trailingItems: trailing);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.ApproachVendor);
+
+        Assert.NotNull(p?.VendorInfo);
+        Assert.Equal(1, p!.VendorInfo!.ItemCount);
+        Assert.Equal(0x1u, p.VendorInfo.VendorGuid);
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_ShortBody_ReturnsNull()
+    {
+        // A truncated header (< the nine fixed 4-byte fields) is rejected; the
+        // outer catch returns null so the caller falls back to PayloadBytes.
+        var p = GameEventPayloadDecoder.Decode(new byte[20], GameEventType.ApproachVendor);
+        Assert.Null(p);
+    }
 }
