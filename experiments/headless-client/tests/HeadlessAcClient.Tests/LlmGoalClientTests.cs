@@ -296,7 +296,130 @@ public class LlmGoalClientTests
         Assert.Single(handler.RequestedModels);
     }
 
+    // ---- per-model cooldown (skip known-walled models across calls) ----
+
+    private static readonly DateTimeOffset T0 = new(2026, 6, 10, 12, 0, 0, TimeSpan.Zero);
+
+    [Fact]
+    public async Task Cooldown_AllWalled_NextCallSkipsHttp_AndReportsSoonestReset()
+    {
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ => TooMany(TimeSpan.FromSeconds(100)));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B,C", now: clock.Get);
+
+        var first = await llm.CompleteAsync("s", "u"); // probes A,B,C -> all 429, all cool 100s
+        Assert.False(first.Ok);
+        Assert.Equal(new[] { "A", "B", "C" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(10); // still within the 100s cooldown
+        var second = await llm.CompleteAsync("s", "u");
+
+        Assert.False(second.Ok);
+        Assert.Equal((HttpStatusCode)429, second.StatusCode);
+        // No new HTTP — known-walled models are not re-probed.
+        Assert.Equal(3, handler.RequestedModels.Count);
+        // Back off only until the soonest model frees (~90s left).
+        Assert.NotNull(second.RetryAfter);
+        Assert.InRange(second.RetryAfter!.Value, TimeSpan.FromSeconds(89), TimeSpan.FromSeconds(91));
+    }
+
+    [Fact]
+    public async Task Cooldown_SkipsCoolingModel_EvenWhenRotationReachesIt()
+    {
+        var clock = new FakeClock(T0);
+        var bWalled = false;
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? TooMany(TimeSpan.FromSeconds(100))
+            : (bWalled ? TooMany(TimeSpan.FromSeconds(50)) : Ok("ok-B")));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        var first = await llm.CompleteAsync("s", "u"); // A 429 (cool 100s), B ok, active=B
+        Assert.True(first.Ok);
+
+        clock.Now = T0.AddSeconds(10);
+        bWalled = true; // B now walls too
+        handler.RequestedModels.Clear();
+        var second = await llm.CompleteAsync("s", "u"); // start at B; A still cooling -> skipped
+
+        Assert.False(second.Ok);
+        // Only B is probed; A (90s left on its cooldown) is skipped despite being
+        // next in rotation order.
+        Assert.Equal(new[] { "B" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task Cooldown_Expires_ModelIsReprobed()
+    {
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ => TooMany(TimeSpan.FromSeconds(100)));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        await llm.CompleteAsync("s", "u"); // A,B 429, cool 100s
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(101); // cooldowns expired
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");
+
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels); // both re-probed
+    }
+
+    [Fact]
+    public async Task Cooldown_SingleModel_NeverCools_ReprobesEachCall()
+    {
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ => TooMany(TimeSpan.FromSeconds(100)));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key", now: clock.Get);
+
+        await llm.CompleteAsync("s", "u");
+        var second = await llm.CompleteAsync("s", "u"); // same instant; single model -> still probes
+
+        Assert.False(second.Ok);
+        Assert.Equal(new[] { "A", "A" }, handler.RequestedModels); // no cooldown skip
+    }
+
+    [Fact]
+    public async Task Cooldown_AnchoredAtObservationTime_NotCallStart()
+    {
+        // The 429 arrives only AFTER the awaited HTTP latency, so the cooldown
+        // must be measured from when the 429 was OBSERVED, not from CompleteAsync
+        // start — otherwise it expires early and the model is re-probed too soon.
+        var clock = new FakeClock(T0);
+        var bWalled = false;
+        var handler = new ModelRoutingHandler(m =>
+        {
+            if (m == "A") { clock.Now = clock.Now.AddSeconds(8); return TooMany(TimeSpan.FromSeconds(10)); }
+            return bWalled ? TooMany(TimeSpan.FromSeconds(10)) : Ok("ok-B");
+        });
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        // A: clock advances to T0+8, then 429 r-a=10 => cools until T0+18; B ok, active=B.
+        var first = await llm.CompleteAsync("s", "u");
+        Assert.True(first.Ok);
+
+        clock.Now = T0.AddSeconds(12); // past a call-start anchor (T0+10), before the correct one (T0+18)
+        bWalled = true;
+        handler.RequestedModels.Clear();
+        var second = await llm.CompleteAsync("s", "u"); // order [B, A]; A must still be cooling -> skipped
+
+        Assert.False(second.Ok);
+        // A is NOT re-probed: its cooldown was anchored at observation (T0+8)+10=T0+18,
+        // not call-start T0+10. A call-start anchor would wrongly re-probe A here.
+        Assert.Equal(new[] { "B" }, handler.RequestedModels);
+    }
+
     // ---- test doubles ----
+
+    private sealed class FakeClock
+    {
+        public DateTimeOffset Now;
+        public FakeClock(DateTimeOffset start) => Now = start;
+        public DateTimeOffset Get() => Now;
+    }
 
     private static HttpResponseMessage Ok(string content)
     {
