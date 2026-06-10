@@ -693,6 +693,11 @@ public class IntentStackWiringTests
         Assert.Contains("QUEST-DIALOG COMPILER", prompt);
         Assert.Contains("## Recent directive check", prompt);
         Assert.Contains("do not invent a task, target, count, NPC, or location", prompt);
+        // cp-2615: the rule must tell the LLM to preserve the task-giver +
+        // turn-in across a kill-count auto-pop (push a return-to-giver intent
+        // under the kill intent, or record the giver in the rationale that the
+        // stack now surfaces from recent history, cp-2614).
+        Assert.Contains("return-to-giver", prompt);
     }
 
     [Fact]
