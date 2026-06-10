@@ -652,4 +652,65 @@ public class WorldStateTests
         // Already clear ⇒ returns false (no-op).
         Assert.False(ws.ClearFellowship());
     }
+
+    [Fact]
+    public void Contracts_Table_SetsAndReplacesWholesale()
+    {
+        var ws = new WorldState();
+        ws.ApplyContractTable(new ContractTrackerTablePayload(new[]
+        {
+            new ContractTrackerEntry(1u, 100u, 2u, 0.0, 0.0),
+            new ContractTrackerEntry(1u, 200u, 1u, 0.0, 0.0),
+        }));
+        Assert.Equal(2, ws.Contracts.Count);
+        // A later table REPLACES the prior set wholesale.
+        ws.ApplyContractTable(new ContractTrackerTablePayload(new[]
+        {
+            new ContractTrackerEntry(1u, 300u, 3u, 0.0, 0.0),
+        }));
+        Assert.Single(ws.Contracts);
+        Assert.Equal(300u, ws.Contracts[0].ContractId);
+    }
+
+    [Fact]
+    public void Contracts_Update_UpsertsByContractId()
+    {
+        var ws = new WorldState();
+        ws.ApplyContractTable(new ContractTrackerTablePayload(new[]
+        {
+            new ContractTrackerEntry(1u, 100u, 1u, 0.0, 0.0),
+        }));
+        // New contract id → appended.
+        Assert.True(ws.ApplyContractUpdate(new ContractTrackerPayload(
+            new ContractTrackerEntry(1u, 200u, 2u, 0.0, 0.0),
+            DeleteContract: false, SetAsDisplayContract: false)));
+        Assert.Equal(2, ws.Contracts.Count);
+        // Same contract id → replaced (not duplicated): remove-then-append moves
+        // it to the tail with the new stage.
+        Assert.True(ws.ApplyContractUpdate(new ContractTrackerPayload(
+            new ContractTrackerEntry(1u, 100u, 3u, 0.0, 0.0),
+            DeleteContract: false, SetAsDisplayContract: false)));
+        Assert.Equal(2, ws.Contracts.Count);
+        Assert.Equal(100u, ws.Contracts[1].ContractId);
+        Assert.Equal(3u, ws.Contracts[1].Stage);
+    }
+
+    [Fact]
+    public void Contracts_Update_DeleteRemovesEntry_AndNoOpWhenAbsent()
+    {
+        var ws = new WorldState();
+        ws.ApplyContractTable(new ContractTrackerTablePayload(new[]
+        {
+            new ContractTrackerEntry(1u, 100u, 1u, 0.0, 0.0),
+        }));
+        // Delete a tracked contract → removed.
+        Assert.True(ws.ApplyContractUpdate(new ContractTrackerPayload(
+            new ContractTrackerEntry(1u, 100u, 1u, 0.0, 0.0),
+            DeleteContract: true, SetAsDisplayContract: false)));
+        Assert.Empty(ws.Contracts);
+        // Delete of a contract we are not tracking → no-op (false).
+        Assert.False(ws.ApplyContractUpdate(new ContractTrackerPayload(
+            new ContractTrackerEntry(1u, 999u, 1u, 0.0, 0.0),
+            DeleteContract: true, SetAsDisplayContract: false)));
+    }
 }

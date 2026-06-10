@@ -1967,6 +1967,24 @@ internal sealed class HandshakeDriver : IDisposable
                                     if (worldState.ApplyFellowshipDeparture(fellowDismiss.DismissedGuid))
                                         Console.WriteLine($"[fellowship] dismissed: 0x{fellowDismiss.DismissedGuid:X8}");
                                 }
+                                // Contract tracker (0x0314 full table / 0x0315 single
+                                // update) -> WorldState so the LLM prompt can perceive
+                                // "you have a tracked objective at stage X". Same
+                                // self-addressed guard; projection-only, source never
+                                // decides to accept/abandon/act on a contract.
+                                else if (ge.Payload?.ContractTrackerTable is { } contractTable)
+                                {
+                                    worldState.ApplyContractTable(contractTable);
+                                    Console.WriteLine($"[contract] table: {contractTable.Contracts.Count} tracked");
+                                }
+                                else if (ge.Payload?.ContractTracker is { } contractUpdate)
+                                {
+                                    if (worldState.ApplyContractUpdate(contractUpdate))
+                                        Console.WriteLine(
+                                            $"[contract] update: contract={contractUpdate.Entry.ContractId} " +
+                                            $"stage={contractUpdate.Entry.Stage}" +
+                                            (contractUpdate.DeleteContract ? " (removed)" : ""));
+                                }
                             }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh

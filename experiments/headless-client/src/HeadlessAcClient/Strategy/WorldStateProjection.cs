@@ -255,6 +255,18 @@ internal sealed record FellowshipProjection
     [JsonPropertyName("locked")] public bool Locked { get; init; }
 }
 
+/// <summary>
+/// contract-perception: one tracked objective surfaced to the LLM — its numeric
+/// id and the raw wire ContractStage code. Built from <see cref="WorldState.Contracts"/>.
+/// Surfaced in the "## Contracts" prompt section as raw facts; source assigns no
+/// priority and never decides to accept/abandon/act on a contract.
+/// </summary>
+internal sealed record ContractProjection
+{
+    [JsonPropertyName("contract_id")] public uint ContractId { get; init; }
+    [JsonPropertyName("stage")] public uint Stage { get; init; }
+}
+
 internal sealed record WorldStateProjection
 {
     [JsonPropertyName("self")]
@@ -275,6 +287,16 @@ internal sealed record WorldStateProjection
     /// </summary>
     [JsonPropertyName("fellowship")]
     public FellowshipProjection? Fellowship { get; init; }
+
+    /// <summary>
+    /// contract-perception: the bot's currently tracked contracts/objectives
+    /// (numeric id + raw wire stage), empty when none. Built from
+    /// <see cref="WorldState.Contracts"/> and rendered in the "## Contracts"
+    /// prompt section. Raw facts only.
+    /// </summary>
+    [JsonPropertyName("contracts")]
+    public IReadOnlyList<ContractProjection> Contracts { get; init; }
+        = System.Array.Empty<ContractProjection>();
 
     /// <summary>
     /// combat-damage-output: the live outcome of the current melee
@@ -667,6 +689,12 @@ internal sealed record WorldStateProjection
             };
         }
 
+        // contract-perception: project the tracked contracts (id + raw stage)
+        // for the "## Contracts" prompt section. Raw facts only.
+        var contractProj = world.Contracts
+            .Select(c => new ContractProjection { ContractId = c.ContractId, Stage = c.Stage })
+            .ToList();
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -693,6 +721,7 @@ internal sealed record WorldStateProjection
             Inventory = inv,
             Visible = visible,
             Fellowship = fellowshipProj,
+            Contracts = contractProj,
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,

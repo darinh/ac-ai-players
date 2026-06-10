@@ -4643,6 +4643,52 @@ public class LlmGoalPolicyTests
         Assert.Null(proj!.Fellowship);
     }
 
+    // ── contract perception ("## Contracts" section) ─────────────────────
+    private static WorldStateProjection BuildContractWorld(params (uint id, uint stage)[] contracts) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        Contracts = contracts.Select(c => new ContractProjection { ContractId = c.id, Stage = c.stage }).ToArray(),
+    };
+
+    [Fact]
+    public void Contracts_None_SectionOmitted()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildContractWorld(), new EventStream(), null);
+        Assert.DoesNotContain("## Contracts", prompt);
+    }
+
+    [Fact]
+    public void Contracts_Present_RendersIdAndStage()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildContractWorld((100u, 2u), (200u, 3u)), new EventStream(), null);
+        Assert.Contains("## Contracts", prompt);
+        Assert.Contains("contract 100: stage 2", prompt);
+        Assert.Contains("contract 200: stage 3", prompt);
+    }
+
+    [Fact]
+    public void Contracts_FromWorldState_ProjectsTrackedContracts()
+    {
+        var ws = new HeadlessAcClient.World.WorldState();
+        ws.SetSelf(SelfGuid);
+        ws.Apply(new HeadlessAcClient.Protocol.GameMessages.PrivateUpdatePropertyIntMessage(
+            Sequence: 1, Property: 25, Value: 5));
+        ws.ApplyContractTable(new HeadlessAcClient.Protocol.GameMessages.ContractTrackerTablePayload(
+            new[] { new HeadlessAcClient.Protocol.GameMessages.ContractTrackerEntry(1u, 777u, 2u, 0.0, 0.0) }));
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        Assert.Single(proj!.Contracts);
+        Assert.Equal(777u, proj.Contracts[0].ContractId);
+        Assert.Equal(2u, proj.Contracts[0].Stage);
+    }
+
     // ── named-target search telemetry ("## Search progress" section) ─────
     private static WorldStateProjection BuildNamedSearchWorld(
         string? targetName, int probes, int distinctCells) => new()
