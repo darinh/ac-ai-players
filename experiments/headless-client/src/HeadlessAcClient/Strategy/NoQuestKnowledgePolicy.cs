@@ -619,16 +619,29 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0);
             if (hasMeleeWielded)
             {
+                // Prefer the nearest monster the bot's OWN combat-feel record
+                // does NOT mark as a repeated loss. A "beaten" kind (recorded
+                // death/near-death/ineffective and NO kill — the SAME signal the
+                // prompt's combat-history rule surfaces to the LLM) is skipped so
+                // autonomous fallback grinding (which runs heavily during LLM
+                // 429-backoffs) does not keep feeding the bot to a kind it cannot
+                // beat. No kind is dangerous in source: a kind becomes avoidable
+                // ONLY after the bot itself loses to it (its own experience, not
+                // hardcoded danger). If every visible monster is a beaten kind, no
+                // Attack is emitted and the policy falls through to Explore (move
+                // on to find winnable monsters) rather than dying in place.
+                // Mirrors the cp-2405 disengage reflex (self-experience).
                 var huntTarget = world.Visible
                     .Where(v => v.IsMonster && !v.IsCorpse)
                     .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
+                    .Where(v => !IsBeatenKind(v, world))
                     .OrderBy(v => v.Distance ?? float.MaxValue)
                     .FirstOrDefault();
                 if (huntTarget is not null)
                     return MakeGoal(GoalKind.Attack,
                         new Selector { Guid = huntTarget.Guid, Name = huntTarget.Name },
                         null, priority: 2,
-                        rationale: $"decompose Hunt intent [{topIntent.Id}]: monster {huntTarget.Name} at d={huntTarget.Distance:F1}");
+                        rationale: $"decompose Hunt intent [{topIntent.Id}]: winnable monster {huntTarget.Name} at d={huntTarget.Distance:F1}");
             }
         }
 
@@ -648,4 +661,26 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             Rationale = rationale,
             Source = Source,
         };
+
+    // True iff the bot's OWN combat-feel record marks this monster's KIND as a
+    // repeated loss — recorded death/near-death/ineffective with NO kill (the
+    // same "it out-defends you" signal the prompt's combat-history rule gives
+    // the LLM). Uses the UNCAPPED CombatHistoryFull so an older loss is not
+    // missed by the prompt's recency cap. No hardcoded kind/wcid: a kind is
+    // avoidable ONLY after the bot itself loses to it.
+    //
+    // Delegates identity-matching to LlmGoalPolicy.FindCombatRecord so the
+    // verdict is computed from the SAME AGGREGATE the prompt surfaces to the
+    // LLM: wcid-preferred key OR exact normalized display name, summed over
+    // EVERY matching row. The wire assigns different wcids to variants sharing
+    // one display name, so aggregating (not first-match) keeps the verdict
+    // order-independent and complete.
+    private static bool IsBeatenKind(VisibleObjectProjection v, WorldStateProjection world)
+    {
+        if (world.CombatHistoryFull is not { } hist) return false;
+        var record = LlmGoalPolicy.FindCombatRecord(hist, v.Wcid, v.Name);
+        if (record is null) return false;
+        return record.Kills == 0
+            && (record.Deaths > 0 || record.NearDeaths > 0 || record.Ineffective > 0);
+    }
 }

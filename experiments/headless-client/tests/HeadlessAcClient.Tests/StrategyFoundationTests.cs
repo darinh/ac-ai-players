@@ -2546,6 +2546,149 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_SkipsBeatenKind_AttacksWinnable()
+    {
+        // The bot's OWN combat-feel record marks "Drudge Skulker" as a repeated
+        // loss (died, never killed). Even though it is NEARER, the Hunt
+        // decomposer skips it and attacks the winnable "Black Rabbit" instead.
+        const uint DrudgeGuid = 0x80000040;
+        const uint RabbitGuid = 0x80000041;
+        const uint WeaponGuid = 0x80000042;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = RabbitGuid, Name = "Black Rabbit", Wcid = 2566u,
+                    ItemType = 0x10u, Distance = 9f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            }) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 4, NearDeaths: 1, Fights: 5, LastOutcome: "death"),
+                new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0, NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(RabbitGuid, goal.Target.Guid); // nearer Drudge skipped (beaten kind)
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_AllBeatenKinds_NoAttack_Explores()
+    {
+        // Only a beaten kind is visible -> the Hunt decomposer emits NO Attack
+        // (don't feed the bot to a kind it loses to) and falls through to Explore.
+        const uint DrudgeGuid = 0x80000050;
+        const uint WeaponGuid = 0x80000051;
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = 19257u,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            }) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 4, NearDeaths: 0, Fights: 4, LastOutcome: "death"),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Attack, goal!.Kind); // no attack on a beaten kind -> Explore
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_HuntIntent_SameNameVariants_AggregatesAcrossWcids()
+    {
+        // The wire assigns DIFFERENT wcids to variants that share one display
+        // name. Here "Drudge Skulker" has TWO history rows: a loss against the
+        // visible wcid (recency-first) AND a win against a sibling wcid. The
+        // beaten verdict must AGGREGATE by name (total Kills>0 => NOT beaten),
+        // matching the prompt's combat-history rule — NOT short-circuit on the
+        // first (loss) row, which would wrongly skip a winnable kind.
+        const uint DrudgeGuid    = 0x80000060;
+        const uint RabbitGuid    = 0x80000061;
+        const uint WeaponGuid    = 0x80000062;
+        const uint DrudgeVisWcid = 19257u; // the variant currently in view
+        const uint DrudgeSibWcid = 19258u; // a sibling variant, same display name
+        var stack = MakeStackWithHunt();
+        var policy = new NoQuestKnowledgePolicy(stack);
+        var proj = MakeHuntProjection(
+            inventory: new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = WeaponGuid, Name = "Training Spadone", Wcid = 31u,
+                    ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0, WieldedAt = 0x18,
+                },
+            },
+            visible: new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = DrudgeGuid, Name = "Drudge Skulker", Wcid = DrudgeVisWcid,
+                    ItemType = 0x10u, Distance = 3f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+                new VisibleObjectProjection
+                {
+                    Guid = RabbitGuid, Name = "Black Rabbit", Wcid = 2566u,
+                    ItemType = 0x10u, Distance = 9f,
+                    IsCreature = true, IsAttackable = true, IsMonster = true,
+                },
+            }) with
+        {
+            CombatHistoryFull = new[]
+            {
+                // Recency-first: a loss against the visible wcid...
+                new CombatHistoryEntry("Drudge Skulker", DrudgeVisWcid, Kills: 0, Deaths: 2, NearDeaths: 0, Fights: 2, LastOutcome: "death"),
+                // ...but the bot HAS killed a same-name sibling wcid.
+                new CombatHistoryEntry("Drudge Skulker", DrudgeSibWcid, Kills: 5, Deaths: 0, NearDeaths: 0, Fights: 5, LastOutcome: "kill"),
+            },
+        };
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        // Aggregate Kills(0+5)=5 > 0 => name NOT beaten => attack the NEARER drudge,
+        // not the farther rabbit (proves aggregation, not first-row short-circuit).
+        Assert.Equal(DrudgeGuid, goal.Target.Guid);
+    }
+
+    [Fact]
     public void NoQuestKnowledgePolicy_HuntIntent_NoAttack_WhenNoMeleeWielded()
     {
         // Hunt intent on stack + monster visible but no melee
