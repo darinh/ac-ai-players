@@ -340,4 +340,79 @@ public class GameEventPayloadDecoderTests
         Assert.NotNull(p?.EvasionDefenderNotification);
         Assert.Equal("Cow", p!.EvasionDefenderNotification!.AttackerName);
     }
+
+    [Fact]
+    public void Decode_FellowshipUpdateFellow_ReadsAllFields()
+    {
+        // 11-u32 prefix (44B): guid, cpCached(0), lumCached(0), level,
+        // hMax, sMax, mMax, hCur, sCur, mCur, shareLoot. Then string16L
+        // name "ab" (2B len + 2B str, already 4-aligned), then u32 updateType.
+        var name = Encoding.UTF8.GetBytes("ab");
+        var body = new byte[44 + 4 + 4];
+        var s = body.AsSpan();
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(0, 4),  0xB0B0u); // guid
+        // [4..8] cpCached = 0, [8..12] lumCached = 0
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(12, 4), 7u);      // level
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(16, 4), 50u);     // healthMax
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(20, 4), 40u);     // staminaMax
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(24, 4), 30u);     // manaMax
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(28, 4), 45u);     // healthCur
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(32, 4), 35u);     // staminaCur
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(36, 4), 25u);     // manaCur
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(40, 4), 2u);      // shareLoot (bool << 1)
+        BinaryPrimitives.WriteUInt16LittleEndian(s.Slice(44, 2), (ushort)name.Length);
+        name.CopyTo(body, 46);
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(48, 4), 1u);      // updateType
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipUpdateFellow);
+
+        Assert.NotNull(p?.FellowshipUpdateFellow);
+        var f = p!.FellowshipUpdateFellow!;
+        Assert.Equal(0xB0B0u, f.Guid);
+        Assert.Equal(7u, f.Level);
+        Assert.Equal(50u, f.HealthMax);
+        Assert.Equal(40u, f.StaminaMax);
+        Assert.Equal(30u, f.ManaMax);
+        Assert.Equal(45u, f.HealthCurrent);
+        Assert.Equal(35u, f.StaminaCurrent);
+        Assert.Equal(25u, f.ManaCurrent);
+        Assert.Equal(2u, f.ShareLootFlags);
+        Assert.Equal("ab", f.Name);
+        Assert.Equal(1u, f.UpdateType);
+    }
+
+    [Fact]
+    public void Decode_FellowshipUpdateFellow_PadsNameToFourBytes()
+    {
+        // name "Cow" (3B): after the 44B prefix, 2B len + 3B str → cursor 49,
+        // pad 3 → cursor 52, then u32 updateType. The decoder must skip the
+        // padding and read updateType at the 4-aligned offset (the critical
+        // alignment case — a wrong pad calc would read updateType as garbage).
+        var name = Encoding.UTF8.GetBytes("Cow");
+        var body = new byte[44 + 2 + 3 + 3 + 4]; // prefix + len + str + pad + updateType = 56
+        var s = body.AsSpan();
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(0, 4),  0x00C0FFEEu); // guid
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(12, 4), 11u);         // level
+        BinaryPrimitives.WriteUInt16LittleEndian(s.Slice(44, 2), (ushort)name.Length);
+        name.CopyTo(body, 46);
+        // bytes [49..52) are name padding (zero)
+        BinaryPrimitives.WriteUInt32LittleEndian(s.Slice(52, 4), 9u);          // updateType
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipUpdateFellow);
+
+        Assert.NotNull(p?.FellowshipUpdateFellow);
+        Assert.Equal("Cow", p!.FellowshipUpdateFellow!.Name);
+        Assert.Equal(9u, p.FellowshipUpdateFellow.UpdateType);
+        Assert.Equal(11u, p.FellowshipUpdateFellow.Level);
+    }
+
+    [Fact]
+    public void Decode_FellowshipUpdateFellow_TooShort_ReturnsNull()
+    {
+        // 10 bytes — far below the 11-u32 fixed prefix. The guard throws
+        // internally and Decode returns null (graceful fallback to raw bytes).
+        var body = new byte[10];
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipUpdateFellow);
+        Assert.Null(p);
+    }
 }
