@@ -225,8 +225,141 @@ public class IntentStackWiringTests
     }
 
     [Fact]
-    public void Applier_TryApply_RejectsOnRevisionMismatch()
+    public void Applier_TryApply_RejectsRevisionMismatch_WhenBatchHasNonPushOp()
     {
+        // A batch carrying a top-identity op (replace/pop/mark) stays strictly
+        // revision-guarded: an intervening auto-pop could have changed the top,
+        // so a stale echoed revision must reject the whole batch.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("root", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.ReplaceTop, Intent = SpecOf("sub"), Reason = "x" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
+            echoedRevision: stack.Revision + 10, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.RejectedRevision, outcome.Result);
+        Assert.Equal(1, stack.Depth);
+        Assert.False(outcome.StaleRevisionTolerated);
+    }
+
+    [Fact]
+    public void Applier_TryApply_PushOnlyBatch_ToleratesStaleRevision_FromRootDeadlineBlock()
+    {
+        // Faithfully reproduce the ONLY stale-revision source that reaches the
+        // applier in the live caller: a child auto-pop / root-completion both emit
+        // a GoalCompleted event that LlmGoalPolicy discards before apply, so the
+        // stale revision that survives is the no-event one — a root whose deadline
+        // elapsed, marked Blocked IN PLACE (revision bumped, NOT popped). The LLM,
+        // having rendered while the root was still Active, emits a PUSH with the
+        // stale render-time revision. The push is applied above the Blocked root
+        // (which resurfaces for REPLACE_TOP once the child completes).
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        stack.TryPush(NewIntent("root", "k-root", b, deadline: DateTime.UtcNow.AddMilliseconds(-1)));
+        var renderRev = stack.Revision;          // what the LLM "saw" (root Active)
+
+        // Root deadline elapsed during LLM latency: CheckTopForCompletion marks the
+        // root Blocked in place, bumps the revision, and returns null (no pop, no
+        // GoalCompleted event — so the caller would NOT discard the response).
+        var popped = stack.CheckTopForCompletion(world, events, DateTime.UtcNow);
+        Assert.Null(popped);
+        Assert.Equal(IntentLifecycle.Blocked, stack.Top!.Status);
+        Assert.NotEqual(renderRev, stack.Revision);
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("compiled-objective"), Reason = "compile" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
+            echoedRevision: renderRev, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.True(outcome.StaleRevisionTolerated);
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal("compiled-objective", stack.Top!.Kind);
+        Assert.Equal(IntentLifecycle.Blocked, stack.Frames[0].Status); // root stays Blocked ancestor
+    }
+
+    [Fact]
+    public void Applier_TryApply_PushOnlyBatch_StaleRevision_StillRejectsDuplicateId()
+    {
+        // The tolerated path does NOT skip duplicate-id validation: a push whose
+        // LLM-supplied id collides with an existing frame is still rejected.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("dup-id", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var dupSpec = SpecOf("sub");
+        dupSpec = dupSpec with { Id = "dup-id" };
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = dupSpec, Reason = "x" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
+            echoedRevision: stack.Revision + 1, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.RejectedInvalid, outcome.Result);
+        Assert.Equal(1, stack.Depth);
+    }
+
+    [Fact]
+    public void Applier_TryApply_MixedBatch_StaleRevision_Rejected()
+    {
+        // A push followed by a top-identity op is NOT push-only, so a stale
+        // revision rejects the whole batch (all-or-nothing).
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("root", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("sub"), Reason = "x" },
+            new() { Op = IntentStackOpKind.MarkTopBlocked, Reason = "stall" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
+            echoedRevision: stack.Revision + 5, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.RejectedRevision, outcome.Result);
+        Assert.Equal(1, stack.Depth);
+    }
+
+    [Fact]
+    public void Applier_TryApply_PushOnlyBatch_StaleRevision_StillEnforcesDepthOverflow()
+    {
+        // Tolerating a stale revision does NOT skip the dry-run: the push is still
+        // re-validated against the LIVE stack, so an overflow is caught.
+        var stack = new IntentStack(maxDepth: 2);
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        stack.TryPush(NewIntent("root", "k", b));
+        stack.TryPush(NewIntent("sub",  "k", b));
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("would-overflow"), Reason = "x" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
+            echoedRevision: stack.Revision + 1, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.RejectedOverflow, outcome.Result);
+        Assert.Equal(2, stack.Depth);
+    }
+
+    [Fact]
+    public void Applier_TryApply_PushOnlyBatch_MatchingRevision_NotMarkedTolerated()
+    {
+        // The tolerance flag only sets on the stale path; a clean revision match
+        // applies normally with StaleRevisionTolerated = false.
         var stack = new IntentStack();
         var alloc = new IntentIdAllocator();
         var world = BuildWorld();
@@ -238,9 +371,10 @@ public class IntentStackWiringTests
             new() { Op = IntentStackOpKind.Push, Intent = SpecOf("sub"), Reason = "x" },
         };
         var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
-            echoedRevision: stack.Revision + 10, world, events, DateTime.UtcNow);
-        Assert.Equal(BatchApplyResult.RejectedRevision, outcome.Result);
-        Assert.Equal(1, stack.Depth);
+            echoedRevision: stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.False(outcome.StaleRevisionTolerated);
+        Assert.Equal(2, stack.Depth);
     }
 
     [Fact]
