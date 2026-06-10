@@ -251,7 +251,13 @@ internal static class IntentStackOpsApplier
         for (int i = 0; i < stack.Depth - 1; i++)
         {
             var f = stack.Frames[i];
-            sb.Append("- ancestor[").Append(i).Append("] ").AppendLine(f.ToString());
+            sb.Append("- ancestor[").Append(i).Append("] ").Append(f.ToString());
+            // ToString() omits Rationale; surface it here so a paused parent
+            // frame's own recorded plan (e.g. a follow-up step it intends to run
+            // once the active child frame completes) survives into the next
+            // deliberation rather than being dropped from the prompt.
+            if (!string.IsNullOrEmpty(f.Rationale)) sb.Append(" rationale=\"").Append(f.Rationale).Append('"');
+            sb.AppendLine();
         }
         var top = stack.Top!;
         var topActive = top.Status == IntentLifecycle.Active;
@@ -279,7 +285,16 @@ internal static class IntentStackOpsApplier
         {
             sb.AppendLine("- recent history (newest first):");
             foreach (var h in stack.History.Take(3))
-                sb.Append("    - ").AppendLine(h.ToString());
+            {
+                sb.Append("    - ").Append(h.ToString());
+                // ToString() omits Rationale; a just-popped frame's rationale is
+                // where the LLM recorded any follow-up it planned for after that
+                // frame completed, so surface it here to keep that context in the
+                // deliberation immediately after the pop instead of relying on it
+                // still being in the (capacity-bounded) event ring.
+                if (!string.IsNullOrEmpty(h.Rationale)) sb.Append(" rationale=\"").Append(h.Rationale).Append('"');
+                sb.AppendLine();
+            }
         }
         return sb.ToString();
     }

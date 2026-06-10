@@ -461,6 +461,46 @@ public class IntentStackWiringTests
         Assert.Contains("kind=do-quest", s);
     }
 
+    [Fact]
+    public void RenderStackForPrompt_Ancestor_IncludesRationale()
+    {
+        // A paused ancestor's rationale (where the LLM records a follow-up step
+        // it plans to run once the active child completes) must survive into the
+        // prompt; Intent.ToString() omits Rationale, so the renderer adds it.
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b));
+        stack.TryPush(NewIntent("i-quest", "do-quest", b, completion: new LevelAtLeastPredicate(5)));
+
+        var s = IntentStackOpsApplier.RenderStackForPrompt(stack);
+        // "test:play-game" is the ROOT (ancestor) rationale; the TOP renders its
+        // own "test:do-quest", so matching the ancestor's proves ancestor
+        // rationale is surfaced specifically.
+        Assert.Contains("ancestor[0]", s);
+        Assert.Contains("rationale=\"test:play-game\"", s);
+    }
+
+    [Fact]
+    public void RenderStackForPrompt_HistoryFrame_IncludesRationale()
+    {
+        // A popped frame's rationale is where the LLM recorded any follow-up it
+        // intended once that frame finished. It must survive into the recent-
+        // history tail so the deliberation right after the pop still sees it
+        // (e.g. when a completion-predicate auto-pops a frame). ToString() drops
+        // Rationale, so the renderer adds it back for history frames too.
+        var stack = new IntentStack();
+        var b = IntentBaseline.Capture(BuildWorld(), new EventStream(), DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-root", "play-game", b));
+        stack.TryPush(NewIntent("i-killcount", "kill-then-return", b));
+        Assert.Equal(StackOpResult.Ok, stack.PopTop(IntentLifecycle.Completed, "predicate satisfied"));
+
+        var s = IntentStackOpsApplier.RenderStackForPrompt(stack);
+        // "test:kill-then-return" can only appear via the history frame's
+        // rationale (the live TOP is now the root, "test:play-game").
+        Assert.Contains("recent history", s);
+        Assert.Contains("rationale=\"test:kill-then-return\"", s);
+    }
+
     // ---- LlmGoalPolicy parse + render ----
 
     [Fact]
