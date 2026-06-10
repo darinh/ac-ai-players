@@ -10806,6 +10806,54 @@ public class LlmGoalPolicyTests
         Assert.Equal("", LlmGoalPolicy.FormatCombatRecordFor(hist, 7u, "Drudge Skulker"));
     }
 
+    // ---- IsBeatenKind shared verdict (fallback skip + frontier mob-bias) ----
+
+    [Fact]
+    public void IsBeatenKind_FalseWhenNoRecord()
+    {
+        Assert.False(LlmGoalPolicy.IsBeatenKind(null, 7u, "X", 5));
+        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
+        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 7u, "Drudge Skulker", 5)); // no match
+    }
+
+    [Fact]
+    public void IsBeatenKind_FalseWhenHasKill()
+    {
+        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 3, 1, 0, 4, "kill") };
+        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 14u, "Cow", 5)); // Kills>0 => not beaten
+    }
+
+    [Fact]
+    public void IsBeatenKind_TrueWhenLostNoKill_RegardlessOfLevelForDeath()
+    {
+        // A death loss stays beaten at any level (no MaxLossBotLevel re-test).
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 1, 3, "death", MaxLossBotLevel: 3) };
+        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 99));
+    }
+
+    [Fact]
+    public void IsBeatenKind_NonLethalLoss_FalseAfterLevelUp_TrueBefore()
+    {
+        // Deaths==0, only near-death/ineffective, lost at level 3.
+        var hist = new[] { new CombatHistoryEntry("Mite Scion", 22600u, 0, 0, 3, 3, "near-death", MaxLossBotLevel: 3) };
+        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 8)); // 8 > 3 -> re-test
+        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 3));  // 3 not > 3 -> beaten
+        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", null)); // unknown level -> beaten
+    }
+
+    [Fact]
+    public void IsBeatenKind_AggregatesSameName_KillOnSiblingUnbeats()
+    {
+        // Same display name, different wcids: a loss on the visible wcid but a
+        // kill on a sibling -> aggregate Kills>0 -> not beaten.
+        var hist = new[]
+        {
+            new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 0, 2, "death", MaxLossBotLevel: 3),
+            new CombatHistoryEntry("Drudge Skulker", 7u, 5, 0, 0, 5, "kill"),
+        };
+        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 3));
+    }
+
     [Fact]
     public void FormatThreatSummary_NullWhenNoMonsters()
     {
