@@ -551,6 +551,38 @@ internal sealed record PdSkill(
     string Name, uint Id, uint AdvancementClass, uint Ranks, uint InitLevel, uint ExperienceSpent);
 
 /// <summary>
+/// Vendor trade terms from a GameEventApproachVendor (0x0062) — the event the
+/// server pushes when a player opens a vendor. Decoded from the fixed header
+/// through the for-sale item count; the per-item weenie list that follows is
+/// intentionally left unread for now (see <see cref="GameEventPayloadDecoder"/>
+/// DecodeApproachVendor), mirroring the early-stop in DecodeFellowshipFullUpdate.
+/// <see cref="MerchandiseItemTypes"/> is the raw ItemType bitmask the vendor
+/// will buy. <see cref="BuyPrice"/> / <see cref="SellPrice"/> are the vendor's
+/// raw price multipliers off the wire. <see cref="AlternateCurrency"/> is a
+/// currency wcid (0 = the base/default currency). All fields are raw wire
+/// values — no interpretation.
+/// </summary>
+internal sealed record VendorInfoPayload(
+    uint VendorGuid,
+    uint MerchandiseItemTypes,
+    uint MerchandiseMinValue,
+    uint MerchandiseMaxValue,
+    bool DealMagicalItems,
+    float BuyPrice,
+    float SellPrice,
+    uint AlternateCurrency,
+    uint AlternateCurrencyAmount,
+    string AlternateCurrencyName,
+    int ItemCount)
+{
+    public override string ToString() =>
+        $"VendorInfo(vendor=0x{VendorGuid:X8} items={ItemCount} " +
+        $"buys=0x{MerchandiseItemTypes:X} value={MerchandiseMinValue}-{MerchandiseMaxValue} " +
+        $"magical={DealMagicalItems} buy={BuyPrice:F2} sell={SellPrice:F2} " +
+        $"altCurrency=0x{AlternateCurrency:X8})";
+}
+
+/// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
 /// implemented here, all variants are null and the caller should
@@ -581,7 +613,8 @@ internal sealed record GameEventPayload(
     FellowshipUpdateFellowPayload?       FellowshipUpdateFellow,
     FellowshipFullUpdatePayload?         FellowshipFullUpdate,
     FellowshipQuitPayload?               FellowshipQuit,
-    FellowshipDismissPayload?            FellowshipDismiss)
+    FellowshipDismissPayload?            FellowshipDismiss,
+    VendorInfoPayload?                   VendorInfo)
 {
     public override string ToString() => EventType switch
     {
@@ -609,6 +642,7 @@ internal sealed record GameEventPayload(
         GameEventType.FellowshipFullUpdate         when FellowshipFullUpdate        is { } x => x.ToString(),
         GameEventType.FellowshipQuit               when FellowshipQuit              is { } x => x.ToString(),
         GameEventType.FellowshipDismiss            when FellowshipDismiss           is { } x => x.ToString(),
+        GameEventType.ApproachVendor               when VendorInfo                  is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -676,6 +710,8 @@ internal static class GameEventPayloadDecoder
                 // non-null payload so the consumer's "decoded" check holds.
                 GameEventType.FellowshipDisband =>
                     Empty(eventType),
+                GameEventType.ApproachVendor =>
+                    Empty(eventType) with { VendorInfo = DecodeApproachVendor(body) },
                 _ => null,
             };
         }
@@ -712,7 +748,8 @@ internal static class GameEventPayloadDecoder
             FellowshipUpdateFellow: null,
             FellowshipFullUpdate: null,
             FellowshipQuit: null,
-            FellowshipDismiss: null);
+            FellowshipDismiss: null,
+            VendorInfo: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
     // serializer GameEventPlayerDescription.cs. We extract the initial
@@ -1204,6 +1241,49 @@ internal static class GameEventPayloadDecoder
         var isLocked   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0;
         return new FellowshipFullUpdatePayload(
             members, fellowshipName, leaderGuid, shareXp, evenShare, open, isLocked);
+    }
+
+    // ApproachVendor / VendorInfoEvent (0x0062) — pushed when a player opens a
+    // vendor. Wire layout from the authoritative server writer
+    // GameEventApproachVendor.cs (after the 16B GameEvent envelope):
+    //   u32   vendorGuid
+    //   u32   merchandiseItemTypes    (ItemType bitmask the vendor will buy)
+    //   u32   merchandiseMinValue
+    //   u32   merchandiseMaxValue
+    //   u32   dealMagicalItems        (bool)
+    //   f32   buyPrice                (vendor price multipliers; raw wire floats)
+    //   f32   sellPrice
+    //   u32   alternateCurrency       (wcid, 0 = the base/default currency)
+    //   u32   alternateCurrencyAmount (player's alt count + spent; 0 when none)
+    //   string16L alternateCurrencyName (plural name; empty when no alt currency)
+    //   i32   numItems
+    //   foreach item: u32 packed(stackSize|pwdType) + SerializeGameDataOnly(weenie)
+    // The per-item weenie list is intentionally left unread for now — the trade
+    // terms + item count precede it on the wire, matching the early-stop in
+    // DecodeFellowshipFullUpdate. The item decode (which reuses the weenie-header
+    // parser) lands in a follow-up slice. The 16B envelope is a multiple of 4, so
+    // body-relative cursor alignment matches the server's stream alignment.
+    private static VendorInfoPayload DecodeApproachVendor(ReadOnlySpan<byte> body)
+    {
+        var cursor = 0;
+        // 9 fixed 4-byte fields precede the alternate-currency string.
+        if (body.Length < 36)
+            throw new InvalidOperationException("body too short for ApproachVendor header");
+        var vendorGuid           = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var merchandiseItemTypes = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var merchandiseMinValue  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var merchandiseMaxValue  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var dealMagicalItems     = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
+        var buyPrice             = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var sellPrice            = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var alternateCurrency    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var altCurrencyAmount    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var altCurrencyName      = ReadString16L(body, ref cursor);
+        var itemCount            = (int)BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        return new VendorInfoPayload(
+            vendorGuid, merchandiseItemTypes, merchandiseMinValue, merchandiseMaxValue,
+            dealMagicalItems, buyPrice, sellPrice, alternateCurrency, altCurrencyAmount,
+            altCurrencyName, itemCount);
     }
 
     // FellowshipQuit (0x00A3) — server writes a single u32, the guid of the
