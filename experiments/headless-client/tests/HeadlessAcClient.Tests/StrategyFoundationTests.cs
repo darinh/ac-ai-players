@@ -645,6 +645,54 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void ResolveTarget_Pickup_ExcludesCorpseObject_KeepsContentsAndUse()
+    {
+        // A corpse is a CONTAINER, not a pickable item — the server rejects
+        // PUTITEMINCONTAINER on it (live: Pickup{Corpse} looped on WeenieError
+        // 0x29). Pickup resolution must EXCLUDE the corpse object (resolve null
+        // -> re-deliberate -> Use opens it). Its CONTENTS (not IsCorpse) still
+        // resolve for Pickup, and Use/Talk/Give still resolve the corpse.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, MobGuid, "Corpse of Drudge", wcid: 19257u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(6f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Corpse);
+        SeedSnapshot(ws, ItemGuid, "Leather Gloves", wcid: 5000u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(7f, 96f, 0f));
+
+        var self = ws.TryGet(SelfGuid);
+
+        // Pickup{corpse object} -> null (excluded; re-deliberate -> Use).
+        var tPickCorpse = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Corpse of Drudge" },
+            Source = "test",
+        });
+        Assert.Null(tPickCorpse.ResolveTarget(ws, self, null));
+
+        // Pickup{content item} -> resolves (NOT a corpse).
+        var tPickItem = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Leather Gloves" },
+            Source = "test",
+        });
+        Assert.Equal(ItemGuid, tPickItem.ResolveTarget(ws, self, null)!.Guid);
+
+        // Use{corpse} STILL resolves the corpse (loot-open path unaffected).
+        var tUseCorpse = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Corpse of Drudge" },
+            Source = "test",
+        });
+        Assert.Equal(MobGuid, tUseCorpse.ResolveTarget(ws, self, null)!.Guid);
+    }
+
+    [Fact]
     public void WorldStateProjection_FromWorldState_DerivesSchemaBitsFromDescriptionFlags()
     {
         // De-hardcoding contract: the projection sees IsDoor / IsPortal /

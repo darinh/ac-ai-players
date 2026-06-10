@@ -87,7 +87,9 @@ internal sealed class TacticsExecutor
         // health=0 known only to the combat layer, not corpse-flagged), so a
         // name-only Attack would re-resolve the dead body the bot is standing on
         // (a repeated 60s no-damage abandon) instead of the next LIVE match.
-        // Pickup/Use deliberately keep corpses + killed guids (loot the body).
+        // Use/Talk/Give deliberately keep corpses (open/loot the body). Pickup
+        // EXCLUDES the corpse OBJECT (it is a container, not a pickable item —
+        // see the Pickup branch below); its CONTENTS are separate guids.
         if (CurrentGoal.Kind == GoalKind.Attack)
         {
             var resolved = SelectorResolver.ResolveSingleNearest(
@@ -116,6 +118,22 @@ internal sealed class TacticsExecutor
                 return null;
             }
             return resolved;
+        }
+        if (CurrentGoal.Kind == GoalKind.Pickup)
+        {
+            // A corpse is a CONTAINER, not a pickable item: the server rejects
+            // PUTITEMINCONTAINER on a corpse object (WeenieError 0x29 +
+            // InventoryServerSaveFailed). Live (cp2388-deploy.log) the LLM
+            // emitted Pickup{Corpse of Drudge Slinker} — a common conflation of
+            // "loot the corpse" — and the Motor looped the doomed dispatch 3x.
+            // Exclude corpses from Pickup resolution so a Pickup that names the
+            // corpse object resolves to NULL and the policy re-deliberates (a
+            // corpse's loot is reached by Use → the existing corpse-loot
+            // extraction; its CONTENTS are separate guids that are NOT IsCorpse,
+            // so they still resolve for Pickup). Wire-bit IsCorpse decode only —
+            // identical to the Attack branch's excludeCorpses; no game knowledge.
+            return SelectorResolver.ResolveSingleNearest(
+                CurrentGoal.Target, world, self, _weenies, excludeCorpses: true);
         }
         return SelectorResolver.ResolveSingleNearest(CurrentGoal.Target, world, self, _weenies);
     }
