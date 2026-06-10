@@ -7082,6 +7082,49 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void RovingNpcTalkLoop_RawBackstop_Fires_OnLongNovelButUnproductiveLoop()
+    {
+        // Live (15x Worcer): an NPC that cycles VARIED canned lines keeps
+        // StaleTalks at 0 (novel each Talk) and slips the stale guard, so the bot
+        // re-Talks it for minutes until the slow dwell-egress. The raw backstop
+        // fires after RovingNpcTalkLoopRawThreshold (8) consecutive same-NPC
+        // Talks with NO inventory/landblock/self-progress (those reset the whole
+        // streak), regardless of dialog novelty. The start call seeds the streak;
+        // TotalTalks climbs from the next call, firing on the 9th consecutive.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        for (var i = 0; i < 8; i++)
+        {
+            es.Append(NpcDialog($"varied canned line {i}"));
+            Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, i, -i), es),
+                $"must not fire before the raw threshold at step {i}");
+        }
+        es.Append(NpcDialog("varied canned line 8"));
+        Assert.True(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, 8, -8), es),
+            "raw backstop must fire on a long novel-but-unproductive single-NPC Talk loop");
+    }
+
+    [Fact]
+    public void RovingNpcTalkLoop_RawBackstop_DoesNotFire_WhenProgressKeepsResetting()
+    {
+        // Each Talk grants an item (turn-in / reward) -> the streak resets every
+        // time, so the raw backstop NEVER accumulates: a genuinely productive
+        // long exchange is not suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npc = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = SamuelGuid } };
+
+        for (var i = 0; i < 12; i++)
+        {
+            es.Append(InvAdded("Reward Token"));
+            Assert.False(policy.IsRovingNpcTalkLoop(npc, WorldAt(0x8602u, 0x860201B3u, i, 0), es),
+                $"raw backstop must not fire while progress resets the streak at step {i}");
+        }
+    }
+
+    [Fact]
     public void RovingNpcTalkLoop_NeverFires_WhenInventoryProgresses()
     {
         // A turn-in / item-grant resets the episode — a productive single-NPC

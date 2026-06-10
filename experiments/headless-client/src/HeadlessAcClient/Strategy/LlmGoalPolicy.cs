@@ -539,10 +539,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         public string Key = "";
         public long FloorSequence;
         public int StaleTalks;
+        // Raw count of consecutive same-NPC Talks in this streak, regardless of
+        // dialog novelty (StaleTalks resets on novelty; this does not). Backstops
+        // the stale counter against a varied-but-unproductive cycling-dialog loop.
+        public int TotalTalks;
         public readonly HashSet<string> SeenDialogFingerprints = new(StringComparer.Ordinal);
     }
 
     private const int RovingNpcTalkLoopStaleThreshold = 4;
+    // cp-2390-era: raw backstop. The stale counter resets on every NOVEL dialog
+    // fingerprint, so an NPC that cycles through many varied canned lines (live:
+    // 15x Worcer Talks) keeps StaleTalks below the stale threshold and slips the
+    // guard until the slow dwell-egress (~5min). A run of this many CONSECUTIVE
+    // same-NPC Talks with NO inventory/landblock/self-progress (those reset the
+    // whole streak) is a loop regardless of dialog variety. Higher than the
+    // stale threshold so a genuinely long advancing conversation is not cut off.
+    private const int RovingNpcTalkLoopRawThreshold = 8;
 
     // cp-2415: after the roving guard (above) confirms a stale single-NPC Talk
     // loop and egresses, the LLM's persistent intent often re-targets the SAME
@@ -3136,6 +3148,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var fp in DialogFingerprintsSince(events, ep.FloorSequence))
             if (ep.SeenDialogFingerprints.Add(fp)) novelDialog = true;
         ep.FloorSequence = events.NextSequence;
+
+        // Raw backstop FIRST: count this continuing same-NPC Talk regardless of
+        // dialog novelty. The streak already reset above on any inventory /
+        // landblock / self-progress, so a long run of consecutive Talks to ONE
+        // NPC with none of those is an unproductive loop even when the NPC keeps
+        // emitting NOVEL canned lines (which would otherwise reset StaleTalks and
+        // hide the loop — live: 15x Worcer). Mechanical repeat-count over the
+        // bot's OWN Talk emissions; no NPC/quest content.
+        ep.TotalTalks++;
+        if (ep.TotalTalks >= RovingNpcTalkLoopRawThreshold)
+        {
+            _rovingNpcTalkLoop = null;
+            return true;
+        }
 
         if (novelDialog) { ep.StaleTalks = 0; return false; }
 
