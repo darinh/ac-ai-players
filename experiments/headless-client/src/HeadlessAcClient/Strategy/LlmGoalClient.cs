@@ -24,6 +24,9 @@
 //                            Retry-After elapses, so a sustained quota wall does
 //                            not re-probe known-walled models every call. The
 //                            policy only sees a 429 once EVERY candidate is walled.
+//                            Rotation/all-walled events are logged ([llm-fallback])
+//                            so the resilience is visible in live runs; single-model
+//                            clients log nothing.
 //   AC_BOTS_LLM_API_KEY   - bearer token
 //                            fallback: OPENAI_API_KEY
 //                            final fallback: `gh auth token` invocation
@@ -81,6 +84,12 @@ internal sealed class LlmGoalClient
 
     private readonly Func<DateTimeOffset> _now;
 
+    // Diagnostic sink for fallback-rotation events (model walled / rotated /
+    // all walled). Defaults to Console so live runs SHOW the 429-resilience
+    // working; tests inject a capturing delegate. Only emitted for multi-model
+    // clients, so a single-model client stays silent.
+    private readonly Action<string> _log;
+
     // Per-model "do not retry before" set from a 429's Retry-After. Lets
     // rotation SKIP a model already known to be walled instead of re-probing it
     // every call during a sustained multi-model quota wall (the wasted
@@ -101,9 +110,11 @@ internal sealed class LlmGoalClient
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
-        string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null)
+        string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null,
+        Action<string>? log = null)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
+        _log = log ?? (s => Console.WriteLine(s));
         _http = http ?? new HttpClient(new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
@@ -178,14 +189,16 @@ internal sealed class LlmGoalClient
         // once per call, so a fully-walled roster fails fast instead of looping.
         List<int> order;
         DateTimeOffset? soonestCooling;
+        int start;
         lock (_gate)
         {
+            start = _activeIndex;
             var multi = _models.Count > 1;
             order = new List<int>(_models.Count);
             soonestCooling = null;
             for (var step = 0; step < _models.Count; step++)
             {
-                var idx = (_activeIndex + step) % _models.Count;
+                var idx = (start + step) % _models.Count;
                 if (multi && _cooldownUntil.TryGetValue(_models[idx], out var until) && now < until)
                 {
                     if (soonestCooling is null || until < soonestCooling) soonestCooling = until;
@@ -194,6 +207,7 @@ internal sealed class LlmGoalClient
                 order.Add(idx);
             }
         }
+        var multiModel = _models.Count > 1;
 
         // Every model is cooling down from a recent 429: don't burn round-trips
         // re-probing known-walled models — surface a 429 whose Retry-After is the
@@ -201,6 +215,7 @@ internal sealed class LlmGoalClient
         if (order.Count == 0)
         {
             var wait = soonestCooling is { } exp && exp > now ? exp - now : MinModelCooldown;
+            SafeLog($"[llm-fallback] all {_models.Count} models cooling down (429 quota); backing off {wait.TotalSeconds:F0}s");
             return new LlmResult(false, "", "", 0, "all models cooling down (429 quota)",
                 StatusCode: (HttpStatusCode)429, RetryAfter: wait);
         }
@@ -217,6 +232,8 @@ internal sealed class LlmGoalClient
                 // Stick to the model that just worked and clear any stale
                 // cooldown on it so the next call starts here.
                 lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); }
+                if (multiModel && idx != start)
+                    SafeLog($"[llm-fallback] rotated to {model} (now the active model)");
                 return result;
             }
 
@@ -228,6 +245,8 @@ internal sealed class LlmGoalClient
             if (result.StatusCode == (HttpStatusCode)429)
             {
                 RecordCooldown(model, result.RetryAfter);
+                if (multiModel)
+                    SafeLog($"[llm-fallback] {model} returned 429 (quota); rotating to next candidate");
                 lastQuota = result;
                 // Remember the 429 whose Retry-After expires SOONEST: when every
                 // model is walled the caller should resume as early as the first
@@ -245,6 +264,8 @@ internal sealed class LlmGoalClient
         // Every reachable candidate is quota-exhausted. Prefer the
         // soonest-resuming Retry-After hint so the policy's backoff window is
         // correct; fall back to the last 429 when no model supplied a hint.
+        if (multiModel)
+            SafeLog($"[llm-fallback] all {_models.Count} candidate models walled (429 quota)");
         return soonestQuota ?? lastQuota!;
     }
 
@@ -263,6 +284,15 @@ internal sealed class LlmGoalClient
         // server's Retry-After is relative to when it answered — anchoring at
         // call-start would expire the cooldown early and re-probe too soon.
         lock (_gate) _cooldownUntil[model] = _now() + span;
+    }
+
+    // Diagnostics must never alter the LLM call path: a throwing log sink is
+    // swallowed so a bad logger can't turn a returned LlmResult into a thrown
+    // exception.
+    private void SafeLog(string line)
+    {
+        try { _log(line); }
+        catch { /* diagnostics are best-effort */ }
     }
 
     // One HTTP round-trip to a specific model. Owns all the wire concerns:
