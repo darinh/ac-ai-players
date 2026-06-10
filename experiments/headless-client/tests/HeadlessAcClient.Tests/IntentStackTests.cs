@@ -318,6 +318,28 @@ public class IntentStackTests
     }
 
     [Fact]
+    public void KillCountSincePush_NameFiltered_DuplicateDisplayName_SubtractsBaselineOnce()
+    {
+        // Two rows share the display name "Drudge" (different wcids — the ledger
+        // keys by wcid). The per-name baseline must be subtracted ONCE per name,
+        // not once per matching row (which would under-count the delta).
+        var atPush = BuildWorld() with
+        {
+            CombatHistoryFull = new[] { Ch("Drudge", 100u, 2), Ch("Drudge", 200u, 1) }, // baseline name total = 3
+        };
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
+        var now = BuildWorld() with
+        {
+            CombatHistoryFull = new[] { Ch("Drudge", 100u, 3), Ch("Drudge", 200u, 4) }, // current name total = 7
+        };
+        var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
+        // Delta = 7 - 3 = 4 (baseline subtracted once), NOT (3-3)+(4-3)=1.
+        Assert.True(new KillCountSincePushAtLeastPredicate(4, "Drudge").IsSatisfied(ctx));
+        Assert.False(new KillCountSincePushAtLeastPredicate(5, "Drudge").IsSatisfied(ctx));
+    }
+
+    [Fact]
     public void KillCountSincePush_NameFiltered_SubstringSpansMultipleKinds()
     {
         var atPush = BuildWorld();

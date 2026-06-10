@@ -432,14 +432,20 @@ internal sealed record KillCountSincePushAtLeastPredicate(
         if (!string.IsNullOrWhiteSpace(NameContains) &&
             ctx.World.CombatHistoryFull is { Count: > 0 } hist)
         {
+            // Group CURRENT rows by the SAME normalized name the baseline is
+            // keyed by, so the per-name baseline is subtracted EXACTLY ONCE per
+            // name — even if two rows share a display name (the ledger keys by
+            // wcid, so same-name/different-wcid rows can co-exist). Subtracting
+            // per-row would double-count the baseline and under-count the delta.
             long delta = 0;
-            foreach (var h in hist)
+            foreach (var grp in hist
+                .Where(h => !string.IsNullOrWhiteSpace(h.Name) &&
+                            h.Name.IndexOf(NameContains, StringComparison.OrdinalIgnoreCase) >= 0)
+                .GroupBy(h => h.Name.Trim().ToLowerInvariant()))
             {
-                if (string.IsNullOrWhiteSpace(h.Name)) continue;
-                if (h.Name.IndexOf(NameContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                var atPush = ctx.Baseline.KillsByNameAtPush
-                    .GetValueOrDefault(h.Name.Trim().ToLowerInvariant());
-                delta += h.Kills - atPush;
+                var currentKills = grp.Sum(h => (long)h.Kills);
+                var atPush = ctx.Baseline.KillsByNameAtPush.GetValueOrDefault(grp.Key);
+                delta += currentKills - atPush;
             }
             return delta >= Count;
         }
