@@ -412,6 +412,94 @@ public class LlmGoalClientTests
         Assert.Equal(new[] { "B" }, handler.RequestedModels);
     }
 
+    // ---- fallback diagnostics (observable in live logs) ----
+
+    [Fact]
+    public async Task Diagnostic_LogsRotation_WhenFallbackTakesOver()
+    {
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(m => m == "A" ? TooMany() : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", log: logs.Add);
+
+        var result = await llm.CompleteAsync("s", "u");
+
+        Assert.True(result.Ok);
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("A") && l.Contains("429"));
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("rotated to B"));
+    }
+
+    [Fact]
+    public async Task Diagnostic_LogsAllWalled_WhenEveryModelReturns429()
+    {
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(_ => TooMany());
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", log: logs.Add);
+
+        await llm.CompleteAsync("s", "u");
+
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("all 2") && l.Contains("walled"));
+    }
+
+    [Fact]
+    public async Task Diagnostic_LogsAllCooling_OnNoHttpShortCircuit()
+    {
+        var clock = new FakeClock(T0);
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(_ => TooMany(TimeSpan.FromSeconds(100)));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, log: logs.Add);
+
+        await llm.CompleteAsync("s", "u"); // both 429, cool 100s
+        clock.Now = T0.AddSeconds(10);
+        logs.Clear();
+        await llm.CompleteAsync("s", "u"); // all cooling -> synthetic 429, no HTTP
+
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("cooling down"));
+    }
+
+    [Fact]
+    public async Task Diagnostic_SingleModel_LogsNothing()
+    {
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(_ => TooMany());
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key", log: logs.Add);
+
+        await llm.CompleteAsync("s", "u");
+
+        Assert.Empty(logs); // single-model client stays silent
+    }
+
+    [Fact]
+    public async Task Diagnostic_NoRotationLog_WhenPrimarySucceedsFirstTry()
+    {
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(m => Ok($"ok-{m}"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", log: logs.Add);
+
+        var result = await llm.CompleteAsync("s", "u");
+
+        Assert.True(result.Ok);
+        Assert.DoesNotContain(logs, l => l.Contains("rotated"));
+    }
+
+    [Fact]
+    public async Task Diagnostic_ThrowingLogSink_DoesNotBreakTheCall()
+    {
+        // A bad logger must never turn a returned LlmResult into a thrown
+        // exception — diagnostics are best-effort.
+        var handler = new ModelRoutingHandler(m => m == "A" ? TooMany() : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", log: _ => throw new InvalidOperationException("logger boom"));
+
+        var result = await llm.CompleteAsync("s", "u");
+
+        Assert.True(result.Ok);
+        Assert.Equal("ok-B", result.Content);
+    }
+
     // ---- test doubles ----
 
     private sealed class FakeClock
