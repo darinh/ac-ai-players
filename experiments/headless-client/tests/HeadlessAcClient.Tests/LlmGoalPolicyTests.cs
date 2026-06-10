@@ -11793,6 +11793,49 @@ public class LlmGoalPolicyTests
         Assert.Contains("COMPLETION PREDICATES", prompt);
     }
 
+    [Fact]
+    public void StackPrompt_TeachesGrindAsKillCountIntent_WhenMonsterInView()
+    {
+        // reduce-llm-call-volume: when a monster is in view (a combat scene) and
+        // a stack is configured, the prompt teaches the LLM to express a WINNING
+        // grind as a typed kill-count intent, so the Motor's autonomous
+        // decomposition (cp-2426) can mint the repeats without a per-monster LLM
+        // round-trip. Audit-safe: the LLM authors the push and decides
+        // whether/what to grind; source never branches on a kind.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
+
+        Assert.Contains("COMMIT A WINNING GRIND", prompt);
+        Assert.Contains("kill_count_since_push_at_least", prompt);
+        Assert.Contains("deadline_seconds", prompt);
+    }
+
+    [Fact]
+    public void StackPrompt_GrindAsKillCount_OmittedWhenNoMonsterInView()
+    {
+        // Gated on monsterInView (the complement of PERSIST A HUNT EXCURSION):
+        // a grind rule is moot with nothing to Attack, so it must not bloat the
+        // non-combat preamble.
+        var world = BuildExitTokenWorld();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
+
+        Assert.DoesNotContain("COMMIT A WINNING GRIND", prompt);
+    }
+
+    [Fact]
+    public void StackPrompt_GrindAsKillCount_AbsentWhenNoStack()
+    {
+        // Stack-gated: with no IntentStack there is no stack-ops guidance at all.
+        var world = BuildWorldWithMonsters(
+            new VisibleObjectProjection
+            { Guid = 0x600u, Name = "Sparring Golem", Wcid = 70u, Distance = 6.5f, IsMonster = true });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), currentGoal: null, stack: null);
+
+        Assert.DoesNotContain("COMMIT A WINNING GRIND", prompt);
+    }
+
     // ---- ## Unseen objective target (phantom named-target capsule) ----
 
     private static IntentStack StackWithTopIntent(
