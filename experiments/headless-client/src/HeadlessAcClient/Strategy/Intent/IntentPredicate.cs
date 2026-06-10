@@ -420,15 +420,38 @@ internal sealed record KillCountSincePushAtLeastPredicate(
     {
         if (Count <= 0) return false;
 
-        if (ctx.Stats is { } stats)
+        // Name-filtered ("kill N <kind>") tasks need a PER-KIND count. The
+        // lifetime BotStatistics.Kills (a kind-agnostic Attack-completion
+        // proxy) cannot provide it — using it would FALSELY satisfy "kill 10
+        // Drudges" after 10 kills of ANY kind. Count actual per-kind kills from
+        // the combat-feel history snapshot (current minus the per-kind baseline
+        // captured at push). Substring match on the kind's display name, summed
+        // across every matching kind (e.g. "Drudge" covers Skulker + Slinker).
+        if (!string.IsNullOrWhiteSpace(NameContains) &&
+            ctx.World.CombatHistory is { Count: > 0 } hist)
         {
-            // Authoritative path: pure subtraction.
+            long delta = 0;
+            foreach (var h in hist)
+            {
+                if (string.IsNullOrWhiteSpace(h.Name)) continue;
+                if (h.Name.IndexOf(NameContains, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                var atPush = ctx.Baseline.KillsByNameAtPush
+                    .GetValueOrDefault(h.Name.Trim().ToLowerInvariant());
+                delta += h.Kills - atPush;
+            }
+            return delta >= Count;
+        }
+
+        // No name filter: pure subtraction on the authoritative lifetime total.
+        if (ctx.Stats is { } stats && string.IsNullOrWhiteSpace(NameContains))
+        {
             return (stats.Kills - ctx.Baseline.StatsAtPush.Kills) >= Count;
         }
 
-        // Legacy path (no Stats wired): fall back to the original
-        // bounded EventStream scan. Honors NameContains. Will silently
-        // under-count if > 256 events between push and check.
+        // Legacy path (no Stats wired, or NameContains set before any combat
+        // history exists): the original bounded EventStream scan. Honors
+        // NameContains against the goal text. Will silently under-count if
+        // > 256 events between push and check.
         var seen = 0;
         foreach (var e in ctx.Events.Recent())
         {

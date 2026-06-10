@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text.Json;
 using HeadlessAcClient.Strategy;
 using HeadlessAcClient.Strategy.Intent;
+using HeadlessAcClient.World;
 using Xunit;
 
 namespace HeadlessAcClient.Tests;
@@ -259,6 +260,62 @@ public class IntentStackTests
         Assert.True(new KillCountSincePushAtLeastPredicate(2, "Sparring Golem").IsSatisfied(ctx));
         Assert.False(new KillCountSincePushAtLeastPredicate(3, "Sparring Golem").IsSatisfied(ctx));
         Assert.False(new KillCountSincePushAtLeastPredicate(2, "Drudge").IsSatisfied(ctx));
+    }
+
+    private static CombatHistoryEntry Ch(string name, uint wcid, int kills) =>
+        new(name, wcid, Kills: kills, Deaths: 0, NearDeaths: 0, Fights: kills, LastOutcome: "kill");
+
+    [Fact]
+    public void KillCountSincePush_NameFiltered_UsesPerKindCombatHistoryDelta()
+    {
+        // cp-2384: a name-filtered kill_count_since_push must count PER-KIND
+        // kills (combat-feel history) minus the per-kind baseline at push — NOT
+        // the kind-agnostic lifetime total (which would falsely complete).
+        var atPush = BuildWorld() with { CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 2) } };
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
+
+        // 5 Drudge Skulker total (3 since push) + 8 Rabbit (must NOT count).
+        var now = BuildWorld() with
+        {
+            CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 5), Ch("Black Rabbit", 2566u, 8) },
+        };
+        var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
+
+        Assert.True(new KillCountSincePushAtLeastPredicate(3, "Drudge").IsSatisfied(ctx));
+        Assert.False(new KillCountSincePushAtLeastPredicate(4, "Drudge").IsSatisfied(ctx));
+    }
+
+    [Fact]
+    public void KillCountSincePush_NameFiltered_OtherKindKillsDoNotSatisfy()
+    {
+        // The exact bug: "kill 5 Drudges" must NOT complete after killing 10
+        // Rabbits, even though the lifetime total is well over 5.
+        var atPush = BuildWorld();
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
+        var now = BuildWorld() with { CombatHistory = new[] { Ch("Black Rabbit", 2566u, 10) } };
+        var stats = new BotStatistics();
+        var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = stats };
+
+        Assert.False(new KillCountSincePushAtLeastPredicate(5, "Drudge").IsSatisfied(ctx));
+    }
+
+    [Fact]
+    public void KillCountSincePush_NameFiltered_SubstringSpansMultipleKinds()
+    {
+        var atPush = BuildWorld();
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(atPush, events, DateTime.UtcNow);
+        // "Drudge" substring matches Skulker(3) + Slinker(2) = 5.
+        var now = BuildWorld() with
+        {
+            CombatHistory = new[] { Ch("Drudge Skulker", 19257u, 3), Ch("Drudge Slinker", 19258u, 2) },
+        };
+        var ctx = new IntentEvalContext(now, events, baseline, DateTime.UtcNow) { Stats = new BotStatistics() };
+
+        Assert.True(new KillCountSincePushAtLeastPredicate(5, "Drudge").IsSatisfied(ctx));
+        Assert.False(new KillCountSincePushAtLeastPredicate(6, "Drudge").IsSatisfied(ctx));
     }
 
     [Fact]
