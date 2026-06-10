@@ -2,6 +2,7 @@
 // LlmGoalPolicy / LlmGoalClient tests.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -266,6 +267,194 @@ public class LlmGoalPolicyTests
         // Moving freely (no geometry rejection) -> the rule is gated off.
         Assert.DoesNotContain("STUCK ESCAPE",
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_CountsCivilianNpcNotInTalkedSet()
+    {
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u));
+
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(world, new HashSet<uint>());
+
+        Assert.Equal(1, count);
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_SkipsTalkedGuid()
+    {
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u));
+
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(
+            world, new HashSet<uint> { 0x90000001u });
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_SkipsMonsterCorpseAndHostile()
+    {
+        var world = BuildVisibleWorld(
+            CivilianNpc(0x90000001u) with { IsMonster = true },
+            CivilianNpc(0x90000002u) with { IsCorpse = true },
+            CivilianNpc(0x90000003u) with { ObservedHostile = true });
+
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(world, new HashSet<uint>());
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_EmptyWorldZero()
+    {
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(
+            BuildVisibleWorld(), new HashSet<uint>());
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_SkipsTalkedName()
+    {
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u));
+
+        // Name-keyed, case-insensitive match (the LLM may vary casing). The
+        // CivilianNpc fixture names itself "Npc <GUID:X8>". This is the path
+        // that matters in production: LLM Talk emissions are name-only.
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(
+            world,
+            talkedNpcGuids: new HashSet<uint>(),
+            talkedNpcNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "npc 90000001" });
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void TryExtractTalkGoalTargetIdentity_NameOnlyEmission_CapturesNameNotGuid()
+    {
+        var ok = LlmGoalPolicy.TryExtractTalkGoalTargetIdentity(
+            "Talk target=name=\"Npc One\" item=<empty> source=llm:test",
+            out var guid, out var name);
+
+        Assert.True(ok);
+        Assert.Null(guid);
+        Assert.Equal("Npc One", name);
+    }
+
+    [Fact]
+    public void TryExtractTalkGoalTargetIdentity_GuidBearingEmission_CapturesBoth()
+    {
+        var ok = LlmGoalPolicy.TryExtractTalkGoalTargetIdentity(
+            "Talk target=guid=0x90000001 name=\"Npc One\" item=<empty> source=fallback:x",
+            out var guid, out var name);
+
+        Assert.True(ok);
+        Assert.Equal(0x90000001u, guid);
+        Assert.Equal("Npc One", name);
+    }
+
+    [Fact]
+    public void TryExtractTalkGoalTargetIdentity_NonTalkGoalReturnsFalse()
+    {
+        var ok = LlmGoalPolicy.TryExtractTalkGoalTargetIdentity(
+            "Attack target=name=\"Npc One\" item=<empty> source=llm:test",
+            out var guid, out var name);
+
+        Assert.False(ok);
+        Assert.Null(guid);
+        Assert.Null(name);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RendersUntalkedNpcCount()
+    {
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u), CivilianNpc(0x90000002u));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: new HashSet<uint> { 0x90000001u });
+
+        Assert.Contains("- untalked npcs in view: 1", prompt);
+        Assert.Contains("Talk each once", prompt);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_TalkedNpcPersistsAfterEmissionAgesOut()
+    {
+        // Production LLM Talk goals are NAME-ONLY (Selector.Guid is null and the
+        // Motor's resolved guid is never written back into the emitted Goal), so
+        // the session talked-set must persist by NAME. Use a name-only emission
+        // whose name matches the visible NPC and assert it stays "talked" even
+        // after the emission ages out of the bounded event ring.
+        var requestBodies = new List<string>();
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = "{\"kind\":\"Explore\",\"target\":{\"name\":\"anywhere\"},\"rationale\":\"x\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler(async (req, ct) =>
+        {
+            var body = req.Content is null ? "" : await req.Content.ReadAsStringAsync(ct);
+            requestBodies.Add(body);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"Npc 90000001\" item=<empty> source=llm:test",
+        });
+
+        var world = BuildVisibleWorld(CivilianNpc(0x90000001u));
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+
+        Assert.Single(requestBodies);
+        Assert.Contains("- untalked npcs in view: 0", PromptFromRequest(requestBodies[0]));
+
+        for (var i = 0; i < EventStream.DefaultCapacity + 20; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = -1,
+                Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ServerMessage,
+                Text = $"ambient event {i}",
+            });
+        }
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorLabel = "Blocked",
+            Text = "test",
+        });
+
+        _ = policy.ProposeGoal(world, events, firstGoal);
+        await policy.WaitForInFlightAsync();
+
+        Assert.Equal(2, requestBodies.Count);
+        Assert.Contains("- untalked npcs in view: 0", PromptFromRequest(requestBodies[1]));
+    }
+
+    private static string PromptFromRequest(string requestBody)
+    {
+        using var doc = JsonDocument.Parse(requestBody);
+        return doc.RootElement
+            .GetProperty("messages")[1]
+            .GetProperty("content")
+            .GetString()!;
     }
 
     [Fact]
@@ -6333,6 +6522,25 @@ public class LlmGoalPolicyTests
     private const uint NpcGuid  = 0x90000010;
     private const uint MobGuid  = 0x90000020;
     private const uint ItemGuid = 0x80000030;
+
+    private static WorldStateProjection BuildVisibleWorld(params VisibleObjectProjection[] visible) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u, CellId = 0x86020001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = visible,
+    };
+
+    private static VisibleObjectProjection CivilianNpc(uint guid) => new()
+    {
+        Guid = guid,
+        Name = $"Npc {guid:X8}",
+        Distance = 3f,
+        IsCreature = true,
+    };
 
     private static WorldStateProjection BuildHostileWorld() => new()
     {

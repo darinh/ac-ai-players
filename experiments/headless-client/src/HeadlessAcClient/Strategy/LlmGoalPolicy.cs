@@ -198,6 +198,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // outcome + a timer — no game content. Mirrors _egressLastObservedLevel.
     private int? _lastObservedDeaths;
     private DateTimeOffset? _lastOwnDeathUtc;
+    private readonly HashSet<uint> _talkedNpcGuids = new();
+    private readonly HashSet<string> _talkedNpcNames = new(StringComparer.OrdinalIgnoreCase);
 
     // Current-goal progress telemetry (cp-2300). Samples the bot-to-target
     // distance of the ACTIVE goal's resolved target across recent ProposeGoal
@@ -1141,6 +1143,76 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
         => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
+    internal static int CountUntalkedNpcsInView(
+        WorldStateProjection world,
+        IReadOnlySet<uint>? talkedNpcGuids,
+        IReadOnlySet<string>? talkedNpcNames = null)
+        => world.Visible.Count(v =>
+            v.IsCreature
+            && !v.IsMonster
+            && !v.IsCorpse
+            && !v.ObservedHostile
+            && !IsNpcAlreadyTalked(v, talkedNpcGuids, talkedNpcNames));
+
+    // A visible NPC counts as already-talked when EITHER its resolved guid or
+    // its display name appears in the session talked-set. The bot's own Talk
+    // emissions are usually name-only (the LLM names a target; the wire guid is
+    // resolved later by the Motor and is never written back into the emitted
+    // Goal), so name is the identity that actually matches across cycles; a
+    // fallback-sourced Talk additionally carries a guid. Matching either token
+    // keeps an NPC marked talked regardless of which token its emission carried.
+    private static bool IsNpcAlreadyTalked(
+        VisibleObjectProjection v,
+        IReadOnlySet<uint>? talkedNpcGuids,
+        IReadOnlySet<string>? talkedNpcNames)
+        => (talkedNpcGuids?.Contains(v.Guid) ?? false)
+           || (v.Name is { Length: > 0 } name && (talkedNpcNames?.Contains(name) ?? false));
+
+    private void RecordTalkedNpcs(EventStream events)
+    {
+        foreach (var ge in events.Recent(EventStream.DefaultCapacity)
+                     .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+                     .Take(10))
+        {
+            if (!TryExtractTalkGoalTargetIdentity(ge.Text!, out var guid, out var name))
+                continue;
+            if (guid is { } g) _talkedNpcGuids.Add(g);
+            if (!string.IsNullOrEmpty(name)) _talkedNpcNames.Add(name!);
+        }
+    }
+
+    // Parse a Talk GoalEmitted Text into whichever target identity tokens it
+    // carries. LLM Talk goals are name-only; fallback Talk goals also carry a
+    // resolved guid. Returns true when at least one token was found. Purely a
+    // structural parse of the bot's own emission text — no game knowledge.
+    internal static bool TryExtractTalkGoalTargetIdentity(
+        string text, out uint? guid, out string? name)
+    {
+        guid = null;
+        name = null;
+        if (!text.StartsWith("Talk ", StringComparison.Ordinal)) return false;
+        if (!TryExtractGoalTargetSelector(text, out var selector)) return false;
+        var gm = System.Text.RegularExpressions.Regex.Match(selector, "guid=0x([0-9A-Fa-f]+)");
+        if (gm.Success && uint.TryParse(
+                gm.Groups[1].Value,
+                System.Globalization.NumberStyles.HexNumber,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var g))
+            guid = g;
+        var nm = System.Text.RegularExpressions.Regex.Match(selector, "name=\"([^\"]+)\"");
+        if (nm.Success) name = nm.Groups[1].Value;
+        return guid is not null || name is not null;
+    }
+
+    private static bool TryExtractGoalTargetSelector(string text, out string selector)
+    {
+        selector = string.Empty;
+        var sm = System.Text.RegularExpressions.Regex.Match(text, "target=(.*?) item=.*? source=");
+        if (!sm.Success) return false;
+        selector = sm.Groups[1].Value.Trim();
+        return selector.Length > 0 && selector != "<empty>";
+    }
+
     // Pure decision: a freshly PROVEN stationary NPC Talk fixation should break
     // the loop immediately (early egress) when no attackable monster is in view
     // and the server is not actively guiding the bot with a fresh directive.
@@ -1950,7 +2022,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _worldUseChurnEpisode is { } ue && ue.Landblock == world.Self.Landblock && ue.UseCounts.Count > 0
                 ? (ue.UseCounts.Count, ue.DistinctChurnLatched)
                 : null;
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, promptCeiling: _adaptivePromptCeiling);
+        RecordTalkedNpcs(events);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -4138,6 +4211,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null,
         IReadOnlyList<LootedCorpse>? lootedEmptyCorpses = null,
         (int Distinct, bool Latched)? localUseChurn = null,
+        IReadOnlySet<uint>? talkedNpcGuids = null,
+        IReadOnlySet<string>? talkedNpcNames = null,
         int? promptCeiling = null)
     {
         var sb = new StringBuilder(2048);
@@ -4382,7 +4457,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (the cp-2335 per-rule gating pattern). Behaviour-preserving: each
         // still renders identically whenever no monster is in view.
         if (!monsterInView)
-        sb.AppendLine("- LOOP-BREAK (town-stuck): if `minutes in current landblock` > 5 AND `nearest monster: (none in view)` AND every visible creature is `npc` (no `monster` tag anywhere), you are STUCK in a town — emit `Explore{target: {name: \"anywhere\"}}` immediately. The picker walks you through visible Doors/portals to new areas. This OVERRIDES Talk/Give even when a new NPC is visible — talk-to-every-NPC is not progress with no monsters in view.");
+        sb.AppendLine("- LOOP-BREAK (town-stuck): if `minutes in current landblock` > 5 AND `nearest monster: (none in view)` AND every visible creature is `npc` (no `monster` tag anywhere) AND `untalked npcs in view: 0`, you are STUCK in a town — emit `Explore{target: {name: \"anywhere\"}}` immediately. The picker walks you through visible Doors/portals to new areas. UNLESS `untalked npcs in view` is above 0 — first `Talk` each untalked `npc` ONCE (a task-giver looks like any other npc; you only know by talking) to check for a task; only Explore away once `untalked npcs in view: 0`. This OVERRIDES RE-talking ALREADY-talked NPCs — talking the SAME npc again is still not progress with no monsters in view.");
         if (!monsterInView)
         sb.AppendLine("- HUNT EXCURSION (leave a tapped-out safe zone to find monsters): monsters do NOT spawn in safe zones — you must travel OUT to surrounding open country. When combat-ready, NO `monster` anywhere in `Visible nearby`, NO un-acted server/quest directive naming a specific next target (re-talking an NPC with no NEW dialog and browsing vendors do NOT count), AND `minutes in current landblock` is more than a few with local progress dried up (no new level, quest item, or unique hint), the zone is TAPPED OUT. Emit `Explore{target: {name: \"anywhere\"}}` — crossing out takes MANY ticks, so KEEP emitting it every cycle (your own recent `Explore` does NOT mean the excursion is done; do NOT revert to talking the same town NPCs mid-excursion) until your `landblock` actually changes OR a `monster` appears (then `Attack` it). A NEW server/quest directive, quest item, danger, or fresh dialog step interrupts the hunt — act on it. Quest progress outranks an optional hunt.");
         if (!monsterInView)
@@ -4997,10 +5072,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             var txt = ge.Text!;
             if (!txt.StartsWith("Talk ", StringComparison.Ordinal)) continue;
-            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
-            if (!sm.Success) continue;
-            var sel = sm.Groups[1].Value.Trim();
-            if (sel.Length == 0 || sel == "<empty>") continue;
+            if (!TryExtractGoalTargetSelector(txt, out var sel)) continue;
             var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
             var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
             var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
@@ -5037,6 +5109,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine("- recent Talk emissions: (none)");
         }
+        var untalkedNpcsInView = CountUntalkedNpcsInView(world, talkedNpcGuids, talkedNpcNames);
+        sb.AppendLine(untalkedNpcsInView > 0
+            ? $"- untalked npcs in view: {untalkedNpcsInView} (you have NOT yet Talked these — Talk each once to check whether it offers a task before leaving town)"
+            : "- untalked npcs in view: 0 (every visible npc has been talked this session)");
         // Per-target recent Use emissions (last 10 GoalEmitted events
         // of kind Use). Mirrors the Talk-count surface so the LLM can
         // see when it is re-Using the SAME world object (e.g. a door
