@@ -13587,21 +13587,30 @@ public class LlmGoalPolicyTests
     // ---- LowerCeilingOnPayloadTooLarge (adaptive ceiling auto-lowers on 413) ----
 
     [Fact]
-    public void LowerCeilingOnPayloadTooLarge_On413Status_CollapsesToFloor()
+    public void LowerCeilingOnPayloadTooLarge_On413Status_StepsDownNotStraightToFloor()
     {
+        // A single 413 must NOT crater the whole session to the floor: it steps
+        // the ceiling DOWN by the backoff factor, preserving most of the context
+        // budget so the next call (and any model the fallback rotation lands on)
+        // keeps a usable prompt.
         var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
-        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
-            26000, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor));
+        var lowered = LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor);
+        Assert.Equal(20800, lowered);          // 26000 * 0.8
+        Assert.True(lowered > floor, "one 413 must not collapse straight to the floor");
+        Assert.True(lowered < 26000, "the ceiling must step down");
     }
 
     [Fact]
-    public void LowerCeilingOnPayloadTooLarge_On413ErrorString_CollapsesToFloor()
+    public void LowerCeilingOnPayloadTooLarge_On413ErrorString_StepsDown()
     {
         // The structured status may be absent; the "http 413" error string is the
         // fallback signal (mirrors the 429 detection's belt-and-braces check).
         var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
-        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
-            26000, status: null, "http 413: Payload Too Large", floor));
+        var lowered = LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, status: null, "http 413: Payload Too Large", floor);
+        Assert.Equal(20800, lowered);
+        Assert.True(lowered > floor);
     }
 
     [Fact]
@@ -13617,7 +13626,36 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void LowerCeilingOnPayloadTooLarge_OneWay_NeverRaisesAndStaysAtFloor()
+    public void LowerCeilingOnPayloadTooLarge_RepeatedPayloadFailures_WalkDownToFloorNeverBelow()
+    {
+        // Repeated 413s walk the ceiling down step by step and converge to the
+        // floor, never below it; once at the floor it stays there (one-way).
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        var ceiling = 26000;
+        var prev = ceiling;
+        for (var i = 0; i < 20; i++)
+        {
+            ceiling = LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+                ceiling, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor);
+            Assert.True(ceiling >= floor, $"ceiling {ceiling} dropped below floor {floor}");
+            Assert.True(ceiling <= prev, "ceiling must be monotonically non-increasing");
+            prev = ceiling;
+        }
+        Assert.Equal(floor, ceiling);
+    }
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_StepBelowFloor_ClampsToFloor()
+    {
+        // When one backoff step would land below the floor, it clamps to the
+        // floor (never below) rather than overshooting.
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            floor + 2000, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor));
+    }
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_OneWay_AtFloorStaysAtFloor()
     {
         // Already at the floor: a 413 keeps it at the floor (never raises, never
         // drops below the configured minimum).
