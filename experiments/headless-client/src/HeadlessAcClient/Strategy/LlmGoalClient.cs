@@ -225,7 +225,7 @@ internal sealed class LlmGoalClient
         req.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
 
         var sw = Stopwatch.StartNew();
-        HttpResponseMessage resp;
+        HttpResponseMessage? resp = null;
         string raw;
         try
         {
@@ -234,6 +234,10 @@ internal sealed class LlmGoalClient
         }
         catch (Exception ex)
         {
+            // SendAsync may have returned a live response before
+            // ReadAsStringAsync threw (e.g. a mid-body cancellation); dispose it
+            // here since the using-scope below is never entered on this path.
+            resp?.Dispose();
             return new LlmResult(false, "", "", (int)sw.ElapsedMilliseconds, $"http error: {ex.Message}");
         }
         sw.Stop();
