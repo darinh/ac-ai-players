@@ -137,6 +137,33 @@ internal sealed record FriendsListUpdatePayload(
         $"FriendsListUpdate(count={Friends.Count} updateType={UpdateType})";
 }
 
+/// <summary>
+/// One fellow's stat block from a FellowshipUpdateFellow (0x02C0) GameEvent —
+/// the incremental "this fellow was added / changed" update the server sends
+/// to each fellowship member. <see cref="UpdateType"/> is the raw
+/// FellowUpdateType enum value as written by the server. <see cref="ShareLootFlags"/>
+/// is the raw field the server writes (the shareLoot bool shifted left one bit,
+/// i.e. 0 or 2). The server's TODO-stub cpCached / lumCached fields are always 0
+/// and are not surfaced. Pure wire-protocol projection — no game knowledge.
+/// </summary>
+internal sealed record FellowshipUpdateFellowPayload(
+    uint Guid,
+    uint Level,
+    uint HealthMax,
+    uint StaminaMax,
+    uint ManaMax,
+    uint HealthCurrent,
+    uint StaminaCurrent,
+    uint ManaCurrent,
+    uint ShareLootFlags,
+    string Name,
+    uint UpdateType)
+{
+    public override string ToString() =>
+        $"FellowshipUpdateFellow(0x{Guid:X8} \"{Name}\" L{Level} " +
+        $"hp={HealthCurrent}/{HealthMax} updateType={UpdateType})";
+}
+
 internal sealed record SetTurbineChatChannelsPayload(
     uint Allegiance,
     uint General,
@@ -488,7 +515,8 @@ internal sealed record GameEventPayload(
     AttackerNotificationPayload?         AttackerNotification,
     EvasionAttackerNotificationPayload?  EvasionAttackerNotification,
     DefenderNotificationPayload?         DefenderNotification,
-    EvasionDefenderNotificationPayload?  EvasionDefenderNotification)
+    EvasionDefenderNotificationPayload?  EvasionDefenderNotification,
+    FellowshipUpdateFellowPayload?       FellowshipUpdateFellow)
 {
     public override string ToString() => EventType switch
     {
@@ -512,6 +540,7 @@ internal sealed record GameEventPayload(
         GameEventType.EvasionAttackerNotification  when EvasionAttackerNotification is { } x => x.ToString(),
         GameEventType.DefenderNotification         when DefenderNotification       is { } x => x.ToString(),
         GameEventType.EvasionDefenderNotification  when EvasionDefenderNotification is { } x => x.ToString(),
+        GameEventType.FellowshipUpdateFellow       when FellowshipUpdateFellow      is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -566,6 +595,8 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { DefenderNotification = DecodeDefenderNotification(body) },
                 GameEventType.EvasionDefenderNotification =>
                     Empty(eventType) with { EvasionDefenderNotification = DecodeEvasionDefenderNotification(body) },
+                GameEventType.FellowshipUpdateFellow =>
+                    Empty(eventType) with { FellowshipUpdateFellow = DecodeFellowshipUpdateFellow(body) },
                 _ => null,
             };
         }
@@ -598,7 +629,8 @@ internal static class GameEventPayloadDecoder
             AttackerNotification: null,
             EvasionAttackerNotification: null,
             DefenderNotification: null,
-            EvasionDefenderNotification: null);
+            EvasionDefenderNotification: null,
+            FellowshipUpdateFellow: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
     // serializer GameEventPlayerDescription.cs. We extract the initial
@@ -997,6 +1029,42 @@ internal static class GameEventPayloadDecoder
         }
         var updateType = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
         return new FriendsListUpdatePayload(friends, updateType);
+    }
+
+    // FellowshipUpdateFellow (0x02C0) — incremental single-fellow update. Wire
+    // layout mirrors the authoritative server writer
+    // GameEventFellowshipUpdateFellow.cs (after the 16B GameEvent envelope):
+    //   u32 guid
+    //   u32 cpCached   (TODO-stub, always 0 server-side; skipped)
+    //   u32 lumCached  (TODO-stub, always 0 server-side; skipped)
+    //   u32 level
+    //   u32 healthMax  u32 staminaMax  u32 manaMax
+    //   u32 healthCur  u32 staminaCur  u32 manaCur
+    //   u32 shareLoot  (server writes Convert.ToUInt32(bool) << 1 → 0 or 2)
+    //   string16L name (u16 len + utf8 + pad to 4)
+    //   u32 fellowUpdateType
+    // Fixed prefix is 11 u32 = 44B, then the name, then a trailing 4B updateType.
+    private static FellowshipUpdateFellowPayload DecodeFellowshipUpdateFellow(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 44 + 2 + 4) // 11 u32 prefix + min string16L len + updateType
+            throw new InvalidOperationException("body too short for FellowshipUpdateFellow");
+        var cursor = 0;
+        var guid        = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        cursor += 4; // cpCached  (always 0)
+        cursor += 4; // lumCached (always 0)
+        var level       = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var healthMax   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var staminaMax  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var manaMax     = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var healthCur   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var staminaCur  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var manaCur     = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var shareLoot   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var name        = ReadString16L(body, ref cursor);
+        var updateType  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        return new FellowshipUpdateFellowPayload(
+            guid, level, healthMax, staminaMax, manaMax,
+            healthCur, staminaCur, manaCur, shareLoot, name, updateType);
     }
 
     private static SetTurbineChatChannelsPayload DecodeSetTurbineChatChannels(ReadOnlySpan<byte> body)
