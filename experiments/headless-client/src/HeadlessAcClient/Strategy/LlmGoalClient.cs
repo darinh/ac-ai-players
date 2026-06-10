@@ -19,8 +19,11 @@
 //                            comparisons are not silently confounded. When set,
 //                            a 429 transparently rotates to the next quota-fresh
 //                            candidate within one CompleteAsync call, and the
-//                            client sticks to the model that worked. The policy
-//                            only sees a 429 once EVERY candidate is walled.
+//                            client sticks to the model that worked. A walled
+//                            model is then skipped (cooled down) until its
+//                            Retry-After elapses, so a sustained quota wall does
+//                            not re-probe known-walled models every call. The
+//                            policy only sees a 429 once EVERY candidate is walled.
 //   AC_BOTS_LLM_API_KEY   - bearer token
 //                            fallback: OPENAI_API_KEY
 //                            final fallback: `gh auth token` invocation
@@ -76,11 +79,31 @@ internal sealed class LlmGoalClient
     // re-probing the exhausted one every time.
     private int _activeIndex;
 
+    private readonly Func<DateTimeOffset> _now;
+
+    // Per-model "do not retry before" set from a 429's Retry-After. Lets
+    // rotation SKIP a model already known to be walled instead of re-probing it
+    // every call during a sustained multi-model quota wall (the wasted
+    // round-trips show up as the "bots are slow" symptom). Consulted ONLY when
+    // more than one model is configured — a single-model client never cools
+    // down, so its behaviour is unchanged. Bookkeeping TTL keyed on model name;
+    // guarded by _gate.
+    private readonly Dictionary<string, DateTimeOffset> _cooldownUntil =
+        new(StringComparer.Ordinal);
+
+    // TTL bounds for a model cooldown. A 429 with no Retry-After hint gets the
+    // default; one with a hint is clamped to [min, max]. Not game constants —
+    // pure rate-limit bookkeeping.
+    private static readonly TimeSpan DefaultModelCooldown = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan MinModelCooldown = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MaxModelCooldown = TimeSpan.FromHours(24);
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
-        string? apiKey = null, string? fallbackModels = null)
+        string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null)
     {
+        _now = now ?? (() => DateTimeOffset.UtcNow);
         _http = http ?? new HttpClient(new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
@@ -147,27 +170,53 @@ internal sealed class LlmGoalClient
         if (string.IsNullOrEmpty(token))
             return new LlmResult(Ok: false, Content: "", RawResponse: "", LatencyMs: 0, Error: "no api key (set AC_BOTS_LLM_API_KEY or run `gh auth login`)");
 
-        // Build the rotation order for this call: start at the currently-
-        // preferred model and walk the list once, wrapping. Each model is
-        // tried at most once per call, so a fully-walled roster fails fast
-        // instead of looping.
-        int start;
-        lock (_gate) start = _activeIndex;
-        var n = _models.Count;
+        var now = _now();
+
+        // Build this call's try-order: start at the currently-preferred model
+        // and walk the list once, wrapping, SKIPPING any model still cooling
+        // down from a recent 429 (multi-model only). Each model is tried at most
+        // once per call, so a fully-walled roster fails fast instead of looping.
+        List<int> order;
+        DateTimeOffset? soonestCooling;
+        lock (_gate)
+        {
+            var multi = _models.Count > 1;
+            order = new List<int>(_models.Count);
+            soonestCooling = null;
+            for (var step = 0; step < _models.Count; step++)
+            {
+                var idx = (_activeIndex + step) % _models.Count;
+                if (multi && _cooldownUntil.TryGetValue(_models[idx], out var until) && now < until)
+                {
+                    if (soonestCooling is null || until < soonestCooling) soonestCooling = until;
+                    continue;
+                }
+                order.Add(idx);
+            }
+        }
+
+        // Every model is cooling down from a recent 429: don't burn round-trips
+        // re-probing known-walled models — surface a 429 whose Retry-After is the
+        // soonest model's reset so the policy backs off exactly until then.
+        if (order.Count == 0)
+        {
+            var wait = soonestCooling is { } exp && exp > now ? exp - now : MinModelCooldown;
+            return new LlmResult(false, "", "", 0, "all models cooling down (429 quota)",
+                StatusCode: (HttpStatusCode)429, RetryAfter: wait);
+        }
 
         LlmResult? lastQuota = null;
         LlmResult? soonestQuota = null;
-        for (var step = 0; step < n; step++)
+        foreach (var idx in order)
         {
-            var idx = (start + step) % n;
             var model = _models[idx];
             var result = await SendOnceAsync(model, token, systemPrompt, userPrompt, ct).ConfigureAwait(false);
 
             if (result.Ok)
             {
-                // Stick to the model that just worked so the next call starts
-                // here rather than re-probing an exhausted earlier model.
-                lock (_gate) _activeIndex = idx;
+                // Stick to the model that just worked and clear any stale
+                // cooldown on it so the next call starts here.
+                lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); }
                 return result;
             }
 
@@ -178,6 +227,7 @@ internal sealed class LlmGoalClient
             // blip or a misconfiguration.
             if (result.StatusCode == (HttpStatusCode)429)
             {
+                RecordCooldown(model, result.RetryAfter);
                 lastQuota = result;
                 // Remember the 429 whose Retry-After expires SOONEST: when every
                 // model is walled the caller should resume as early as the first
@@ -192,10 +242,27 @@ internal sealed class LlmGoalClient
             return result;
         }
 
-        // Every candidate is quota-exhausted. Prefer the soonest-resuming
-        // Retry-After hint so the policy's backoff window is correct; fall back
-        // to the last 429 when no model supplied a hint.
+        // Every reachable candidate is quota-exhausted. Prefer the
+        // soonest-resuming Retry-After hint so the policy's backoff window is
+        // correct; fall back to the last 429 when no model supplied a hint.
         return soonestQuota ?? lastQuota!;
+    }
+
+    // Mark a model as cooling down after a 429 (multi-model only): skip it in
+    // rotation until its Retry-After elapses, so a sustained quota wall does not
+    // re-probe known-walled models every call. A single-model client never cools
+    // down — it always re-probes its only option, preserving prior behaviour.
+    private void RecordCooldown(string model, TimeSpan? retryAfter)
+    {
+        if (_models.Count <= 1) return;
+        var span = retryAfter is { } ra
+            ? (ra < MinModelCooldown ? MinModelCooldown : (ra > MaxModelCooldown ? MaxModelCooldown : ra))
+            : DefaultModelCooldown;
+        // Anchor at the moment the 429 was OBSERVED, not the CompleteAsync-start
+        // snapshot: the awaited HTTP round-trip can take seconds, and the
+        // server's Retry-After is relative to when it answered — anchoring at
+        // call-start would expire the cooldown early and re-probe too soon.
+        lock (_gate) _cooldownUntil[model] = _now() + span;
     }
 
     // One HTTP round-trip to a specific model. Owns all the wire concerns:
