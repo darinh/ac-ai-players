@@ -12815,4 +12815,46 @@ public class LlmGoalPolicyTests
         Assert.Equal(min, LlmGoalPolicy.ResolvePromptCeiling(min.ToString()));
         Assert.Equal(26000, LlmGoalPolicy.ResolvePromptCeiling((min - 1).ToString()));
     }
+
+    // ---- LowerCeilingOnPayloadTooLarge (adaptive ceiling auto-lowers on 413) ----
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_On413Status_CollapsesToFloor()
+    {
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor));
+    }
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_On413ErrorString_CollapsesToFloor()
+    {
+        // The structured status may be absent; the "http 413" error string is the
+        // fallback signal (mirrors the 429 detection's belt-and-braces check).
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, status: null, "http 413: Payload Too Large", floor));
+    }
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_NonPayloadFailure_LeavesCeilingUnchanged()
+    {
+        // A 429 (or any non-413) must NOT lower the ceiling — only a payload
+        // rejection adapts the request size; rate limits are handled by backoff.
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(26000, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, (System.Net.HttpStatusCode)429, "http 429: Too Many Requests", floor));
+        Assert.Equal(26000, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            26000, status: null, error: null, floor));
+    }
+
+    [Fact]
+    public void LowerCeilingOnPayloadTooLarge_OneWay_NeverRaisesAndStaysAtFloor()
+    {
+        // Already at the floor: a 413 keeps it at the floor (never raises, never
+        // drops below the configured minimum).
+        var floor = LlmGoalPolicy.MinConfigurablePromptCeilingChars;
+        Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
+            floor, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor));
+    }
 }

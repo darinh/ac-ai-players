@@ -1896,7 +1896,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _worldUseChurnEpisode is { } ue && ue.Landblock == world.Self.Landblock && ue.UseCounts.Count > 0
                 ? (ue.UseCounts.Count, ue.DistinctChurnLatched)
                 : null;
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, promptCeiling: _adaptivePromptCeiling);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -2048,6 +2048,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Console.WriteLine(
                 $"[llm-call] FAILED id={decisionId} latency={result.LatencyMs}ms " +
                 $"error={result.Error ?? "(null)"}");
+            // HTTP 413 Payload Too Large — the model endpoint rejected the
+            // request body as too large. Auto-lower the session prompt ceiling to
+            // the floor so the NEXT call fits, letting a payload-limited but
+            // capable model (e.g. deepseek-v3 at the default 26000 ceiling)
+            // self-adapt without a manual AC_BOTS_PROMPT_CEILING. One-way (never
+            // raised) so a persistent endpoint limit is honoured for the run.
+            // Request-size management keyed to the endpoint's limit, not strategy.
+            var loweredCeiling = LowerCeilingOnPayloadTooLarge(
+                _adaptivePromptCeiling, result.StatusCode, result.Error,
+                MinConfigurablePromptCeilingChars);
+            if (loweredCeiling != _adaptivePromptCeiling)
+            {
+                Console.WriteLine(
+                    $"[llm-call] 413 Payload Too Large at prompt-ceiling={_adaptivePromptCeiling} -> " +
+                    $"lowering to {loweredCeiling} for the rest of the session " +
+                    $"(model payload limit; subsequent prompts auto-fit).");
+                _adaptivePromptCeiling = loweredCeiling;
+            }
             // Slice T (extended) — 429 / rate-limit backoff trigger.
             // Prefer the structured HttpStatusCode field over substring
             // matching on Error (the old check was brittle to message
@@ -3955,7 +3973,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         ExcursionCoverageProjection? excursionCoverage = null,
         IReadOnlyList<FreshKillCorpse>? freshKillCorpses = null,
         IReadOnlyList<LootedCorpse>? lootedEmptyCorpses = null,
-        (int Distinct, bool Latched)? localUseChurn = null)
+        (int Distinct, bool Latched)? localUseChurn = null,
+        int? promptCeiling = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -5991,7 +6010,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
-        return FitPromptToCeiling(body, salienceTail, EffectivePromptCeilingChars);
+        return FitPromptToCeiling(body, salienceTail, promptCeiling ?? EffectivePromptCeilingChars);
     }
 
     // Some GitHub Models endpoints reject an over-large request body with
@@ -6018,6 +6037,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private static readonly int EffectivePromptCeilingChars =
         ResolvePromptCeiling(Environment.GetEnvironmentVariable("AC_BOTS_PROMPT_CEILING"));
 
+    // Adaptive session-level prompt ceiling. Starts at the configured
+    // EffectivePromptCeilingChars and AUTO-LOWERS to MinConfigurablePromptCeilingChars
+    // on the first HTTP 413 (Payload Too Large) from the model endpoint, then
+    // stays lowered for the rest of the run (one-way; never raised). This lets a
+    // payload-limited but capable model (e.g. deepseek-v3, which 413s a ~26000-
+    // char body but FITS at ~10000) self-adapt WITHOUT a manual
+    // AC_BOTS_PROMPT_CEILING — preventing the "413s every call -> knowledge-free
+    // fallback -> looks non-viable" failure. Request-size management, not strategy.
+    private int _adaptivePromptCeiling = EffectivePromptCeilingChars;
+
     // Parse the AC_BOTS_PROMPT_CEILING override. A value that parses as an int in
     // [MinConfigurablePromptCeilingChars, HardUserPromptCeilingChars] is used;
     // anything else (null, unset, unparseable, or out of range) falls back to the
@@ -6031,6 +6060,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && ceiling <= HardUserPromptCeilingChars
             ? ceiling
             : HardUserPromptCeilingChars;
+
+    // Decide the new adaptive prompt ceiling after an LLM call failure. On an
+    // HTTP 413 (Payload Too Large) — by structured status OR an error string
+    // containing "413" — collapse to <paramref name="floor"/> so the next
+    // request fits the endpoint's payload limit. One-way: never raises, and a
+    // no-413 failure (or already-at-floor) returns the current ceiling
+    // unchanged. Request-size management keyed to the endpoint, not game logic.
+    internal static int LowerCeilingOnPayloadTooLarge(
+        int currentCeiling, System.Net.HttpStatusCode? status, string? error, int floor)
+    {
+        var is413 =
+            status == System.Net.HttpStatusCode.RequestEntityTooLarge ||
+            (error is not null && error.Contains("413"));
+        return is413 && currentCeiling > floor ? floor : currentCeiling;
+    }
 
     // Lowest-value variable row-sections first. Out-of-view sightings are
     // the least actionable, then historical events, then the FAR end of
