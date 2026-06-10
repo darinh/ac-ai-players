@@ -246,6 +246,25 @@ internal sealed record WorldStateProjection
     public CombatFightStatus? CurrentFight { get; init; }
 
     /// <summary>
+    /// Session-cumulative melee swings that LANDED (across every fight).
+    /// Copied straight from <see cref="WorldState.CumulativeSwingsLanded"/>.
+    /// Paired with <see cref="CumulativeSwingsEvaded"/> it expresses the
+    /// bot's overall melee accuracy as raw perception; source draws no
+    /// conclusion (the prompt's SPEND XP rule supplies the mapping from
+    /// accuracy to which attribute affects it).
+    /// </summary>
+    [JsonPropertyName("cumulative_swings_landed")]
+    public int CumulativeSwingsLanded { get; init; }
+
+    /// <summary>
+    /// Session-cumulative melee swings the target EVADED (across every
+    /// fight). Copied straight from
+    /// <see cref="WorldState.CumulativeSwingsEvaded"/>. Raw perception.
+    /// </summary>
+    [JsonPropertyName("cumulative_swings_evaded")]
+    public int CumulativeSwingsEvaded { get; init; }
+
+    /// <summary>
     /// active-combat-telemetry: rolling-window summary of recent inbound
     /// damage the bot has TAKEN. Copied straight from
     /// <see cref="WorldState.RecentInboundDamage"/>. Surfaced to the LLM as
@@ -597,6 +616,8 @@ internal sealed record WorldStateProjection
             Inventory = inv,
             Visible = visible,
             CurrentFight = world.CurrentFight,
+            CumulativeSwingsLanded = world.CumulativeSwingsLanded,
+            CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
             RecentInboundDamage = world.RecentInboundDamage,
             OpenedCorpseGuids = world.OpenedCorpseGuids,
             CombatHistory = world.CombatHistory,

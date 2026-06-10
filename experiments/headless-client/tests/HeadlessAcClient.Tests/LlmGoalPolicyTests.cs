@@ -9510,6 +9510,42 @@ public class LlmGoalPolicyTests
     };
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_SurfacesSwingAccuracyWhenSwingsThrown()
+    {
+        // cp-2427: the offense-mechanism evidence that disambiguates the
+        // failure mode. Across models the bot poured XP into endurance while
+        // its swings kept evading, because the capsule surfaced deaths/max-HP
+        // (survival) but never the raw melee hit/evade split. With resolved
+        // swings present, the capsule must state the bot's own landed-vs-evaded
+        // counts so the SPEND XP rule's accuracy->attribute mapping has the
+        // evidence it needs. Raw fact, no recommendation.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CumulativeSwingsLanded = 12,
+            CumulativeSwingsEvaded = 80,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.Contains(
+            "your melee swings this session have landed 12 time(s) and been evaded 80 time(s)",
+            prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_OmitsSwingAccuracyBeforeAnySwing()
+    {
+        // RAW-PRESENCE gate: before any swing resolves (landed + evaded == 0)
+        // the accuracy fact would be noise ("landed 0, evaded 0"), so it must
+        // not render. Mirrors the any-positive gate the other spend facts use.
+        var world = BuildXpWorld(69296, 5475); // cumulative swings default to 0
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Unspent XP", prompt);
+        Assert.DoesNotContain("your melee swings this session have landed", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_PriorityBand_IncludesInvestUnspentXp()
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);

@@ -2424,6 +2424,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (ge.Payload?.AttackerNotification is { } atkHit)
                                 {
                                     combatSwingsLanded++;
+                                    worldState.CumulativeSwingsLanded++;
                                     combatDamageDealt += atkHit.Damage;
                                     if (!string.IsNullOrEmpty(atkHit.DefenderName))
                                         combatTargetName = atkHit.DefenderName;
@@ -2434,6 +2435,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 else if (ge.Payload?.EvasionAttackerNotification is { } atkEvade)
                                 {
                                     combatSwingsEvaded++;
+                                    worldState.CumulativeSwingsEvaded++;
                                     if (!string.IsNullOrEmpty(atkEvade.DefenderName))
                                         combatTargetName = atkEvade.DefenderName;
                                     Console.WriteLine(

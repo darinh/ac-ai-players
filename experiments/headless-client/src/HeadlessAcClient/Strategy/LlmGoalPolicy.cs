@@ -5471,6 +5471,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         $"in recent combat you have {endcapKills} kill(s) and have fought " +
                         $"{endcapUnkilledKinds} monster kind(s) you have not killed");
             }
+            // cp-2427: the offense-mechanism EVIDENCE that disambiguates the
+            // failure mode the facts above only hint at. Deaths + max HP + the
+            // "kinds not killed" count tell the LLM it is LOSING, but not WHY:
+            // is its offense whiffing (swings evading) or is it connecting but
+            // outlasted? Across models the bot poured XP into endurance while
+            // its swings kept evading, because this capsule surfaced the
+            // SURVIVAL side (deaths/max HP) yet never the RAW melee hit/evade
+            // split — so the LLM had no evidence the problem was ACCURACY. The
+            // bot's own session-cumulative landed-vs-evaded swing counts are
+            // exactly that evidence; the SPEND XP rule already maps "how often
+            // your swings land" to the attributes that drive it. RAW observed
+            // outcomes, on RAW PRESENCE (any resolved swing), no magnitude gate,
+            // NO recommendation about which attribute to raise; no game knowledge.
+            var endcapSwingsLanded = world.CumulativeSwingsLanded;
+            var endcapSwingsEvaded = world.CumulativeSwingsEvaded;
+            if (endcapSwingsLanded + endcapSwingsEvaded > 0)
+                spendFacts.Add(
+                    $"your melee swings this session have landed {endcapSwingsLanded} time(s) and " +
+                    $"been evaded {endcapSwingsEvaded} time(s)");
             if (spendFacts.Count > 0)
                 sb.AppendLine($"- raw fact: {string.Join("; ", spendFacts)}.");
             sb.AppendLine(
