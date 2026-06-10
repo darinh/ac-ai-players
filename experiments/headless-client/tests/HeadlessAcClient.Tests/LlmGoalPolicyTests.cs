@@ -4904,14 +4904,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void RecentSightings_OmitsNonMobKinds()
+    public void RecentSightings_NpcRendersInOwnBlock_NotMonsterBlock()
     {
-        // An NPC-kind remembered creature is not surfaced in the
-        // monster-recall section (mirrors the live "nearest monster").
+        // An NPC-kind remembered creature surfaces in the SEPARATE NPC recall
+        // block (with its bearing, so the LLM can steer back to seek a
+        // kill-task), NOT in the monster-recall block.
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
         var world = RecallSelfWorld();
         var prompt = BuildPromptWithRecall(world,
-            Sighting("Town Crier", 1234u, EntityKind.NPC, ageSeconds: 20));
-        Assert.DoesNotContain("## Recently sighted (out of view)", prompt);
+            Sighting("Town Crier", 1234u, EntityKind.NPC, ageSeconds: 20,
+                worldX: selfGX, worldY: selfGY + 50f));
+        Assert.DoesNotContain("Monsters you have seen", prompt); // monster block absent
+        Assert.Contains("## Recently sighted NPCs (out of view)", prompt);
+        Assert.Contains("Town Crier (kind=npc, last seen 20s ago, approx N ~50m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_RendersBothBlocks_MonstersAndNpcsSeparately()
+    {
+        // Monsters and NPCs each get their own bounded block so an NPC-dense
+        // town can never starve the monster recall.
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("The Chicken", 24937u, EntityKind.Mob, ageSeconds: 30,
+                worldX: selfGX, worldY: selfGY + 100f),
+            Sighting("Town Crier", 1234u, EntityKind.NPC, ageSeconds: 40,
+                worldX: selfGX, worldY: selfGY - 80f));
+        Assert.Contains("## Recently sighted (out of view)", prompt);
+        Assert.Contains("The Chicken (kind=monster, last seen 30s ago, approx N ~100m)", prompt);
+        Assert.Contains("## Recently sighted NPCs (out of view)", prompt);
+        Assert.Contains("Town Crier (kind=npc, last seen 40s ago, approx S ~80m)", prompt);
     }
 
     [Fact]
@@ -12671,6 +12696,26 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Combat readiness", result);   // fixed section intact
         Assert.Contains("- ready-line", result);
         Assert.Contains("- keep-this", result);           // section after events intact
+    }
+
+    [Fact]
+    public void FitPromptToCeiling_TrimsNpcRecallBlock_InCascade()
+    {
+        // cp-2423: the NPC recall block must be in PromptTrimOrder so it sheds
+        // trailing rows under budget pressure, before the fixed sections.
+        var sb = new StringBuilder();
+        sb.Append("PREAMBLE-FIXED-KEEP\n");
+        sb.Append("## Recently sighted NPCs (out of view)\n");
+        for (int i = 0; i < 100; i++) sb.Append("- npc").Append(i).Append('\n');
+        sb.Append("## Combat readiness\n- ready-line\n");
+
+        var result = LlmGoalPolicy.FitPromptToCeiling(sb.ToString(), ceiling: 200);
+
+        Assert.True(result.Length <= 200, $"len={result.Length}");
+        Assert.Contains("PREAMBLE-FIXED-KEEP", result);   // fixed preamble intact
+        Assert.Contains("## Combat readiness", result);   // fixed section intact
+        Assert.Contains("- ready-line", result);
+        Assert.DoesNotContain("- npc99", result);         // NPC recall tail trimmed
     }
 
     [Fact]

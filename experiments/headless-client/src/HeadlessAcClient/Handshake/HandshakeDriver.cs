@@ -6742,25 +6742,22 @@ internal sealed class HandshakeDriver : IDisposable
                     // a candidate that no longer applies.
                     llmPolicyForPickerSurface?.SetCurrentExplorationCandidates(explorationCandidatesForLlm);
 
-                    // Publish the bot's own remembered MONSTER sightings
-                    // (out-of-view recall) so the LLM can choose to return
-                    // to a monster that left its field of view. Project the
-                    // Mob-kind SightedLocation memory into the small recall
-                    // DTO, bounded to the most-recent ones; the prompt
-                    // builder does visible-exclusion, dedup, TTL and cap.
-                    // Mob-only here (not Mob+NPC): the builder renders only
-                    // Mob, so including NPCs would let an NPC-dense town fill
-                    // the bounded projection and starve out the monsters the
-                    // recall is for. Pure perception.
+                    // Publish the bot's own remembered MONSTER + NPC sightings
+                    // (out-of-view recall) so the LLM can choose to return to a
+                    // monster that left view (to hunt) OR to a remembered NPC
+                    // cluster (to seek a kill-task quest — see the SEEK A
+                    // KILL-TASK rule). Project both kinds with SEPARATE caps so
+                    // an NPC-dense town can never starve the monster recall; the
+                    // prompt builder renders each kind in its own bounded block,
+                    // and does visible-exclusion, dedup, TTL and per-block cap.
+                    // Pure perception.
                     if (llmPolicyForPickerSurface is not null)
                     {
-                        const int MaxRecallSightings = 40;
+                        const int MaxMobRecallSightings = 40;
+                        const int MaxNpcRecallSightings = 20;
                         var nowRecall = DateTimeOffset.UtcNow;
-                        var recall = navGraph.SnapshotSighted()
-                            .Where(s => s.Kind == EntityKind.Mob)
-                            .OrderByDescending(s => s.LastSeenUtc)
-                            .Take(MaxRecallSightings)
-                            .Select(s => new SightedRecallProjection
+                        SightedRecallProjection ProjectRecall(SightedLocation s) =>
+                            new SightedRecallProjection
                             {
                                 Name       = s.Name,
                                 Wcid       = s.Wcid,
@@ -6769,7 +6766,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 WorldX     = s.WorldX,
                                 WorldY     = s.WorldY,
                                 AgeSeconds = Math.Max(0.0, (nowRecall - s.LastSeenUtc).TotalSeconds),
-                            })
+                            };
+                        var sighted = navGraph.SnapshotSighted();
+                        var recall = sighted
+                            .Where(s => s.Kind == EntityKind.Mob)
+                            .OrderByDescending(s => s.LastSeenUtc)
+                            .Take(MaxMobRecallSightings)
+                            .Select(ProjectRecall)
+                            .Concat(sighted
+                                .Where(s => s.Kind == EntityKind.NPC)
+                                .OrderByDescending(s => s.LastSeenUtc)
+                                .Take(MaxNpcRecallSightings)
+                                .Select(ProjectRecall))
                             .ToList();
                         llmPolicyForPickerSurface.SetRecentSightings(recall);
                     }
