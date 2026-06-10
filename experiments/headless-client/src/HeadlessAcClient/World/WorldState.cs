@@ -215,6 +215,15 @@ internal sealed class WorldState
     /// </summary>
     public FellowshipMembership? Fellowship { get; private set; }
 
+    /// <summary>
+    /// The bot's currently tracked contracts/objectives, set from the server's
+    /// SendClientContractTrackerTable (0x0314) full snapshot and upserted/removed
+    /// by SendClientContractTracker (0x0315). Empty when none are tracked. Pure
+    /// perception memory; the LLM owns any decision about a contract.
+    /// </summary>
+    public IReadOnlyList<ContractTrackerEntry> Contracts { get; private set; }
+        = new List<ContractTrackerEntry>();
+
     public int ObjectCount => _objects.Count;
 
     /// <summary>
@@ -490,6 +499,39 @@ internal sealed class WorldState
         if (Fellowship is null)
             return false;
         Fellowship = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Replace the tracked-contract set from a SendClientContractTrackerTable
+    /// (0x0314) snapshot — the server's authoritative full list. Returns true.
+    /// </summary>
+    public bool ApplyContractTable(ContractTrackerTablePayload table)
+    {
+        Contracts = table.Contracts.ToList();
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a single SendClientContractTracker (0x0315) update: remove the
+    /// matching contract when <see cref="ContractTrackerPayload.DeleteContract"/>
+    /// is set, otherwise upsert it by contract id (replace an existing entry or
+    /// append a new one). Returns false when a delete targets a contract that is
+    /// not tracked (no-op).
+    /// </summary>
+    public bool ApplyContractUpdate(ContractTrackerPayload update)
+    {
+        var entry = update.Entry;
+        var remaining = Contracts.Where(c => c.ContractId != entry.ContractId).ToList();
+        if (update.DeleteContract)
+        {
+            if (remaining.Count == Contracts.Count)
+                return false; // delete targeted a contract we were not tracking
+            Contracts = remaining;
+            return true;
+        }
+        remaining.Add(entry);
+        Contracts = remaining;
         return true;
     }
 

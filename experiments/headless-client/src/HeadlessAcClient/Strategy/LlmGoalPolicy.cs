@@ -4638,6 +4638,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
+        // ── ## Contracts (tracked-objective perception) ──────────────────
+        // Raw tracked-contract facts from the server's contract tracker
+        // (SendClientContractTracker 0x0315 / Table 0x0314). Conditional
+        // (omitted when none are tracked). Numeric id + the wire ContractStage
+        // code only — no quest/NPC/contract names. Facts so the LLM can decide
+        // whether to pursue an objective or turn one in; source never decides.
+        if (world.Contracts.Count > 0)
+        {
+            sb.AppendLine("## Contracts");
+            sb.AppendLine(
+                "- tracked objectives (stage code: 1 available, 2 in progress, " +
+                "3 done or pending repeat, 4+ in progress with a step counter):");
+            foreach (var c in world.Contracts)
+                sb.AppendLine($"  - contract {c.ContractId}: stage {c.Stage}");
+            sb.AppendLine();
+        }
+
         if (stack is not null)
         {
             sb.AppendLine(IntentStackOpsApplier.RenderStackForPrompt(stack));
