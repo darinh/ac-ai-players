@@ -90,6 +90,21 @@ internal static class MotorPostActionCooldown
     public static readonly TimeSpan PortalWindup = TimeSpan.FromSeconds(6);
 
     /// <summary>
+    /// Post-action hold for a NON-INTERACT arrival — an Explore goal that
+    /// reached its waypoint. Unlike USE/PICKUP/Talk/Give, an Explore arrival
+    /// dispatches NO opcode to the server (it is pure movement), so there is no
+    /// server-side action reply or animation to wait for: the motor only needs
+    /// to clear the motion lock and let the next goal be picked. Zero removes
+    /// the ~2s idle that the <see cref="Default"/> cooldown would otherwise add
+    /// on every Explore hop (the Explore short-circuit reuses the same
+    /// useSent-gated reset cascade). The DELIBERATE picker-arrived-no-action
+    /// park (which waits <see cref="Default"/> so the LLM can name a verb for
+    /// the just-arrived target before the lock clears) is a DIFFERENT path and
+    /// keeps the full cooldown. Mechanical motor timing; no game knowledge.
+    /// </summary>
+    public static readonly TimeSpan NonInteractArrival = TimeSpan.Zero;
+
+    /// <summary>
     /// Per-target wall-clock cooldown for the action-cycle-reset
     /// gate. Returns <see cref="PortalWindup"/> for Portal entities
     /// (pure wire-bit predicate on

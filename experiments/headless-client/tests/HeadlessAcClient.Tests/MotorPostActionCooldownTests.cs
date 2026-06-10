@@ -172,4 +172,26 @@ public class MotorPostActionCooldownTests
         Assert.True(MotorPostActionCooldown.PortalWindup >= TimeSpan.FromSeconds(5),
             $"Expected PortalWindup ({MotorPostActionCooldown.PortalWindup}) >= 5 seconds");
     }
+
+    [Fact]
+    public void NonInteractArrival_IsZero()
+    {
+        // An Explore arrival dispatches NO opcode — pure movement that
+        // reached its waypoint — so there is no server reply/animation to
+        // await. The hold is zero so the motor resets and picks the next goal
+        // immediately, removing the ~2s idle the Explore short-circuit
+        // inherited from reusing the useSent-gated reset cascade.
+        Assert.Equal(TimeSpan.Zero, MotorPostActionCooldown.NonInteractArrival);
+    }
+
+    [Fact]
+    public void NonInteractArrival_IsLessThanDefault()
+    {
+        // Relationship invariant: a non-interact (Explore) arrival must NOT
+        // wait as long as an interact (USE/PICKUP/Talk/Give) cycle, which holds
+        // for the server's action reply. If a refactor raised NonInteractArrival
+        // to >= Default the Explore tempo win would silently regress.
+        Assert.True(MotorPostActionCooldown.NonInteractArrival < MotorPostActionCooldown.Default,
+            $"Expected NonInteractArrival ({MotorPostActionCooldown.NonInteractArrival}) < Default ({MotorPostActionCooldown.Default})");
+    }
 }
