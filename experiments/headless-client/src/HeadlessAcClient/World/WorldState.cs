@@ -220,6 +220,24 @@ internal sealed class WorldState
     public CombatFightStatus? CurrentFight { get; set; }
 
     /// <summary>
+    /// Session-cumulative count of the bot's OWN melee swings that LANDED a
+    /// hit (AttackerNotification), summed across every fight. Unlike the
+    /// per-fight counters inside <see cref="CurrentFight"/> (which reset each
+    /// fight) this is monotonic for the run, so the prompt can surface the
+    /// bot's overall hit/evade split beside the spend-XP decision. Raw
+    /// observed outcome; source draws no conclusion from it.
+    /// </summary>
+    public int CumulativeSwingsLanded { get; set; }
+
+    /// <summary>
+    /// Session-cumulative count of the bot's OWN melee swings the target
+    /// EVADED (EvasionAttackerNotification), summed across every fight. Pairs
+    /// with <see cref="CumulativeSwingsLanded"/> to express overall melee
+    /// accuracy. Raw observed outcome; source draws no conclusion from it.
+    /// </summary>
+    public int CumulativeSwingsEvaded { get; set; }
+
+    /// <summary>
     /// active-combat-telemetry: rolling-window summary of recent inbound
     /// damage the bot has TAKEN, set/cleared by HandshakeDriver before each
     /// projection build from a short TTL window of landed DefenderNotification
