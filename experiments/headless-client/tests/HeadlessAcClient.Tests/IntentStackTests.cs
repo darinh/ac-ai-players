@@ -216,6 +216,44 @@ public class IntentStackTests
         Assert.Equal(IntentLifecycle.Blocked, s.Top!.Status);
     }
 
+    [Fact]
+    public void CheckTopForCompletion_RootDeadlineElapsed_BumpsRevisionOnce_NotPerTick()
+    {
+        // Regression (stack-revision-runaway): once the ROOT intent's deadline
+        // elapses, CheckTopForCompletion marks it Blocked. Blocked is NOT a
+        // terminal status (the root stays at depth 1), so re-entry must NOT
+        // re-mark + re-bump the revision every tick — otherwise the revision
+        // churns ~4/sec and the echoed expectedRevision is perpetually stale, so
+        // EVERY stack op is RefusedRevision and the stack can no longer be
+        // mutated. The bump must happen exactly ONCE, on the Blocked transition.
+        var s = new IntentStack();
+        var world = BuildWorld(level: 1);
+        var events = new EventStream();
+        var baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        s.TryPush(NewIntent(
+            "i-001", "session-root", baseline,
+            new AlwaysFalsePredicate(),
+            deadline: DateTime.UtcNow.AddSeconds(5)));
+
+        var revBeforeDeadline = s.Revision;
+        var future = DateTime.UtcNow.AddMinutes(1);
+
+        // First post-deadline check: transition to Blocked, bump ONCE.
+        s.CheckTopForCompletion(world, events, future);
+        var revAfterFirst = s.Revision;
+        Assert.Equal(revBeforeDeadline + 1, revAfterFirst);
+        Assert.Equal(IntentLifecycle.Blocked, s.Top!.Status);
+
+        // Many further post-deadline checks (simulating ticks during a slow LLM
+        // call): the root is ALREADY Blocked, so the revision must not move.
+        for (var i = 0; i < 20; i++)
+            s.CheckTopForCompletion(world, events, future);
+
+        Assert.Equal(revAfterFirst, s.Revision); // no per-tick churn
+        Assert.Equal(1, s.Depth);
+        Assert.Equal(IntentLifecycle.Blocked, s.Top!.Status);
+    }
+
     // ---- Predicate evaluation ----
 
     [Fact]
