@@ -583,6 +583,53 @@ internal sealed record VendorInfoPayload(
 }
 
 /// <summary>
+/// One contract / tracked-objective entry. Wire layout from the authoritative
+/// server serializer ContractTracker.cs (ContractTrackerExtensions.Write):
+/// version, contract id, stage, and two absolute server times. <see cref="Stage"/>
+/// is the raw wire ContractStage value (1=available, 2=in-progress,
+/// 3=done/pending-repeat, 4+=progress-counter); stored as a raw number with no
+/// interpretation. <see cref="TimeWhenDone"/> / <see cref="TimeWhenRepeats"/> are
+/// raw server timestamps (seconds). All fields are raw wire values.
+/// </summary>
+internal sealed record ContractTrackerEntry(
+    uint Version,
+    uint ContractId,
+    uint Stage,
+    double TimeWhenDone,
+    double TimeWhenRepeats)
+{
+    public override string ToString() =>
+        $"contract={ContractId} stage={Stage} done@{TimeWhenDone:F0} repeats@{TimeWhenRepeats:F0}";
+}
+
+/// <summary>
+/// A single contract update from a SendClientContractTracker (0x0315) GameEvent:
+/// one <see cref="ContractTrackerEntry"/> plus the delete/display flags. Decoded
+/// from the authoritative server serializer GameEventSendClientContractTracker.cs.
+/// </summary>
+internal sealed record ContractTrackerPayload(
+    ContractTrackerEntry Entry,
+    bool DeleteContract,
+    bool SetAsDisplayContract)
+{
+    public override string ToString() =>
+        $"ContractTracker({Entry}{(DeleteContract ? " DELETE" : "")}{(SetAsDisplayContract ? " DISPLAY" : "")})";
+}
+
+/// <summary>
+/// The whole contract table from a SendClientContractTrackerTable (0x0314)
+/// GameEvent: a PackableHashTable of <see cref="ContractTrackerEntry"/>. Decoded
+/// from the authoritative server serializer
+/// GameEventSendClientContractTrackerTable.cs (ContractManagerExtensions.Write).
+/// </summary>
+internal sealed record ContractTrackerTablePayload(
+    IReadOnlyList<ContractTrackerEntry> Contracts)
+{
+    public override string ToString() =>
+        $"ContractTrackerTable(count={Contracts.Count})";
+}
+
+/// <summary>
 /// Discriminated-union view of the decoded GameEvent payload.
 /// Exactly one variant is non-null. If the GameEvent type is not
 /// implemented here, all variants are null and the caller should
@@ -614,7 +661,9 @@ internal sealed record GameEventPayload(
     FellowshipFullUpdatePayload?         FellowshipFullUpdate,
     FellowshipQuitPayload?               FellowshipQuit,
     FellowshipDismissPayload?            FellowshipDismiss,
-    VendorInfoPayload?                   VendorInfo)
+    VendorInfoPayload?                   VendorInfo,
+    ContractTrackerPayload?              ContractTracker,
+    ContractTrackerTablePayload?         ContractTrackerTable)
 {
     public override string ToString() => EventType switch
     {
@@ -643,6 +692,8 @@ internal sealed record GameEventPayload(
         GameEventType.FellowshipQuit               when FellowshipQuit              is { } x => x.ToString(),
         GameEventType.FellowshipDismiss            when FellowshipDismiss           is { } x => x.ToString(),
         GameEventType.ApproachVendor               when VendorInfo                  is { } x => x.ToString(),
+        GameEventType.SendClientContractTracker      when ContractTracker          is { } x => x.ToString(),
+        GameEventType.SendClientContractTrackerTable when ContractTrackerTable     is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -712,6 +763,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType),
                 GameEventType.ApproachVendor =>
                     Empty(eventType) with { VendorInfo = DecodeApproachVendor(body) },
+                GameEventType.SendClientContractTracker =>
+                    Empty(eventType) with { ContractTracker = DecodeContractTracker(body) },
+                GameEventType.SendClientContractTrackerTable =>
+                    Empty(eventType) with { ContractTrackerTable = DecodeContractTrackerTable(body) },
                 _ => null,
             };
         }
@@ -749,7 +804,9 @@ internal static class GameEventPayloadDecoder
             FellowshipFullUpdate: null,
             FellowshipQuit: null,
             FellowshipDismiss: null,
-            VendorInfo: null);
+            VendorInfo: null,
+            ContractTracker: null,
+            ContractTrackerTable: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
     // serializer GameEventPlayerDescription.cs. We extract the initial
@@ -1284,6 +1341,58 @@ internal static class GameEventPayloadDecoder
             vendorGuid, merchandiseItemTypes, merchandiseMinValue, merchandiseMaxValue,
             dealMagicalItems, buyPrice, sellPrice, alternateCurrency, altCurrencyAmount,
             altCurrencyName, itemCount);
+    }
+
+    // SendClientContractTracker (0x0315) — a single contract update. Wire layout
+    // from the authoritative server serializer GameEventSendClientContractTracker.cs
+    // (after the 16B GameEvent envelope): a ContractTracker struct (28B; see
+    // ReadContractTrackerEntry) followed by two u32 booleans.
+    //   ContractTracker(28B) + u32 deleteContract + u32 setAsDisplayContract = 36B
+    private static ContractTrackerPayload DecodeContractTracker(ReadOnlySpan<byte> body)
+    {
+        var cursor = 0;
+        var entry = ReadContractTrackerEntry(body, ref cursor);
+        var deleteContract       = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
+        var setAsDisplayContract = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0;
+        return new ContractTrackerPayload(entry, deleteContract, setAsDisplayContract);
+    }
+
+    // SendClientContractTrackerTable (0x0314) — the whole contract table. Wire
+    // layout from the authoritative server serializer
+    // GameEventSendClientContractTrackerTable.cs (ContractManagerExtensions.Write):
+    //   PackableHashTable header: u16 count + u16 numBuckets
+    //   foreach entry: u32 key (== ContractId) + ContractTracker (28B)
+    private static ContractTrackerTablePayload DecodeContractTrackerTable(ReadOnlySpan<byte> body)
+    {
+        var cursor = 0;
+        if (body.Length - cursor < 4)
+            throw new InvalidOperationException("body too short for ContractTrackerTable header");
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4; // u16 count + u16 numBuckets
+        // Each entry is u32 key + 28B tracker = 32B; reject a count larger than the
+        // remaining body can hold before allocating. Body-length-derived bound only.
+        if (count > (body.Length - cursor) / 32)
+            throw new InvalidOperationException($"ContractTrackerTable count absurd: {count}");
+        var contracts = new List<ContractTrackerEntry>(count);
+        for (var i = 0; i < count; i++)
+        {
+            cursor += 4; // u32 dictionary key (== the entry's own ContractId)
+            contracts.Add(ReadContractTrackerEntry(body, ref cursor));
+        }
+        return new ContractTrackerTablePayload(contracts);
+    }
+
+    // Shared ContractTracker struct reader (28B fixed, no strings/alignment).
+    // Wire layout from ContractTracker.cs ContractTrackerExtensions.Write:
+    //   u32 version, u32 contractId, u32 stage, f64 timeWhenDone, f64 timeWhenRepeats
+    private static ContractTrackerEntry ReadContractTrackerEntry(ReadOnlySpan<byte> body, ref int cursor)
+    {
+        var version         = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var contractId      = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var stage           = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var timeWhenDone    = BinaryPrimitives.ReadDoubleLittleEndian(body.Slice(cursor, 8)); cursor += 8;
+        var timeWhenRepeats = BinaryPrimitives.ReadDoubleLittleEndian(body.Slice(cursor, 8)); cursor += 8;
+        return new ContractTrackerEntry(version, contractId, stage, timeWhenDone, timeWhenRepeats);
     }
 
     // FellowshipQuit (0x00A3) — server writes a single u32, the guid of the
