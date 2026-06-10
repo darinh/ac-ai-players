@@ -6124,6 +6124,209 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("door open", prompt[(prompt.IndexOf("wcid=9000", StringComparison.Ordinal))..]);
     }
 
+    // ---- IsOptionalAttackOnBeatenKind (beaten-kind Attack veto) ----
+    // The explicit LLM Attack path lacked the IsBeatenKind guard the autonomous
+    // kill-commitment picker has, so a weak model could re-pick a KIND its own
+    // ledger shows it loses to. These pin the veto AND its self-defense exempt.
+
+    private static WorldStateProjection BuildWorldBeaten(
+        IReadOnlyList<CombatHistoryEntry>? fullHistory, int? selfLevel,
+        params VisibleObjectProjection[] visible)
+    {
+        var w = BuildWorldWithVisible(visible);
+        return w with { CombatHistoryFull = fullHistory, Self = w.Self with { Level = selfLevel } };
+    }
+
+    private static CombatHistoryEntry[] LethalBeaten(string name, uint wcid)
+        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 3, NearDeaths: 2,
+            Fights: 5, LastOutcome: "death", Ineffective: 0) };
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_BeatenKindNotInView_Vetoes()
+    {
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_ActivelyHostileSameKind_Exempt()
+    {
+        // Self-defense: the beaten kind is in view AND attacking the bot now.
+        // The veto must NOT fire — the Motor's flee/disengage reflexes own it.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 3f, IsMonster = true, ObservedHostile = true,
+            });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_BeatenKindVisibleButNotHostile_Vetoes()
+    {
+        // In view but NOT hostile (a chosen engagement of a passive beaten
+        // kind) is still optional -> veto.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 6f, IsMonster = true, ObservedHostile = false,
+            });
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NotBeatenKind_DoesNotFire()
+    {
+        // A kind the bot has killed (no losses) is not beaten -> never vetoed.
+        var hist = new[] { new CombatHistoryEntry("Rabbit", 9u, Kills: 4, Deaths: 0,
+            NearDeaths: 0, Fights: 4, LastOutcome: "kill", Ineffective: 0) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Rabbit"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NoHistory_DoesNotFire()
+    {
+        var world = BuildWorldBeaten(fullHistory: null, selfLevel: 11);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NonAttackKind_DoesNotFire()
+    {
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Drudge Skulker" } },
+            world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NoTargetName_DoesNotFire()
+    {
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "  " } }, world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_RetestableWhenOutleveled()
+    {
+        // A NON-lethal beaten kind (no deaths, only near-deaths) becomes
+        // re-testable once the bot out-levels its recorded max loss level —
+        // delegated to IsBeatenKind. selfLevel 11 > MaxLossBotLevel 9 -> allowed.
+        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
+            NearDeaths: 2, Fights: 2, LastOutcome: "near-death", Ineffective: 0,
+            MaxLossBotLevel: 9) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Mosswart"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_StillBeatenWhenNotOutleveled()
+    {
+        // Same non-lethal record but the bot has NOT out-leveled it -> beaten.
+        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
+            NearDeaths: 2, Fights: 2, LastOutcome: "near-death", Ineffective: 0,
+            MaxLossBotLevel: 11) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Mosswart"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_LethalLoss_RetestableWhenOutleveled()
+    {
+        // A LETHAL beaten kind (deaths recorded) is re-testable on the EXPLICIT
+        // LLM path once the bot out-levels the loss — the explicit order opts in
+        // to the out-level re-test. selfLevel 12 > MaxLossBotLevel 9 -> allowed.
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
+            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 9) };
+        var world = BuildWorldBeaten(hist, selfLevel: 12);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_LethalLoss_StillBeatenWhenNotOutleveled()
+    {
+        // Same lethal record but the bot has NOT out-leveled it (at or below the
+        // loss level) -> still vetoed. Pins the at-level death loop.
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
+            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 12) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_WcidOnlySelector_Vetoes()
+    {
+        // A wcid-only Attack selector (no name) still matches the ledger by wcid
+        // -> a beaten wcid is vetoed (closes the name-only bypass).
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        var goal = new Goal { Kind = GoalKind.Attack, Target = new Selector { Wcid = 7u } };
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(goal, world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_NameContainsSelector_Vetoes()
+    {
+        // A name_contains selector resolving to a beaten kind's name is vetoed
+        // (closes the name-only bypass for the substring hook).
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        var goal = new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { NameContains = "Drudge Skulker" },
+        };
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(goal, world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_MixedVisibleSet_HostileAndPassiveSameName_Exempt()
+    {
+        // Name-only selectors cannot tell two identically named creatures apart:
+        // if ANY same-name creature is actively hostile, the self-defense
+        // exemption fires for the whole goal (documents the name-only limit).
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 3f, IsMonster = true, ObservedHostile = true,
+            },
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid + 1, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 9f, IsMonster = true, ObservedHostile = false,
+            });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge Skulker"), world));
+    }
+
+    [Fact]
+    public void IsBeatenKind_LethalLoss_PermanentForAutonomousButRetestableForExplicit()
+    {
+        // Default (autonomous) keeps a lethal kind beaten even when out-leveled;
+        // the explicit opt-in re-tests it once the bot out-levels the loss.
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
+            Deaths: 2, NearDeaths: 0, Fights: 2, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 5) };
+        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
+            currentLevel: 20));
+        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
+            currentLevel: 20, lethalRetestableWhenOutleveled: true));
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
