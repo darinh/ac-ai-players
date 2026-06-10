@@ -415,4 +415,135 @@ public class GameEventPayloadDecoderTests
         var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipUpdateFellow);
         Assert.Null(p);
     }
+
+    // ---- FellowshipFullUpdate (0x02BE) ----
+
+    // Shared byte-builder for the FellowshipFullUpdate wire layout. w.Count is
+    // body-relative (the real 16B GameEvent envelope is 4-aligned, so the
+    // string padding matches). Mirrors PackableHashTable.WriteHeader (u16 count
+    // + u16 numBuckets) + WriteFellow + name + leader + 4 bool-as-u32 flags.
+    private static byte[] BuildFullUpdate(
+        (uint guid, uint level, uint hMax, uint sMax, uint mMax, uint hCur, uint sCur, uint mCur, string name)[] fellows,
+        string fellowshipName, uint leaderGuid, uint shareXp, uint evenShare, uint open, uint isLocked,
+        byte[]? trailing = null)
+    {
+        var w = new System.Collections.Generic.List<byte>();
+        void U16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void U32(uint v)   { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
+        void Str16(string s) { var nb = Encoding.Latin1.GetBytes(s); U16((ushort)nb.Length); foreach (var x in nb) w.Add(x); while (w.Count % 4 != 0) w.Add(0); }
+        U16((ushort)fellows.Length); U16(16); // PHT header: count + numBuckets
+        foreach (var f in fellows)
+        {
+            U32(f.guid); U32(0); U32(0); U32(f.level);
+            U32(f.hMax); U32(f.sMax); U32(f.mMax);
+            U32(f.hCur); U32(f.sCur); U32(f.mCur);
+            U32(0x10); // shareLoot stub
+            Str16(f.name);
+        }
+        Str16(fellowshipName);
+        U32(leaderGuid); U32(shareXp); U32(evenShare); U32(open); U32(isLocked);
+        if (trailing != null) w.AddRange(trailing);
+        return w.ToArray();
+    }
+
+    [Fact]
+    public void Decode_FellowshipFullUpdate_TwoMembers()
+    {
+        var body = BuildFullUpdate(
+            new[]
+            {
+                (0x1111u, 10u, 100u, 90u, 80u, 95u, 85u, 75u, "Al"),
+                (0x2222u, 20u, 200u, 190u, 180u, 195u, 185u, 175u, "Bo"),
+            },
+            fellowshipName: "Crew", leaderGuid: 0x1111u,
+            shareXp: 1, evenShare: 0, open: 1, isLocked: 0);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipFullUpdate);
+
+        Assert.NotNull(p?.FellowshipFullUpdate);
+        var f = p!.FellowshipFullUpdate!;
+        Assert.Equal(2, f.Members.Count);
+        Assert.Equal(0x1111u, f.Members[0].Guid);
+        Assert.Equal(10u, f.Members[0].Level);
+        Assert.Equal(100u, f.Members[0].HealthMax);
+        Assert.Equal(95u, f.Members[0].HealthCurrent);
+        Assert.Equal("Al", f.Members[0].Name);
+        Assert.Equal(0x2222u, f.Members[1].Guid);
+        Assert.Equal(20u, f.Members[1].Level);
+        Assert.Equal(175u, f.Members[1].ManaCurrent);
+        Assert.Equal("Bo", f.Members[1].Name);
+        Assert.Equal("Crew", f.FellowshipName);
+        Assert.Equal(0x1111u, f.LeaderGuid);
+        Assert.True(f.ShareXp);
+        Assert.False(f.EvenShare);
+        Assert.True(f.Open);
+        Assert.False(f.IsLocked);
+    }
+
+    [Fact]
+    public void Decode_FellowshipFullUpdate_EmptyFellowship()
+    {
+        var body = BuildFullUpdate(
+            Array.Empty<(uint, uint, uint, uint, uint, uint, uint, uint, string)>(),
+            fellowshipName: "", leaderGuid: 0u,
+            shareXp: 0, evenShare: 0, open: 0, isLocked: 0);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipFullUpdate);
+
+        Assert.NotNull(p?.FellowshipFullUpdate);
+        Assert.Empty(p!.FellowshipFullUpdate!.Members);
+        Assert.Equal("", p.FellowshipFullUpdate.FellowshipName);
+        Assert.False(p.FellowshipFullUpdate.IsLocked);
+    }
+
+    [Fact]
+    public void Decode_FellowshipFullUpdate_IgnoresTrailingTables()
+    {
+        // Append DepartedMembers (1 entry: u16 count + u16 buckets + u32 guid +
+        // i32 value) and an empty FellowshipLocks PHT after the flags. The
+        // decoder must read members/name/leader/flags and leave these unread.
+        var trailing = new System.Collections.Generic.List<byte>();
+        void T16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) trailing.Add(x); }
+        void T32(uint v)   { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(b, v); foreach (var x in b) trailing.Add(x); }
+        T16(1); T16(8); T32(0x9999); T32(0x7B); // DepartedMembers: 1 entry
+        T16(0); T16(8);                          // FellowshipLocks: empty
+
+        var body = BuildFullUpdate(
+            new[] { (0x3333u, 5u, 50u, 40u, 30u, 45u, 35u, 25u, "X") },
+            fellowshipName: "T", leaderGuid: 0x3333u,
+            shareXp: 1, evenShare: 1, open: 0, isLocked: 1,
+            trailing: trailing.ToArray());
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipFullUpdate);
+
+        Assert.NotNull(p?.FellowshipFullUpdate);
+        var f = p!.FellowshipFullUpdate!;
+        Assert.Single(f.Members);
+        Assert.Equal(0x3333u, f.Members[0].Guid);
+        Assert.Equal("X", f.Members[0].Name);
+        Assert.Equal("T", f.FellowshipName);
+        Assert.Equal(0x3333u, f.LeaderGuid);
+        Assert.True(f.IsLocked);
+        Assert.False(f.Open);
+    }
+
+    [Fact]
+    public void Decode_FellowshipFullUpdate_DecodesLatin1Name()
+    {
+        // The server writes string16L with CP1252 ('é' = single byte 0xE9),
+        // not UTF-8 (which would be two bytes 0xC3 0xA9). The decoder must
+        // read it as Latin-1/CP1252 so the name round-trips, not as UTF-8
+        // (which would mangle 0xE9 into the replacement char). Locks the
+        // shared ReadString16L codec fix.
+        var body = BuildFullUpdate(
+            new[] { (0x4444u, 3u, 30u, 20u, 10u, 30u, 20u, 10u, "Café") },
+            fellowshipName: "Naïve", leaderGuid: 0x4444u,
+            shareXp: 0, evenShare: 0, open: 0, isLocked: 0);
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.FellowshipFullUpdate);
+
+        Assert.NotNull(p?.FellowshipFullUpdate);
+        Assert.Equal("Café", p!.FellowshipFullUpdate!.Members[0].Name);
+        Assert.Equal("Naïve", p.FellowshipFullUpdate.FellowshipName);
+    }
 }

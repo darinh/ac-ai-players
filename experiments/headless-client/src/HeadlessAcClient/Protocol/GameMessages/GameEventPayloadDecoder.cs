@@ -164,6 +164,48 @@ internal sealed record FellowshipUpdateFellowPayload(
         $"hp={HealthCurrent}/{HealthMax} updateType={UpdateType})";
 }
 
+/// <summary>
+/// One member's stat block within a FellowshipFullUpdate (0x02BE) snapshot.
+/// Same wire shape as the incremental update minus the trailing updateType:
+/// the server's per-fellow shareLoot is a fixed stub here and is not surfaced,
+/// and the cpCached / lumCached TODO-stubs (always 0) are skipped. Pure
+/// wire-protocol projection.
+/// </summary>
+internal sealed record FellowMember(
+    uint Guid,
+    uint Level,
+    uint HealthMax,
+    uint StaminaMax,
+    uint ManaMax,
+    uint HealthCurrent,
+    uint StaminaCurrent,
+    uint ManaCurrent,
+    string Name);
+
+/// <summary>
+/// The whole-fellowship snapshot from a FellowshipFullUpdate (0x02BE) GameEvent —
+/// the membership view the bot needs to know it is in a fellowship, who is in it,
+/// and who leads. <see cref="ShareXp"/> / <see cref="EvenShare"/> /
+/// <see cref="Open"/> / <see cref="IsLocked"/> are the fellowship bool flags the
+/// server writes (each as a u32). The trailing DepartedMembers / FellowshipLocks
+/// bookkeeping tables the server appends are not surfaced (the bot does not need
+/// them yet) and are left unread — every field here precedes them on the wire.
+/// </summary>
+internal sealed record FellowshipFullUpdatePayload(
+    IReadOnlyList<FellowMember> Members,
+    string FellowshipName,
+    uint LeaderGuid,
+    bool ShareXp,
+    bool EvenShare,
+    bool Open,
+    bool IsLocked)
+{
+    public override string ToString() =>
+        $"FellowshipFullUpdate(\"{FellowshipName}\" members={Members.Count} " +
+        $"leader=0x{LeaderGuid:X8} shareXp={ShareXp} even={EvenShare} " +
+        $"open={Open} locked={IsLocked})";
+}
+
 internal sealed record SetTurbineChatChannelsPayload(
     uint Allegiance,
     uint General,
@@ -516,7 +558,8 @@ internal sealed record GameEventPayload(
     EvasionAttackerNotificationPayload?  EvasionAttackerNotification,
     DefenderNotificationPayload?         DefenderNotification,
     EvasionDefenderNotificationPayload?  EvasionDefenderNotification,
-    FellowshipUpdateFellowPayload?       FellowshipUpdateFellow)
+    FellowshipUpdateFellowPayload?       FellowshipUpdateFellow,
+    FellowshipFullUpdatePayload?         FellowshipFullUpdate)
 {
     public override string ToString() => EventType switch
     {
@@ -541,6 +584,7 @@ internal sealed record GameEventPayload(
         GameEventType.DefenderNotification         when DefenderNotification       is { } x => x.ToString(),
         GameEventType.EvasionDefenderNotification  when EvasionDefenderNotification is { } x => x.ToString(),
         GameEventType.FellowshipUpdateFellow       when FellowshipUpdateFellow      is { } x => x.ToString(),
+        GameEventType.FellowshipFullUpdate         when FellowshipFullUpdate        is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -597,6 +641,8 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { EvasionDefenderNotification = DecodeEvasionDefenderNotification(body) },
                 GameEventType.FellowshipUpdateFellow =>
                     Empty(eventType) with { FellowshipUpdateFellow = DecodeFellowshipUpdateFellow(body) },
+                GameEventType.FellowshipFullUpdate =>
+                    Empty(eventType) with { FellowshipFullUpdate = DecodeFellowshipFullUpdate(body) },
                 _ => null,
             };
         }
@@ -630,7 +676,8 @@ internal static class GameEventPayloadDecoder
             EvasionAttackerNotification: null,
             DefenderNotification: null,
             EvasionDefenderNotification: null,
-            FellowshipUpdateFellow: null);
+            FellowshipUpdateFellow: null,
+            FellowshipFullUpdate: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
     // serializer GameEventPlayerDescription.cs. We extract the initial
@@ -1067,6 +1114,63 @@ internal static class GameEventPayloadDecoder
             healthCur, staminaCur, manaCur, shareLoot, name, updateType);
     }
 
+    // FellowshipFullUpdate (0x02BE) — whole-fellowship snapshot. Wire layout from
+    // the authoritative server writer GameEventFellowshipFullUpdate.cs (after the
+    // 16B GameEvent envelope):
+    //   PackableHashTable header: u16 count + u16 numBuckets
+    //   foreach fellow (WriteFellow): u32 guid, u32 cpCached(0), u32 lumCached(0),
+    //     u32 level, u32 health/stamina/mana max, u32 health/stamina/mana cur,
+    //     u32 shareLoot (fixed 0x10 stub), string16L name
+    //     — note: NO trailing updateType, unlike the incremental UpdateFellow.
+    //   string16L fellowshipName
+    //   u32 leaderGuid
+    //   u32 shareXp  u32 evenShare  u32 open  u32 isLocked   (each a bool as u32)
+    //   [trailing: DepartedMembers PHT + FellowshipLocks PHT]
+    // The trailing departed/lock tables are intentionally left unread — every
+    // field the bot needs (members, name, leader, flags) precedes them on the
+    // wire, so decoding stops after the four flags. PackableHashTable.WriteHeader
+    // writes count first, numBuckets second (both u16); we read count and skip
+    // the bucket count, matching the PropertyInt32/Int64 readers above.
+    private static FellowshipFullUpdatePayload DecodeFellowshipFullUpdate(ReadOnlySpan<byte> body)
+    {
+        var cursor = 0;
+        if (body.Length - cursor < 4)
+            throw new InvalidOperationException("body too short for FellowshipFullUpdate header");
+        var count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4; // u16 count + u16 numBuckets
+        // Each fellow is >= 48B (11 u32 = 44B + a >=4B string16L), so a count
+        // larger than the remaining body can hold is corrupt — reject before
+        // allocating. Body-length-derived bound; no game knowledge about caps.
+        if (count > (body.Length - cursor) / 48)
+            throw new InvalidOperationException($"FellowshipFullUpdate fellow count absurd: {count}");
+        var members = new List<FellowMember>(count);
+        for (var i = 0; i < count; i++)
+        {
+            var fGuid       = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            cursor += 4; // cpCached  (always 0)
+            cursor += 4; // lumCached (always 0)
+            var fLevel      = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fHealthMax  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fStaminaMax = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fManaMax    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fHealthCur  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fStaminaCur = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            var fManaCur    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+            cursor += 4; // shareLoot (fixed 0x10 server stub)
+            var fName       = ReadString16L(body, ref cursor);
+            members.Add(new FellowMember(fGuid, fLevel, fHealthMax, fStaminaMax, fManaMax,
+                fHealthCur, fStaminaCur, fManaCur, fName));
+        }
+        var fellowshipName = ReadString16L(body, ref cursor);
+        var leaderGuid = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var shareXp    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
+        var evenShare  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
+        var open       = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
+        var isLocked   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0;
+        return new FellowshipFullUpdatePayload(
+            members, fellowshipName, leaderGuid, shareXp, evenShare, open, isLocked);
+    }
+
     private static SetTurbineChatChannelsPayload DecodeSetTurbineChatChannels(ReadOnlySpan<byte> body)
     {
         const int FixedSize = 40;
@@ -1335,13 +1439,19 @@ internal static class GameEventPayloadDecoder
     }
 
     /// <summary>
-    /// Reads a string16L: u16 length, then `length` bytes UTF-8,
-    /// then padding so the cursor (relative to body start) lands
-    /// on the next 4-byte boundary. The GameEvent body itself
-    /// begins at a 4-byte-aligned offset in the stream (the 16B
-    /// envelope is itself 4-aligned), so body-relative mod-4
-    /// alignment is equivalent to BinaryWriter.Align()'s
-    /// stream-relative behaviour.
+    /// Reads a string16L: u16 length, then `length` bytes decoded as
+    /// CP1252/Latin-1 (one byte per char), then padding so the cursor
+    /// (relative to body start) lands on the next 4-byte boundary. The
+    /// server writes these bytes with Encoding.GetEncoding(1252)
+    /// (ACE.Server Extensions.WriteString16L); we decode with
+    /// <see cref="Encoding.Latin1"/> — built-in (no CodePages provider
+    /// needed, so it works in test hosts) and byte-identical to CP1252
+    /// for the printable range AC names/messages use. UTF-8 would mangle
+    /// any byte >= 0x80 (e.g. 0xE9 'é' -> replacement char). Matches the
+    /// sibling reader AcStrings.ReadString16L. The GameEvent body begins
+    /// at a 4-byte-aligned offset in the stream (the 16B envelope is
+    /// itself 4-aligned), so body-relative mod-4 alignment is equivalent
+    /// to BinaryWriter.Align()'s stream-relative behaviour.
     /// </summary>
     private static string ReadString16L(ReadOnlySpan<byte> body, ref int cursor)
     {
@@ -1351,7 +1461,7 @@ internal static class GameEventPayloadDecoder
         cursor += 2;
         if (body.Length - cursor < len)
             throw new InvalidOperationException($"string16L: declared {len} bytes, only {body.Length - cursor} remaining");
-        var str = Encoding.UTF8.GetString(body.Slice(cursor, len));
+        var str = Encoding.Latin1.GetString(body.Slice(cursor, len));
         cursor += len;
         var pad = (4 - (cursor % 4)) % 4;
         cursor += pad;
