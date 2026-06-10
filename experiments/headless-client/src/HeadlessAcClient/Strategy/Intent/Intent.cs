@@ -288,15 +288,28 @@ internal sealed class IntentStack
         {
             if (_frames.Count == 1)
             {
-                // Root expired: mark Blocked but don't pop. Caller
-                // (likely the LLM next deliberation) will see the
-                // Expired-but-rooted state and replace.
-                _frames[0] = top with
+                // Root deadline elapsed: mark Blocked but do NOT pop the root, so
+                // the next LLM deliberation sees the blocked-rooted state and
+                // REPLACE_TOPs it. Bump the revision ONLY on the Blocked
+                // TRANSITION. Without this `Status != Blocked` guard the elapsed
+                // deadline stays in the past, so EVERY subsequent tick re-marks
+                // the already-Blocked root and bumps `_revision` again (~4/sec) —
+                // which makes the LLM's echoed `stack_revision` perpetually stale
+                // and rejects EVERY stack op as RefusedRevision, freezing the
+                // strategic stack (the LLM can never push/replace/compile an
+                // intent). Blocked is NOT a terminal status (the root stays at
+                // depth 1), so the Completed/Expired early-return at the top of
+                // this method does not catch it; this guard does. Idempotent:
+                // re-entry while already deadline-Blocked is a no-op.
+                if (top.Status != IntentLifecycle.Blocked)
                 {
-                    Status = IntentLifecycle.Blocked,
-                    LastFailure = "deadline elapsed (root)",
-                };
-                _revision++;
+                    _frames[0] = top with
+                    {
+                        Status = IntentLifecycle.Blocked,
+                        LastFailure = "deadline elapsed (root)",
+                    };
+                    _revision++;
+                }
                 return null;
             }
             PopTop(IntentLifecycle.Expired, "deadline elapsed");
