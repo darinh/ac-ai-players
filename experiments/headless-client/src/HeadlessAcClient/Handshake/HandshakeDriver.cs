@@ -3952,7 +3952,17 @@ internal sealed class HandshakeDriver : IDisposable
                 // server-side portal windups can complete without the
                 // picker dispatching a competing AP. See
                 // Strategy/MotorPostActionCooldown.cs for the rationale.
-                var postActionCooldown = HeadlessAcClient.Strategy.MotorPostActionCooldown.For(motionTarget);
+                // An Explore arrival (lockedGoalKind == Explore) dispatched NO
+                // opcode — it is pure movement that reached its waypoint — so
+                // there is no server reply/animation to await: use the zero
+                // NonInteractArrival hold and reset immediately, removing the
+                // incidental ~2s idle the Explore short-circuit inherited from
+                // reusing this useSent-gated cascade. The picker-arrived-no-
+                // action park (lockedGoalKind == null) is a different branch and
+                // KEEPS the default cooldown so the LLM can still name a verb.
+                var postActionCooldown = lockedGoalKind == GoalKind.Explore
+                    ? HeadlessAcClient.Strategy.MotorPostActionCooldown.NonInteractArrival
+                    : HeadlessAcClient.Strategy.MotorPostActionCooldown.For(motionTarget);
                 if (useSent && useSentAt is DateTime usat &&
                     (DateTime.UtcNow - usat) >= postActionCooldown)
                 {
