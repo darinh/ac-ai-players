@@ -238,6 +238,17 @@ internal sealed class WorldState
     public IReadOnlyList<CombatHistoryEntry>? CombatHistory { get; set; }
 
     /// <summary>
+    /// The SAME combat-feel outcomes as <see cref="CombatHistory"/> but
+    /// UNCAPPED (every kind with a recorded outcome, not just the 6
+    /// most-recent). The prompt uses the capped <see cref="CombatHistory"/>;
+    /// the <c>kill_count_since_push</c> Intent predicate needs the full set so
+    /// its per-kind baseline does not miss a kind that has aged out of the
+    /// capped snapshot (which would over-count pre-push kills). Set alongside
+    /// <see cref="CombatHistory"/> by HandshakeDriver.
+    /// </summary>
+    public IReadOnlyList<CombatHistoryEntry>? CombatHistoryFull { get; set; }
+
+    /// <summary>
     /// observed-hostile perception: the set of NORMALIZED creature names
     /// the server has recently told us are attacking the bot (decoded from
     /// DefenderNotification 0x01B2 / EvasionDefenderNotification 0x01B4),

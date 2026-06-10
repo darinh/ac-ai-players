@@ -73,6 +73,18 @@ internal sealed record IntentBaseline
     [JsonPropertyName("stats_at_push")]
     public required StatsSnapshot StatsAtPush { get; init; }
 
+    /// <summary>
+    /// Frozen PER-KIND kill counts at push (trimmed/lowercased display name
+    /// -> kills), snapshotted from the combat-feel history. Lets a
+    /// name-filtered <c>kill_count_since_push</c> predicate count kills of a
+    /// SPECIFIC kind since the push — which the lifetime total in
+    /// <see cref="StatsAtPush"/> (a kind-agnostic Attack-completion proxy)
+    /// cannot do. Defaults to empty for legacy/pre-field persisted JSON.
+    /// </summary>
+    [JsonPropertyName("kills_by_name_at_push")]
+    public ImmutableDictionary<string, long> KillsByNameAtPush { get; init; }
+        = ImmutableDictionary<string, long>.Empty;
+
     public static IntentBaseline Capture(WorldStateProjection world, EventStream events, DateTime utcNow)
         => Capture(world, events, utcNow, stats: null);
 
@@ -88,6 +100,22 @@ internal sealed record IntentBaseline
             .Where(i => i.Wcid != 0)
             .GroupBy(i => i.Wcid)
             .ToImmutableDictionary(g => g.Key, g => g.Count());
+
+        // Per-kind kill snapshot from the UNCAPPED combat-feel history so a
+        // name-filtered kill_count_since_push predicate can subtract the
+        // pre-push kills of a SPECIFIC kind. Must use CombatHistoryFull (not the
+        // prompt's recency-capped CombatHistory): a kind that has aged out of
+        // the capped snapshot at push would otherwise snapshot 0 here and then
+        // over-count its pre-push kills when re-engaged. Keyed by trimmed/lowered
+        // display name to match the predicate's case-insensitive lookup.
+        var killsByName = ImmutableDictionary<string, long>.Empty;
+        if (world.CombatHistoryFull is { Count: > 0 } combatHist)
+        {
+            killsByName = combatHist
+                .Where(h => !string.IsNullOrWhiteSpace(h.Name))
+                .GroupBy(h => h.Name.Trim().ToLowerInvariant())
+                .ToImmutableDictionary(g => g.Key, g => (long)g.Sum(h => h.Kills));
+        }
 
         Vector3? pos = new Vector3(world.Self.PositionX, world.Self.PositionY, world.Self.PositionZ);
 
@@ -110,6 +138,7 @@ internal sealed record IntentBaseline
             VisibleAtPush = visible,
             InventoryCountsAtPush = inv,
             StatsAtPush = stats?.Snapshot() ?? default,
+            KillsByNameAtPush = killsByName,
         };
     }
 }

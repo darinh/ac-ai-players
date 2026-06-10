@@ -420,15 +420,46 @@ internal sealed record KillCountSincePushAtLeastPredicate(
     {
         if (Count <= 0) return false;
 
-        if (ctx.Stats is { } stats)
+        // Name-filtered ("kill N <kind>") tasks need a PER-KIND count. The
+        // lifetime BotStatistics.Kills (a kind-agnostic Attack-completion
+        // proxy) cannot provide it — using it would FALSELY satisfy "kill 10
+        // Drudges" after 10 kills of ANY kind. Count actual per-kind kills from
+        // the UNCAPPED combat-feel history (current minus the per-kind baseline
+        // captured at push). Substring match on the kind's display name, summed
+        // across every matching kind (e.g. "Drudge" covers Skulker + Slinker).
+        // CombatHistoryFull (not the capped CombatHistory) is required so a kind
+        // that aged out of the prompt snapshot still counts correctly.
+        if (!string.IsNullOrWhiteSpace(NameContains) &&
+            ctx.World.CombatHistoryFull is { Count: > 0 } hist)
         {
-            // Authoritative path: pure subtraction.
+            // Group CURRENT rows by the SAME normalized name the baseline is
+            // keyed by, so the per-name baseline is subtracted EXACTLY ONCE per
+            // name — even if two rows share a display name (the ledger keys by
+            // wcid, so same-name/different-wcid rows can co-exist). Subtracting
+            // per-row would double-count the baseline and under-count the delta.
+            long delta = 0;
+            foreach (var grp in hist
+                .Where(h => !string.IsNullOrWhiteSpace(h.Name) &&
+                            h.Name.IndexOf(NameContains, StringComparison.OrdinalIgnoreCase) >= 0)
+                .GroupBy(h => h.Name.Trim().ToLowerInvariant()))
+            {
+                var currentKills = grp.Sum(h => (long)h.Kills);
+                var atPush = ctx.Baseline.KillsByNameAtPush.GetValueOrDefault(grp.Key);
+                delta += currentKills - atPush;
+            }
+            return delta >= Count;
+        }
+
+        // No name filter: pure subtraction on the authoritative lifetime total.
+        if (ctx.Stats is { } stats && string.IsNullOrWhiteSpace(NameContains))
+        {
             return (stats.Kills - ctx.Baseline.StatsAtPush.Kills) >= Count;
         }
 
-        // Legacy path (no Stats wired): fall back to the original
-        // bounded EventStream scan. Honors NameContains. Will silently
-        // under-count if > 256 events between push and check.
+        // Legacy path (no Stats wired, or NameContains set before any combat
+        // history exists): the original bounded EventStream scan. Honors
+        // NameContains against the goal text. Will silently under-count if
+        // > 256 events between push and check.
         var seen = 0;
         foreach (var e in ctx.Events.Recent())
         {
