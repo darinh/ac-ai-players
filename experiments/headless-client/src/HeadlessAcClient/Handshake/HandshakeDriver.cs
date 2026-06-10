@@ -2838,6 +2838,19 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"[vital]   -> self Health current={pal.Current} (seq={pal.Sequence})");
                             }
                             break;
+                        case PrivateUpdateAttributeMessage pa:
+                            // Surface a primary-attribute change (the wire update
+                            // was already applied to worldState above) so the deploy
+                            // log shows the attribute's Base actually moving across a
+                            // spend. Base = StartingValue + Ranks per the wire layout.
+                            // Pure observability of an applied wire update; no
+                            // decision and no game knowledge.
+                            Console.WriteLine(
+                                $"[attr]   -> self attribute id={pa.Attribute} " +
+                                $"base={pa.StartingValue + pa.Ranks} (ranks={pa.Ranks} " +
+                                $"startingValue={pa.StartingValue} xpSpent={pa.ExperienceSpent}) " +
+                                $"seq={pa.Sequence}");
+                            break;
                         case UpdatePositionMessage upm:
                             var vel = upm.Velocity is { } v ? $" vel=({v.X:F2},{v.Y:F2},{v.Z:F2})" : "";
                             var plc = upm.PlacementId is { } pid ? $" placement=0x{pid:X}" : "";
