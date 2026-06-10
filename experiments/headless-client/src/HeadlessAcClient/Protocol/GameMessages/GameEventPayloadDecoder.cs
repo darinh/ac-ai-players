@@ -206,6 +206,26 @@ internal sealed record FellowshipFullUpdatePayload(
         $"open={Open} locked={IsLocked})";
 }
 
+/// <summary>
+/// FellowshipQuit (0x00A3) — a member (possibly the bot itself) left the
+/// fellowship voluntarily. The server writes only the departing player's guid.
+/// Pure wire-protocol projection; the consumer decides self-vs-other.
+/// </summary>
+internal sealed record FellowshipQuitPayload(uint DepartedGuid)
+{
+    public override string ToString() => $"FellowshipQuit(0x{DepartedGuid:X8})";
+}
+
+/// <summary>
+/// FellowshipDismiss (0x00A4) — the leader removed a member (possibly the bot
+/// itself) from the fellowship. The server writes only the dismissed player's
+/// guid. Pure wire-protocol projection; the consumer decides self-vs-other.
+/// </summary>
+internal sealed record FellowshipDismissPayload(uint DismissedGuid)
+{
+    public override string ToString() => $"FellowshipDismiss(0x{DismissedGuid:X8})";
+}
+
 internal sealed record SetTurbineChatChannelsPayload(
     uint Allegiance,
     uint General,
@@ -559,7 +579,9 @@ internal sealed record GameEventPayload(
     DefenderNotificationPayload?         DefenderNotification,
     EvasionDefenderNotificationPayload?  EvasionDefenderNotification,
     FellowshipUpdateFellowPayload?       FellowshipUpdateFellow,
-    FellowshipFullUpdatePayload?         FellowshipFullUpdate)
+    FellowshipFullUpdatePayload?         FellowshipFullUpdate,
+    FellowshipQuitPayload?               FellowshipQuit,
+    FellowshipDismissPayload?            FellowshipDismiss)
 {
     public override string ToString() => EventType switch
     {
@@ -585,6 +607,8 @@ internal sealed record GameEventPayload(
         GameEventType.EvasionDefenderNotification  when EvasionDefenderNotification is { } x => x.ToString(),
         GameEventType.FellowshipUpdateFellow       when FellowshipUpdateFellow      is { } x => x.ToString(),
         GameEventType.FellowshipFullUpdate         when FellowshipFullUpdate        is { } x => x.ToString(),
+        GameEventType.FellowshipQuit               when FellowshipQuit              is { } x => x.ToString(),
+        GameEventType.FellowshipDismiss            when FellowshipDismiss           is { } x => x.ToString(),
         _ => $"{EventType}",
     };
 }
@@ -643,6 +667,15 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { FellowshipUpdateFellow = DecodeFellowshipUpdateFellow(body) },
                 GameEventType.FellowshipFullUpdate =>
                     Empty(eventType) with { FellowshipFullUpdate = DecodeFellowshipFullUpdate(body) },
+                GameEventType.FellowshipQuit =>
+                    Empty(eventType) with { FellowshipQuit = DecodeFellowshipQuit(body) },
+                GameEventType.FellowshipDismiss =>
+                    Empty(eventType) with { FellowshipDismiss = DecodeFellowshipDismiss(body) },
+                // Disband carries no body (just the 16B GameEvent envelope); the
+                // EventType alone signals the fellowship dissolved. Return a
+                // non-null payload so the consumer's "decoded" check holds.
+                GameEventType.FellowshipDisband =>
+                    Empty(eventType),
                 _ => null,
             };
         }
@@ -677,7 +710,9 @@ internal static class GameEventPayloadDecoder
             DefenderNotification: null,
             EvasionDefenderNotification: null,
             FellowshipUpdateFellow: null,
-            FellowshipFullUpdate: null);
+            FellowshipFullUpdate: null,
+            FellowshipQuit: null,
+            FellowshipDismiss: null);
 
     // PlayerDescription (0x0013) — wire layout from the ACE-bots server
     // serializer GameEventPlayerDescription.cs. We extract the initial
@@ -1169,6 +1204,26 @@ internal static class GameEventPayloadDecoder
         var isLocked   = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0;
         return new FellowshipFullUpdatePayload(
             members, fellowshipName, leaderGuid, shareXp, evenShare, open, isLocked);
+    }
+
+    // FellowshipQuit (0x00A3) — server writes a single u32, the guid of the
+    // player who quit (server serializer GameEventFellowshipQuit.cs:
+    // Writer.Write(playerId)). No other fields follow.
+    private static FellowshipQuitPayload DecodeFellowshipQuit(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 4)
+            throw new InvalidOperationException("body too short for FellowshipQuit");
+        return new FellowshipQuitPayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
+    }
+
+    // FellowshipDismiss (0x00A4) — server writes a single u32, the guid of the
+    // dismissed player (server serializer GameEventFellowshipDismiss.cs:
+    // Writer.Write(dismissedPlayer.Guid.Full)). No other fields follow.
+    private static FellowshipDismissPayload DecodeFellowshipDismiss(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 4)
+            throw new InvalidOperationException("body too short for FellowshipDismiss");
+        return new FellowshipDismissPayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
     }
 
     private static SetTurbineChatChannelsPayload DecodeSetTurbineChatChannels(ReadOnlySpan<byte> body)

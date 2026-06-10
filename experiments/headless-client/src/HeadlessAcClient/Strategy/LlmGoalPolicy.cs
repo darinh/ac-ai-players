@@ -4606,6 +4606,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (world.Self.CoinValue is int cv) sb.AppendLine($"- coin (server-tracked): {cv} pyreals");
         sb.AppendLine();
 
+        // ── ## Fellowship (membership perception) ────────────────────────
+        // Raw membership facts from the server's FellowshipFullUpdate snapshot:
+        // whether the bot is in a fellowship, who is in it, who leads, and the
+        // share/open/lock flags. Conditional (omitted when not in a fellowship)
+        // → zero static-floor cost in the common solo case. Pure perception; no
+        // advice about whether or how to use the fellowship — the LLM owns any
+        // fellowship decision.
+        if (world.Fellowship is { } fellow)
+        {
+            sb.AppendLine("## Fellowship");
+            var leaderClause = fellow.AmLeader
+                ? "you are the leader"
+                : (fellow.LeaderName is { Length: > 0 } ln ? $"led by {ln}" : "leader unknown");
+            sb.AppendLine(
+                $"- you are in a fellowship \"{fellow.Name}\" " +
+                $"({fellow.MemberCount} member(s), {leaderClause})");
+            if (fellow.Members.Count > 0)
+            {
+                sb.AppendLine(
+                    "- members: " +
+                    string.Join(", ", fellow.Members.Select(m =>
+                        $"{m.Name} (L{m.Level}{(m.IsSelf ? ", you" : "")}{(m.IsLeader ? ", leader" : "")})")));
+            }
+            sb.AppendLine(
+                $"- flags: shares XP {(fellow.ShareXp ? "yes" : "no")}, " +
+                $"even share {(fellow.EvenShare ? "yes" : "no")}, " +
+                $"open {(fellow.Open ? "yes" : "no")}, " +
+                $"locked {(fellow.Locked ? "yes" : "no")}");
+            sb.AppendLine();
+        }
+
         if (stack is not null)
         {
             sb.AppendLine(IntentStackOpsApplier.RenderStackForPrompt(stack));
