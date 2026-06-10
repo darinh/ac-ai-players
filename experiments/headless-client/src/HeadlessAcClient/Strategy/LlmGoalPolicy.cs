@@ -6091,6 +6091,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private static readonly string[] PromptTrimOrder =
     {
         "## Recently sighted (out of view)",
+        "## Recently sighted NPCs (out of view)",
         "## Recent events (newest first)",
         "## Visible nearby",
         "## Inventory",
@@ -6611,17 +6612,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             => (s.Wcid is uint sw && visibleWcids.Contains(sw))
                || visibleNames.Contains(s.Name);
 
-        var candidates = sightings
-            .Where(s => s.Kind == EntityKind.Mob)
-            .Where(s => s.AgeSeconds <= RecentSightingTtlSeconds)
-            .Where(s => !CurrentlyVisible(s))
-            .GroupBy(s => (Name: s.Name.ToLowerInvariant(), s.Wcid, s.Landblock))
-            .Select(g => g.OrderBy(s => s.AgeSeconds).First())
-            .OrderBy(s => s.AgeSeconds)
-            .ToList();
-
-        if (candidates.Count == 0) return;
-
         // Self position must be lifted into the SAME absolute world frame as
         // the stored sightings (which NavGraph keeps in absolute coords).
         // world.Self.Position* is landblock-LOCAL (0..192), so convert via
@@ -6633,27 +6623,59 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             ? AcCoords.ToGlobalXY(selfCell, world.Self.PositionX, world.Self.PositionY)
             : null;
 
-        sb.AppendLine("## Recently sighted (out of view)");
-        sb.AppendLine(
+        // Render one bounded block PER KIND so an NPC-dense town can never
+        // starve the monster recall (and vice-versa) — the reason the recall
+        // was Mob-only before. Monsters and NPCs each get their own header and
+        // row/char cap. Surfacing NPCs lets the LLM, when SEEKING A KILL-TASK
+        // with no quest in hand (see the SEEK A KILL-TASK rule), steer back
+        // toward a remembered NPC cluster using the SAME bearing/distance the
+        // monster recall already provides. Pure perception — the bot's own
+        // out-of-view sighting memory; no priority, no hardcoded NPC/location.
+        void RenderBlock(EntityKind kind, string header, string description)
+        {
+            var candidates = sightings
+                .Where(s => s.Kind == kind)
+                .Where(s => s.AgeSeconds <= RecentSightingTtlSeconds)
+                .Where(s => !CurrentlyVisible(s))
+                .GroupBy(s => (Name: s.Name.ToLowerInvariant(), s.Wcid, s.Landblock))
+                .Select(g => g.OrderBy(s => s.AgeSeconds).First())
+                .OrderBy(s => s.AgeSeconds)
+                .ToList();
+            if (candidates.Count == 0) return;
+
+            sb.AppendLine(header);
+            sb.AppendLine(description);
+
+            int rows = 0;
+            int chars = 0;
+            foreach (var s in candidates)
+            {
+                if (rows >= RecentSightingMaxRows) break;
+                var row = RenderRecentSightingRow(s, selfLb, selfGlobal);
+                int cost = row.Length + 1; // newline AppendLine adds
+                if (rows > 0 && chars + cost > RecentSightingCharBudget) break;
+                sb.AppendLine(row);
+                chars += cost;
+                rows++;
+            }
+            if (rows < candidates.Count)
+                sb.AppendLine($"- (+{candidates.Count - rows} more remembered, not shown)");
+            sb.AppendLine();
+        }
+
+        RenderBlock(
+            EntityKind.Mob,
+            "## Recently sighted (out of view)",
             "Monsters you have seen that are NOT currently in view, from your own " +
             "memory. Not recommendations — the bot assigns no priority. To return " +
             "to one, target it by name; the bot will navigate to where it was last seen.");
-
-        int rows = 0;
-        int chars = 0;
-        foreach (var s in candidates)
-        {
-            if (rows >= RecentSightingMaxRows) break;
-            var row = RenderRecentSightingRow(s, selfLb, selfGlobal);
-            int cost = row.Length + 1; // newline AppendLine adds
-            if (rows > 0 && chars + cost > RecentSightingCharBudget) break;
-            sb.AppendLine(row);
-            chars += cost;
-            rows++;
-        }
-        if (rows < candidates.Count)
-            sb.AppendLine($"- (+{candidates.Count - rows} more remembered, not shown)");
-        sb.AppendLine();
+        RenderBlock(
+            EntityKind.NPC,
+            "## Recently sighted NPCs (out of view)",
+            "NPCs you have seen that are NOT currently in view, from your own memory. " +
+            "Not recommendations — the bot assigns no priority. To return to one (for " +
+            "example to Talk it and check whether it offers a task), target it by name " +
+            "or Explore toward its bearing; the bot will navigate to where it was last seen.");
     }
 
     private static string RenderRecentSightingRow(
@@ -6677,7 +6699,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var lb = (selfLb is uint slb && s.Landblock != slb)
             ? $", landblock 0x{s.Landblock:X4}"
             : "";
-        return $"- {s.Name} (kind=monster, {age}, {where}{lb})";
+        var kindLabel = s.Kind == EntityKind.NPC ? "npc" : "monster";
+        return $"- {s.Name} (kind={kindLabel}, {age}, {where}{lb})";
     }
 
     // 8-point compass bearing from a world-space (dx,dy) delta. +Y is
