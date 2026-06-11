@@ -5245,6 +5245,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 .Select(g => g.First())
                 .ToList(),
             earliest: 4, newest: 6);
+        // npc-local-speech-perception — heard local/area speech (HeardSpeech),
+        // the spoken-aloud sibling of NpcDialog. Sourced from EventStream's
+        // DEDICATED heard-speech window (RecentHeardSpeech) — NOT the main event
+        // ring — so high-volume ambient speech never evicts critical events.
+        // Lower caps than NpcDialog: it is ambient context, so keep the budget
+        // footprint small while still anchoring the earliest distinct lines.
+        // Selection by event KIND + age only, never by parsing the text (which
+        // would be hardcoded knowledge).
+        var heardHints = RetainEnds(
+            events.RecentHeardSpeech()
+                .Where(e => !string.IsNullOrEmpty(e.Text))
+                .GroupBy(e => (e.Name, e.Text))
+                // Keep the NEWEST occurrence of each distinct line so a just-
+                // respoken line carries its latest Sequence into RetainEnds.
+                // RecentHeardSpeech() is oldest-first (unlike the newest-first
+                // events.Recent() the other hint categories dedupe over), so a
+                // plain First() would retain the stale first-seen Sequence and
+                // RetainEnds could then drop a line that was actually spoken most
+                // recently.
+                .Select(g => g.OrderByDescending(e => e.Sequence).First())
+                .ToList(),
+            earliest: 2, newest: 4);
         // PopupString earliest anchors are sourced from BOTH the recent ring AND
         // the EventStream's persistent distinct-popup store (PersistentPopupStrings),
         // so a one-time login/exit directive that has already aged out of the 256-
@@ -5284,8 +5306,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Where(e => e.Kind == EventKind.PopupString && !string.IsNullOrEmpty(e.Text))
             .GroupBy(e => e.Text!)
             .ToDictionary(g => g.Key, g => g.Count());
+        var heardRepeats = events.RecentHeardSpeech()
+            .Where(e => !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => (e.Name, e.Text))
+            .ToDictionary(g => g.Key, g => g.Count());
         static string RepeatSuffix(int count) => count > 1 ? $" (repeated x{count})" : "";
-        if (serverHints.Count > 0 || npcHints.Count > 0 || popupHints.Count > 0)
+        if (serverHints.Count > 0 || npcHints.Count > 0 || popupHints.Count > 0 || heardHints.Count > 0)
         {
             sb.AppendLine("## Server hints (recent — text the server sent you, dedupe'd)");
             bool anyRepeated = false;
@@ -5306,6 +5332,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 var c = h.Text is { } pt && popupRepeats.TryGetValue(pt, out var pc) ? pc : 1;
                 if (c > 1) anyRepeated = true;
                 sb.AppendLine($"- PopupString: \"{Truncate(h.Text, 320)}\"{RepeatSuffix(c)}");
+            }
+            foreach (var h in heardHints)
+            {
+                var c = heardRepeats.TryGetValue((h.Name, h.Text), out var hc) ? hc : 1;
+                if (c > 1) anyRepeated = true;
+                sb.AppendLine($"- HeardSpeech from=\"{h.Name}\": \"{Truncate(h.Text, 320)}\"{RepeatSuffix(c)}");
             }
             if (anyRepeated)
                 sb.AppendLine(
