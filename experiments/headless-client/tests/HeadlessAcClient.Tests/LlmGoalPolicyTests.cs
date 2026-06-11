@@ -6781,11 +6781,11 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_RetestableWhenOutleveled()
+    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_NotVetoed_WhenOutleveled()
     {
-        // A NON-lethal beaten kind (no deaths, only near-deaths) becomes
-        // re-testable once the bot out-levels its recorded max loss level —
-        // delegated to IsBeatenKind. selfLevel 11 > MaxLossBotLevel 9 -> allowed.
+        // A SURVIVED (non-lethal: no deaths) beaten kind is not vetoed on the
+        // explicit LLM Attack path. Out-leveling is sufficient but, after the
+        // deadlock fix, no longer required (see the not-out-leveled case below).
         var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
             NearDeaths: 2, Fights: 2, LastOutcome: "near-death", Ineffective: 0,
             MaxLossBotLevel: 9) };
@@ -6795,15 +6795,35 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_StillBeatenWhenNotOutleveled()
+    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_NotVetoed_EvenWhenNotOutleveled()
     {
-        // Same non-lethal record but the bot has NOT out-leveled it -> beaten.
+        // DEADLOCK FIX (was: vetoed). A survived (no-death) beaten kind is no
+        // longer vetoed on the explicit LLM Attack path even at/below the loss
+        // level. The bot survived (the Motor's low-health flee gate owns
+        // survival); re-engaging to land more hits or use better gear is the
+        // strategist's WHAT. Pins the early-game trap: near-death at one's own
+        // level with no kill (so no level-up) would otherwise bar the bot
+        // forever from re-attempting the only available target.
         var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
-            NearDeaths: 2, Fights: 2, LastOutcome: "near-death", Ineffective: 0,
-            MaxLossBotLevel: 11) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            NearDeaths: 1, Fights: 1, LastOutcome: "near-death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1);   // at-level, not out-leveled
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
             AttackGoal("Mosswart"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_IneffectiveOnlyLoss_NotVetoed()
+    {
+        // A purely INEFFECTIVE survived loss (no deaths, no near-deaths — could
+        // not land enough hits) is an offense deficit, not a death risk, so the
+        // explicit Attack is honored regardless of level.
+        var hist = new[] { new CombatHistoryEntry("Mite Scion", 9u, Kills: 0, Deaths: 0,
+            NearDeaths: 0, Fights: 3, LastOutcome: "ineffective", Ineffective: 3,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Mite Scion"), world));
     }
 
     [Fact]
