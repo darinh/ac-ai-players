@@ -269,6 +269,128 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
     }
 
+    // ---- ## Server hints — HeardSpeech (local NPC speech perception) -------
+    // HearSpeech (0x02BB) is the spoken-aloud sibling of the directed Tell
+    // (NpcDialog). The receive loop appends a non-self HeardSpeech event; it
+    // renders in `## Server hints` so the brain perceives what a nearby player
+    // would hear. It is deliberately NON-salient (never wakes the LLM by
+    // itself) so ambient speech volume cannot drive a deliberation per line.
+
+    [Fact]
+    public void BuildUserPrompt_ServerHints_RendersHeardSpeech()
+    {
+        var heard = new EventStream();
+        heard.AppendHeardSpeech(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.HeardSpeech,
+            Name = "Nearby Speaker",
+            Text = "a spoken line",
+            ChatType = 3,
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), heard, null);
+
+        // Asserted on the whole prompt (not a CapsuleSection slice): the rules
+        // block mentions `## Server hints` in backticks before the real section,
+        // so a header-substring slice would grab the wrong span. The companion
+        // OmitsHeardSpeechWhenNoSpeechHeard test guarantees the conditional.
+        Assert.Contains("HeardSpeech from=\"Nearby Speaker\"", prompt);
+        Assert.Contains("a spoken line", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ServerHints_OmitsHeardSpeechWhenNoSpeechHeard()
+    {
+        // Conditional capsule: with no heard speech (the common case, e.g. the
+        // entire tutorial), nothing about HeardSpeech renders — zero prompt cost.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);
+        Assert.DoesNotContain("HeardSpeech", prompt);
+    }
+
+    [Fact]
+    public void IsSalientKind_HeardSpeech_IsNotSalient()
+    {
+        // Call-volume contract: ambient local speech (repeated creature emotes,
+        // other players'/bots' chatter) must NOT wake the LLM. HeardSpeech is
+        // perception-only — it is surfaced when the LLM is already deliberating,
+        // never as a deliberation trigger. Regressing this would bankrupt the
+        // LLM with a round-trip per spoken line.
+        Assert.False(LlmGoalPolicy.IsSalientKind(EventKind.HeardSpeech));
+        // It must also not interrupt the autonomous combat chain.
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.HeardSpeech));
+    }
+
+    [Fact]
+    public void StreamEvent_HeardSpeech_ToString_RendersSpeakerAndLine()
+    {
+        var e = new StreamEvent
+        {
+            Sequence = 7,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.HeardSpeech,
+            Name = "Nearby Speaker",
+            Text = "a spoken line",
+        };
+        var s = e.ToString();
+        Assert.Contains("HeardSpeech from=\"Nearby Speaker\"", s);
+        Assert.Contains("a spoken line", s);
+    }
+
+    [Fact]
+    public void AppendHeardSpeech_StaysOutOfMainRing_SoItCannotEvictCriticalEvents()
+    {
+        // Ambient heard speech must NEVER enter the bounded main event ring —
+        // a flood of it would otherwise evict ActionRejected / GoalFailed memory
+        // (the prompt looks back ~100 events) and could strand the bot in a
+        // retry loop. It is segregated into a dedicated window instead.
+        var stream = new EventStream();
+        stream.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ErrorLabel = "Blocked",
+        });
+        stream.AppendHeardSpeech(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.HeardSpeech, Name = "Nearby Speaker", Text = "a spoken line",
+        });
+
+        // The main ring retains the critical rejection and is NOT polluted by
+        // the ambient speech.
+        Assert.Contains(stream.Recent(), e => e.Kind == EventKind.ActionRejected);
+        Assert.DoesNotContain(stream.Recent(), e => e.Kind == EventKind.HeardSpeech);
+        // The dedicated window holds the heard speech.
+        Assert.Contains(stream.RecentHeardSpeech(), e => e.Kind == EventKind.HeardSpeech);
+    }
+
+    private static StreamEvent MakeHeard(string text) => new()
+    {
+        Sequence = -1,
+        Utc = DateTimeOffset.UtcNow,
+        Kind = EventKind.HeardSpeech,
+        Name = "Speaker",
+        Text = text,
+    };
+
+    [Fact]
+    public void BuildUserPrompt_HeardSpeech_KeepsRecentlyRespokenLineOverOlderDistinctLines()
+    {
+        // Dedup must keep the NEWEST occurrence of a repeated line so a just-
+        // respoken line is treated as recent by RetainEnds. With >6 distinct
+        // lines and one respoken last, dedup-by-OLDEST would retain the stale
+        // first-seen sequence and RetainEnds(2,4) would drop it (regression).
+        var stream = new EventStream();
+        foreach (var t in new[] { "A", "B", "C", "D", "E", "F", "G" })
+            stream.AppendHeardSpeech(MakeHeard(t));
+        stream.AppendHeardSpeech(MakeHeard("C")); // C is the most-recently heard line
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), stream, null);
+
+        Assert.Contains("HeardSpeech from=\"Speaker\": \"C\"", prompt);
+    }
+
     [Fact]
     public void CountUntalkedNpcsInView_CountsCivilianNpcNotInTalkedSet()
     {

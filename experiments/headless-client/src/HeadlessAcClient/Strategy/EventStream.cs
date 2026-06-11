@@ -162,6 +162,18 @@ internal enum EventKind
     // materiality band). Name = the attacker's display name, Text = the raw
     // "inbound hit landed (N damage) from X" summary.
     InboundDamageTaken      = 21,
+    // npc-local-speech-perception: the player HEARD local/area chat-text
+    // (GameMessageHearSpeech 0x02BB) from a non-self speaker — the spoken-aloud
+    // sibling of the directed NpcDialog (a server Tell). The receive loop routes
+    // one per non-self HearSpeech into EventStream's DEDICATED heard-speech
+    // window (AppendHeardSpeech) — NOT the main event ring — because ambient
+    // local speech can be high-volume and must never evict the bot's critical
+    // recent-event memory. Deliberately NOT salient (omitted from
+    // LlmGoalPolicy.IsSalientKind): low-priority ambient context, surfaced in
+    // `## Server hints` only when the LLM is already deliberating, NEVER a wake
+    // on its own. Name = speaker display name, Text = the spoken line, ChatType
+    // = the raw wire ChatMessageType, ItemGuid = speaker guid.
+    HeardSpeech             = 22,
 }
 
 /// <summary>
@@ -240,6 +252,7 @@ internal sealed record StreamEvent
         EventKind.CombatFeedback       => $"#{Sequence} CombatFeedback target=\"{Name}\" \"{Truncate(Text, 120)}\"",
         EventKind.SelfProgressChanged  => $"#{Sequence} SelfProgress  \"{Truncate(Text, 120)}\"",
         EventKind.InboundDamageTaken   => $"#{Sequence} InboundDamage \"{Truncate(Text, 120)}\"",
+        EventKind.HeardSpeech          => $"#{Sequence} HeardSpeech from=\"{Name}\" \"{Truncate(Text, 120)}\"",
         _                              => $"#{Sequence} {Kind}",
     };
 
@@ -294,6 +307,16 @@ internal sealed class EventStream
     private const int MaxRecentNpcDialogs = 4;
     private readonly List<StreamEvent> _recentPopups = new();
     private readonly List<StreamEvent> _recentNpcDialogs = new();
+
+    // npc-local-speech-perception — heard local/area speech (HeardSpeech). This
+    // is AMBIENT and potentially HIGH-VOLUME (creature emotes, other players'/
+    // bots' chatter), so it lives in a SEPARATE bounded window and is NEVER
+    // appended to the main event ring: flooding the ring would evict the bot's
+    // recent ActionRejected / GoalFailed / goal-lifecycle memory (the prompt
+    // looks back ~100 events) and could strand it in a retry loop. Captured by
+    // event KIND only, never by parsing the spoken text (no game knowledge).
+    private const int MaxHeardSpeech = 12;
+    private readonly List<StreamEvent> _heardSpeech = new();
 
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
@@ -363,6 +386,24 @@ internal sealed class EventStream
         return stamped;
     }
 
+    /// <summary>
+    /// Append a heard local/area speech (HeardSpeech) observation to its
+    /// DEDICATED bounded window — NOT the main event ring. Ambient local speech
+    /// can be high-volume; segregating it keeps the ring's critical
+    /// action/rejection/goal-lifecycle memory intact. Stamps a monotonic
+    /// Sequence (the shared counter) so consumers can order earliest/newest.
+    /// Evicts the oldest beyond <see cref="MaxHeardSpeech"/>. No in-store dedup,
+    /// so the prompt can still derive a repeat count over the window.
+    /// </summary>
+    public StreamEvent AppendHeardSpeech(StreamEvent ev)
+    {
+        var stamped = ev with { Sequence = _nextSeq++ };
+        _heardSpeech.Add(stamped);
+        while (_heardSpeech.Count > MaxHeardSpeech)
+            _heardSpeech.RemoveAt(0);
+        return stamped;
+    }
+
     /// <summary>Newest-first enumeration of all retained events.</summary>
     public IEnumerable<StreamEvent> Recent()
     {
@@ -421,4 +462,14 @@ internal sealed class EventStream
     /// instruction survives even after the earliest store is full.
     /// </summary>
     public IReadOnlyList<StreamEvent> RecentPersistentNpcDialogs() => _recentNpcDialogs;
+
+    /// <summary>
+    /// The MOST-RECENT heard local/area speech (HeardSpeech), capped at
+    /// <see cref="MaxHeardSpeech"/>. Kept OUT of the main event ring (see
+    /// <see cref="AppendHeardSpeech"/>) so ambient chatter never evicts the
+    /// bot's critical recent-event memory. Read by the prompt's `## Server
+    /// hints` HeardSpeech category. Raw recent lines (no in-store dedup) so the
+    /// prompt can derive a repeat count; the consumer orders by Sequence.
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentHeardSpeech() => _heardSpeech;
 }

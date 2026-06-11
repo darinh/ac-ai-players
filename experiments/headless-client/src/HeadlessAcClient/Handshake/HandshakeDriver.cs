@@ -3001,6 +3001,33 @@ internal sealed class HandshakeDriver : IDisposable
                         case HearSpeechMessage hs:
                             Console.WriteLine(
                                 $"[observe]   -> HearSpeech: <{hs.SenderName}> (0x{hs.SenderId:X8}, chatType=0x{hs.ChatMessageType:X}): \"{DialogLogPreview(hs.Message)}\"");
+                            // npc-local-speech-perception — surface heard local
+                            // speech to the brain, mirroring the Tell -> NpcDialog
+                            // append above. Local chat-text is how NPCs (and
+                            // creatures) speak ALOUD rather than via a directed
+                            // Tell, so a player standing nearby perceives it; the
+                            // bot previously only logged it. Skip our OWN echoed
+                            // speech by sender guid. Perception only: routed to a
+                            // DEDICATED bounded window (AppendHeardSpeech), NOT the
+                            // main event ring, so high-volume ambient speech can
+                            // never evict the bot's critical recent-event memory;
+                            // and EventKind.HeardSpeech is non-salient, so this
+                            // never wakes the LLM by itself. It renders in
+                            // `## Server hints` only when the LLM is already called.
+                            if (hs.SenderId != worldState.SelfGuid &&
+                                !string.IsNullOrWhiteSpace(hs.Message))
+                            {
+                                eventStream.AppendHeardSpeech(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.HeardSpeech,
+                                    Text = hs.Message,
+                                    Name = hs.SenderName,
+                                    ItemGuid = hs.SenderId,
+                                    ChatType = (int)hs.ChatMessageType,
+                                });
+                            }
                             break;
                         case null when opcode is not null:
                             Console.WriteLine($"[observe]   -> opcode 0x{(uint)opcode.Value:X4} (no decoder yet)");
