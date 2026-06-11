@@ -39,6 +39,14 @@ internal sealed record BatchApplyOutcome(
     /// diagnostics so a deploy log can show the tolerance firing.
     /// </summary>
     public bool StaleRevisionTolerated { get; init; }
+
+    /// <summary>
+    /// Number of `push` ops that were applied as idempotent no-ops because
+    /// they re-stated an intent already live (same kind+target) on the
+    /// stack. Surfaced for diagnostics; AppliedLog still carries one entry
+    /// per such op (labelled "redundant-noop").
+    /// </summary>
+    public int SuppressedCount { get; init; }
 }
 
 internal static class IntentStackOpsApplier
@@ -49,10 +57,12 @@ internal static class IntentStackOpsApplier
     /// an outcome carrying a human-readable per-op log so the caller
     /// can log and feed into training data.
     ///
-    /// IDs in `push` ops are filled with the allocator if the LLM did
-    /// not supply one; if the LLM supplied a duplicate of an existing
-    /// frame id, the op is rejected (avoids ambiguous "i-005" debug
-    /// output).
+    /// Intent ids are only display labels (pop/replace/mark target the
+    /// TOP by identity, never by id). A `push`/`replace_top` keeps its
+    /// supplied id only when non-blank AND not already live on the stack;
+    /// otherwise a fresh id is allocated. A `push` that re-states a
+    /// commitment already active (same kind+target) is applied as an
+    /// idempotent no-op rather than rejected.
     /// </summary>
     public static BatchApplyOutcome TryApply(
         IntentStack stack,
@@ -101,13 +111,23 @@ internal static class IntentStackOpsApplier
             staleRevisionTolerated = true;
         }
 
-        // Dry-run against a logical-only mirror of the stack so we can
-        // validate the whole batch before touching the real stack.
-        // We don't need a real IntentStack clone — just track the
-        // depth and id-set the ops would produce.
-        var depth = stack.Depth;
+        // Dry-run against a logical mirror of the stack so we can validate
+        // the whole batch before touching the real stack. The mirror tracks
+        // each frame's semantic (kind,target) key and whether it is still
+        // Active, so a push that merely RE-STATES a commitment already live
+        // is recognized as redundant. The LLM has no memory of its prior
+        // turn's stack ops, so it routinely re-derives — and re-pushes — an
+        // intent it already placed (commonly re-labelled with a reused
+        // example id). Applying such a push verbatim would either hard-
+        // reject on the id collision (silently dropping the turn's strategic
+        // decision) or stack a duplicate until overflow; instead we mark it
+        // `suppressed` and apply it as an idempotent no-op. Pure stack
+        // bookkeeping; the LLM still authors every distinct intent.
         var maxDepth = stack.MaxDepth;
-        var existingIds = new HashSet<string>(stack.Frames.Select(f => f.Id), StringComparer.Ordinal);
+        var mirror = new List<MirrorFrame>(stack.Frames.Count + ops.Count);
+        foreach (var f in stack.Frames)
+            mirror.Add(new MirrorFrame(SemanticKey(f.Kind, f.TargetName), f.Status == IntentLifecycle.Active));
+        var suppressed = new bool[ops.Count];
 
         for (int i = 0; i < ops.Count; i++)
         {
@@ -121,37 +141,50 @@ internal static class IntentStackOpsApplier
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] push: missing completion predicate");
                     if (string.IsNullOrWhiteSpace(op.Intent.Kind))
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] push: blank kind");
-                    if (depth >= maxDepth)
+                    var pushKey = SemanticKey(op.Intent.Kind, op.Intent.TargetName);
+                    // Strategic identity is (kind,target); tactical fields
+                    // (deadline, completion wording) deliberately do NOT key
+                    // it, so a re-derived intent dedupes even when the model
+                    // rephrases the predicate. Match ANY live Active frame
+                    // (not just the top): re-pushing a commitment already on
+                    // the stack is redundant and would otherwise stack a
+                    // duplicate. A Blocked/Completed/Expired frame does not
+                    // suppress, so a legitimate retry is still allowed.
+                    if (mirror.Any(m => m.Active && string.Equals(m.Key, pushKey, StringComparison.Ordinal)))
+                    {
+                        // Redundant with a live Active intent — idempotent no-op.
+                        suppressed[i] = true;
+                        break;
+                    }
+                    if (mirror.Count >= maxDepth)
                         return Reject(BatchApplyResult.RejectedOverflow, $"op[{i}] push: would exceed max depth {maxDepth}");
-                    if (!string.IsNullOrWhiteSpace(op.Intent.Id) && existingIds.Contains(op.Intent.Id!))
-                        return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] push: duplicate intent id '{op.Intent.Id}'");
-                    var pushedId = string.IsNullOrWhiteSpace(op.Intent.Id) ? "(auto)" : op.Intent.Id!;
-                    if (pushedId != "(auto)") existingIds.Add(pushedId);
-                    depth++;
+                    mirror.Add(new MirrorFrame(pushKey, true));
                     break;
 
                 case IntentStackOpKind.PopTop:
-                    if (depth == 0)
+                    if (mirror.Count == 0)
                         return Reject(BatchApplyResult.RejectedEmpty, $"op[{i}] pop_top: stack empty");
-                    if (depth == 1)
+                    if (mirror.Count == 1)
                         return Reject(BatchApplyResult.RejectedRootPop, $"op[{i}] pop_top: cannot pop root");
-                    depth--;
+                    mirror.RemoveAt(mirror.Count - 1);
                     break;
 
                 case IntentStackOpKind.ReplaceTop:
-                    if (depth == 0)
+                    if (mirror.Count == 0)
                         return Reject(BatchApplyResult.RejectedEmpty, $"op[{i}] replace_top: stack empty");
                     if (op.Intent is null)
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing intent");
                     if (op.Intent.Completion is null)
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing completion predicate");
+                    mirror[^1] = new MirrorFrame(SemanticKey(op.Intent.Kind, op.Intent.TargetName), true);
                     break;
 
                 case IntentStackOpKind.MarkTopBlocked:
-                    if (depth == 0)
+                    if (mirror.Count == 0)
                         return Reject(BatchApplyResult.RejectedEmpty, $"op[{i}] mark_top_blocked: stack empty");
                     if (string.IsNullOrWhiteSpace(op.Reason))
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] mark_top_blocked: reason required");
+                    mirror[^1] = mirror[^1] with { Active = false };
                     break;
 
                 default:
@@ -159,15 +192,31 @@ internal static class IntentStackOpsApplier
             }
         }
 
-        // All ops validated. Apply for real.
+        // All ops validated. Apply for real. `suppressed[i]` (from the dry-
+        // run) marks a push that is redundant with a live Active intent; it
+        // is recorded as an idempotent no-op rather than pushed. `liveIds`
+        // tracks the ids actually on the stack so a pushed id is kept only
+        // when unique (see ResolveUniqueId).
         var log = new List<string>(ops.Count);
-        foreach (var op in ops)
+        var liveIds = new HashSet<string>(stack.Frames.Select(f => f.Id), StringComparer.Ordinal);
+        int suppressedCount = 0;
+        for (int i = 0; i < ops.Count; i++)
         {
+            var op = ops[i];
             switch (op.Op)
             {
                 case IntentStackOpKind.Push:
                 {
-                    var intent = BuildIntent(op.Intent!, allocator, world, events, utcNow);
+                    if (suppressed[i])
+                    {
+                        suppressedCount++;
+                        log.Add($"push redundant-noop kind={op.Intent!.Kind} " +
+                                $"target=\"{op.Intent!.TargetName}\" (already active)");
+                        break;
+                    }
+                    var id = ResolveUniqueId(op.Intent!.Id, liveIds, allocator);
+                    liveIds.Add(id);
+                    var intent = BuildIntent(op.Intent!, id, world, events, utcNow);
                     var r = stack.TryPush(intent);
                     log.Add($"push id={intent.Id} kind={intent.Kind} reason=\"{op.Reason}\" -> {r}");
                     break;
@@ -181,8 +230,15 @@ internal static class IntentStackOpsApplier
                 }
                 case IntentStackOpKind.ReplaceTop:
                 {
-                    var intent = BuildIntent(op.Intent!, allocator, world, events, utcNow);
                     var oldId = stack.Top?.Id ?? "?";
+                    // The replacement id is a display label too: resolve it
+                    // through the same uniqueness rule as push so a reused id
+                    // cannot duplicate an ancestor's. Free the outgoing top's
+                    // id first so an in-place refine can keep its own label.
+                    if (oldId != "?") liveIds.Remove(oldId);
+                    var id = ResolveUniqueId(op.Intent!.Id, liveIds, allocator);
+                    liveIds.Add(id);
+                    var intent = BuildIntent(op.Intent!, id, world, events, utcNow);
                     var r = stack.ReplaceTop(intent, op.Reason);
                     log.Add($"replace_top old={oldId} new={intent.Id} reason=\"{op.Reason}\" -> {r}");
                     break;
@@ -199,6 +255,7 @@ internal static class IntentStackOpsApplier
         return new BatchApplyOutcome(BatchApplyResult.Ok, null, log)
         {
             StaleRevisionTolerated = staleRevisionTolerated,
+            SuppressedCount = suppressedCount,
         };
 
         static BatchApplyOutcome Reject(BatchApplyResult result, string reason) =>
@@ -207,12 +264,11 @@ internal static class IntentStackOpsApplier
 
     private static Intent BuildIntent(
         IntentSpec spec,
-        IntentIdAllocator allocator,
+        string id,
         WorldStateProjection world,
         EventStream events,
         DateTime utcNow)
     {
-        var id = string.IsNullOrWhiteSpace(spec.Id) ? allocator.Allocate() : spec.Id!;
         var baseline = IntentBaseline.Capture(world, events, utcNow);
         DateTime? deadline = spec.DeadlineSeconds is int s && s > 0
             ? utcNow.AddSeconds(s)
@@ -231,6 +287,39 @@ internal static class IntentStackOpsApplier
             PredicateRequest = spec.PredicateRequest,
         };
     }
+
+    /// <summary>
+    /// Resolve the id for a pushed intent. The LLM-supplied id is only a
+    /// display label — pop/replace/mark all target the TOP by identity,
+    /// never by id — and the LLM frequently reuses a literal example id
+    /// ("i-001") across turns, which collides with the same id already on
+    /// the stack OR with the allocator's own "i-NNN" namespace. So we keep
+    /// a supplied id only when it is non-blank AND not already present;
+    /// otherwise we allocate, looping until the allocated id is unique on
+    /// the stack. Mechanical id bookkeeping; no game knowledge.
+    /// </summary>
+    private static string ResolveUniqueId(string? supplied, HashSet<string> liveIds, IntentIdAllocator allocator)
+    {
+        if (!string.IsNullOrWhiteSpace(supplied) && !liveIds.Contains(supplied!))
+            return supplied!;
+        string id;
+        do { id = allocator.Allocate(); } while (liveIds.Contains(id));
+        return id;
+    }
+
+    /// <summary>
+    /// Stable semantic key for an intent: lowercased, trimmed (kind, target).
+    /// Two intents with the same key are the same commitment regardless of
+    /// the LLM-chosen id, so a push matching a live Active frame is a
+    /// redundant re-statement.
+    /// </summary>
+    private static string SemanticKey(string? kind, string? target) =>
+        (kind ?? string.Empty).Trim().ToLowerInvariant()
+        + "\u0001"
+        + (target ?? string.Empty).Trim().ToLowerInvariant();
+
+    /// <summary>Logical batch-validation mirror entry: a frame's semantic key and whether it is still Active.</summary>
+    private readonly record struct MirrorFrame(string Key, bool Active);
 
     /// <summary>
     /// Build the human-readable "## Intent stack" block surfaced to

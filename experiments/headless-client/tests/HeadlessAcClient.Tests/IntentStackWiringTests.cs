@@ -288,26 +288,33 @@ public class IntentStackWiringTests
     }
 
     [Fact]
-    public void Applier_TryApply_PushOnlyBatch_StaleRevision_StillRejectsDuplicateId()
+    public void Applier_TryApply_PushOnlyBatch_StaleRevision_AutoAllocatesCollidingId()
     {
-        // The tolerated path does NOT skip duplicate-id validation: a push whose
-        // LLM-supplied id collides with an existing frame is still rejected.
+        // The LLM commonly reuses a literal example id ("i-001") that already
+        // names a frame. Such a push is NOT rejected (rejecting silently drops
+        // the turn's strategic decision and loops) — a fresh unique id is
+        // allocated and the (genuinely different) intent is pushed. Holds on
+        // the tolerated stale-revision path too.
         var stack = new IntentStack();
         var alloc = new IntentIdAllocator();
         var world = BuildWorld();
         var events = new EventStream();
         stack.TryPush(NewIntent("dup-id", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
 
-        var dupSpec = SpecOf("sub");
-        dupSpec = dupSpec with { Id = "dup-id" };
+        var dupSpec = SpecOf("sub");                  // different kind => a genuinely new intent
+        dupSpec = dupSpec with { Id = "dup-id" };     // ...mislabelled with an id already on the stack
         var ops = new IntentStackOp[]
         {
             new() { Op = IntentStackOpKind.Push, Intent = dupSpec, Reason = "x" },
         };
         var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops,
             echoedRevision: stack.Revision + 1, world, events, DateTime.UtcNow);
-        Assert.Equal(BatchApplyResult.RejectedInvalid, outcome.Result);
-        Assert.Equal(1, stack.Depth);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.True(outcome.StaleRevisionTolerated);
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal("sub", stack.Top!.Kind);
+        Assert.NotEqual("dup-id", stack.Top!.Id);     // collision => fresh id
+        Assert.Equal(0, outcome.SuppressedCount);      // different kind => not redundant
     }
 
     [Fact]
@@ -431,6 +438,189 @@ public class IntentStackWiringTests
         Assert.Equal(2, stack.Depth);
         Assert.Equal(IntentLifecycle.Blocked, stack.Top!.Status);
         Assert.Equal(2, outcome.AppliedLog.Count);
+    }
+
+    [Fact]
+    public void Applier_TryApply_RedundantPush_SameKindAndTarget_SuppressedAsNoop()
+    {
+        // The LLM re-derives and re-pushes an intent already live (it has no
+        // memory of its prior turn). A push whose (kind,target) matches an
+        // Active frame is an idempotent no-op: not pushed, not rejected.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("i-001", "quest:recover", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+        var preRev = stack.Revision;
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("quest:recover"), Reason = "re-derived" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, preRev, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(1, outcome.SuppressedCount);
+        Assert.Equal(1, stack.Depth);            // not pushed
+        Assert.Equal(preRev, stack.Revision);    // no mutation
+    }
+
+    [Fact]
+    public void Applier_TryApply_RedundantPush_MatchIsCaseAndWhitespaceInsensitive()
+    {
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("root", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+        var ops1 = new IntentStackOp[] { new() { Op = IntentStackOpKind.Push, Intent = SpecOf("Hunt", targetName: "Bob"), Reason = "a" } };
+        IntentStackOpsApplier.TryApply(stack, alloc, ops1, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(2, stack.Depth);
+
+        var ops2 = new IntentStackOp[] { new() { Op = IntentStackOpKind.Push, Intent = SpecOf("  hUNT ", targetName: " bob "), Reason = "b" } };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops2, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(1, outcome.SuppressedCount);
+        Assert.Equal(2, stack.Depth);
+    }
+
+    [Fact]
+    public void Applier_TryApply_RedundantPush_NotSuppressedAgainstBlockedFrame()
+    {
+        // Suppression fires only against an ACTIVE frame; a same-(kind,target)
+        // push when the matching frame is Blocked is a legitimate retry.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        stack.TryPush(NewIntent("root", "k-root", b));
+        stack.TryPush(NewIntent("q", "quest", b));
+        stack.MarkTopBlocked("stalled");           // top "quest" now Blocked
+        Assert.Equal(IntentLifecycle.Blocked, stack.Top!.Status);
+
+        var ops = new IntentStackOp[] { new() { Op = IntentStackOpKind.Push, Intent = SpecOf("quest"), Reason = "retry" } };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(0, outcome.SuppressedCount);
+        Assert.Equal(3, stack.Depth);
+        Assert.Equal(IntentLifecycle.Active, stack.Top!.Status);
+    }
+
+    [Fact]
+    public void Applier_TryApply_CollidingId_DifferentIntent_AutoAllocatesFreshId()
+    {
+        // A reused id that names a DIFFERENT intent (kind differs) is not
+        // redundant: it is pushed with a freshly allocated unique id.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("i-001", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var spec = SpecOf("quest:fetch", targetName: "Apples") with { Id = "i-001" };
+        var ops = new IntentStackOp[] { new() { Op = IntentStackOpKind.Push, Intent = spec, Reason = "compile" } };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(0, outcome.SuppressedCount);
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal("quest:fetch", stack.Top!.Kind);
+        Assert.NotEqual("i-001", stack.Top!.Id);
+    }
+
+    [Fact]
+    public void Applier_TryApply_AutoAllocatedId_SkipsIdsAlreadyOnStack()
+    {
+        // The allocator shares the "i-NNN" namespace with LLM ids. If its next
+        // id is already on the stack, ResolveUniqueId loops until unique.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();         // next allocate => "i-001"
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("i-001", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("new-objective"), Reason = "x" }, // blank id
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(2, stack.Depth);
+        Assert.NotEqual("i-001", stack.Top!.Id);     // i-001 taken => allocator skipped past it
+    }
+
+    [Fact]
+    public void Applier_TryApply_WithinBatch_SecondIdenticalPush_Suppressed()
+    {
+        // Two identical pushes in one batch: the first lands, the second is a
+        // redundant no-op (the dry-run mirror tracks the just-added frame).
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        stack.TryPush(NewIntent("root", "k-root", IntentBaseline.Capture(world, events, DateTime.UtcNow)));
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("hunt", targetName: "Drudge"), Reason = "a" },
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("hunt", targetName: "Drudge"), Reason = "b" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(1, outcome.SuppressedCount);
+        Assert.Equal(2, stack.Depth);             // root + one hunt
+    }
+
+    [Fact]
+    public void Applier_TryApply_ReplaceTop_CollidingIdWithAncestor_AutoAllocatesFreshId()
+    {
+        // replace_top ids are display labels too. A supplied id that collides
+        // with an ANCESTOR frame's id must be reassigned, never duplicated.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-001", "k-root", b));      // root id = i-001
+        stack.TryPush(NewIntent("i-002", "k-child", b));     // top  id = i-002
+
+        // Replace the top but (mistakenly) reuse the root's id "i-001".
+        var spec = SpecOf("k-replacement") with { Id = "i-001" };
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.ReplaceTop, Intent = spec, Reason = "refine" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal("k-replacement", stack.Top!.Kind);
+        Assert.NotEqual("i-001", stack.Top!.Id);             // would-be duplicate reassigned
+        var ids = stack.Frames.Select(f => f.Id).ToList();
+        Assert.Equal(ids.Count, ids.Distinct().Count());     // no duplicate ids on the stack
+    }
+
+    [Fact]
+    public void Applier_TryApply_ReplaceTop_ReusingOwnTopId_KeepsLabel()
+    {
+        // Refining the top while keeping its own id is a unique label (the
+        // outgoing top is freed first), so the label is preserved — not churned.
+        var stack = new IntentStack();
+        var alloc = new IntentIdAllocator();
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        stack.TryPush(NewIntent("i-001", "k-root", b));
+        stack.TryPush(NewIntent("i-007", "k-child", b));     // top id = i-007
+
+        var spec = SpecOf("k-child-refined") with { Id = "i-007" };
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.ReplaceTop, Intent = spec, Reason = "refine" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal("i-007", stack.Top!.Id);                // own id kept
+        Assert.Equal("k-child-refined", stack.Top!.Kind);
     }
 
     // ---- Render block ----

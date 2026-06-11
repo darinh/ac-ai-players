@@ -2257,8 +2257,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         _stack, _idAllocator, stackOps, stackRevision, world, events, nowUtc.UtcDateTime);
                     Console.WriteLine(
                         $"[intent-stack] result={outcome.Result} ops={stackOps.Count} " +
-                        $"applied={outcome.AppliedLog.Count} " +
+                        $"applied={outcome.AppliedLog.Count - outcome.SuppressedCount} " +
+                        $"suppressed={outcome.SuppressedCount} " +
                         $"revision_after={_stack.Revision} depth_after={_stack.Depth}" +
+                        (outcome.Result != BatchApplyResult.Ok && !string.IsNullOrEmpty(outcome.RejectReason)
+                            ? $" reason=\"{outcome.RejectReason}\"" : "") +
                         (outcome.StaleRevisionTolerated ? " stale_revision_tolerated=push-only" : ""));
                     if (outcome.Result != BatchApplyResult.Ok)
                     {
