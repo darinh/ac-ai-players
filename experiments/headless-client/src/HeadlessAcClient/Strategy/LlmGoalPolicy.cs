@@ -2774,10 +2774,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                                    && VisibleMatchesSelector(target, v)))
             return false;
 
-        // This is an explicit, deliberate order, so a lethal-loss kind is
-        // re-testable once the bot has out-leveled the loss (the autonomous
-        // picker stays conservative and keeps such kinds permanently beaten).
-        // Bot-owned outcomes + own level only; no game knowledge.
+        // Override an explicit Attack order ONLY to prevent an UNRECOVERABLE
+        // outcome: a kind whose own ledger records an actual DEATH. A merely
+        // SURVIVED loss (Deaths==0: only near-deaths or ineffective swings) is
+        // NOT vetoed here. Survival during any re-attempt is enforced
+        // independently by the Motor's low-health flee / self-preservation
+        // gate, so this veto need not also block survivable kinds; and the
+        // out-level re-test gate (below) keys on the bot's level, which a
+        // survived loss does not raise, so vetoing here would bar re-engagement
+        // indefinitely. A FATAL-loss kind stays beaten, re-testable only once
+        // the bot out-levels the death. Bot-owned outcome counts + own level
+        // only; no game knowledge.
+        var record = FindCombatRecord(world.CombatHistoryFull, target.Wcid, targetName);
+        if (record is null || record.Deaths == 0) return false;
+
         return IsBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
             world.Self.Level, lethalRetestableWhenOutleveled: true);
     }
