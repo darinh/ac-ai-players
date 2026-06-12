@@ -586,6 +586,66 @@ public class LlmGoalPolicyTests
         Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
     }
 
+    [Fact]
+    public void BuildUserPrompt_ContractsCapsule_SurvivesBodyTrimAtTinyCeiling()
+    {
+        // The ## Contracts section lives in the protected salience tail, so a
+        // tracked objective (what it requires / who turns it in) stays visible
+        // even at a tight request ceiling that forces the trimmable body (rules
+        // preamble + ## Visible nearby) to be hard-cut. Regression guard: it
+        // previously rendered mid-body and was guillotined before the LLM saw it
+        // (the cp2889 enrichment was effectively invisible live).
+        var world = BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 700u, Stage = 1u,
+                Name = "Slay the Drudges",
+                Description = "Defeat 5 drudges in the mine and report back.",
+                NpcEnd = "Sergeant",
+            });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: new HashSet<uint>(), promptCeiling: 10000);
+
+        Assert.Contains("## Contracts", prompt);
+        var cap = CapsuleSection(prompt, "## Contracts");
+        Assert.Contains("contract 700 \"Slay the Drudges\"", cap);
+        Assert.Contains("objective: Defeat 5 drudges", cap);
+        Assert.Contains("turn-in NPC: Sergeant", cap);
+        Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ContractsCapsule_CharBudgetCapsAndNotesOverflow()
+    {
+        // Many contracts with long objective text must not let the protected
+        // capsule blow its char budget: excess contracts are dropped (in wire
+        // order) with a "+N more" note, and the first contract always survives.
+        var many = Enumerable.Range(0, 20)
+            .Select(i => new ContractProjection
+            {
+                ContractId = (uint)(1000 + i),
+                Stage = 2u,
+                Name = $"Contract Number {i}",
+                Description = new string('x', 180),
+                NpcEnd = "Giver",
+            })
+            .ToArray();
+        var world = BuildEnrichedContractWorld(many);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = CapsuleSection(prompt, "## Contracts");
+
+        Assert.Contains("## Contracts", prompt);
+        Assert.Contains("contract 1000", cap);              // first always survives
+        Assert.Contains("more tracked, not shown)", cap);   // overflow noted
+        var rendered = System.Text.RegularExpressions.Regex.Matches(cap, @"- contract \d+").Count;
+        Assert.True(rendered is >= 1 and < 20,
+            $"char budget should drop some of 20 contracts but keep >=1; rendered {rendered}");
+    }
+
     // Returns the text of a `## `-headed section: from the header up to the
     // next `## ` header (or end of prompt). Bounds Contains assertions to the
     // intended capsule so a name appearing in a later section can't pass.

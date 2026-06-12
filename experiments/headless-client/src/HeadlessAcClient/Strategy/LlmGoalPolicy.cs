@@ -4651,43 +4651,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
-        // ── ## Contracts (tracked-objective perception) ──────────────────
-        // Raw tracked-contract facts. The numeric id + the wire ContractStage
-        // code come from the server's contract tracker
-        // (SendClientContractTracker 0x0315 / Table 0x0314). The objective text
-        // (name / what it requires / which NPC starts and turns it in) is the
-        // game's own dat string, looked up by id (see ContractCatalog) and
-        // surfaced verbatim when present — so the LLM knows what an opaque
-        // contract id actually REQUIRES. Facts so the LLM can decide whether to
-        // pursue or turn one in; source assigns no priority and decides nothing.
-        if (world.Contracts.Count > 0)
-        {
-            sb.AppendLine("## Contracts");
-            sb.AppendLine(
-                "- tracked objectives (stage code: 1 available, 2 in progress, " +
-                "3 done or pending repeat, 4+ in progress with a step counter):");
-            foreach (var c in world.Contracts)
-            {
-                var name = OneLine(c.Name);
-                sb.AppendLine(name is null
-                    ? $"  - contract {c.ContractId}: stage {c.Stage}"
-                    : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
-
-                var objective = OneLine(c.Description);
-                if (objective is not null)
-                    sb.AppendLine($"      objective: {objective}");
-                var progress = OneLine(c.DescriptionProgress);
-                if (progress is not null)
-                    sb.AppendLine($"      in progress: {progress}");
-                var npcStart = OneLine(c.NpcStart);
-                if (npcStart is not null)
-                    sb.AppendLine($"      start NPC: {npcStart}");
-                var npcEnd = OneLine(c.NpcEnd);
-                if (npcEnd is not null)
-                    sb.AppendLine($"      turn-in NPC: {npcEnd}");
-            }
-            sb.AppendLine();
-        }
+        // ── ## Contracts — relocated to the PROTECTED salience tail (search
+        // "## Contracts" below). The body's trailing sections are hard-cut first
+        // when the prompt overflows the request ceiling, which live guillotined
+        // tracked-objective perception before the LLM saw it; rendering it among
+        // the protected end-capsules keeps it intact.
 
         if (stack is not null)
         {
@@ -5762,6 +5730,71 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "versus offense. Whether, how much, and which to raise is your call.");
         }
 
+        // ── ## Contracts (tracked-objective perception, end-of-prompt capsule) ─
+        // Tracked contracts render HERE in the protected salience tail, not the
+        // body, because the body's trailing sections are hard-cut first when the
+        // prompt overflows the request ceiling — live, an object-dense town
+        // pushed the body past 26000 and this section (previously rendered
+        // mid-body) was guillotined before the LLM ever saw it. A tracked
+        // objective (what it requires / where / who turns it in) is small and
+        // decision-proximate, so it belongs with the other protected capsules.
+        //
+        // Each line is the server's contract tracker (numeric id + wire
+        // ContractStage) enriched with the dat's own objective text
+        // (ContractCatalog), looked up by id and surfaced verbatim. No
+        // object-type priority/urgency in source and no source-side decision to
+        // pursue or turn one in — the LLM decides (it reads each contract's
+        // stage code and chooses). Rows are emitted in WIRE ORDER (NOT ranked —
+        // source must not judge which objective matters) and bounded by a TOTAL
+        // char budget so the protected tail stays well under the ceiling and can
+        // never force the body hard-cut to eat the fixed rules preamble; the
+        // first row is always emitted so at least one contract stays visible. A
+        // `(+N more)` count note tells the LLM its view is partial.
+        if (world.Contracts.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Contracts");
+            sb.AppendLine(
+                "- tracked objectives (stage code: 1 available, 2 in progress, " +
+                "3 done or pending repeat, 4+ in progress with a step counter):");
+            var contractsShown = 0;
+            var contractsChars = 0;
+            foreach (var c in world.Contracts)
+            {
+                var entry = new StringBuilder();
+                var name = OneLine(c.Name);
+                entry.AppendLine(name is null
+                    ? $"  - contract {c.ContractId}: stage {c.Stage}"
+                    : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
+                var objective = OneLine(c.Description);
+                if (objective is not null)
+                    entry.AppendLine($"      objective: {objective}");
+                var progress = OneLine(c.DescriptionProgress);
+                if (progress is not null)
+                    entry.AppendLine($"      in progress: {progress}");
+                var npcStart = OneLine(c.NpcStart);
+                if (npcStart is not null)
+                    entry.AppendLine($"      start NPC: {npcStart}");
+                var npcEnd = OneLine(c.NpcEnd);
+                if (npcEnd is not null)
+                    entry.AppendLine($"      turn-in NPC: {npcEnd}");
+
+                // Always render the first contract; stop once the rows would
+                // exceed the capsule's char budget (the tail is non-trimmable,
+                // so it must self-limit).
+                if (contractsShown > 0 && contractsChars + entry.Length > ContractsProtectedCharBudget)
+                    break;
+                sb.Append(entry);
+                contractsChars += entry.Length;
+                contractsShown++;
+            }
+            if (contractsShown < world.Contracts.Count)
+                sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: whether to pursue an objective " +
+                "or turn one in is your call.");
+        }
+
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
         // Visible monsters already render mid-prompt (`## Visible nearby`,
         // `## Combat readiness`), but a fact placed earlier in this large
@@ -6781,6 +6814,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // (name + truncated short_desc), enough to surface the academy's quest
     // items; deduped first so duplicate stacks don't consume the budget.
     private const int HeldItemsProtectedCharBudget = 1200;
+
+    // Total char budget for the protected `## Contracts` capsule ROWS — bounds
+    // the rendered contract rows so a bloated tracker (many contracts, or long
+    // dat objective text) cannot grow the protected salience tail enough to
+    // force the body hard-cut to eat the fixed rules preamble. ~1200 fits
+    // several contracts (id + stage + objective + turn-in NPC, each OneLine-
+    // capped); the header + caption + disclaimer (~300 chars) are added on top.
+    // Same sizing rationale as `## Held items`.
+    private const int ContractsProtectedCharBudget = 1200;
 
     // How many of the EARLIEST persisted distinct server PopupStrings the
     // `## Early server directives` protected-tail capsule re-surfaces. The
