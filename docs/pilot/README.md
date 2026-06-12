@@ -41,7 +41,7 @@ Driving session plan: `~/.copilot/session-state/.../plan.md` (v5).
 | P-5 | LLM Quest Compiler | Pending |
 | P-6 | Needs Engine + Goal Arbiter + Preemption Matrix | Pending |
 | P-7 | Generic quest executor BT | Pending |
-| P-8 | Pilot-01 on AC canonical tutorial | Pending |
+| P-8 | Pilot-01 on AC canonical tutorial | **Working (2026-06)** — exits the Academy (via the Exit Token) into the Holtburg open world, turns in quests, buys/completes Contract Broker contracts, fights open-world mobs, and self-levels to ~L7. Slices d39965b (intent-push dedup), 7c93ce1 (beaten-kind veto), 6187654 (portal recall), c56c5f2 (directive-over-grind). |
 | P-9 | Grind discovery loop | Pending |
 | P-10 | Custom-content validation | Pending |
 | P-11 | Generalize for archetypes | Pending |
