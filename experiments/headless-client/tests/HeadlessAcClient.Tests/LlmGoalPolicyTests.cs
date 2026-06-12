@@ -3894,8 +3894,9 @@ public class LlmGoalPolicyTests
         // respawning Sparring Golems ("attacking grants XP, no blocking
         // conditions") instead of taking the exit. A distinct rule must teach
         // that once an area reports COMPLETE, grinding its respawning monsters
-        // is optional and the named exit/portal is the progression (WEIGH, not
-        // a ban — respects valuing academy XP).
+        // is optional and the named exit/portal is the progression — pursue it
+        // (health-critical safety and any step the directive itself requires
+        // still come first).
         var es = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
 
@@ -3904,7 +3905,14 @@ public class LlmGoalPolicyTests
         var lineEnd = prompt.IndexOf('\n', idx);
         var line = lineEnd >= 0 ? prompt.Substring(idx, lineEnd - idx) : prompt.Substring(idx);
         Assert.Contains("respawning", line);
-        Assert.Contains("WEIGH, not a hard ban", line);
+        // The "WEIGH, not a hard ban / brief reason to train more is fine"
+        // loophole was removed (it let the LLM justify "one more fight" while
+        // the exit directive sat unacted); the rule now firmly says pursue the
+        // exit, while still preserving the health-critical + directive-required
+        // exceptions.
+        Assert.DoesNotContain("WEIGH, not a hard ban", line);
+        Assert.Contains("do NOT justify", line);
+        Assert.Contains("Health-critical", line);
         Assert.Contains("portal", line);
     }
 
@@ -3926,6 +3934,29 @@ public class LlmGoalPolicyTests
         var precLine = precLineEnd >= 0 ? prompt.Substring(precIdx, precLineEnd - precIdx) : prompt.Substring(precIdx);
         Assert.Contains("## Early server directives", precLine);
         Assert.Contains("grinding", precLine);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PrecedenceRule_OutranksFirstTimeIncidentalButNotDirectiveRequired()
+    {
+        // The precedence loophole: the rule only outranked REPEATING a local
+        // interaction, implicitly green-lighting FIRST-TIME loot/corpse/untalked-
+        // NPC actions, so the bot ground/looted instead of following a leave/
+        // advance directive. The rule now also outranks fresh incidental local
+        // interactions, while explicitly preserving health-critical safety and
+        // any action the directive itself names/requires (so it does not starve
+        // an objective interaction like reading a directed sign or giving a
+        // turn-in item).
+        var es = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        var idx = prompt.IndexOf("SERVER-INSTRUCTION PRECEDENCE", System.StringComparison.Ordinal);
+        Assert.True(idx >= 0, "precedence rule must be present");
+        var lineEnd = prompt.IndexOf('\n', idx);
+        var line = lineEnd >= 0 ? prompt.Substring(idx, lineEnd - idx) : prompt.Substring(idx);
+        Assert.Contains("FRESH incidental", line);                 // first-time interactions outranked
+        Assert.Contains("NEVER overrides health-critical", line);  // safety preserved
+        Assert.Contains("ARE the directive", line);                // directive-required actions preserved
     }
 
     [Fact]
