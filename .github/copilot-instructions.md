@@ -58,6 +58,23 @@ phrasings, you are violating this directive:
 - "I characterized the gap; the build deserves a fresh session" —
   characterization without the build is half a loop iteration. Do the
   build.
+- **"the remaining gaps aren't cleanly buildable" / "every capability +
+  rule already exists, so it's just LLM variance" / "the next work is a
+  different MODE (prompt-tuning / model-quality)" / "forcing a change now
+  would risk regression or lower quality" / "shipping it would violate the
+  quality bar."** This is the 13th-strike excuse and it is BANNED. The
+  quality bar is upheld by the adversarial multi-model consensus + HK audit
+  + live-validation gauntlet you ALREADY run on every slice — that gauntlet
+  is the thing that catches a bad or regressing change, so "it might be low
+  quality / risky / a tunnel-vision regression" is a reason to BUILD IT AND
+  SUBMIT IT TO REVIEW, never a reason to refuse to build. A prompt-rule
+  change (behind that gauntlet, optionally behind a config flag) is a valid,
+  low-risk slice. "LLM variance / instruction-following" is itself a gap you
+  fix with prompt work — it is NOT an exemption from building. There is
+  ALWAYS a buildable next step: a prompt rule, a unit test, a diagnostic, a
+  config-flagged behavior, or a small safe refactor toward the gap. If you
+  think a gap is "risky," your job is to scope it small + get consensus, not
+  to stop.
 
 ### Forcing function before ANY `task_complete`
 
@@ -97,9 +114,9 @@ If it returns a row, that is your next task — start it THIS turn. The
 existence of a ready todo is proof you are not done. `task_complete`
 while a ready todo exists is a direct violation of this directive.
 
-### The 12-strike rule (you are here)
+### The 13-strike rule (you are here)
 
-You have now stopped 12+ times in a row, each time dressing a
+You have now stopped 13+ times in a row (the user has counted), each time dressing a
 non-reason as a terminal condition. Observing/characterizing a gap and
 then calling `task_complete` is the SAME violation every time. The fix
 is not a better checkpoint — it is to DO THE BUILD in the same session
