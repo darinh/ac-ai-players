@@ -4842,6 +4842,134 @@ public class LlmGoalPolicyTests
         Assert.Equal(2u, proj.Contracts[0].Stage);
     }
 
+    private static WorldStateProjection BuildEnrichedContractWorld(params ContractProjection[] contracts) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        Contracts = contracts,
+    };
+
+    [Fact]
+    public void Contracts_Enriched_RendersObjectiveTextAsRawFacts()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 100u, Stage = 2u,
+                Name = "Pathwarden Token",
+                Description = "Return the token to the warden.",
+                DescriptionProgress = "You are carrying the token.",
+                NpcStart = "Town Crier",
+                NpcEnd = "Warden",
+            }), new EventStream(), null);
+
+        Assert.Contains("## Contracts", prompt);
+        Assert.Contains("contract 100 \"Pathwarden Token\": stage 2", prompt);
+        Assert.Contains("objective: Return the token to the warden.", prompt);
+        Assert.Contains("in progress: You are carrying the token.", prompt);
+        Assert.Contains("start NPC: Town Crier", prompt);
+        Assert.Contains("turn-in NPC: Warden", prompt);
+    }
+
+    [Fact]
+    public void Contracts_Enriched_BlankFieldsOmitted_FallsBackToIdAndStage()
+    {
+        // No name/objective in the catalog (e.g. dat unavailable): the row must
+        // still render the raw id + stage and skip the empty sub-lines.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection { ContractId = 300u, Stage = 1u }),
+            new EventStream(), null);
+
+        Assert.Contains("contract 300: stage 1", prompt);
+        Assert.DoesNotContain("contract 300 \"", prompt);
+        Assert.DoesNotContain("objective:", prompt);
+        Assert.DoesNotContain("turn-in NPC:", prompt);
+    }
+
+    [Fact]
+    public void Contracts_Enriched_CollapsesMultiLineObjectiveToOneLine()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 400u, Stage = 2u,
+                Description = "Line one.\r\n  Line two.\n\tLine three.",
+            }), new EventStream(), null);
+
+        Assert.Contains("objective: Line one. Line two. Line three.", prompt);
+        // The objective must occupy exactly one prompt line (no raw newlines).
+        var objectiveLine = prompt.Split('\n').Single(l => l.Contains("objective:"));
+        Assert.DoesNotContain("Line two.", objectiveLine.Split("objective:")[0]);
+    }
+
+    [Fact]
+    public void ContractCatalog_TryGet_HitsAndMisses()
+    {
+        var catalog = new ContractCatalog(new Dictionary<uint, ContractInfo>
+        {
+            [555u] = new ContractInfo(555u, "Test Contract", "Do the thing.", "Doing it.", "Giver", "Taker"),
+        });
+
+        Assert.Equal(1, catalog.Count);
+        Assert.True(catalog.TryGet(555u, out var info));
+        Assert.Equal("Test Contract", info.Name);
+        Assert.Equal("Taker", info.NpcEnd);
+        Assert.False(catalog.TryGet(999u, out _));
+    }
+
+    [Fact]
+    public void ContractCatalog_Empty_AlwaysMisses()
+    {
+        var catalog = new ContractCatalog();
+        Assert.Equal(0, catalog.Count);
+        Assert.False(catalog.TryGet(1u, out _));
+    }
+
+    [Fact]
+    public void Contracts_FromWorldState_EnrichesFromInjectedCatalogById()
+    {
+        var catalog = new ContractCatalog(new Dictionary<uint, ContractInfo>
+        {
+            [424242u] = new ContractInfo(424242u, "Catalog Name", "Catalog Objective", "", "Start Guy", "End Guy"),
+        });
+
+        var ws = new HeadlessAcClient.World.WorldState();
+        ws.SetSelf(SelfGuid);
+        ws.ApplyContractTable(new HeadlessAcClient.Protocol.GameMessages.ContractTrackerTablePayload(
+            new[] { new HeadlessAcClient.Protocol.GameMessages.ContractTrackerEntry(1u, 424242u, 2u, 0.0, 0.0) }));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null, contractCatalog: catalog);
+
+        Assert.NotNull(proj);
+        Assert.Single(proj!.Contracts);
+        Assert.Equal("Catalog Name", proj.Contracts[0].Name);
+        Assert.Equal("Catalog Objective", proj.Contracts[0].Description);
+        Assert.Equal("Start Guy", proj.Contracts[0].NpcStart);
+        // A blank dat field is coalesced to null, not an empty string.
+        Assert.Null(proj.Contracts[0].DescriptionProgress);
+    }
+
+    [Fact]
+    public void Contracts_FromWorldState_NoCatalog_LeavesRawIdAndStage()
+    {
+        var ws = new HeadlessAcClient.World.WorldState();
+        ws.SetSelf(SelfGuid);
+        ws.ApplyContractTable(new HeadlessAcClient.Protocol.GameMessages.ContractTrackerTablePayload(
+            new[] { new HeadlessAcClient.Protocol.GameMessages.ContractTrackerEntry(1u, 424242u, 2u, 0.0, 0.0) }));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        Assert.NotNull(proj);
+        Assert.Single(proj!.Contracts);
+        Assert.Equal(424242u, proj.Contracts[0].ContractId);
+        Assert.Null(proj.Contracts[0].Name);
+    }
+
     // ── named-target search telemetry ("## Search progress" section) ─────
     private static WorldStateProjection BuildNamedSearchWorld(
         string? targetName, int probes, int distinctCells) => new()

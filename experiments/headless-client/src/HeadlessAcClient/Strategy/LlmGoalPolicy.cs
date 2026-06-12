@@ -4652,11 +4652,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
 
         // ── ## Contracts (tracked-objective perception) ──────────────────
-        // Raw tracked-contract facts from the server's contract tracker
-        // (SendClientContractTracker 0x0315 / Table 0x0314). Conditional
-        // (omitted when none are tracked). Numeric id + the wire ContractStage
-        // code only — no quest/NPC/contract names. Facts so the LLM can decide
-        // whether to pursue an objective or turn one in; source never decides.
+        // Raw tracked-contract facts. The numeric id + the wire ContractStage
+        // code come from the server's contract tracker
+        // (SendClientContractTracker 0x0315 / Table 0x0314). The objective text
+        // (name / what it requires / which NPC starts and turns it in) is the
+        // game's own dat string, looked up by id (see ContractCatalog) and
+        // surfaced verbatim when present — so the LLM knows what an opaque
+        // contract id actually REQUIRES. Facts so the LLM can decide whether to
+        // pursue or turn one in; source assigns no priority and decides nothing.
         if (world.Contracts.Count > 0)
         {
             sb.AppendLine("## Contracts");
@@ -4664,7 +4667,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- tracked objectives (stage code: 1 available, 2 in progress, " +
                 "3 done or pending repeat, 4+ in progress with a step counter):");
             foreach (var c in world.Contracts)
-                sb.AppendLine($"  - contract {c.ContractId}: stage {c.Stage}");
+            {
+                var name = OneLine(c.Name);
+                sb.AppendLine(name is null
+                    ? $"  - contract {c.ContractId}: stage {c.Stage}"
+                    : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
+
+                var objective = OneLine(c.Description);
+                if (objective is not null)
+                    sb.AppendLine($"      objective: {objective}");
+                var progress = OneLine(c.DescriptionProgress);
+                if (progress is not null)
+                    sb.AppendLine($"      in progress: {progress}");
+                var npcStart = OneLine(c.NpcStart);
+                if (npcStart is not null)
+                    sb.AppendLine($"      start NPC: {npcStart}");
+                var npcEnd = OneLine(c.NpcEnd);
+                if (npcEnd is not null)
+                    sb.AppendLine($"      turn-in NPC: {npcEnd}");
+            }
             sb.AppendLine();
         }
 
@@ -6674,6 +6695,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     private static string Truncate(string? s, int n) =>
         string.IsNullOrEmpty(s) ? "" : (s.Length <= n ? s : s[..n] + "...");
+
+    // Collapse a possibly multi-line dat string to a single trimmed line
+    // (each prompt row is one line), or null when blank. Caps the length so a
+    // long objective string can't crowd out the rest of the prompt. Mechanical
+    // text shaping only — the dat's own words, no game knowledge applied.
+    private static string? OneLine(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        var collapsed = string.Join(' ',
+            s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        if (collapsed.Length == 0) return null;
+        return collapsed.Length <= 200 ? collapsed : collapsed[..200] + "...";
+    }
 
     /// <summary>
     /// Keep both ends of an already-deduped hint list: the N earliest and
