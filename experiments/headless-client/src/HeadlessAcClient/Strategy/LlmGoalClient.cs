@@ -100,12 +100,26 @@ internal sealed class LlmGoalClient
     private readonly Dictionary<string, DateTimeOffset> _cooldownUntil =
         new(StringComparer.Ordinal);
 
+    // Global circuit-breaker: set when the ENTIRE reachable roster fails one
+    // call with an infrastructure error (transport/timeout/5xx) and nothing
+    // succeeds. While set, CompleteAsync short-circuits (no probing) so the bot
+    // uses its autonomous policy immediately instead of re-paying a roster-worth
+    // of client timeouts every decision. Cleared on any success. Multi-model
+    // only; guarded by _gate.
+    private DateTimeOffset? _infraBackoffUntil;
+
     // TTL bounds for a model cooldown. A 429 with no Retry-After hint gets the
     // default; one with a hint is clamped to [min, max]. Not game constants —
     // pure rate-limit bookkeeping.
     private static readonly TimeSpan DefaultModelCooldown = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan MinModelCooldown = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan MaxModelCooldown = TimeSpan.FromHours(24);
+
+    // How long to skip LLM probing after the whole roster fails one call with an
+    // infrastructure error (see _infraBackoffUntil). Short, so a recovered
+    // endpoint is re-probed quickly; long enough that a sustained outage doesn't
+    // re-pay N client timeouts every decision. Pure rate-limit bookkeeping.
+    private static readonly TimeSpan InfraOutageBackoff = TimeSpan.FromSeconds(20);
 
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
@@ -189,9 +203,11 @@ internal sealed class LlmGoalClient
         // once per call, so a fully-walled roster fails fast instead of looping.
         List<int> order;
         DateTimeOffset? soonestCooling;
+        DateTimeOffset? infraBackoff;
         int start;
         lock (_gate)
         {
+            infraBackoff = _infraBackoffUntil;
             start = _activeIndex;
             var multi = _models.Count > 1;
             order = new List<int>(_models.Count);
@@ -209,6 +225,20 @@ internal sealed class LlmGoalClient
         }
         var multiModel = _models.Count > 1;
 
+        // Infra circuit-breaker (multi-model only): the whole reachable roster
+        // recently failed one call with a transport/timeout/5xx error and nothing
+        // has succeeded since, so the endpoint is (still) down. Skip probing for
+        // the backoff window — otherwise every decision re-pays up to a
+        // roster-worth of client timeouts before falling back. The bot runs on
+        // its autonomous policy meanwhile; any success clears the breaker.
+        if (multiModel && infraBackoff is { } breakerUntil && now < breakerUntil)
+        {
+            var backoff = breakerUntil - now;
+            SafeLog($"[llm-fallback] endpoint unreachable; infra backoff {backoff.TotalSeconds:F0}s (autonomous policy meanwhile)");
+            return new LlmResult(false, "", "", 0, "llm endpoint unreachable (infra backoff)",
+                RetryAfter: backoff, FailureKind: LlmFailureKind.Transport);
+        }
+
         // Every model is cooling down from a recent 429: don't burn round-trips
         // re-probing known-walled models — surface a 429 whose Retry-After is the
         // soonest model's reset so the policy backs off exactly until then.
@@ -222,6 +252,7 @@ internal sealed class LlmGoalClient
 
         LlmResult? lastQuota = null;
         LlmResult? soonestQuota = null;
+        LlmResult? lastFailover = null;
         foreach (var idx in order)
         {
             var model = _models[idx];
@@ -229,19 +260,17 @@ internal sealed class LlmGoalClient
 
             if (result.Ok)
             {
-                // Stick to the model that just worked and clear any stale
-                // cooldown on it so the next call starts here.
-                lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); }
+                // Stick to the model that just worked, clear any stale cooldown
+                // on it, and lift the infra circuit-breaker — the endpoint is
+                // reachable again.
+                lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); _infraBackoffUntil = null; }
                 if (multiModel && idx != start)
                     SafeLog($"[llm-fallback] rotated to {model} (now the active model)");
                 return result;
             }
 
-            // Rotate ONLY on a quota 429. Every other outcome (transport error,
-            // 5xx, 413, parse failure) is returned as-is so the policy's
-            // existing non-429 handling (e.g. adaptive prompt-ceiling on 413)
-            // still applies and we don't thrash across models on a transient
-            // blip or a misconfiguration.
+            // Rotate on a quota 429: cool the model down for its Retry-After
+            // window (a sustained wall) and try the next candidate.
             if (result.StatusCode == (HttpStatusCode)429)
             {
                 RecordCooldown(model, result.RetryAfter);
@@ -258,15 +287,45 @@ internal sealed class LlmGoalClient
                 continue;
             }
 
+            // Rotate on an infrastructure failure too: a transport error /
+            // client timeout (no clean HTTP status was reached) or a 5xx server
+            // error. A daily-quota wall on a large prompt frequently surfaces as
+            // a connection reset / stream-copy failure or a 30s timeout rather
+            // than a clean 429, and a 5xx means that model's endpoint is down —
+            // either way a healthy fallback model still answers. Unlike a 429
+            // there is NO per-model cooldown: it may be a transient blip, so the
+            // model stays eligible next call (and the "stick to what worked"
+            // index naturally avoids re-probing it once a fallback succeeds).
+            // 413 / other 4xx / parse failures are request/content problems
+            // another model would hit identically, so they return as-is for the
+            // adaptive prompt-ceiling and misconfiguration handling.
+            if (multiModel && IsFailoverCandidate(result))
+            {
+                SafeLog($"[llm-fallback] {model} failed ({result.Error}); rotating to next candidate");
+                lastFailover = result;
+                continue;
+            }
+
             return result;
         }
 
-        // Every reachable candidate is quota-exhausted. Prefer the
-        // soonest-resuming Retry-After hint so the policy's backoff window is
-        // correct; fall back to the last 429 when no model supplied a hint.
+        // Loop exhausted: every reachable candidate failed with a rotatable
+        // outcome. If the whole probed roster failed purely on infrastructure
+        // (transport/5xx) with NO quota involved, the endpoint is down — arm the
+        // circuit-breaker so the next calls short-circuit instead of re-probing
+        // (and re-paying client timeouts). A quota failure does NOT arm it: the
+        // per-model 429 cooldowns already pace re-probing and a fresh model may
+        // appear when a cooldown expires.
+        if (multiModel && lastFailover is not null && lastQuota is null && soonestQuota is null)
+            lock (_gate) _infraBackoffUntil = _now() + InfraOutageBackoff;
+
+        // Prefer the soonest-resuming 429 hint so the policy's backoff window is
+        // correct; else the last 429; else the last infra failure (at least one
+        // is set, since order.Count >= 1 here and every non-returning branch
+        // records one).
         if (multiModel)
-            SafeLog($"[llm-fallback] all {_models.Count} candidate models walled (429 quota)");
-        return soonestQuota ?? lastQuota!;
+            SafeLog($"[llm-fallback] all {order.Count} candidate models walled or unreachable (429 quota / transport)");
+        return soonestQuota ?? lastQuota ?? lastFailover!;
     }
 
     // Mark a model as cooling down after a 429 (multi-model only): skip it in
@@ -285,6 +344,22 @@ internal sealed class LlmGoalClient
         // call-start would expire the cooldown early and re-probe too soon.
         lock (_gate) _cooldownUntil[model] = _now() + span;
     }
+
+    // A failure worth trying the NEXT fallback model for: an infrastructure
+    // failure another model would NOT hit identically. Two cases:
+    //   - Transport: a transport error / client timeout that never reached a
+    //     clean HTTP status (a quota wall on a large prompt often surfaces this
+    //     way instead of a clean 429).
+    //   - 5xx: the model's endpoint returned a server error — that endpoint is
+    //     down, but a fallback model's may be up.
+    // A quota 429 is handled separately (per-model cooldown). 413 / other 4xx
+    // (request-specific), parse failures, and caller-cancellations are NOT
+    // failover candidates — they return as-is so the policy's existing handling
+    // (adaptive prompt-ceiling on 413, etc.) applies and we don't thrash models
+    // on a request-specific problem.
+    private static bool IsFailoverCandidate(LlmResult r) =>
+        r.FailureKind == LlmFailureKind.Transport ||
+        (r.FailureKind == LlmFailureKind.Http && r.StatusCode is { } sc && (int)sc >= 500);
 
     // Diagnostics must never alter the LLM call path: a throwing log sink is
     // swallowed so a bad logger can't turn a returned LlmResult into a thrown
@@ -335,7 +410,14 @@ internal sealed class LlmGoalClient
             // ReadAsStringAsync threw (e.g. a mid-body cancellation); dispose it
             // here since the using-scope below is never entered on this path.
             resp?.Dispose();
-            return new LlmResult(false, "", "", (int)sw.ElapsedMilliseconds, $"http error: {ex.Message}");
+            // A caller-requested cancellation (bot shutting down) is NOT a
+            // failover candidate — don't burn the remaining models on the way
+            // out. A client TIMEOUT also surfaces as OperationCanceledException
+            // but with ct NOT signalled; that IS a transport failure worth
+            // failing over, as is any other send/read error.
+            var callerCancelled = ex is OperationCanceledException && ct.IsCancellationRequested;
+            return new LlmResult(false, "", "", (int)sw.ElapsedMilliseconds, $"http error: {ex.Message}",
+                FailureKind: callerCancelled ? LlmFailureKind.None : LlmFailureKind.Transport);
         }
         sw.Stop();
 
@@ -366,7 +448,8 @@ internal sealed class LlmGoalClient
                 return new LlmResult(false, "", raw, (int)sw.ElapsedMilliseconds,
                     $"http {(int)resp.StatusCode}: {resp.ReasonPhrase}",
                     StatusCode: resp.StatusCode,
-                    RetryAfter: retryAfter);
+                    RetryAfter: retryAfter,
+                    FailureKind: LlmFailureKind.Http);
             }
 
             try
@@ -381,7 +464,8 @@ internal sealed class LlmGoalClient
             }
             catch (Exception ex)
             {
-                return new LlmResult(false, "", raw, (int)sw.ElapsedMilliseconds, $"parse error: {ex.Message}");
+                return new LlmResult(false, "", raw, (int)sw.ElapsedMilliseconds, $"parse error: {ex.Message}",
+                    FailureKind: LlmFailureKind.Parse);
             }
         }
     }
@@ -429,6 +513,20 @@ internal sealed class LlmGoalClient
     }
 }
 
+// How a non-Ok LlmResult failed — drives whether CompleteAsync fails over to
+// the next fallback model. Transport (a transport error / client timeout that
+// never reached a clean HTTP status) and an Http 5xx (server error) are
+// infrastructure failures that trigger failover; an Http 429 is handled
+// separately (cooldown + rotate); Http 413 / other 4xx and Parse are
+// request/content problems returned as-is for the caller's existing handling.
+internal enum LlmFailureKind
+{
+    None,
+    Transport,
+    Http,
+    Parse,
+}
+
 internal sealed record LlmResult(
     bool Ok,
     string Content,
@@ -436,4 +534,5 @@ internal sealed record LlmResult(
     int LatencyMs,
     string? Error,
     HttpStatusCode? StatusCode = null,
-    TimeSpan? RetryAfter = null);
+    TimeSpan? RetryAfter = null,
+    LlmFailureKind FailureKind = LlmFailureKind.None);
