@@ -62,6 +62,7 @@ internal static class Program
         await PingApiAsync().ConfigureAwait(false);
 
         var indoorNav = TryInitIndoorNav();
+        var contractCatalog = TryInitContractCatalog();
 
         // Outer cancellation budget. Must exceed
         // HandshakeDriver.ObserveSeconds (currently 3600) plus
@@ -77,7 +78,7 @@ internal static class Program
         // — symptom: runs always terminated at ~3min 20s regardless
         // of ObserveSeconds. See spec/12 future ops notes.
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3700));
-        using var driver = new HandshakeDriver(host, port, account, password, characterName, indoorNav);
+        using var driver = new HandshakeDriver(host, port, account, password, characterName, indoorNav, contractCatalog);
         try
         {
             var result = await driver.RunAsync(cts.Token).ConfigureAwait(false);
@@ -216,6 +217,47 @@ internal static class Program
             Console.WriteLine($"[indoor-nav] FAILED to initialise: {ex.GetType().Name}: {ex.Message}");
             Console.WriteLine("[indoor-nav] continuing with indoor-nav disabled");
             return new IndoorNavService();
+        }
+    }
+
+    /// <summary>
+    /// Build the contract catalog from the portal dat, independently of
+    /// indoor-nav. A tracked contract's objective lives in client_portal.dat's
+    /// ContractTable; reading it lets the bot project what an opaque contract
+    /// id REQUIRES. Reuses the DATs indoor-nav already opened when present;
+    /// otherwise opens the portal dat here (portal-only — contracts need no
+    /// cell data) so enrichment works even when AC_INDOOR_NAV is disabled.
+    /// Returns an empty catalog (lookups miss, prompt falls back to raw id +
+    /// stage) when the DAT directory is absent or a read fails.
+    /// </summary>
+    private static IContractCatalog TryInitContractCatalog()
+    {
+        var datDir = Environment.GetEnvironmentVariable("AC_DAT_DIR");
+        if (string.IsNullOrWhiteSpace(datDir))
+            datDir = @"C:\ACE\Dats";
+
+        if (!System.IO.Directory.Exists(datDir))
+        {
+            Console.WriteLine($"[contracts] catalog disabled (DAT directory not found: {datDir})");
+            return new ContractCatalog();
+        }
+
+        try
+        {
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            // Reuse the DATs indoor-nav already opened; otherwise open the
+            // portal dat here. loadCell:false — contracts need no cell data.
+            if (DatManager.PortalDat is null)
+                DatManager.Initialize(datDir, keepOpen: true, loadCell: false);
+
+            var catalog = ContractCatalog.FromPortalDat(DatManager.PortalDat);
+            Console.WriteLine($"[contracts] catalog loaded ({catalog.Count} definitions)");
+            return catalog;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[contracts] catalog disabled ({ex.GetType().Name}: {ex.Message})");
+            return new ContractCatalog();
         }
     }
 

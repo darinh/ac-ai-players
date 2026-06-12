@@ -89,6 +89,7 @@ internal sealed class HandshakeDriver : IDisposable
     private readonly string _password;
     private readonly string _characterName;
     private readonly Strategy.IndoorNavService _indoorNav;
+    private readonly Strategy.IContractCatalog _contractCatalog;
     /// <summary>
     /// Phase 3.1 — per-session fog-of-war: indoor cells the bot has
     /// directly perceived (its own cell, or any cell containing an
@@ -101,7 +102,7 @@ internal sealed class HandshakeDriver : IDisposable
 
     private Socket? _socket;
 
-    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null, Strategy.IndoorNavService? indoorNav = null)
+    public HandshakeDriver(IPAddress host, int port, string account, string password, string? characterName = null, Strategy.IndoorNavService? indoorNav = null, Strategy.IContractCatalog? contractCatalog = null)
     {
         _serverPort0 = new IPEndPoint(host, port);
         _serverPort1 = new IPEndPoint(host, port + 1);
@@ -109,6 +110,7 @@ internal sealed class HandshakeDriver : IDisposable
         _password = password;
         _characterName = string.IsNullOrWhiteSpace(characterName) ? "Headless01" : characterName;
         _indoorNav = indoorNav ?? new Strategy.IndoorNavService();
+        _contractCatalog = contractCatalog ?? new Strategy.ContractCatalog();
     }
 
     public async Task<HandshakeResult> RunAsync(CancellationToken ct)
@@ -4676,7 +4678,7 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.NamedSearchDistinctCells = namedSearchCells.Count;
 
                     var projection = WorldStateProjection.FromWorldState(
-                        worldState, weenies, visibleRadius: 120f, maxVisible: 48);
+                        worldState, weenies, _contractCatalog, visibleRadius: 120f, maxVisible: 48);
                     // Slice R wiring — pump lifetime stat counters and
                     // check the top of the intent stack for completion
                     // BEFORE the policy deliberates. If the predicate

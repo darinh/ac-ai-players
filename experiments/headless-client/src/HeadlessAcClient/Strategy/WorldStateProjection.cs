@@ -265,6 +265,15 @@ internal sealed record ContractProjection
 {
     [JsonPropertyName("contract_id")] public uint ContractId { get; init; }
     [JsonPropertyName("stage")] public uint Stage { get; init; }
+
+    // Human-readable objective looked up from the dat ContractTable (see
+    // ContractCatalog), null when the catalog has no entry for this id. Raw
+    // game text, surfaced so the LLM knows what the contract REQUIRES.
+    [JsonPropertyName("name")] public string? Name { get; init; }
+    [JsonPropertyName("description")] public string? Description { get; init; }
+    [JsonPropertyName("description_progress")] public string? DescriptionProgress { get; init; }
+    [JsonPropertyName("npc_start")] public string? NpcStart { get; init; }
+    [JsonPropertyName("npc_end")] public string? NpcEnd { get; init; }
 }
 
 internal sealed record WorldStateProjection
@@ -449,6 +458,7 @@ internal sealed record WorldStateProjection
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
+        IContractCatalog? contractCatalog = null,
         float visibleRadius = DefaultVisibleRadiusUnits,
         int maxVisible = 48)
     {
@@ -689,10 +699,25 @@ internal sealed record WorldStateProjection
             };
         }
 
-        // contract-perception: project the tracked contracts (id + raw stage)
-        // for the "## Contracts" prompt section. Raw facts only.
+        // contract-perception: project the tracked contracts (id + raw stage),
+        // enriched with the human-readable objective from the dat ContractTable
+        // (ContractCatalog) when available — so the LLM can see what each tracked
+        // contract REQUIRES, not just an opaque id. Raw facts only; no priority.
         var contractProj = world.Contracts
-            .Select(c => new ContractProjection { ContractId = c.ContractId, Stage = c.Stage })
+            .Select(c =>
+            {
+                var p = new ContractProjection { ContractId = c.ContractId, Stage = c.Stage };
+                if (contractCatalog is not null && contractCatalog.TryGet(c.ContractId, out var info))
+                    p = p with
+                    {
+                        Name = NullIfEmpty(info.Name),
+                        Description = NullIfEmpty(info.Description),
+                        DescriptionProgress = NullIfEmpty(info.DescriptionProgress),
+                        NpcStart = NullIfEmpty(info.NpcStart),
+                        NpcEnd = NullIfEmpty(info.NpcEnd),
+                    };
+                return p;
+            })
             .ToList();
 
         return new WorldStateProjection
@@ -753,4 +778,13 @@ internal sealed record WorldStateProjection
             name.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         return collapsed.Length == 0 ? null : collapsed.ToLowerInvariant();
     }
+
+    /// <summary>
+    /// Coalesces a blank string to null so an absent dat field is omitted from
+    /// the projection (and the prompt) rather than rendered as an empty value.
+    /// Returns the original text unchanged when non-blank — the raw dat string
+    /// is surfaced verbatim, no game knowledge applied.
+    /// </summary>
+    private static string? NullIfEmpty(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 }
