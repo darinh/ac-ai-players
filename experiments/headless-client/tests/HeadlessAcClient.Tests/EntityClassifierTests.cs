@@ -16,6 +16,7 @@ public class EntityClassifierTests
     private const uint Vendor = (uint)ObjectDescriptionFlag.Vendor;         // 0x200
     private const uint Healer = (uint)ObjectDescriptionFlag.Healer;         // 0x10000
     private const uint Corpse = (uint)ObjectDescriptionFlag.Corpse;         // 0x2000
+    private const uint Portal = (uint)ObjectDescriptionFlag.Portal;         // 0x40000
     private const uint RadarBlip = (uint)WeenieHeaderFlag.RadarBlipColor;   // 0x100000
 
     [Fact]
@@ -69,9 +70,20 @@ public class EntityClassifierTests
     [Fact]
     public void ClassifySighting_NonCreature_Unknown()
     {
-        // An item / door / portal (no creature bit) is not surfaced in
-        // the creature-recall section, so its kind stays Unknown.
+        // An item / door (no creature bit, no portal bit) is not surfaced in
+        // the recall section, so its kind stays Unknown.
         Assert.Equal(EntityKind.Unknown, EntityClassifier.ClassifySighting(0u, 0u, 0u));
         Assert.Equal(EntityKind.Unknown, EntityClassifier.ClassifySighting(0x1u /*MeleeWeapon*/, 0u, 0u));
+    }
+
+    [Fact]
+    public void ClassifySighting_PortalFlag_ClassifiesAsPortal()
+    {
+        // A portal carries the wire Portal desc bit and no creature bit; it is
+        // surfaced in the out-of-view recall so the LLM can return to a named
+        // area transition (e.g. a graduation portal) it has already seen.
+        Assert.Equal(EntityKind.Portal, EntityClassifier.ClassifySighting(0u, Portal, 0u));
+        // The Portal bit is decoded regardless of other non-creature bits.
+        Assert.Equal(EntityKind.Portal, EntityClassifier.ClassifySighting(0u, Portal | Attackable, 0u));
     }
 }

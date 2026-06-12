@@ -45,12 +45,22 @@ internal static class EntityClassifier
     /// the categories the out-of-view recall prompt section surfaces:
     /// <see cref="EntityKind.Mob"/> (the IsMonster composite holds),
     /// <see cref="EntityKind.NPC"/> (a creature that is not a monster —
-    /// vendor / healer / quest-giver), else <see cref="EntityKind.Unknown"/>
-    /// for non-creatures (items, doors, portals) which the recall
-    /// section does not list. This is a perception label, not a priority.
+    /// vendor / healer / quest-giver), <see cref="EntityKind.Portal"/> (a
+    /// non-creature carrying the wire Portal flag — an area transition the
+    /// recall surfaces so the LLM can return to it by name), else
+    /// <see cref="EntityKind.Unknown"/> for other non-creatures (items,
+    /// doors) the recall section does not list. This is a perception label,
+    /// not a priority.
     /// </summary>
     public static EntityKind ClassifySighting(uint itemType, uint descFlags, uint weenieFlags)
     {
+        // A portal is a non-creature wire category (ObjectDescriptionFlag.Portal —
+        // the same bit WorldStateProjection and the Motor stop-radius decode). The
+        // out-of-view recall surfaces it so the LLM can return to a remembered area
+        // transition by name. Decoded bit, not game knowledge — checked before the
+        // creature gate because a portal is never a creature.
+        if ((descFlags & (uint)ObjectDescriptionFlag.Portal) != 0)
+            return EntityKind.Portal;
         var isCreature = (itemType & ItemTypeMasks.Creature) != 0;
         if (!isCreature) return EntityKind.Unknown;
         return IsMonster(itemType, descFlags, weenieFlags) ? EntityKind.Mob : EntityKind.NPC;

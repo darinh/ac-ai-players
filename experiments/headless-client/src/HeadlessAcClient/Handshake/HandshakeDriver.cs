@@ -6897,19 +6897,21 @@ internal sealed class HandshakeDriver : IDisposable
                     // a candidate that no longer applies.
                     llmPolicyForPickerSurface?.SetCurrentExplorationCandidates(explorationCandidatesForLlm);
 
-                    // Publish the bot's own remembered MONSTER + NPC sightings
-                    // (out-of-view recall) so the LLM can choose to return to a
-                    // monster that left view (to hunt) OR to a remembered NPC
-                    // cluster (to seek a kill-task quest — see the SEEK A
-                    // KILL-TASK rule). Project both kinds with SEPARATE caps so
-                    // an NPC-dense town can never starve the monster recall; the
-                    // prompt builder renders each kind in its own bounded block,
-                    // and does visible-exclusion, dedup, TTL and per-block cap.
-                    // Pure perception.
+                    // Publish the bot's own remembered MONSTER + NPC + PORTAL
+                    // sightings (out-of-view recall) so the LLM can choose to
+                    // return to a monster that left view (to hunt), a remembered
+                    // NPC cluster (to seek a kill-task quest — see the SEEK A
+                    // KILL-TASK rule), or a remembered portal / area transition
+                    // (to follow a directive naming a place to reach). Project
+                    // each kind with SEPARATE caps so a dense area can never
+                    // starve another kind's recall; the prompt builder renders
+                    // each kind in its own bounded block, and does visible-
+                    // exclusion, dedup, TTL and per-block cap. Pure perception.
                     if (llmPolicyForPickerSurface is not null)
                     {
                         const int MaxMobRecallSightings = 40;
                         const int MaxNpcRecallSightings = 20;
+                        const int MaxPortalRecallSightings = 8;
                         var nowRecall = DateTimeOffset.UtcNow;
                         SightedRecallProjection ProjectRecall(SightedLocation s) =>
                             new SightedRecallProjection
@@ -6932,6 +6934,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 .Where(s => s.Kind == EntityKind.NPC)
                                 .OrderByDescending(s => s.LastSeenUtc)
                                 .Take(MaxNpcRecallSightings)
+                                .Select(ProjectRecall))
+                            .Concat(sighted
+                                .Where(s => s.Kind == EntityKind.Portal)
+                                .OrderByDescending(s => s.LastSeenUtc)
+                                .Take(MaxPortalRecallSightings)
                                 .Select(ProjectRecall))
                             .ToList();
                         llmPolicyForPickerSurface.SetRecentSightings(recall);
