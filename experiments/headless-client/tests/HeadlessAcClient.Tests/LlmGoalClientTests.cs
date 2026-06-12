@@ -194,8 +194,11 @@ public class LlmGoalClientTests
     // ---- non-quota errors must NOT trigger rotation ----
 
     [Fact]
-    public async Task NonQuotaError_5xx_DoesNotRotate_ReturnsError()
+    public async Task NonQuotaError_5xx_RotatesToFallback_Succeeds()
     {
+        // A 5xx means the primary model's endpoint is down; a fallback model's
+        // may be up, so it is an infrastructure failover candidate (like a
+        // transport error) — unlike a request-specific 4xx.
         var handler = new ModelRoutingHandler(model =>
             model == "primary"
                 ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("boom") }
@@ -205,11 +208,9 @@ public class LlmGoalClientTests
 
         var result = await llm.CompleteAsync("sys", "user");
 
-        Assert.False(result.Ok);
-        Assert.Equal(HttpStatusCode.InternalServerError, result.StatusCode);
-        // Fallback is reserved for quota (429); a 5xx is returned as-is so the
-        // policy's existing non-429 handling applies and we don't thrash models.
-        Assert.Equal(new[] { "primary" }, handler.RequestedModels);
+        Assert.True(result.Ok);
+        Assert.Equal("content-from-fallback-a", result.Content);
+        Assert.Equal(new[] { "primary", "fallback-a" }, handler.RequestedModels);
     }
 
     [Fact]
@@ -498,6 +499,199 @@ public class LlmGoalClientTests
 
         Assert.True(result.Ok);
         Assert.Equal("ok-B", result.Content);
+    }
+
+    // ---- transport errors / client timeouts trigger failover (NOT just 429) ----
+    //
+    // A daily-quota wall on a large prompt frequently surfaces as a connection
+    // reset / stream-copy failure or a 30s client timeout rather than a clean
+    // 429. The active model then "fails" with no HTTP status, and a healthy
+    // fallback would still answer — so a transport failure must rotate too.
+
+    [Fact]
+    public async Task Fallback_PrimaryTransportError_RotatesToFallback_Succeeds()
+    {
+        var handler = new ModelRoutingHandler(model =>
+            model == "primary"
+                ? throw new HttpRequestException("Error while copying content to a stream.")
+                : Ok($"content-from-{model}"));
+        var llm = new LlmGoalClient(
+            new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "fallback-a");
+
+        var result = await llm.CompleteAsync("sys", "user");
+
+        Assert.True(result.Ok);
+        Assert.Equal("content-from-fallback-a", result.Content);
+        Assert.Equal("fallback-a", llm.Model);
+        Assert.Equal(new[] { "primary", "fallback-a" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task Fallback_PrimaryClientTimeout_RotatesToFallback_Succeeds()
+    {
+        // HttpClient.Timeout surfaces as a TaskCanceledException with the
+        // CALLER's token NOT signalled — that is a transport failure, not a
+        // caller cancellation, so it must fail over.
+        var handler = new ModelRoutingHandler(model =>
+            model == "primary"
+                ? throw new TaskCanceledException("HttpClient.Timeout of 30s elapsing")
+                : Ok($"content-from-{model}"));
+        var llm = new LlmGoalClient(
+            new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "fallback-a");
+
+        var result = await llm.CompleteAsync("sys", "user");
+
+        Assert.True(result.Ok);
+        Assert.Equal("content-from-fallback-a", result.Content);
+        Assert.Equal(new[] { "primary", "fallback-a" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task Fallback_AllModelsTransportError_ReturnsTransportFailure_AllProbed()
+    {
+        var handler = new ModelRoutingHandler(_ =>
+            throw new HttpRequestException("connection reset"));
+        var llm = new LlmGoalClient(
+            new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "a,b");
+
+        var result = await llm.CompleteAsync("sys", "user");
+
+        Assert.False(result.Ok);
+        // Not a 429: a transport failure has no HTTP status.
+        Assert.Null(result.StatusCode);
+        Assert.Contains("http error", result.Error);
+        // Every candidate is tried exactly once, in order.
+        Assert.Equal(new[] { "primary", "a", "b" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task SingleModel_TransportError_ReturnsFailure_NoRotation()
+    {
+        var handler = new ModelRoutingHandler(_ =>
+            throw new HttpRequestException("connection reset"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "primary", "key");
+
+        var result = await llm.CompleteAsync("sys", "user");
+
+        Assert.False(result.Ok);
+        Assert.Null(result.StatusCode);
+        Assert.Equal(new[] { "primary" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task TransportError_NoPerModelCooldown_BothReprobedAfterBackoff()
+    {
+        // Unlike a 429, a transport failure imposes NO lingering per-model
+        // cooldown. (A whole-roster transport failure does arm a short GLOBAL
+        // infra backoff — covered separately — so this advances past that window
+        // to assert the per-model behaviour: both models are re-probed, neither
+        // is individually benched.)
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ =>
+            throw new HttpRequestException("connection reset"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        await llm.CompleteAsync("s", "u"); // A,B both transport-fail (no per-model cooldown)
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(21); // past the global infra backoff window
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");
+
+        // Both re-probed — a 429 would have skipped a still-cooling model.
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+    }
+
+    // ---- global infra circuit-breaker (whole roster down) ----
+
+    [Fact]
+    public async Task InfraBackoff_WholeRosterTransportFails_NextCallShortCircuits_NoProbing()
+    {
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ =>
+            throw new HttpRequestException("endpoint down"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        var first = await llm.CompleteAsync("s", "u"); // probes A,B -> all transport-fail -> arm breaker
+        Assert.False(first.Ok);
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(5); // within the 20s infra backoff
+        handler.RequestedModels.Clear();
+        var second = await llm.CompleteAsync("s", "u");
+
+        Assert.False(second.Ok);
+        Assert.Empty(handler.RequestedModels); // short-circuited: NO HTTP probing this call
+        Assert.NotNull(second.RetryAfter);     // backs off until the window ends
+    }
+
+    [Fact]
+    public async Task InfraBackoff_LiftedAfterWindow_AndClearedOnSuccess()
+    {
+        var clock = new FakeClock(T0);
+        var down = true;
+        var handler = new ModelRoutingHandler(m =>
+            down ? throw new HttpRequestException("down") : Ok($"ok-{m}"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        await llm.CompleteAsync("s", "u"); // arm breaker
+        down = false;                       // endpoint recovers, but we're still backed off
+
+        clock.Now = T0.AddSeconds(5);
+        handler.RequestedModels.Clear();
+        var blocked = await llm.CompleteAsync("s", "u");
+        Assert.False(blocked.Ok);
+        Assert.Empty(handler.RequestedModels); // still short-circuited inside the window
+
+        clock.Now = T0.AddSeconds(21);         // past the window
+        var ok = await llm.CompleteAsync("s", "u");
+        Assert.True(ok.Ok);                    // re-probes, succeeds, clears the breaker
+
+        handler.RequestedModels.Clear();
+        var ok2 = await llm.CompleteAsync("s", "u");
+        Assert.True(ok2.Ok);                   // breaker stays cleared; sticky on the working model
+        Assert.Equal(new[] { "A" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task CallerCancellation_DoesNotFailOver_ReturnsImmediately()
+    {
+        // A caller-requested cancellation (bot shutting down) surfaces as an
+        // OperationCanceledException WITH the caller token signalled. That must
+        // NOT burn the remaining models on the way out.
+        using var cts = new CancellationTokenSource();
+        var handler = new ModelRoutingHandler(_ =>
+        {
+            cts.Cancel();
+            throw new OperationCanceledException(cts.Token);
+        });
+        var llm = new LlmGoalClient(
+            new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "fallback-a");
+
+        var result = await llm.CompleteAsync("sys", "user", cts.Token);
+
+        Assert.False(result.Ok);
+        // Did NOT rotate to fallback-a despite the failure.
+        Assert.Equal(new[] { "primary" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task Diagnostic_LogsRotation_OnTransportError()
+    {
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? throw new HttpRequestException("stream copy failed") : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", log: logs.Add);
+
+        var result = await llm.CompleteAsync("s", "u");
+
+        Assert.True(result.Ok);
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("failed") && l.Contains("rotating"));
+        Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("rotated to B"));
     }
 
     // ---- test doubles ----
