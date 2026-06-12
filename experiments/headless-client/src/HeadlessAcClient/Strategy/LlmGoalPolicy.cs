@@ -7214,6 +7214,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             "Not recommendations — the bot assigns no priority. To return to one (for " +
             "example to Talk it and check whether it offers a task), target it by name " +
             "or Explore toward its bearing; the bot will navigate to where it was last seen.");
+        RenderBlock(
+            EntityKind.Portal,
+            "## Recently sighted portals (out of view)",
+            "Portals / area transitions you have seen that are NOT currently in view, " +
+            "from your own memory. Not recommendations — the bot assigns no priority. " +
+            "To return to one, `Use` it by name (or Explore toward its bearing); the bot " +
+            "will navigate to where it was last seen.");
     }
 
     private static string RenderRecentSightingRow(
@@ -7237,7 +7244,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var lb = (selfLb is uint slb && s.Landblock != slb)
             ? $", landblock 0x{s.Landblock:X4}"
             : "";
-        var kindLabel = s.Kind == EntityKind.NPC ? "npc" : "monster";
+        var kindLabel = s.Kind switch
+        {
+            EntityKind.NPC => "npc",
+            EntityKind.Portal => "portal",
+            _ => "monster",
+        };
         return $"- {s.Name} (kind={kindLabel}, {age}, {where}{lb})";
     }
 

@@ -5560,9 +5560,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void RecentSightings_RendersBothBlocks_MonstersAndNpcsSeparately()
+    public void RecentSightings_PortalRendersInOwnBlock()
     {
-        // Monsters and NPCs each get their own bounded block so an NPC-dense
+        // A remembered out-of-view portal surfaces in the SEPARATE portal recall
+        // block with its bearing, so the LLM can return to a named area
+        // transition (e.g. a graduation portal a server directive points at)
+        // it has already seen but is no longer in view.
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Central Courtyard", 31061u, EntityKind.Portal, ageSeconds: 25,
+                worldX: selfGX, worldY: selfGY + 60f));
+        Assert.Contains("## Recently sighted portals (out of view)", prompt);
+        Assert.Contains("Central Courtyard (kind=portal, last seen 25s ago, approx N ~60m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_RendersBothBlocks_MonstersAndNpcsSeparately()
+    {        // Monsters and NPCs each get their own bounded block so an NPC-dense
         // town can never starve the monster recall.
         const float selfGX = 0xA9 * AcCoords.BlockLength;
         const float selfGY = 0xB3 * AcCoords.BlockLength;
