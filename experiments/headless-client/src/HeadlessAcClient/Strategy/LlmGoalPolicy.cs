@@ -4175,6 +4175,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
+    // Count the bot's OWN recent Talk goals aimed at a given NPC NAME that were
+    // emitted at or after `since` (the time the contract became stage-3). A
+    // purely structural read of GoalEmitted history (the "VERB target=...
+    // item=... source=..." text the executor records) — no server text, no game
+    // knowledge. Scoping to `since` keeps a pre-completion or other-contract
+    // Talk to the same NPC from mis-counting toward a done contract's hand-in
+    // attempts. Surfaced in ## Contracts so the LLM can SEE that a stage-3
+    // contract has already had repeated hand-in attempts with no stage change.
+    private static int CountRecentTalkGoalsToName(EventStream events, string npcName, DateTimeOffset since)
+    {
+        if (string.IsNullOrWhiteSpace(npcName)) return 0;
+        var n = 0;
+        foreach (var ge in events.Recent(EventStream.DefaultCapacity)
+                     .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+                     .Take(24))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Talk", StringComparison.Ordinal)) continue;
+            // Format is "Talk target=<selector> item=<item> source=<src>"; the
+            // target's name is the FIRST name="..." AFTER target=. Reading it
+            // this way is robust to a name that itself contains " item=" or
+            // " source=" (a bounded target=(.*?) item= regex would truncate it).
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
+        }
+        return n;
+    }
+
     // cp-2402: cheap pre-pass for the BLOCKED-targets rule's relevance gate.
     // Returns true when the recent event history carries an ActionRejected
     // whose ErrorLabel is "Blocked" or "Unreachable" (the Motor surfaces these
@@ -5818,6 +5851,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     entry.AppendLine($"      objective area: {areaAt} from you");
                 if (BearingTo(c.TurnInWorldX, c.TurnInWorldY) is string turnInAt)
                     entry.AppendLine($"      turn-in location: {turnInAt} from you");
+
+                // A stage-3 contract is already complete. If the bot has ALREADY
+                // Talked its turn-in NPC repeatedly SINCE the contract became
+                // stage 3 and it is STILL stage 3, that contract has no separate
+                // hand-in (its reward is the issuer's to grant on its own terms)
+                // — surface that mechanical fact + the bot's OWN post-completion
+                // attempt count so the LLM stops re-attempting a turn-in that has
+                // had no effect. Only when the turn-in NPC is UNIQUE among tracked
+                // contracts (a shared turn-in NPC makes per-contract attribution
+                // ambiguous). A structural read of the bot's goal history scoped
+                // to the done window (no server text, no game knowledge); the LLM
+                // still decides what to do next.
+                if (c.Stage == 3u && npcEnd is not null && c.Stage3SinceUtc is { } since3
+                    && world.Contracts.Count(o =>
+                        string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1)
+                {
+                    var handInTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
+                    if (handInTries >= 2)
+                        entry.AppendLine(
+                            $"      DONE (stage 3, complete): you have already Talked " +
+                            $"{npcEnd} {handInTries}x and this contract is STILL stage 3 — it " +
+                            $"has no separate hand-in, so further turn-in Talks to {npcEnd} for " +
+                            $"it will not change anything. Treat it as finished and spend your " +
+                            $"turn on other progress (accept or complete another task).");
+                }
 
                 // Always render the first contract; stop once the rows would
                 // exceed the capsule's char budget (the tail is non-trimmable,

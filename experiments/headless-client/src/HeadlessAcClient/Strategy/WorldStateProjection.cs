@@ -266,6 +266,13 @@ internal sealed record ContractProjection
     [JsonPropertyName("contract_id")] public uint ContractId { get; init; }
     [JsonPropertyName("stage")] public uint Stage { get; init; }
 
+    // Wall-clock time the contract first entered its current stage-3 (done)
+    // cycle, copied from WorldState bookkeeping; null when not stage 3. Used by
+    // the ## Contracts capsule to count only the hand-in Talks made AFTER the
+    // contract became done. Internal bookkeeping — not part of the LLM-facing
+    // training JSON.
+    [JsonIgnore] public DateTimeOffset? Stage3SinceUtc { get; init; }
+
     // Human-readable objective looked up from the dat ContractTable (see
     // ContractCatalog), null when the catalog has no entry for this id. Raw
     // game text, surfaced so the LLM knows what the contract REQUIRES.
@@ -765,7 +772,12 @@ internal sealed record WorldStateProjection
         var contractProj = world.Contracts
             .Select(c =>
             {
-                var p = new ContractProjection { ContractId = c.ContractId, Stage = c.Stage };
+                var p = new ContractProjection
+                {
+                    ContractId = c.ContractId,
+                    Stage = c.Stage,
+                    Stage3SinceUtc = world.ContractStage3Since(c.ContractId),
+                };
                 if (contractCatalog is not null && contractCatalog.TryGet(c.ContractId, out var info))
                     p = p with
                     {

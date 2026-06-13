@@ -224,6 +224,45 @@ internal sealed class WorldState
     public IReadOnlyList<ContractTrackerEntry> Contracts { get; private set; }
         = new List<ContractTrackerEntry>();
 
+    // Per-contract wall-clock time at which the bot first observed the contract
+    // at stage 3 (DoneOrPendingRepeat), cleared when it is later seen at any
+    // other stage (a repeat cycle restarts the clock) or removed. Bookkeeping
+    // the LLM cannot do: it lets the ## Contracts capsule count only the
+    // hand-in Talks made AFTER a contract became done, so a pre-completion or
+    // other-contract Talk to the same NPC does not mis-flag a contract as
+    // having no hand-in. Pure mechanical memory; no game knowledge.
+    private readonly Dictionary<uint, DateTimeOffset> _contractStage3Since = new();
+
+    /// <summary>
+    /// The wall-clock time the given contract was first observed at stage 3 in
+    /// its current done-cycle, or null if it is not currently stage 3. Used to
+    /// scope hand-in attempt counting to the post-completion window.
+    /// </summary>
+    public DateTimeOffset? ContractStage3Since(uint contractId) =>
+        _contractStage3Since.TryGetValue(contractId, out var t) ? t : null;
+
+    // Stamp newly-stage-3 contracts with the current time and drop any tracked
+    // contract that is no longer stage 3 (or no longer tracked), so the
+    // post-completion window restarts cleanly across a repeat cycle.
+    private void RefreshContractStage3Tracking()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stage3Ids = new HashSet<uint>();
+        foreach (var c in Contracts)
+        {
+            if (c.Stage != 3u) continue;
+            stage3Ids.Add(c.ContractId);
+            if (!_contractStage3Since.ContainsKey(c.ContractId))
+                _contractStage3Since[c.ContractId] = now;
+        }
+        if (_contractStage3Since.Count > 0)
+        {
+            var stale = _contractStage3Since.Keys.Where(id => !stage3Ids.Contains(id)).ToList();
+            foreach (var id in stale)
+                _contractStage3Since.Remove(id);
+        }
+    }
+
     /// <summary>
     /// The vendor trade panel the bot most recently opened (ApproachVendor
     /// 0x0062) and the landblock it was opened in. The projection surfaces it
@@ -519,6 +558,7 @@ internal sealed class WorldState
     public bool ApplyContractTable(ContractTrackerTablePayload table)
     {
         Contracts = table.Contracts.ToList();
+        RefreshContractStage3Tracking();
         return true;
     }
 
@@ -618,10 +658,12 @@ internal sealed class WorldState
             if (remaining.Count == Contracts.Count)
                 return false; // delete targeted a contract we were not tracking
             Contracts = remaining;
+            RefreshContractStage3Tracking();
             return true;
         }
         remaining.Add(entry);
         Contracts = remaining;
+        RefreshContractStage3Tracking();
         return true;
     }
 
