@@ -1987,6 +1987,15 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"stage={contractUpdate.Entry.Stage}" +
                                             (contractUpdate.DeleteContract ? " (removed)" : ""));
                                 }
+                                // Vendor trade panel (ApproachVendor 0x0062) -> WorldState
+                                // so the LLM prompt can perceive what the vendor sells
+                                // (name/value per item). Same self-addressed guard;
+                                // projection-only, source never decides to buy.
+                                else if (ge.Payload?.VendorInfo is { } vendorInfo)
+                                {
+                                    worldState.ApplyVendorInfo(vendorInfo);
+                                    Console.WriteLine($"[vendor] {vendorInfo}");
+                                }
                             }
                             // Phase 6l — pickup-ack triggers the queued
                             // equip. Send GetAndWieldItem in a fresh

@@ -5795,6 +5795,71 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "or turn one in is your call.");
         }
 
+        // ── ## Vendor offerings (open-vendor perception, end-of-prompt capsule) ─
+        // When the bot has a vendor trade panel open (it Used/Talked a vendor),
+        // render WHAT that vendor sells — each item's name + the cost to buy it
+        // + stack size — so the LLM can decide whether to buy. The cost mirrors
+        // the server's Vendor.GetSellCost EXACTLY (including its fixed-rate
+        // override for one item type and its float multiply) and is stated in
+        // the vendor's actual currency unit (coin, or an alternate currency).
+        // Protected salience tail (survives the body hard-cut), beside the other
+        // end-capsules. Rows are WIRE ORDER (NOT ranked — source must not judge
+        // which item matters) and bounded by a TOTAL char budget so a big vendor
+        // list can't evict the rules preamble; the first row is always emitted.
+        // No object-type priority/urgency in source and no source-side decision
+        // to buy — the LLM decides.
+        if (world.Vendor is { } vendor && vendor.Offers.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Vendor offerings");
+            sb.AppendLine("- the vendor you have open is selling these:");
+            // The currency unit: coin for a normal vendor, else the vendor's
+            // alternate currency (raw wire fact; the server charges the SAME
+            // GetSellCost amount, only the unit differs).
+            var vendorUnit = vendor.AlternateCurrency == 0u
+                ? "coin"
+                : (OneLine(vendor.AlternateCurrencyName) ?? "alternate currency");
+            var vendorShown = 0;
+            var vendorChars = 0;
+            foreach (var offer in vendor.Offers)
+            {
+                var entry = new StringBuilder();
+                var name = OneLine(offer.Name) ?? "(unnamed)";
+                if (offer.Value is uint val)
+                {
+                    // Mirror Vendor.GetSellCost: max(1, ceil((float)rate*value -
+                    // 0.1)), where rate is the vendor's SellPrice EXCEPT the
+                    // server forces a fixed rate for one item type. Keep the
+                    // multiply in float — the server computes (float)rate*value,
+                    // so widening to double would DIVERGE from what it charges.
+                    var rate = offer.ItemType == ItemTypePromissoryNote
+                        ? PromissoryNoteSellRate
+                        : (float)vendor.BuyCostMultiplier;
+                    var cost = Math.Max(1L,
+                        (long)Math.Ceiling((double)(rate * val) - 0.1));
+                    entry.Append($"  - {name}: {cost} {vendorUnit} to buy (value {val})");
+                }
+                else
+                {
+                    entry.Append($"  - {name}");
+                }
+                if (offer.StackSize > 1)
+                    entry.Append($", sold in stacks of {offer.StackSize}");
+                entry.AppendLine();
+
+                if (vendorShown > 0 && vendorChars + entry.Length > VendorOfferingsProtectedCharBudget)
+                    break;
+                sb.Append(entry);
+                vendorChars += entry.Length;
+                vendorShown++;
+            }
+            if (vendorShown < vendor.Offers.Count)
+                sb.AppendLine($"  - (+{vendor.Offers.Count - vendorShown} more for sale, not shown)");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: whether to buy anything, and " +
+                "what, is your call.");
+        }
+
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
         // Visible monsters already render mid-prompt (`## Visible nearby`,
         // `## Combat readiness`), but a fact placed earlier in this large
@@ -6823,6 +6888,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // capped); the header + caption + disclaimer (~300 chars) are added on top.
     // Same sizing rationale as `## Held items`.
     private const int ContractsProtectedCharBudget = 1200;
+
+    // Total char budget for the protected `## Vendor offerings` capsule ROWS —
+    // bounds the rendered for-sale rows so a large vendor list (e.g. a general
+    // store) cannot grow the protected tail enough to evict the rules preamble.
+    // ~1200 fits roughly a dozen item rows (name + buy cost), each OneLine-capped;
+    // the header + disclaimer (~250 chars) are added on top. Same rationale as
+    // `## Held items` / `## Contracts`.
+    private const int VendorOfferingsProtectedCharBudget = 1200;
+
+    // ACE.Entity.Enum.ItemType.PromissoryNote (0x00040000): the one item type
+    // for which the server's Vendor.GetSellCost overrides the per-vendor
+    // SellPrice with a fixed rate (below), ignoring the vendor's own multiplier.
+    // Mirrored so the rendered buy cost equals what the server will charge. A
+    // wire/datatype constant + the server's own price FACT (source of truth:
+    // ACE-bots Source/ACE.Entity/Enum/ItemType.cs and
+    // Source/ACE.Server/WorldObjects/Vendor.cs GetSellCost) — NOT an object-type
+    // priority or a bot preference.
+    private const uint ItemTypePromissoryNote = 0x00040000u;
+    private const float PromissoryNoteSellRate = 1.15f;
 
     // How many of the EARLIEST persisted distinct server PopupStrings the
     // `## Early server directives` protected-tail capsule re-surfaces. The
