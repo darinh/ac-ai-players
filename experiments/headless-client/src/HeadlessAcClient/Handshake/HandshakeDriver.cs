@@ -2006,7 +2006,15 @@ internal sealed class HandshakeDriver : IDisposable
                                 else if (ge.Payload?.VendorInfo is { } vendorInfo)
                                 {
                                     worldState.ApplyVendorInfo(vendorInfo);
-                                    Console.WriteLine($"[vendor] {vendorInfo}");
+                                    // Diagnostic: also log the decoded for-sale item names so a
+                                    // live run reveals WHAT a vendor (e.g. a contract broker)
+                                    // offers — the panel is transient and rarely survives into a
+                                    // logged decision prompt. Pure logging; no behavior change.
+                                    var vendorItems = vendorInfo.Items.Count == 0
+                                        ? "(no items read)"
+                                        : string.Join(", ", vendorInfo.Items.Select(it =>
+                                            it.Value is uint val ? $"{it.Name}(v{val})" : it.Name));
+                                    Console.WriteLine($"[vendor] {vendorInfo} for-sale: {vendorItems}");
                                 }
                             }
                             // Phase 6l — pickup-ack triggers the queued
