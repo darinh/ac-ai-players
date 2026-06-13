@@ -274,6 +274,16 @@ internal sealed record ContractProjection
     [JsonPropertyName("description_progress")] public string? DescriptionProgress { get; init; }
     [JsonPropertyName("npc_start")] public string? NpcStart { get; init; }
     [JsonPropertyName("npc_end")] public string? NpcEnd { get; init; }
+
+    // Dat-defined world locations for this contract, as global (worldX, worldY)
+    // coordinates: where the turn-in NPC stands, and the quest/objective area.
+    // Null when the dat leaves the location unset. The "## Contracts" capsule
+    // turns these into a bearing+distance from the bot so it can head there.
+    // Raw dat facts; source assigns no priority.
+    [JsonPropertyName("turn_in_world_x")] public float? TurnInWorldX { get; init; }
+    [JsonPropertyName("turn_in_world_y")] public float? TurnInWorldY { get; init; }
+    [JsonPropertyName("quest_area_world_x")] public float? QuestAreaWorldX { get; init; }
+    [JsonPropertyName("quest_area_world_y")] public float? QuestAreaWorldY { get; init; }
 }
 
 /// <summary>
@@ -764,6 +774,10 @@ internal sealed record WorldStateProjection
                         DescriptionProgress = NullIfEmpty(info.DescriptionProgress),
                         NpcStart = NullIfEmpty(info.NpcStart),
                         NpcEnd = NullIfEmpty(info.NpcEnd),
+                        TurnInWorldX = info.TurnInWorldX,
+                        TurnInWorldY = info.TurnInWorldY,
+                        QuestAreaWorldX = info.QuestAreaWorldX,
+                        QuestAreaWorldY = info.QuestAreaWorldY,
                     };
                 return p;
             })

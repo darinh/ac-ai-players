@@ -5759,6 +5759,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "3 done or pending repeat, 4+ in progress with a step counter):");
             var contractsShown = 0;
             var contractsChars = 0;
+            // The bot's own global (worldX, worldY), used to turn a contract's
+            // dat-defined location into a bearing+distance it can act on (via an
+            // Explore `direction`). Computed once. Self is non-null here.
+            (float Gx, float Gy)? selfXY = world.Self.CellId is uint selfCell
+                ? AcCoords.ToGlobalXY(selfCell,
+                    new System.Numerics.Vector3(world.Self.PositionX, world.Self.PositionY, world.Self.PositionZ))
+                : null;
+            string? BearingTo(float? tx, float? ty)
+            {
+                if (selfXY is not { } s || tx is not float x || ty is not float y) return null;
+                var dx = x - s.Gx;
+                var dy = y - s.Gy;
+                var dist = MathF.Sqrt(dx * dx + dy * dy);
+                return $"~{dist:F0}u {Compass8(dx, dy)}";
+            }
             foreach (var c in world.Contracts)
             {
                 var entry = new StringBuilder();
@@ -5778,6 +5793,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 var npcEnd = OneLine(c.NpcEnd);
                 if (npcEnd is not null)
                     entry.AppendLine($"      turn-in NPC: {npcEnd}");
+                // Dat-defined locations as a bearing+distance from the bot, so it
+                // can head there (Explore accepts a compass `direction`). Only
+                // when the dat carried the location AND the bot's position is
+                // known. Raw facts; the LLM decides whether to travel.
+                if (BearingTo(c.QuestAreaWorldX, c.QuestAreaWorldY) is string areaAt)
+                    entry.AppendLine($"      objective area: {areaAt} from you");
+                if (BearingTo(c.TurnInWorldX, c.TurnInWorldY) is string turnInAt)
+                    entry.AppendLine($"      turn-in location: {turnInAt} from you");
 
                 // Always render the first contract; stop once the rows would
                 // exceed the capsule's char budget (the tail is non-trimmable,
