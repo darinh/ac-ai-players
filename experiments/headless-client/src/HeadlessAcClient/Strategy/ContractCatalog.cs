@@ -31,7 +31,11 @@ internal sealed record ContractInfo(
     string Description,
     string DescriptionProgress,
     string NpcStart,
-    string NpcEnd);
+    string NpcEnd,
+    float? TurnInWorldX = null,
+    float? TurnInWorldY = null,
+    float? QuestAreaWorldX = null,
+    float? QuestAreaWorldY = null);
 
 /// <summary>
 /// Lookup of contract definitions keyed by id. Injected into
@@ -97,13 +101,21 @@ internal sealed class ContractCatalog : IContractCatalog
             {
                 var c = kv.Value;
                 if (c is null) continue;
+                // Dat-defined contract locations -> global (worldX, worldY). The
+                // dat leaves a location's ObjCellID 0 when unset; skip those.
+                float? endX = null, endY = null, areaX = null, areaY = null;
+                if (c.LocationNPCEnd is { ObjCellID: not 0 } endLoc)
+                    (endX, endY) = AcCoords.ToGlobalXY(endLoc.ObjCellID, endLoc.Frame.Origin);
+                if (c.LocationQuestArea is { ObjCellID: not 0 } areaLoc)
+                    (areaX, areaY) = AcCoords.ToGlobalXY(areaLoc.ObjCellID, areaLoc.Frame.Origin);
                 map[kv.Key] = new ContractInfo(
                     c.ContractId,
                     c.ContractName ?? string.Empty,
                     c.Description ?? string.Empty,
                     c.DescriptionProgress ?? string.Empty,
                     c.NameNPCStart ?? string.Empty,
-                    c.NameNPCEnd ?? string.Empty);
+                    c.NameNPCEnd ?? string.Empty,
+                    endX, endY, areaX, areaY);
             }
             return new ContractCatalog(map);
         }
