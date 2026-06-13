@@ -597,12 +597,15 @@ internal sealed record VendorInfoPayload(
 /// by WorldObject.SerializeGameDataOnly — the item's guid + weenie description
 /// (the same structure ObjectCreate uses, minus the model/physics blocks).
 /// <see cref="Value"/> is the item's raw pyreal value (null when absent); a
-/// buyer pays value scaled by the vendor's BuyPrice. All fields are raw wire/dat
-/// values — no interpretation.
+/// buyer pays value scaled by the vendor's SellPrice (the server's GetSellCost
+/// rate, NOT BuyPrice which is the vendor's buy-back rate). <see cref="ItemType"/>
+/// is retained because the server's GetSellCost overrides the rate for one item
+/// type (promissory notes). All fields are raw wire/dat values — no interpretation.
 /// </summary>
 internal sealed record VendorItemInfo(
     uint Guid,
     uint WeenieClassId,
+    uint ItemType,
     string Name,
     uint? Value,
     int StackSize);
@@ -1388,7 +1391,7 @@ internal static class GameEventPayloadDecoder
                 var guid = r.ReadGuid();
                 var weenie = ObjectCreateDecoder.DecodeWeenieHeader(r);
                 items.Add(new VendorItemInfo(
-                    guid, weenie.WeenieClassId, weenie.Name, weenie.Value, stackSize));
+                    guid, weenie.WeenieClassId, weenie.ItemType, weenie.Name, weenie.Value, stackSize));
             }
         }
         catch (System.IO.EndOfStreamException)

@@ -224,6 +224,16 @@ internal sealed class WorldState
     public IReadOnlyList<ContractTrackerEntry> Contracts { get; private set; }
         = new List<ContractTrackerEntry>();
 
+    /// <summary>
+    /// The vendor trade panel the bot most recently opened (ApproachVendor
+    /// 0x0062) and the landblock it was opened in. The projection surfaces it
+    /// only while the bot is still in that landblock (a vendor interaction is
+    /// single-landblock); a later ApproachVendor replaces it. Pure perception —
+    /// source never decides to buy.
+    /// </summary>
+    public VendorInfoPayload? OpenVendor { get; private set; }
+    public uint? OpenVendorLandblock { get; private set; }
+
     public int ObjectCount => _objects.Count;
 
     /// <summary>
@@ -509,6 +519,18 @@ internal sealed class WorldState
     public bool ApplyContractTable(ContractTrackerTablePayload table)
     {
         Contracts = table.Contracts.ToList();
+        return true;
+    }
+
+    /// <summary>
+    /// Record the vendor trade panel the bot just opened (ApproachVendor 0x0062),
+    /// stamped with the bot's current landblock so the projection can drop it once
+    /// the bot walks away. Replaces any prior open vendor. Returns true.
+    /// </summary>
+    public bool ApplyVendorInfo(VendorInfoPayload vendor)
+    {
+        OpenVendor = vendor;
+        OpenVendorLandblock = Self?.CellId is uint c ? c >> 16 : (uint?)null;
         return true;
     }
 

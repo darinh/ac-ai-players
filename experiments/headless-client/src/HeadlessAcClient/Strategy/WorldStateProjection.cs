@@ -276,6 +276,46 @@ internal sealed record ContractProjection
     [JsonPropertyName("npc_end")] public string? NpcEnd { get; init; }
 }
 
+/// <summary>
+/// vendor-perception: the trade panel of the vendor the bot currently has open
+/// (ApproachVendor 0x0062) — what it sells, decoded from the wire item list.
+/// Built from <see cref="WorldState.OpenVendor"/> only while the bot is still in
+/// the landblock where it opened. Surfaced in the "## Vendor offerings" prompt
+/// section as raw facts; source assigns no priority and never decides to buy.
+/// </summary>
+internal sealed record VendorProjection
+{
+    [JsonPropertyName("vendor_guid")] public uint VendorGuid { get; init; }
+    // The player's BUY-cost rate = the vendor's SellPrice (the rate the vendor
+    // SELLS to the player; GetSellCost uses this, NOT BuyPrice which is the
+    // vendor's buy-back rate). A buyer pays max(1, ceil(value * this - 0.1)).
+    // Raw wire value.
+    [JsonPropertyName("buy_cost_multiplier")] public float BuyCostMultiplier { get; init; }
+    // Alternate currency the vendor charges instead of coin: the currency wcid
+    // (0 = coin/default) and its display name. Raw wire facts so the prompt can
+    // state the correct unit (the server charges the SAME GetSellCost amount,
+    // only the unit differs for an alternate-currency vendor).
+    [JsonPropertyName("alternate_currency")] public uint AlternateCurrency { get; init; }
+    [JsonPropertyName("alternate_currency_name")] public string AlternateCurrencyName { get; init; } = "";
+    [JsonPropertyName("offers")] public IReadOnlyList<VendorOfferProjection> Offers { get; init; }
+        = System.Array.Empty<VendorOfferProjection>();
+}
+
+/// <summary>
+/// One item a vendor offers for sale: the dat name + raw pyreal value (a buyer
+/// pays value times the vendor's buy-cost multiplier, i.e. its SellPrice) +
+/// stack size (-1 = unlimited supply) + raw ItemType (the server overrides the
+/// sell rate for one item type). Raw wire/dat facts; no interpretation.
+/// </summary>
+internal sealed record VendorOfferProjection
+{
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("wcid")] public uint Wcid { get; init; }
+    [JsonPropertyName("item_type")] public uint ItemType { get; init; }
+    [JsonPropertyName("value")] public uint? Value { get; init; }
+    [JsonPropertyName("stack_size")] public int StackSize { get; init; }
+}
+
 internal sealed record WorldStateProjection
 {
     [JsonPropertyName("self")]
@@ -306,6 +346,15 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("contracts")]
     public IReadOnlyList<ContractProjection> Contracts { get; init; }
         = System.Array.Empty<ContractProjection>();
+
+    /// <summary>
+    /// vendor-perception: the open vendor's for-sale list, or null when no vendor
+    /// panel is open (or the bot has left the landblock where it opened). Built
+    /// from <see cref="WorldState.OpenVendor"/>; rendered in "## Vendor offerings".
+    /// Raw facts only.
+    /// </summary>
+    [JsonPropertyName("vendor")]
+    public VendorProjection? Vendor { get; init; }
 
     /// <summary>
     /// combat-damage-output: the live outcome of the current melee
@@ -720,6 +769,47 @@ internal sealed record WorldStateProjection
             })
             .ToList();
 
+        // vendor-perception: project the open vendor's for-sale list, but only
+        // while the bot is still standing at that vendor — the vendor object is
+        // still tracked, in the CURRENT landblock the panel was opened in, and
+        // within interaction range. Once the bot walks away, the vendor
+        // despawns, or it changes landblock, the panel is stale and drops.
+        // The server gates vendor /use on the object's UseRadius (edge-to-edge
+        // cylinder distance; ACE-bots WorldObject_Use.cs IsWithinUseRadiusOf,
+        // default ~0.6u). We keep a small CENTER-to-center slack above that to
+        // absorb the bot's dead-reckoned position (so a stationary bot at the
+        // vendor doesn't flap) while still dropping the panel well before the
+        // bot has wandered out of use range. (Proximity/liveness bookkeeping —
+        // no object-type priority.) Raw facts: each item's dat name + raw value
+        // + stack size + item type; source assigns no priority and never decides
+        // to buy.
+        const float vendorPanelRangeUnits = 8f;
+        VendorProjection? vendorProj = null;
+        if (world.OpenVendor is { } ov &&
+            world.OpenVendorLandblock is uint ovLandblock && ovLandblock == landblock &&
+            world.Objects.TryGetValue(ov.VendorGuid, out var vendorObj) &&
+            WorldDistance.TrySelectionSquaredDistance(self, vendorObj, out var vendorD2) &&
+            vendorD2 <= vendorPanelRangeUnits * vendorPanelRangeUnits)
+        {
+            vendorProj = new VendorProjection
+            {
+                VendorGuid = ov.VendorGuid,
+                BuyCostMultiplier = ov.SellPrice,
+                AlternateCurrency = ov.AlternateCurrency,
+                AlternateCurrencyName = ov.AlternateCurrencyName,
+                Offers = ov.Items
+                    .Select(it => new VendorOfferProjection
+                    {
+                        Name = it.Name,
+                        Wcid = it.WeenieClassId,
+                        ItemType = it.ItemType,
+                        Value = it.Value,
+                        StackSize = it.StackSize,
+                    })
+                    .ToList(),
+            };
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -747,6 +837,7 @@ internal sealed record WorldStateProjection
             Visible = visible,
             Fellowship = fellowshipProj,
             Contracts = contractProj,
+            Vendor = vendorProj,
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
