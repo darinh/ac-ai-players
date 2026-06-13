@@ -770,26 +770,14 @@ internal sealed record WorldStateProjection
             .ToList();
 
         // vendor-perception: project the open vendor's for-sale list, but only
-        // while the bot is still standing at that vendor — the vendor object is
-        // still tracked, in the CURRENT landblock the panel was opened in, and
-        // within interaction range. Once the bot walks away, the vendor
-        // despawns, or it changes landblock, the panel is stale and drops.
-        // The server gates vendor /use on the object's UseRadius (edge-to-edge
-        // cylinder distance; ACE-bots WorldObject_Use.cs IsWithinUseRadiusOf,
-        // default ~0.6u). We keep a small CENTER-to-center slack above that to
-        // absorb the bot's dead-reckoned position (so a stationary bot at the
-        // vendor doesn't flap) while still dropping the panel well before the
-        // bot has wandered out of use range. (Proximity/liveness bookkeeping —
-        // no object-type priority.) Raw facts: each item's dat name + raw value
-        // + stack size + item type; source assigns no priority and never decides
-        // to buy.
-        const float vendorPanelRangeUnits = 8f;
+        // while the panel is still LIVE (open + same landblock + within
+        // interaction range). The liveness predicate lives on WorldState
+        // (TryGetLiveOpenVendor) so the prompt the LLM sees and the Buy motor it
+        // acts with gate on the SAME condition. Raw facts: each item's dat name
+        // + raw value + stack size + item type; source assigns no priority and
+        // never decides to buy.
         VendorProjection? vendorProj = null;
-        if (world.OpenVendor is { } ov &&
-            world.OpenVendorLandblock is uint ovLandblock && ovLandblock == landblock &&
-            world.Objects.TryGetValue(ov.VendorGuid, out var vendorObj) &&
-            WorldDistance.TrySelectionSquaredDistance(self, vendorObj, out var vendorD2) &&
-            vendorD2 <= vendorPanelRangeUnits * vendorPanelRangeUnits)
+        if (world.TryGetLiveOpenVendor(out var ov) && ov is not null)
         {
             vendorProj = new VendorProjection
             {

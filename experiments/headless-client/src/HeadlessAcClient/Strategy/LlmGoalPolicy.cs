@@ -4238,7 +4238,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -4256,7 +4256,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -5857,7 +5857,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"  - (+{vendor.Offers.Count - vendorShown} more for sale, not shown)");
             sb.AppendLine(
                 "- raw fact, not a recommendation: whether to buy anything, and " +
-                "what, is your call.");
+                "what, is your call. To buy one, emit a Buy goal with " +
+                "target.name set to an item's exact name above (it works only " +
+                "while you have this vendor open; quantity defaults to 1).");
         }
 
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────

@@ -535,6 +535,74 @@ internal sealed class WorldState
     }
 
     /// <summary>
+    /// Center-to-center range, in game units, within which the open vendor's
+    /// trade panel is treated as live. The server gates vendor /use on the
+    /// object's UseRadius (edge-to-edge cylinder distance; WorldObject_Use.cs
+    /// IsWithinUseRadiusOf, default ~0.6u); this keeps a small slack above that
+    /// for the bot's dead-reckoned position so a stationary bot at the vendor
+    /// does not flap, while dropping the panel well before it has wandered off.
+    /// Single source of truth for BOTH the prompt projection and the Buy motor.
+    /// </summary>
+    public const float VendorPanelRangeUnits = 8f;
+
+    /// <summary>
+    /// The open vendor panel IF it is still live: a panel is open, the bot is
+    /// still in the landblock it was opened in, and the vendor object is still
+    /// tracked within interaction range. Returns false (vendor=null) when no
+    /// panel is open, or the bot has walked away / changed landblock / the
+    /// vendor despawned. The prompt (what the LLM sees) and the Buy motor (what
+    /// it may act on) BOTH gate on this so they always agree. Pure liveness
+    /// bookkeeping — no object-type priority, no decision to buy.
+    /// </summary>
+    public bool TryGetLiveOpenVendor(out VendorInfoPayload? vendor)
+    {
+        vendor = null;
+        if (OpenVendor is not { } ov) return false;
+        if (Self is not { } self) return false;
+        if (OpenVendorLandblock is not uint ovLandblock) return false;
+        if (self.CellId is not uint cell || (cell >> 16) != ovLandblock) return false;
+        if (!_objects.TryGetValue(ov.VendorGuid, out var vendorObj)) return false;
+        if (!WorldDistance.TrySelectionSquaredDistance(self, vendorObj, out var d2)) return false;
+        if (d2 > VendorPanelRangeUnits * VendorPanelRangeUnits) return false;
+        vendor = ov;
+        return true;
+    }
+
+    /// <summary>
+    /// Resolve a vendor for-sale item by EXACT (case-insensitive) name. Returns
+    /// null when no item matches exactly. Deliberately NOT a substring/fuzzy
+    /// match: a Buy spends currency irreversibly, so the motor must buy exactly
+    /// the item the LLM named (or nothing) — never silently pick a different
+    /// item whose name merely contains the requested text.
+    /// </summary>
+    public static VendorItemInfo? ResolveVendorItemExact(
+        IReadOnlyList<VendorItemInfo> items, string? name)
+    {
+        if (items is null || string.IsNullOrWhiteSpace(name)) return null;
+        foreach (var it in items)
+            if (string.Equals(it.Name, name, StringComparison.OrdinalIgnoreCase))
+                return it;
+        return null;
+    }
+
+    /// <summary>
+    /// Count the items of a given weenie class id currently in the bot's OWN
+    /// inventory (objects directly contained by self). Used as a
+    /// currency-agnostic "the purchase landed" signal when reconciling an
+    /// in-flight Buy (works for coin AND alternate-currency vendors, unlike a
+    /// coin-balance delta).
+    /// </summary>
+    public int CountOwnedInventoryByWcid(uint wcid)
+    {
+        if (Self is not { } self) return 0;
+        var count = 0;
+        foreach (var o in _objects.Values)
+            if (o.WeenieClassId == wcid && o.ContainerGuid is uint cg && cg == self.Guid)
+                count++;
+        return count;
+    }
+
+    /// <summary>
     /// Apply a single SendClientContractTracker (0x0315) update: remove the
     /// matching contract when <see cref="ContractTrackerPayload.DeleteContract"/>
     /// is set, otherwise upsert it by contract id (replace an existing entry or

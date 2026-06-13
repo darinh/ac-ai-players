@@ -87,6 +87,20 @@ internal enum GoalKind
     /// after PvP).
     /// </summary>
     Recall = 13,
+
+    /// <summary>
+    /// Buy an item from the vendor whose trade panel is currently open. The LLM
+    /// names the for-sale item in <see cref="Goal.Target"/> (name = an item from
+    /// the <c>## Vendor offerings</c> prompt section) and MAY set
+    /// <see cref="Goal.Amount"/> to a quantity (default 1). The motor resolves
+    /// the name to the open vendor's matching item guid and sends the Buy
+    /// (0x005F) GameAction to that vendor; the server charges the cost and
+    /// places the item in the bot's pack. The motor makes NO decision about WHAT
+    /// or WHETHER to buy (Strategy owns that) and never opens a vendor on its
+    /// own — a Buy with no vendor panel open fails so the LLM approaches the
+    /// vendor (Use/Talk) first. No game-content knowledge lives here.
+    /// </summary>
+    Buy = 14,
 }
 
 /// <summary>

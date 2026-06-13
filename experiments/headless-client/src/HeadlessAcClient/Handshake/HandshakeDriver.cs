@@ -1099,6 +1099,14 @@ internal sealed class HandshakeDriver : IDisposable
         // cleared on a confirmed AvailableExperience decrease (success) or
         // after the timeout (no confirmation seen).
         (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaise = null;
+        // Vendor-buy in-flight bookkeeping. Buy (0x005F) spends currency
+        // irreversibly, so — exactly like the Raise* self-actions — only ONE
+        // buy is allowed in flight: it is reconciled by a currency-AGNOSTIC
+        // signal (the purchased item arriving in the bot's own inventory) or
+        // dropped after a timeout, so a Buy->Buy burst can never double-spend.
+        // (Coin-only reconciliation would never confirm alternate-currency
+        // purchases.)
+        (uint VendorGuid, uint ItemGuid, string ItemName, uint ItemWcid, DateTime At, int PreCount)? pendingBuy = null;
         // Lifestone-recall in-flight bookkeeping. Recall (TeleToLifestone
         // 0x0063) is NOT instant like the Raise* self-actions: the server
         // plays a recall animation, then teleports the bot — and it ABORTS
@@ -5283,6 +5291,95 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"rationale=\"{goal.Rationale}\"; pktSeq={recallPktSeq} " +
                                 $"fragSeq={recallFragSeq} bytes={recallSent}; holding goal until " +
                                 $"recall completes (<= {recallInFlightWindow.TotalSeconds:F0}s).");
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.Buy)
+                    {
+                        // Vendor self-action: buy a named item from the vendor
+                        // whose trade panel is open. The LLM chose the item
+                        // (goal.Target.name, from `## Vendor offerings`); the
+                        // motor only resolves that EXACT name to the open
+                        // vendor's matching for-sale guid and sends the Buy
+                        // (0x005F) opcode. It never opens a vendor itself and
+                        // makes NO decision about WHAT/WHETHER to buy. One buy
+                        // at a time (currency is irreversible): a Buy->Buy burst
+                        // is suppressed until the prior buy confirms (the bought
+                        // item arrives in inventory) or times out.
+
+                        // Reconcile any prior pending buy: the purchased item
+                        // arriving in the bot's own inventory confirms it
+                        // landed (currency-agnostic — works for coin AND
+                        // alternate-currency vendors); a stale entry past the
+                        // timeout is dropped so it can never wedge the dedup.
+                        if (pendingBuy is { } pb0)
+                        {
+                            var arrivedCount = worldState.CountOwnedInventoryByWcid(pb0.ItemWcid);
+                            var arrived = arrivedCount > pb0.PreCount;
+                            if (arrived || (DateTime.UtcNow - pb0.At) > TimeSpan.FromSeconds(12))
+                            {
+                                Console.WriteLine(
+                                    $"[vendor-buy] pending Buy '{pb0.ItemName}' guid=0x{pb0.ItemGuid:X8} " +
+                                    (arrived
+                                        ? $"CONFIRMED (inventory wcid={pb0.ItemWcid} {pb0.PreCount}->{arrivedCount})"
+                                        : "timed out (item did not arrive in inventory)"));
+                                pendingBuy = null;
+                            }
+                        }
+
+                        var wantedName = goal.Target?.Name;
+                        if (!worldState.TryGetLiveOpenVendor(out var ovBuy) || ovBuy is null)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-buy] Buy '{goal.Target}': no vendor panel open within reach — " +
+                                $"approach/Use the vendor first. source={goal.Source}");
+                            tactics.Fail("buy: no live vendor panel", eventStream);
+                        }
+                        else if (HeadlessAcClient.World.WorldState.ResolveVendorItemExact(ovBuy.Items, wantedName)
+                                 is not { } buyItem)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-buy] Buy: vendor 0x{ovBuy.VendorGuid:X8} has no for-sale item whose " +
+                                $"name exactly matches '{wantedName}'; not sending — retry with an exact name " +
+                                $"from `## Vendor offerings`. source={goal.Source}");
+                            tactics.Fail("buy: no exact vendor item match", eventStream);
+                        }
+                        else if (pendingBuy is { } pbDup)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-buy] Buy '{buyItem.Name}' suppressed — a buy ('{pbDup.ItemName}') is " +
+                                $"still pending (dispatched {(DateTime.UtcNow - pbDup.At).TotalSeconds:F1}s ago); " +
+                                $"awaiting inventory-arrival confirmation.");
+                            tactics.Fail("buy: a buy is already pending", eventStream);
+                        }
+                        else
+                        {
+                            var buyAmount = goal.Amount is long qa && qa > 0 ? (int)Math.Min(qa, 1000) : 1;
+                            var preCount = worldState.CountOwnedInventoryByWcid(buyItem.WeenieClassId);
+                            var buyPktSeq  = nextOutboundPacketSequence++;
+                            var buyFragSeq = nextOutboundFragmentSequence++;
+                            var buyBuf = new byte[GameActionBuyMessage.PackedSize];
+                            var buyLen = GameActionBuyMessage.Pack(buyBuf, ovBuy.VendorGuid, buyItem.Guid, buyAmount);
+                            var buyMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                buyMsg.AddAckSequence(lastReceivedSeq);
+                            buyMsg.AddBlobFragment(
+                                fragSequence: buyFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: buyBuf.AsSpan(0, buyLen));
+                            var buySent = buyMsg.Pack(sendBuf, myClientId,
+                                                      sequence: buyPktSeq, iteration: 1,
+                                                      encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, buySent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            pendingBuy = (ovBuy.VendorGuid, buyItem.Guid, buyItem.Name,
+                                          buyItem.WeenieClassId, DateTime.UtcNow, preCount);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Buy: '{buyItem.Name}' guid=0x{buyItem.Guid:X8} " +
+                                $"wcid={buyItem.WeenieClassId} amount={buyAmount} from vendor 0x{ovBuy.VendorGuid:X8} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={buyPktSeq} fragSeq={buyFragSeq} bytes={buySent}");
+                            tactics.Clear("buy dispatched", eventStream);
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
