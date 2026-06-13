@@ -52,6 +52,7 @@ internal enum GameActionType : uint
     GiveObjectRequest   = 0x00CD,
     SetSingleCharacterOption = 0x0005,
     TeleToLifestone     = 0x0063,
+    Buy                 = 0x005F,
 }
 
 /// <summary>
@@ -302,6 +303,48 @@ internal static class GameActionUseWithTargetMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.UseWithTarget, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), sourceGuid); cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// Buy (0x005F). Purchases item(s) from a vendor whose trade panel is open. The
+/// server handler (Source/ACE.Server/Network/GameAction/Actions/
+/// GameActionBuyItems.cs) reads:
+/// <code>
+///   u32 vendorGuid
+///   u32 numItems
+///   for each item: i32 amount, u32 objectID   (objectID = the for-sale guid)
+///   // an optional trailing u32 altCurrencyWcid is commented out server-side
+/// </code>
+/// then calls <c>Player.HandleActionBuyItem(vendorGuid, items)</c>, which
+/// validates the bot is at the vendor and has the funds, charges the
+/// GetSellCost (in coin or the vendor's alternate currency), and creates the
+/// item(s) in the bot's pack. This packer sends a SINGLE-item buy
+/// (numItems = 1). The motor only dispatches this when the LLM emits a Buy goal
+/// naming a vendor item; it makes NO decision about WHAT or WHETHER to buy —
+/// that is the Strategy layer's job.
+///
+/// Payload after the 12B GameAction header (16 bytes):
+///   u32 vendorGuid
+///   u32 numItems (= 1)
+///   i32 amount
+///   u32 objectID
+/// </summary>
+internal static class GameActionBuyMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 16;  // 28 bytes
+
+    public static int Pack(Span<byte> dest, uint vendorGuid, uint itemGuid, int amount = 1, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.Buy, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), vendorGuid); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), 1u); cursor += 4;   // numItems
+        BinaryPrimitives.WriteInt32LittleEndian(dest.Slice(cursor), amount); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid); cursor += 4;
         return cursor;
     }
 }
