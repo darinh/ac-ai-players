@@ -575,12 +575,37 @@ internal sealed record VendorInfoPayload(
     string AlternateCurrencyName,
     int ItemCount)
 {
+    /// <summary>
+    /// The decoded for-sale items (guid / wcid / name / value), in wire order.
+    /// Empty when the item list was truncated or could not be read — the
+    /// header's trade terms stay valid in that case.
+    /// </summary>
+    public IReadOnlyList<VendorItemInfo> Items { get; init; } =
+        System.Array.Empty<VendorItemInfo>();
+
     public override string ToString() =>
-        $"VendorInfo(vendor=0x{VendorGuid:X8} items={ItemCount} " +
+        $"VendorInfo(vendor=0x{VendorGuid:X8} items={ItemCount} read={Items.Count} " +
         $"buys=0x{MerchandiseItemTypes:X} value={MerchandiseMinValue}-{MerchandiseMaxValue} " +
         $"magical={DealMagicalItems} buy={BuyPrice:F2} sell={SellPrice:F2} " +
         $"altCurrency=0x{AlternateCurrency:X8})";
 }
+
+/// <summary>
+/// One for-sale item from a vendor's ApproachVendor (0x0062) list. Wire layout
+/// from the authoritative server serializer GameEventApproachVendor.cs: per item
+/// a packed u32 (stackSize in the low 24 bits, -1 = unlimited supply) followed
+/// by WorldObject.SerializeGameDataOnly — the item's guid + weenie description
+/// (the same structure ObjectCreate uses, minus the model/physics blocks).
+/// <see cref="Value"/> is the item's raw pyreal value (null when absent); a
+/// buyer pays value scaled by the vendor's BuyPrice. All fields are raw wire/dat
+/// values — no interpretation.
+/// </summary>
+internal sealed record VendorItemInfo(
+    uint Guid,
+    uint WeenieClassId,
+    string Name,
+    uint? Value,
+    int StackSize);
 
 /// <summary>
 /// One contract / tracked-objective entry. Wire layout from the authoritative
@@ -1322,25 +1347,74 @@ internal static class GameEventPayloadDecoder
     // body-relative cursor alignment matches the server's stream alignment.
     private static VendorInfoPayload DecodeApproachVendor(ReadOnlySpan<byte> body)
     {
-        var cursor = 0;
         // 9 fixed 4-byte fields precede the alternate-currency string.
         if (body.Length < 36)
             throw new InvalidOperationException("body too short for ApproachVendor header");
-        var vendorGuid           = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var merchandiseItemTypes = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var merchandiseMinValue  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var merchandiseMaxValue  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var dealMagicalItems     = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)) != 0; cursor += 4;
-        var buyPrice             = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var sellPrice            = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var alternateCurrency    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var altCurrencyAmount    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
-        var altCurrencyName      = ReadString16L(body, ref cursor);
-        var itemCount            = (int)BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+
+        // Decode via MessageReader (vendor-open is not a hot path) so the
+        // per-item weenie descriptions can reuse the ObjectCreate weenie-header
+        // decoder. AbsoluteOrigin 0: the 16-byte GameEvent envelope that
+        // precedes `body` is a multiple of 4, so a body-relative Align4 lands on
+        // the same boundary the server aligned to.
+        var buf = new byte[body.Length];
+        body.CopyTo(buf);
+        var r = new MessageReader(buf);
+
+        var vendorGuid           = r.ReadU32();
+        var merchandiseItemTypes = r.ReadU32();
+        var merchandiseMinValue  = r.ReadU32();
+        var merchandiseMaxValue  = r.ReadU32();
+        var dealMagicalItems     = r.ReadU32() != 0;
+        var buyPrice             = r.ReadF32();
+        var sellPrice            = r.ReadF32();
+        var alternateCurrency    = r.ReadU32();
+        var altCurrencyAmount    = r.ReadU32();
+        var altCurrencyName      = r.ReadString16L();
+        var itemCount            = (int)r.ReadU32();
+
+        // The for-sale list: per item a packed u32 (stackSize in the low 24
+        // bits, -1 = unlimited) + SerializeGameDataOnly (guid + weenie header,
+        // reusing the ObjectCreate decoder). Decode defensively: a truncated or
+        // unexpectedly-shaped real packet stops the loop and we keep the header
+        // + items read so far, rather than discarding the whole perception.
+        var items = new List<VendorItemInfo>(itemCount < 0 ? 0 : Math.Min(itemCount, 256));
+        try
+        {
+            for (var i = 0; i < itemCount; i++)
+            {
+                var packed = r.ReadU32();
+                var low24 = (int)(packed & 0xFFFFFF);
+                var stackSize = low24 == 0xFFFFFF ? -1 : low24;
+                var guid = r.ReadGuid();
+                var weenie = ObjectCreateDecoder.DecodeWeenieHeader(r);
+                items.Add(new VendorItemInfo(
+                    guid, weenie.WeenieClassId, weenie.Name, weenie.Value, stackSize));
+            }
+        }
+        catch (System.IO.EndOfStreamException)
+        {
+            // Expected: a truncated or oversized item blob ran past the end of
+            // the buffer. Keep the header + the items decoded cleanly so far.
+        }
+        catch (Exception ex)
+        {
+            // Unexpected: an alignment desync (Align4's non-zero-pad check), an
+            // unsupported weenie flag (e.g. HouseRestrictions), or a wire-format
+            // change. Keep the header + partial items, but LOG it so a systematic
+            // decode fault is observable instead of being silently masked as
+            // truncation (mirrors the ObjectCreateDecoder fault log).
+            Console.WriteLine(
+                $"[ApproachVendor] item-list decode fault after {items.Count}/{itemCount} items: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+
         return new VendorInfoPayload(
             vendorGuid, merchandiseItemTypes, merchandiseMinValue, merchandiseMaxValue,
             dealMagicalItems, buyPrice, sellPrice, alternateCurrency, altCurrencyAmount,
-            altCurrencyName, itemCount);
+            altCurrencyName, itemCount)
+        {
+            Items = items,
+        };
     }
 
     // SendClientContractTracker (0x0315) — a single contract update. Wire layout

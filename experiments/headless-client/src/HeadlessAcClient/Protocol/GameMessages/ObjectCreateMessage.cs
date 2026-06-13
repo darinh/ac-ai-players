@@ -316,7 +316,7 @@ internal static class ObjectCreateDecoder
             seqPos, seqMov, seqSta, seqVec, seqTel, seqSvc, seqFpo, seqVis, seqIns);
     }
 
-    private static ObjectWeenieHeader DecodeWeenieHeader(MessageReader r)
+    internal static ObjectWeenieHeader DecodeWeenieHeader(MessageReader r)
     {
         var flags = (WeenieHeaderFlag)r.ReadU32();
         var name = r.ReadString16L();
