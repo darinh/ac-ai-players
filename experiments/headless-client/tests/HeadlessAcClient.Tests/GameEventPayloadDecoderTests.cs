@@ -606,7 +606,9 @@ public class GameEventPayloadDecoderTests
         uint vendorGuid, uint merchandiseItemTypes, uint minValue, uint maxValue,
         uint dealMagical, float buyPrice, float sellPrice,
         uint altCurrency, uint altCurrencyAmount, string altCurrencyName,
-        int numItems, byte[]? trailingItems = null)
+        int numItems,
+        (uint guid, string name, uint wcid, uint itemType, uint? value, int stackSize)[]? items = null,
+        byte[]? trailingItems = null)
     {
         var w = new System.Collections.Generic.List<byte>();
         void U16(ushort v) { Span<byte> b = stackalloc byte[2]; BinaryPrimitives.WriteUInt16LittleEndian(b, v); foreach (var x in b) w.Add(x); }
@@ -614,10 +616,36 @@ public class GameEventPayloadDecoderTests
         void I32(int v)    { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteInt32LittleEndian(b, v); foreach (var x in b) w.Add(x); }
         void F32(float v)  { Span<byte> b = stackalloc byte[4]; BinaryPrimitives.WriteSingleLittleEndian(b, v); foreach (var x in b) w.Add(x); }
         void Str16(string s) { var nb = Encoding.Latin1.GetBytes(s); U16((ushort)nb.Length); foreach (var x in nb) w.Add(x); while (w.Count % 4 != 0) w.Add(0); }
+        void Align() { while (w.Count % 4 != 0) w.Add(0); }
+        // AC packed dword: a single u16 for values < 0x8000.
+        void PackedDword(uint v) { if (v < 0x8000) U16((ushort)v); else { U16((ushort)(0x8000 | (v >> 16))); U16((ushort)(v & 0xFFFF)); } }
         U32(vendorGuid); U32(merchandiseItemTypes); U32(minValue); U32(maxValue);
         U32(dealMagical); F32(buyPrice); F32(sellPrice);
         U32(altCurrency); U32(altCurrencyAmount); Str16(altCurrencyName);
         I32(numItems);
+        if (items != null)
+        {
+            // Mirror GameEventApproachVendor.cs: per item a packed u32
+            // (stackSize low 24 | pwdType high 8) then SerializeGameDataOnly =
+            // guid + weenie header (gamedataonly). Minimal header: flags (Value
+            // bit only), name, wcid, icon=0, itemType, objDescFlags=0, Align,
+            // [value], Align. Alignment is body-relative (matches the decoder).
+            foreach (var it in items)
+            {
+                U32((uint)((it.stackSize & 0xFFFFFF) | (-1 << 24)));
+                U32(it.guid);
+                uint flags = it.value.HasValue ? (uint)WeenieHeaderFlag.Value : 0u;
+                U32(flags);
+                Str16(it.name);
+                PackedDword(it.wcid);
+                PackedDword(0u);          // iconId 0
+                U32(it.itemType);
+                U32(0u);                  // objDescFlags (no second header)
+                Align();
+                if (it.value.HasValue) U32(it.value.Value);
+                Align();
+            }
+        }
         if (trailingItems != null) w.AddRange(trailingItems);
         return w.ToArray();
     }
@@ -674,11 +702,70 @@ public class GameEventPayloadDecoderTests
     }
 
     [Fact]
-    public void Decode_ApproachVendor_IgnoresTrailingItemList()
+    public void Decode_ApproachVendor_ReadsForSaleItems()
     {
-        // The for-sale item blobs (packed stackSize + weenie data) follow
-        // numItems. This slice decodes the header through the count and leaves
-        // the item bytes unread (mirroring the FellowshipFullUpdate early-stop).
+        // Round-trip the authoritative GameEventApproachVendor item layout: per
+        // item a packed stackSize word + SerializeGameDataOnly (guid + weenie
+        // header). Confirms the item list — previously left unread — now decodes
+        // to name/wcid/value so the bot can perceive what a vendor sells.
+        var body = BuildApproachVendor(
+            vendorGuid: 0x7A9B46A9u, merchandiseItemTypes: 0u, minValue: 0u, maxValue: 0u,
+            dealMagical: 0u, buyPrice: 1.0f, sellPrice: 0.5f,
+            altCurrency: 0u, altCurrencyAmount: 0u, altCurrencyName: "",
+            numItems: 2,
+            items: new (uint, string, uint, uint, uint?, int)[]
+            {
+                (0x80002DEFu, "Drudge Slaying Contract", 30491u, 0x2000u, 5000u, -1),
+                (0x80002BDAu, "Mite Culling Contract",   30492u, 0x2000u, 7500u, 1),
+            });
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.ApproachVendor);
+
+        Assert.NotNull(p?.VendorInfo);
+        var v = p!.VendorInfo!;
+        Assert.Equal(2, v.ItemCount);
+        Assert.Equal(2, v.Items.Count);
+
+        Assert.Equal(0x80002DEFu, v.Items[0].Guid);
+        Assert.Equal(30491u, v.Items[0].WeenieClassId);
+        Assert.Equal("Drudge Slaying Contract", v.Items[0].Name);
+        Assert.Equal(5000u, v.Items[0].Value);
+        Assert.Equal(-1, v.Items[0].StackSize);   // unlimited supply
+
+        Assert.Equal(0x80002BDAu, v.Items[1].Guid);
+        Assert.Equal("Mite Culling Contract", v.Items[1].Name);
+        Assert.Equal(30492u, v.Items[1].WeenieClassId);
+        Assert.Equal(7500u, v.Items[1].Value);
+        Assert.Equal(1, v.Items[1].StackSize);
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_ItemWithNoValueFlag_LeavesValueNull()
+    {
+        var body = BuildApproachVendor(
+            vendorGuid: 0x5u, merchandiseItemTypes: 0u, minValue: 0u, maxValue: 0u,
+            dealMagical: 0u, buyPrice: 1.0f, sellPrice: 1.0f,
+            altCurrency: 0u, altCurrencyAmount: 0u, altCurrencyName: "",
+            numItems: 1,
+            items: new (uint, string, uint, uint, uint?, int)[]
+            {
+                (0x90u, "Free Sample", 1234u, 0x1u, null, 1),
+            });
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.ApproachVendor);
+
+        Assert.NotNull(p?.VendorInfo);
+        Assert.Single(p!.VendorInfo!.Items);
+        Assert.Equal("Free Sample", p.VendorInfo.Items[0].Name);
+        Assert.Null(p.VendorInfo.Items[0].Value);
+    }
+
+    [Fact]
+    public void Decode_ApproachVendor_TruncatedItemList_KeepsHeaderAndReadsNone()
+    {
+        // numItems says 1 but the item blob is truncated (just a packed word +
+        // guid, no weenie desc). The defensive decode keeps the header and the
+        // items it could read cleanly (none here).
         var trailing = new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00 };
         var body = BuildApproachVendor(
             vendorGuid: 0x1u, merchandiseItemTypes: 0u, minValue: 0u, maxValue: 0u,
@@ -691,6 +778,7 @@ public class GameEventPayloadDecoderTests
         Assert.NotNull(p?.VendorInfo);
         Assert.Equal(1, p!.VendorInfo!.ItemCount);
         Assert.Equal(0x1u, p.VendorInfo.VendorGuid);
+        Assert.Empty(p.VendorInfo.Items);
     }
 
     [Fact]
