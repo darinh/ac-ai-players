@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
 using HeadlessAcClient.World;
 using Xunit;
 
@@ -131,5 +132,35 @@ public class ContractLocationTests
         var c = Assert.Single(proj!.Contracts);
         Assert.Null(c.TurnInWorldX);
         Assert.Null(c.QuestAreaWorldX);
+    }
+
+    [Fact]
+    public void QuestCompiler_Stage3Contract_TeachesHandInOnceThenStop()
+    {
+        // Regression guard for the live turn-in loop: with a stage-3 (done)
+        // contract held, the QUEST-DIALOG COMPILER rule must teach the bot to
+        // attempt the hand-in ONCE and then, if the contract stays stage 3,
+        // treat it as finished and stop re-Talking the turn-in NPC (some
+        // contracts have no separate hand-in; re-attempting is fixation). The
+        // rule is gated on a non-null stack, so pass an (empty) IntentStack.
+        var contract = new ContractProjection
+        {
+            ContractId = 700u, Stage = 3u, Name = "Locate the Sergeant", NpcEnd = "Sergeant",
+        };
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWith(contract), new EventStream(), null, new IntentStack());
+
+        Assert.Contains("Attempt that hand-in ONCE", prompt);
+        // The hand-in attempt is conditioned: only a turn-in made AFTER the
+        // contract reached stage 3 counts (an earlier acceptance/objective Talk
+        // with the same NPC must NOT trigger the egress), so a contract that
+        // really clears on a final hand-in keeps its one real attempt.
+        Assert.Contains("AFTER the contract reached", prompt);
+        // Persistence: the bot marks the turn-in intent blocked (a durable stack
+        // marker) instead of popping, so the stateless rule cannot re-compile it
+        // once the Talk ages out of history (the macro "amnesia" loop).
+        Assert.Contains("MARK_TOP_BLOCKED", prompt);
+        Assert.Contains("fixation, not progress", prompt);
     }
 }
