@@ -16,6 +16,7 @@ using System.Linq;
 using System.Numerics;
 using HeadlessAcClient.Protocol.GameMessages;
 using HeadlessAcClient.Strategy;
+using HeadlessAcClient.Strategy.Intent;
 using HeadlessAcClient.World;
 using Xunit;
 
@@ -222,6 +223,76 @@ public class VendorPerceptionTests
         Assert.Contains("200 coin to buy (value 100)", cap);
         // HK invariant: the capsule states a raw fact, not a recommendation.
         Assert.Contains("raw fact, not a recommendation", cap);
+    }
+
+    [Fact]
+    public void Vendor_Capsule_SurfacesTaskContractAcquisitionMechanic()
+    {
+        // When a vendor panel is open, the capsule teaches the GENERIC
+        // task-contract acquisition mechanic so the LLM can recognise a
+        // for-sale contract item as a buyable directed (kill) task: Buy the
+        // item, then Use it from the pack to accept the task. This is the
+        // criterion-2 funnel knowledge. The note is rendered unconditionally
+        // for any open vendor (this offer is a plain non-contract item), names
+        // no specific contract/NPC/area, and defers the decision to the LLM.
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                VendorProj(Offers(1.0f, ("Plain Trade Good", 50u, -1))),
+                new EventStream(), null),
+            "## Vendor offerings");
+
+        Assert.Contains("TASK CONTRACTS", cap);
+        Assert.Contains("Buying the item", cap);
+        Assert.Contains("Using it from your pack", cap);
+        // Accept-then-reward framing + an explicit deferral (no source-side
+        // urgency, priority, or decision to buy).
+        Assert.Contains("reward on turn-in", cap);
+        Assert.Contains("whether to is your call", cap);
+    }
+
+    [Fact]
+    public void Vendor_RealFailureState_OffersBuyOptionAndDoneContractEgress()
+    {
+        // The adversarial criterion-2 state behind this slice: the bot stands at
+        // an open vendor that sells a task contract while ALREADY holding two
+        // stage-3 (done) Find contracts. Live, the bot looped on turn-in Talks
+        // for the done contracts and never bought. The prompt must, together,
+        // (a) surface the Buy->Use acquisition mechanic for the offered contract
+        // AND (b) tell the bot a stage-3 contract it has already tried to hand in
+        // is finished — stop re-Talking and pursue other directed progress — so
+        // the buy is not permanently outranked by an unwinnable turn-in loop.
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Vendor = Offers(1.5f, ("Contract for Some Region", 100u, -1)),
+            Contracts = new[]
+            {
+                new ContractProjection
+                {
+                    ContractId = 185u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster",
+                },
+                new ContractProjection
+                {
+                    ContractId = 189u, Stage = 3u, Name = "Find the Pathwarden", NpcEnd = "Pathwarden Thorolf",
+                },
+            },
+        };
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(proj, new EventStream(), null, new IntentStack());
+
+        // (a) the Buy->Use mechanic for the offered task contract is present.
+        var vcap = Section(prompt, "## Vendor offerings");
+        Assert.Contains("TASK CONTRACTS", vcap);
+        Assert.Contains("Using it from your pack", vcap);
+        // (b) the done-contract egress frees the bot from the turn-in loop.
+        Assert.Contains("Attempt that hand-in ONCE", prompt);
+        Assert.Contains("fixation, not progress", prompt);
     }
 
     [Fact]
