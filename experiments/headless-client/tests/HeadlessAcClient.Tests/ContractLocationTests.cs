@@ -163,4 +163,165 @@ public class ContractLocationTests
         Assert.Contains("MARK_TOP_BLOCKED", prompt);
         Assert.Contains("fixation, not progress", prompt);
     }
+
+    // Append N Talk goals aimed at npcName (stamped at `at`) to an EventStream,
+    // in the exact "Talk target=name=\"X\" item= source=..." shape the executor
+    // records, so the ## Contracts done-detector counts them.
+    private static EventStream WithTalkGoals(string npcName, int times, DateTimeOffset at)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < times; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1,
+                Utc = at,
+                Kind = EventKind.GoalEmitted,
+                Text = $"Talk target=name=\"{npcName}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    private static WorldStateProjection WorldWithContracts(params ContractProjection[] contracts) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = SelfCell,
+            PositionX = SelfPos.X, PositionY = SelfPos.Y, PositionZ = SelfPos.Z, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = Array.Empty<VisibleObjectProjection>(),
+        Contracts = contracts,
+    };
+
+    [Fact]
+    public void Capsule_Stage3RepeatedTurnInAttempts_SurfacesDoneNoHandIn()
+    {
+        // The live criterion-2 blocker: a stage-3 contract whose turn-in NPC is
+        // the located target, Talked repeatedly with no stage change. The capsule
+        // must surface the bot's OWN post-completion attempt count + the "no
+        // separate hand-in" fact so the LLM stops re-attempting it.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 800u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null),
+            "## Contracts");
+
+        Assert.Contains("DONE (stage 3, complete)", cap);
+        Assert.Contains("Talked Pathwarden Thorolf 4x", cap);
+        Assert.Contains("no separate hand-in", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3SingleAttempt_PreservesTurnIn()
+    {
+        // One (legitimate) post-completion hand-in attempt must NOT trigger the
+        // done/no-hand-in note — a contract that really clears on a final Talk
+        // keeps its one real attempt.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 801u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 1, since), null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Contains("turn-in NPC: Pathwarden Thorolf", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3_PreStage3TalksExcluded()
+    {
+        // Talks made BEFORE the contract became stage 3 (acceptance/locating the
+        // NPC) must NOT count toward hand-in attempts — only post-completion
+        // Talks do, so a contract still gets its one real hand-in attempt.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 803u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract),
+                WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3_SharedTurnInNpc_NoDoneNote()
+    {
+        // Two stage-3 contracts sharing one turn-in NPC make per-contract Talk
+        // attribution ambiguous, so the done note must not fire for either.
+        var since = DateTimeOffset.UtcNow;
+        var a = new ContractProjection
+        {
+            ContractId = 804u, Stage = 3u, Name = "Task A", NpcEnd = "Hub Giver", Stage3SinceUtc = since,
+        };
+        var b = new ContractProjection
+        {
+            ContractId = 805u, Stage = 3u, Name = "Task B", NpcEnd = "Hub Giver", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(a, b), WithTalkGoals("Hub Giver", 5, since), null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3_NpcNameContainingItemToken_StillCounts()
+    {
+        // Regex robustness: a turn-in NPC name that itself contains " item=" must
+        // not break the Talk-goal parse (a bounded target=(.*?) item= regex would
+        // truncate it). Unusual but a correctness guard.
+        var since = DateTimeOffset.UtcNow;
+        const string oddName = "Quartermaster item= Depot";
+        var contract = new ContractProjection
+        {
+            ContractId = 806u, Stage = 3u, Name = "Odd", NpcEnd = oddName, Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithTalkGoals(oddName, 3, since), null),
+            "## Contracts");
+
+        Assert.Contains("DONE (stage 3, complete)", cap);
+        Assert.Contains($"Talked {oddName} 3x", cap);
+    }
+
+    [Fact]
+    public void Capsule_InProgressContract_NoDoneNoteEvenWithRepeatedTalks()
+    {
+        // The done-note is for stage-3 contracts ONLY: an in-progress (stage 2)
+        // contract must never be marked done regardless of Talk history.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 802u, Stage = 2u, Name = "Hunt", NpcEnd = "Sergeant",
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithTalkGoals("Sergeant", 5, since), null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+    }
 }
