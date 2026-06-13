@@ -1107,6 +1107,10 @@ internal sealed class HandshakeDriver : IDisposable
         // (Coin-only reconciliation would never confirm alternate-currency
         // purchases.)
         (uint VendorGuid, uint ItemGuid, string ItemName, uint ItemWcid, DateTime At, int PreCount)? pendingBuy = null;
+        // Diagnostic only: tracks the furthest contract-cycle (criterion-2)
+        // milestone reached this run and logs each advance once. No effect on
+        // behavior.
+        var contractFunnel = new ContractProgressFunnel();
         // Lifestone-recall in-flight bookkeeping. Recall (TeleToLifestone
         // 0x0063) is NOT instant like the Raise* self-actions: the server
         // plays a recall animation, then teleports the bot — and it ABORTS
@@ -4706,6 +4710,13 @@ internal sealed class HandshakeDriver : IDisposable
                     if (projection is not null)
                     {
                         botStats.Pump(eventStream, projection);
+
+                        // Diagnostic: log each contract-cycle milestone the
+                        // first time it is reached (vendor seen/opened ->
+                        // contract held/in-progress/done) so a live run shows
+                        // where the contract chain stalls. Pure observation.
+                        if (contractFunnel.Observe(projection) is string c2Line)
+                            Console.WriteLine(c2Line);
 
                         // Slice 0 (Hunt) — push operator-authorised
                         // initial intent on the first tick where a
