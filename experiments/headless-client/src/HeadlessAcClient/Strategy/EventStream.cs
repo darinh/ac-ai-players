@@ -318,6 +318,24 @@ internal sealed class EventStream
     private const int MaxHeardSpeech = 12;
     private readonly List<StreamEvent> _heardSpeech = new();
 
+    // Goal emissions are infrequent (one every several seconds) but the main
+    // ring is perception/motion-dominated, so a goal can be evicted within
+    // seconds under heavy traffic. Keep a DEDICATED window of recent
+    // GoalEmitted events that outlives the ring, so goal-history reads (e.g.
+    // counting repeated actions toward the same target) span the full realistic
+    // window, not the ring's perception-bounded seconds. Same durability
+    // pattern as the popup/NPC-dialog stores above. No text parsing here; pure
+    // bookkeeping.
+    //
+    // Retain by TIME, not a small fixed count: a count cap could trim an early
+    // hand-in attempt once enough UNRELATED goals follow in a chatty session,
+    // silently dropping a recomputed attempt count back below threshold (the
+    // same bug, just delayed from seconds to minutes). A generous hard count
+    // cap bounds memory against a pathological burst.
+    private static readonly TimeSpan GoalEmissionRetention = TimeSpan.FromMinutes(30);
+    private const int MaxRecentGoalEmissions = 512;
+    private readonly List<StreamEvent> _recentGoalEmissions = new();
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -383,6 +401,20 @@ internal sealed class EventStream
                 _recentNpcDialogs.RemoveAt(0);
         }
 
+        // Durable goal-emission window (see _recentGoalEmissions): retain recent
+        // GoalEmitted events independent of the ring so a goal is not lost to
+        // perception eviction within seconds. Evict by TIME (older than the
+        // retention window), then a generous hard count cap as a memory bound.
+        if (stamped.Kind == EventKind.GoalEmitted)
+        {
+            _recentGoalEmissions.Add(stamped);
+            var cutoff = stamped.Utc - GoalEmissionRetention;
+            while (_recentGoalEmissions.Count > 0
+                && (_recentGoalEmissions[0].Utc < cutoff
+                    || _recentGoalEmissions.Count > MaxRecentGoalEmissions))
+                _recentGoalEmissions.RemoveAt(0);
+        }
+
         return stamped;
     }
 
@@ -418,6 +450,22 @@ internal sealed class EventStream
     /// <summary>Newest-first, limited to N events of any kind.</summary>
     public IReadOnlyList<StreamEvent> Recent(int count) =>
         Recent().Take(count).ToList();
+
+    /// <summary>
+    /// Newest-first GoalEmitted events from the DEDICATED durable window, which
+    /// outlives the perception-dominated ring — so goal history spans minutes,
+    /// not the ring's seconds. Limited to the retained
+    /// <see cref="MaxRecentGoalEmissions"/>. Use this (not the ring) when
+    /// counting recent goals so high-volume perception traffic cannot evict a
+    /// goal before it is counted.
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentGoalEmissions()
+    {
+        var result = new List<StreamEvent>(_recentGoalEmissions.Count);
+        for (int i = _recentGoalEmissions.Count - 1; i >= 0; i--)
+            result.Add(_recentGoalEmissions[i]);
+        return result;
+    }
 
     /// <summary>Newest-first, of a specific kind, limited to N.</summary>
     public IReadOnlyList<StreamEvent> RecentOfKind(EventKind kind, int count) =>
