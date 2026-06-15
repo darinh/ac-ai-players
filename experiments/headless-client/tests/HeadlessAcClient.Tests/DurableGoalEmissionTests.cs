@@ -113,4 +113,18 @@ public class DurableGoalEmissionTests
         es.Append(TalkGoal("Npc", T0.AddMinutes(45))); // 45 min later
         Assert.Single(es.RecentGoalEmissions());
     }
+
+    [Fact]
+    public void HasRecentRepeatedGoalOfKinds_DetectsRepeatAcrossPerceptionEviction()
+    {
+        // The loop-break guard reads the same durable window: two Talk goals to
+        // the same target separated by heavy perception traffic must still be
+        // detected as a repeat (the ring would have evicted the first, hiding
+        // the loop).
+        var es = new EventStream();
+        es.Append(TalkGoal("Npc", T0));
+        for (int i = 0; i < 400; i++) es.Append(Noise(T0.AddSeconds(1)));
+        es.Append(TalkGoal("Npc", T0.AddSeconds(2)));
+        Assert.True(LlmGoalPolicy.HasRecentRepeatedGoalOfKinds(es, "Talk"));
+    }
 }

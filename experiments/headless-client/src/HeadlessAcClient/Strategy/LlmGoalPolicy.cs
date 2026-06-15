@@ -1170,8 +1170,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     private void RecordTalkedNpcs(EventStream events)
     {
-        foreach (var ge in events.Recent(EventStream.DefaultCapacity)
-                     .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+        // Read the last goal emissions from the DEDICATED durable window, not the
+        // perception-dominated ring: under heavy traffic the ring's "recent 10
+        // goals" is starved (goals evicted within seconds), so a just-Talked NPC
+        // could be missed and re-talked. The durable window holds the true last
+        // emissions. (Same eviction fix as CountRecentTalkGoalsToName.)
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text))
                      .Take(10))
         {
             if (!TryExtractTalkGoalTargetIdentity(ge.Text!, out var guid, out var name))
@@ -4151,10 +4156,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // collapse to one count while a Talk and a Use of the same object stay
     // distinct. A purely structural read of the bot's OWN emission history — no
     // server text, no game knowledge.
-    private static bool HasRecentRepeatedGoalOfKinds(EventStream events, params string[] verbPrefixes)
+    internal static bool HasRecentRepeatedGoalOfKinds(EventStream events, params string[] verbPrefixes)
     {
-        var recent = events.Recent(EventStream.DefaultCapacity)
-            .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+        // Last goal emissions from the DEDICATED durable window, not the
+        // perception-dominated ring: ring-starved "recent 10 goals" under-counts
+        // repeats made across a perception-heavy gap, so a real loop slips the
+        // guard. (Same eviction fix as CountRecentTalkGoalsToName.)
+        var recent = events.RecentGoalEmissions()
+            .Where(e => !string.IsNullOrEmpty(e.Text))
             .Take(10);
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         foreach (var ge in recent)
@@ -5170,8 +5179,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // DISTINCT guids get a short guid disambiguator. Mechanical structural
         // parse of the bot's own emission history — no server text, no game
         // knowledge.
-        var recentGoalEmits = hintPoolForRecency
-            .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
+        var recentGoalEmits = events.RecentGoalEmissions()
+            .Where(e => !string.IsNullOrEmpty(e.Text))
             .Take(10)
             .ToList();
         var talkByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
