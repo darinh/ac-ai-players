@@ -4183,13 +4183,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Talk to the same NPC from mis-counting toward a done contract's hand-in
     // attempts. Surfaced in ## Contracts so the LLM can SEE that a stage-3
     // contract has already had repeated hand-in attempts with no stage change.
-    private static int CountRecentTalkGoalsToName(EventStream events, string npcName, DateTimeOffset since)
+    internal static int CountRecentTalkGoalsToName(EventStream events, string npcName, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(npcName)) return 0;
         var n = 0;
-        foreach (var ge in events.Recent(EventStream.DefaultCapacity)
-                     .Where(e => e.Kind == EventKind.GoalEmitted && !string.IsNullOrEmpty(e.Text))
-                     .Take(24))
+        // Read from the DEDICATED durable goal-emission window, NOT the
+        // perception-dominated ring: re-talks to a turn-in NPC spread across
+        // minutes (with heavy perception/motion traffic between) were evicted
+        // from the 256-event ring before this count could reach the hand-in
+        // threshold, so the "DONE (stage 3)" note silently never rendered for a
+        // genuinely re-talked NPC. The window is already bounded and is
+        // time-scoped here by `since`.
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text)))
         {
             if (ge.Utc < since) continue;
             var txt = ge.Text!;
