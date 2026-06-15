@@ -81,6 +81,24 @@ internal sealed class TacticsExecutor
         IReadOnlySet<uint>? killedAttackGuids = null)
     {
         if (CurrentGoal is null) return null;
+        // Self-pronoun target: the LLM names the bot ITSELF as a generic
+        // pronoun — "self"/"me"/"myself"/"yourself" — when a goal acts ON the
+        // bot (e.g. the prompt rule "Use a 'double-click'/'read'/'activate' item
+        // on YOURSELF first, target = your own name"). No world object is named
+        // any of those, so a plain nearest-name resolve MISSES and the goal
+        // loops unresolved every tick. Resolve a pronoun self-reference to the
+        // bot's OWN snapshot. (The bot's own NAME or own GUID need no special
+        // case: the bot is in WorldState, so SelectorResolver already resolves
+        // those to self at distance 0 — and does so while still honouring any
+        // other selector constraints, which a blind name short-circuit would
+        // wrongly bypass on a name collision.) Excludes Attack (targeting self
+        // for combat is never intended). Mechanical self-reference; no game
+        // knowledge.
+        if (self is not null && CurrentGoal.Kind != GoalKind.Attack
+            && IsSelfPronounTarget(CurrentGoal.Target))
+        {
+            return self;
+        }
         // For an Attack goal exclude (a) corpses — a corpse keeps the slain
         // creature's name but is not attackable — and (b) recently-killed creature
         // guids: a slain creature can LINGER in the world model (no ObjectDelete,
@@ -136,6 +154,27 @@ internal sealed class TacticsExecutor
                 CurrentGoal.Target, world, self, _weenies, excludeCorpses: true);
         }
         return SelectorResolver.ResolveSingleNearest(CurrentGoal.Target, world, self, _weenies);
+    }
+
+    /// <summary>
+    /// True when <paramref name="target"/> is a generic self-PRONOUN
+    /// ("self"/"me"/"myself"/"yourself") the LLM uses to mean the bot itself.
+    /// No world object is named any of these, so without this such a target
+    /// resolves to nothing and an on-self goal loops unresolved. The bot's own
+    /// NAME and own GUID are deliberately NOT matched here — the bot is in
+    /// WorldState, so SelectorResolver resolves those to self natively while
+    /// still honouring other selector constraints (a blind name/guid
+    /// short-circuit would wrongly bypass those on a collision). Pure mechanical
+    /// self-reference; no game knowledge.
+    /// </summary>
+    private static bool IsSelfPronounTarget(Selector target)
+    {
+        var n = target.Name;
+        if (string.IsNullOrWhiteSpace(n)) return false;
+        return string.Equals(n, "self", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(n, "me", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(n, "myself", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(n, "yourself", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

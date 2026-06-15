@@ -645,6 +645,108 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void ResolveTarget_Use_SelfPronoun_ResolvesToSelf()
+    {
+        // Live repro (iter5-validate): the LLM emitted Use{target: name="self",
+        // item: "Letter From Home"} (per the "Use a readable/activate item on
+        // YOURSELF first" rule). No world object is named "self", so the target
+        // resolved to nothing (target=MISS) and the goal looped unresolved 8x.
+        // A self-PRONOUN target must resolve to the bot's own snapshot.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, ItemGuid, "Letter From Home", wcid: 30988u, itemType: 0x2000u, cellId: 0x86020001u,
+            containerGuid: SelfGuid, position: new Vector3(5f, 96f, 0f));
+
+        var self = ws.TryGet(SelfGuid);
+        foreach (var pronoun in new[] { "self", "Self", "me", "myself", "yourself" })
+        {
+            var tactics = TacticsWithGoal(new Goal
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Name = pronoun },
+                Item = new Selector { Name = "Letter From Home" },
+                Source = "test",
+            });
+            var resolved = tactics.ResolveTarget(ws, self, null);
+            Assert.NotNull(resolved);
+            Assert.Equal(SelfGuid, resolved!.Guid);
+        }
+    }
+
+    [Fact]
+    public void ResolveTarget_Use_OwnNameOrGuid_ResolveToSelf_ViaNativeResolution()
+    {
+        // The bot's own NAME and own GUID need NO self short-circuit: the bot is
+        // in WorldState, so SelectorResolver resolves them to self at distance 0
+        // (and, unlike a blind short-circuit, still honours other selector
+        // constraints — which is why the own-name/own-guid short-circuit was
+        // dropped). This locks that native behaviour.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+
+        var self = ws.TryGet(SelfGuid);
+        var byName = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Use, Target = new Selector { Name = "Headless" }, Source = "test",
+        });
+        Assert.Equal(SelfGuid, byName.ResolveTarget(ws, self, null)!.Guid);
+        var byGuid = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Use, Target = new Selector { Guid = SelfGuid }, Source = "test",
+        });
+        Assert.Equal(SelfGuid, byGuid.ResolveTarget(ws, self, null)!.Guid);
+    }
+
+    [Fact]
+    public void ResolveTarget_Attack_SelfReference_DoesNotTargetSelf()
+    {
+        // Self-targeting is meaningful for on-self verbs (Use/Wield), never for
+        // Attack — the self short-circuit must NOT apply, so Attack{self} stays
+        // unresolved (no attackable object is named "self") rather than the bot
+        // resolving its own guid as a combat target.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+
+        var self = ws.TryGet(SelfGuid);
+        var tactics = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "self" },
+            Source = "test",
+        });
+        Assert.Null(tactics.ResolveTarget(ws, self, null));
+    }
+
+    [Fact]
+    public void ResolveTarget_Use_NonSelfTarget_StillResolvesNormally()
+    {
+        // Regression: a non-self Use target is unaffected by the self
+        // short-circuit and resolves to the named world object as before.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        SeedSnapshot(ws, ItemGuid, "Forge", wcid: 9000u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(8f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Openable);
+
+        var self = ws.TryGet(SelfGuid);
+        var tactics = TacticsWithGoal(new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Forge" },
+            Source = "test",
+        });
+        Assert.Equal(ItemGuid, tactics.ResolveTarget(ws, self, null)!.Guid);
+    }
+
+    [Fact]
     public void ResolveTarget_Pickup_ExcludesCorpseObject_KeepsContentsAndUse()
     {
         // A corpse is a CONTAINER, not a pickable item — the server rejects
