@@ -102,6 +102,13 @@ internal static class OutdoorFrontierExplorer
     /// <param name="mobBiasMinDistanceMeters">A sighting closer than this to
     /// the bot is ignored for biasing (you are already there — biasing toward
     /// it would orbit).</param>
+    /// <param name="headingDominant">When true, the explicit heading bias is
+    /// COMMITTED rather than a near-tie steer: any forward-hemisphere candidate
+    /// may win regardless of unexplored score, so a caller-commanded bearing
+    /// drives sustained travel that way (cooled cells are still skipped, so
+    /// obstacle routing is preserved). When false (default) the heading only
+    /// resolves near-ties within headingBiasTieWindowMeters. Does not affect
+    /// the separate fallback-heading sweep, which is always near-tie.</param>
     internal static FrontierResult? ChooseFrontier(
         float selfGlobalX,
         float selfGlobalY,
@@ -119,7 +126,8 @@ internal static class OutdoorFrontierExplorer
         float headingBiasTieWindowMeters = 0f,
         float fallbackHeadingX = 0f,
         float fallbackHeadingY = 0f,
-        float fallbackHeadingTieWindowMeters = 0f)
+        float fallbackHeadingTieWindowMeters = 0f,
+        bool headingDominant = false)
     {
         // Build the reference set: visited samples that are both LOCAL
         // (near the bot) and RECENT. Relax to any-age local samples if
@@ -159,7 +167,10 @@ internal static class OutdoorFrontierExplorer
         // Candidates retained ONLY for the optional hunt-bias / heading-bias /
         // fallback-heading post-passes; not allocated on the common (no-bias)
         // path so that path is unchanged.
-        var headingBiasActive = headingBiasTieWindowMeters > 0f
+        // Heading bias is active when a heading vector was supplied AND either
+        // a near-tie window was given OR the caller asked for dominant mode
+        // (dominant ignores the window, so a caller may legitimately pass 0).
+        var headingBiasActive = (headingDominant || headingBiasTieWindowMeters > 0f)
             && (headingBiasX != 0f || headingBiasY != 0f);
         var fallbackHeadingActive = fallbackHeadingTieWindowMeters > 0f
             && (fallbackHeadingX != 0f || fallbackHeadingY != 0f);
@@ -219,31 +230,56 @@ internal static class OutdoorFrontierExplorer
             }
         }
 
-        // Optional heading-bias post-pass. When the caller supplied an
-        // LLM-chosen exploration heading (a unit bearing the LLM picked from
-        // raw coverage facts), prefer — among candidates within
-        // headingBiasTieWindowMeters of the best geometric score — the sector
-        // whose bearing best ALIGNS with that heading. Near-ties only, so an
-        // explicit heading steers WITHIN reasonable unexplored options and can
-        // never force a cooled cell or a clearly worse-explored direction. The
-        // LLM chooses WHERE to head; source only walks it. Takes precedence
-        // over the mob-bias below (an explicit directive beats remembered-mob
-        // memory). Pure bearing geometry; no game knowledge.
+        // Optional heading-bias post-pass. When the caller supplied a chosen
+        // exploration heading (a unit bearing), prefer the candidate sector
+        // whose bearing best ALIGNS with it. Eligibility depends on the mode:
+        //  - NEAR-TIE (headingDominant=false): only candidates within
+        //    headingBiasTieWindowMeters of the best geometric score are
+        //    eligible, so the steer resolves near-ties only and can never
+        //    override a clearly worse-explored direction.
+        //  - DOMINANT (headingDominant=true, an explicit commanded bearing):
+        //    any FORWARD-hemisphere candidate is eligible regardless of
+        //    unexplored score, so the commanded direction is COMMITTED for
+        //    sustained travel that way.
+        // Either way a COOLED cell is never eligible (it is excluded from
+        // `candidates`), so obstacle routing is preserved and a backward pick
+        // is never forced. Takes precedence over the mob-bias below (an
+        // explicit directive beats remembered-mob memory). Pure bearing
+        // geometry; no game knowledge.
         if (headingBiasActive && candidates is not null && best is FrontierResult)
         {
             FrontierResult? headBest = null;
             float headBestAlign = float.NegativeInfinity;
             float headBestScore = float.NegativeInfinity;
+            float headBestTie = float.NegativeInfinity;
             foreach (var c in candidates)
             {
-                if (c.Score < bestScore - headingBiasTieWindowMeters) continue;
                 var align = c.DirX * headingBiasX + c.DirY * headingBiasY;
+                // DOMINANT: any forward-hemisphere candidate (align >= 0) is
+                // eligible, so the commanded bearing wins over a more-unexplored
+                // sideways/backward sector. NEAR-TIE: only candidates within the
+                // score window are eligible. A backward-only forward arc (the
+                // commanded hemisphere fully cooled) leaves headBest null so the
+                // geometric best stands.
+                bool eligible = headingDominant
+                    ? align >= -1e-3f
+                    : c.Score >= bestScore - headingBiasTieWindowMeters;
+                if (!eligible) continue;
+                // Prefer best alignment; on an alignment tie prefer the more
+                // unexplored candidate; on a score tie too (common with no
+                // visited samples, e.g. SW vs SE for a SOUTH command) fall back
+                // to the same away-from-centroid bearing the geometric pass
+                // uses, so an equal-aligned rotation steers outward, not back
+                // toward explored ground.
                 if (align > headBestAlign + 1e-3f ||
-                    (MathF.Abs(align - headBestAlign) <= 1e-3f && c.Score > headBestScore))
+                    (MathF.Abs(align - headBestAlign) <= 1e-3f &&
+                        (c.Score > headBestScore + 1e-3f ||
+                         (MathF.Abs(c.Score - headBestScore) <= 1e-3f && c.Tie > headBestTie))))
                 {
                     headBest = new FrontierResult(c.Gx, c.Gy, c.DestCell, c.Sector);
                     headBestAlign = align;
                     headBestScore = c.Score;
+                    headBestTie = c.Tie;
                 }
             }
             if (headBest is not null) return headBest;
