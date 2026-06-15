@@ -336,6 +336,124 @@ public class OutdoorFrontierExplorerTests
     }
 
     [Fact]
+    public void Heading_Dominant_CommitsTowardCommandedBearing_OverClearlyBetterGeometry()
+    {
+        // Same setup as the near-tie test above: a tight western cluster makes
+        // EAST clearly the least-explored bearing. With headingDominant, a WEST
+        // command must COMMIT west (sustained directed travel toward a named
+        // distant target) even though east scores far better geometrically —
+        // while the same call WITHOUT dominance still yields the east pick.
+        var visited = new List<OutdoorFrontierExplorer.VisitedSample>
+        {
+            Sample(SelfX - 60f, SelfY, Now),
+            Sample(SelfX - 70f, SelfY + 10f, Now),
+            Sample(SelfX - 80f, SelfY - 10f, Now),
+        };
+        var w = OutdoorFrontierExplorer.TryHeadingVector("west")!.Value;
+
+        var nearTie = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, w.X, w.Y, 36f);
+        var dominant = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, w.X, w.Y, 36f, headingDominant: true);
+
+        Assert.NotNull(nearTie);
+        Assert.True(nearTie!.Value.GlobalX > SelfX,
+            "near-tie heading must NOT override the clearly-better east pick");
+        Assert.NotNull(dominant);
+        Assert.Equal(4, dominant!.Value.Sector); // sector 4 = -X = west
+        Assert.True(dominant.Value.GlobalX < SelfX,
+            $"dominant heading must commit WEST despite east being least-explored, got ({dominant.Value.GlobalX},{dominant.Value.GlobalY})");
+    }
+
+    [Fact]
+    public void Heading_Dominant_SkipsCooledCommandedCell_RoutesToNextBestForwardSector()
+    {
+        // A southern visited cluster makes NORTH the least-explored bearing, so
+        // a NEAR-TIE south heading steers NORTH (the wrong way) — only DOMINANT
+        // mode commits south. With the due-south step on cooldown the dominant
+        // pick must ROTATE to the next-best forward sector (SW/SE), still
+        // heading generally south (obstacle routing), where the near-tie pick
+        // does the opposite. The opposed near-tie result is what makes this test
+        // non-vacuous: it would fail if headingDominant were ignored.
+        var visited = new List<OutdoorFrontierExplorer.VisitedSample>
+        {
+            Sample(SelfX, SelfY - 100f, Now),
+            Sample(SelfX - 10f, SelfY - 90f, Now),
+            Sample(SelfX + 10f, SelfY - 110f, Now),
+        };
+        var south = OutdoorFrontierExplorer.TryHeadingVector("south")!.Value;
+
+        // Locate (and confirm) the due-south step under dominance, then cool it.
+        var open = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, NoCooldown, Now, Step, Locality, Recency,
+            null, 0f, 0f, south.X, south.Y, 36f, headingDominant: true);
+        Assert.NotNull(open);
+        Assert.Equal(6, open!.Value.Sector); // sector 6 = -Y = due south
+
+        var cooled = new HashSet<uint> { open.Value.DestCellId };
+        var routed = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, cooled, Now, Step, Locality, Recency,
+            null, 0f, 0f, south.X, south.Y, 36f, headingDominant: true);
+        var nearTieRouted = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, cooled, Now, Step, Locality, Recency,
+            null, 0f, 0f, south.X, south.Y, 36f); // headingDominant defaults false
+
+        Assert.NotNull(routed);
+        // Deterministic: SW(5) and SE(7) tie on alignment to SOUTH, then the
+        // unexplored-score tie-break decides. The cluster is offset so its
+        // nearest sample sits closer to SW, giving SE the higher score — so the
+        // alignment->score ordering must resolve to SE(7), not SW(5).
+        Assert.Equal(7, routed!.Value.Sector);
+        Assert.True(routed.Value.GlobalY < SelfY,
+            "the rotated dominant pick must still head generally south");
+        Assert.NotNull(nearTieRouted);
+        // Without dominance the heading only resolves near-ties: the eligible
+        // set is the unexplored NORTH arc, and alignment->score lands on NE(1)
+        // — the opposite of the dominant southward rotation.
+        Assert.Equal(1, nearTieRouted!.Value.Sector);
+        Assert.True(nearTieRouted.Value.GlobalY > SelfY,
+            "without dominance the near-tie heading steers toward the unexplored NORTH (so dominance is required)");
+    }
+
+    [Fact]
+    public void Heading_Dominant_ForwardArcAllCooled_DefersToGeometry()
+    {
+        // A southern visited cluster makes NORTH (sector 2) the least-explored
+        // bearing among the non-cooled sectors. With the ENTIRE forward (south)
+        // hemisphere cooled, the dominant steer must DECLINE and let the
+        // geometric best (due north) stand — NOT force the least-backward
+        // aligned pick (NE, sector 1), which is what a missing forward-arc guard
+        // would do. Asserting the exact geometric sector makes this non-vacuous.
+        var visited = new List<OutdoorFrontierExplorer.VisitedSample>
+        {
+            Sample(SelfX, SelfY - 100f, Now),
+            Sample(SelfX - 10f, SelfY - 90f, Now),
+            Sample(SelfX + 10f, SelfY - 110f, Now),
+        };
+        var cooled = new HashSet<uint>();
+        foreach (var dir in new[] { "south", "southeast", "southwest", "east", "west" })
+        {
+            var v = OutdoorFrontierExplorer.TryHeadingVector(dir)!.Value;
+            var pick = OutdoorFrontierExplorer.ChooseFrontier(
+                SelfX, SelfY, visited, NoCooldown, Now, Step, Locality, Recency,
+                null, 0f, 0f, v.X, v.Y, 36f, headingDominant: true);
+            Assert.NotNull(pick);
+            cooled.Add(pick!.Value.DestCellId);
+        }
+
+        var south = OutdoorFrontierExplorer.TryHeadingVector("south")!.Value;
+        var result = OutdoorFrontierExplorer.ChooseFrontier(
+            SelfX, SelfY, visited, cooled, Now, Step, Locality, Recency,
+            null, 0f, 0f, south.X, south.Y, 36f, headingDominant: true);
+        Assert.NotNull(result);
+        Assert.Equal(2, result!.Value.Sector); // due north — the geometric best, proving deferral (not NE forced-align)
+        Assert.True(result.Value.GlobalY > SelfY,
+            "deferred geometric pick must not be a forced southward step");
+    }
+
+    [Fact]
     public void Sweep_RedirectsTheTunnelingTrailGeometry_ViaFallbackChannel()
     {
         // Reproduce the cp-2363 tunnel: the bot has walked EAST, leaving a trail

@@ -9883,9 +9883,14 @@ internal sealed class HandshakeDriver : IDisposable
 
         // Optional LLM-chosen heading: when the active Explore goal named an
         // 8-way compass direction, convert it to a global-XY unit bearing and
-        // pass it as a near-tie steer. The LLM chose WHERE; the Motor only
-        // walks it (a near-tie bias that can never override a clearly-more-
-        // unexplored or cooled direction). Unknown/empty heading => no bias.
+        // pass it as a COMMITTED steer (headingDominant). The LLM chose WHERE
+        // to head; the Motor commits to that bearing — among forward-hemisphere
+        // candidates it picks the best-aligned one regardless of which is
+        // locally least-explored, so a directed Explore makes sustained
+        // progress that way instead of fanning toward the nearest frontier.
+        // Cooled cells stay excluded, so a blocked commanded cell still rotates
+        // to the next-best forward sector (obstacle routing), and the LLM
+        // re-deliberates on its own cadence. Unknown/empty heading => no bias.
         var headingVec = Strategy.OutdoorFrontierExplorer.TryHeadingVector(headingDirection);
 
         // Optional FALLBACK heading (cp-2363 anti-tunnel sweep): a mechanical
@@ -9906,7 +9911,8 @@ internal sealed class HandshakeDriver : IDisposable
             headingVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f,
             fallbackVec?.X ?? 0f,
             fallbackVec?.Y ?? 0f,
-            fallbackVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f);
+            fallbackVec is not null ? OutdoorFrontierHeadingBiasTieWindowMeters : 0f,
+            headingDominant: headingVec is not null);
         if (choice is not Strategy.OutdoorFrontierExplorer.FrontierResult ft)
             return null;
 
