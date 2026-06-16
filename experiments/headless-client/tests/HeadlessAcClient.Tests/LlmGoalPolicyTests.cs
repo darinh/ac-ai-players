@@ -4042,7 +4042,14 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
 
         Assert.Contains("## Beaten kinds", prompt);
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Beaten kinds", System.StringComparison.Ordinal));
+        // Scope to the beaten-kinds SECTION only (up to the next `## ` header,
+        // now the sibling `## Winnable kinds` capsule) so winnable kinds listed
+        // later in the tail don't leak into this beaten-only assertion.
+        int beatenStart = prompt.IndexOf("## Beaten kinds", System.StringComparison.Ordinal);
+        int beatenEnd = prompt.IndexOf("## ", beatenStart + 3, System.StringComparison.Ordinal);
+        var capsuleText = beatenEnd > beatenStart
+            ? prompt.Substring(beatenStart, beatenEnd - beatenStart)
+            : prompt.Substring(beatenStart);
         Assert.Contains("Drudge Slinker: fights 2, kills 0, deaths 2", capsuleText);
         // Winnable (has kills) and survived-loss (Deaths==0) kinds are excluded —
         // the veto would not drop an Attack on them.
@@ -4082,6 +4089,61 @@ public class LlmGoalPolicyTests
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.DoesNotContain("## Beaten kinds", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_RendersOnlyClearlyWinnableKinds()
+    {
+        // cp2918 (reduce-llm-call-volume): the LLM needs to see which kinds it is
+        // ALREADY winning against to push a kill-count grind commitment (the
+        // evidence is otherwise truncated). Clearly-winnable = kills recorded AND
+        // no death. A beaten kind (no kills) and an ambiguous kind (kills BUT a
+        // death) must NOT appear — only a clean win qualifies.
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
+            new CombatHistoryEntry("Mosswart", 8u, Kills: 3, Deaths: 1,
+                NearDeaths: 0, Fights: 4, LastOutcome: "kill"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Winnable kinds", prompt);
+        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
+        Assert.Contains("Black Rabbit: fights 12, kills 12, deaths 0", capsuleText);
+        Assert.DoesNotContain("Drudge Slinker", capsuleText); // no kills
+        Assert.DoesNotContain("Mosswart", capsuleText);       // has a death
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_SurvivesBodyHardCut()
+    {
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx);
+        Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
+        Assert.Contains("## Winnable kinds", tight);
+        Assert.Contains("Black Rabbit", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmittedWhenNoCleanWins()
+    {
+        // Only a beaten kind (no kills) → no winnable capsule.
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Winnable kinds", prompt);
     }
 
 
