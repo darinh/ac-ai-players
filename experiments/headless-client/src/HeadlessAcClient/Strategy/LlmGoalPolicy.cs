@@ -5844,9 +5844,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 var dist = MathF.Sqrt(dx * dx + dy * dy);
                 return $"~{dist:F0}u {Compass8(dx, dy)}";
             }
+            var anyContractBearing = false;
             foreach (var c in world.Contracts)
             {
                 var entry = new StringBuilder();
+                var hasBearingThisContract = false;
                 var name = OneLine(c.Name);
                 entry.AppendLine(name is null
                     ? $"  - contract {c.ContractId}: stage {c.Stage}"
@@ -5868,9 +5870,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // when the dat carried the location AND the bot's position is
                 // known. Raw facts; the LLM decides whether to travel.
                 if (BearingTo(c.QuestAreaWorldX, c.QuestAreaWorldY) is string areaAt)
+                {
                     entry.AppendLine($"      objective area: {areaAt} from you");
+                    hasBearingThisContract = true;
+                }
                 if (BearingTo(c.TurnInWorldX, c.TurnInWorldY) is string turnInAt)
+                {
                     entry.AppendLine($"      turn-in location: {turnInAt} from you");
+                    hasBearingThisContract = true;
+                }
 
                 // A stage-3 contract is already complete. If the bot has ALREADY
                 // Talked its turn-in NPC repeatedly SINCE the contract became
@@ -5902,12 +5910,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // so it must self-limit).
                 if (contractsShown > 0 && contractsChars + entry.Length > ContractsProtectedCharBudget)
                     break;
+                // Only now that this row is actually kept may its bearing license
+                // the direction instruction below — otherwise a budget-dropped row
+                // could leave the instruction referencing a bearing not shown.
+                if (hasBearingThisContract)
+                    anyContractBearing = true;
                 sb.Append(entry);
                 contractsChars += entry.Length;
                 contractsShown++;
             }
             if (contractsShown < world.Contracts.Count)
                 sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
+            if (anyContractBearing)
+                sb.AppendLine(
+                    "- to TRAVEL to an `objective area` or `turn-in location` above that is NOT yet in " +
+                    "`## Visible nearby`, do NOT emit an undirected `Explore` (it drifts and can stall against " +
+                    "terrain): emit `Explore{target: {name: \"<the place or the turn-in NPC>\"}, direction: " +
+                    "\"<the compass word from that bearing>\"}` — copy the bearing's compass word verbatim (one of " +
+                    "n/ne/e/se/s/sw/w/nw; a bearing ending `SW` means `direction: \"sw\"`) so the bot COMMITS that " +
+                    "heading and travels toward it; keep heading that same bearing each tick until it enters " +
+                    "`## Visible nearby`, then `Talk`/`Use`/`Give` it.");
             sb.AppendLine(
                 "- raw fact, not a recommendation: whether to pursue an objective " +
                 "or turn one in is your call.");
