@@ -259,4 +259,35 @@ public class CombatChainTests
             enabled: true, chainCount: 0, maxChain: 6);
         Assert.Null(chosen);
     }
+
+    [Fact]
+    public void ChooseChainTarget_SkipReason_ClassifiesEachNoMintCause()
+    {
+        // cp2925 diagnostic: the out-param overload reports WHY no target minted,
+        // so the chain-never-fires tempo gap is observable. Behavior (the returned
+        // target) is identical to the no-out-param overload.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, enabled: false, 0, 6, out var r1);
+        Assert.Equal("chain-disabled", r1);
+
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, true, chainCount: 6, maxChain: 6, out var r2);
+        Assert.Equal("budget-exhausted", r2);
+
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, System.Array.Empty<VisibleObjectProjection>(), null, 5, true, 0, 6, out var r3);
+        Assert.Equal("no-visible", r3);
+
+        LlmGoalPolicy.ChooseCombatChainTarget(NewIntent(new VisibleTagPredicate("monster")), oneQuarry, null, 5, true, 0, 6, out var r4);
+        Assert.Equal("no-active-commitment", r4);
+
+        // The committed kind ("Quarry") is not among the visible mobs.
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, new[] { Mob(0x8002, "Bystander", 5f) }, null, 5, true, 0, 6, out var r5);
+        Assert.Equal("no-matching-monster", r5);
+
+        // A target IS found -> no skip reason.
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, true, 0, 6, out var r6);
+        Assert.NotNull(chosen);
+        Assert.Null(r6);
+    }
 }
