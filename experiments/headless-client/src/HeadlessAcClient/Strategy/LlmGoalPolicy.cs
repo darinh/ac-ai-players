@@ -1970,8 +1970,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // reflexes. Bounded by MaxCombatChainAttacks (periodic forced LLM
         // re-check), the intent's completion predicate + deadline, and the
         // stuck-timeout.
+        var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out _);
+        var chainInterrupting = HasNewChainInterruptingEvent(events);
+        string? chainNoMintReason = null;
         if (currentGoal is null && !stuck
-            && !HasNewChainInterruptingEvent(events) && !pickerArrived && !pickerStartWake)
+            && !chainInterrupting && !pickerArrived && !pickerStartWake)
         {
             var chainTarget = ChooseCombatChainTarget(
                 _stack?.Top,
@@ -1980,10 +1983,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 world.Self.Level,
                 CombatChainEnabled,
                 _combatChainCount,
-                MaxCombatChainAttacks);
+                MaxCombatChainAttacks,
+                out var chainSkipReason);
             if (chainTarget is not null)
             {
                 _combatChainCount++;
+                _lastChainNoMintReason = null;
                 var commitmentSummary = _stack?.Top?.Completion.Summary() ?? "kill-count";
                 Console.WriteLine(
                     $"[combat-chain] mint #{_combatChainCount}/{MaxCombatChainAttacks} " +
@@ -2001,6 +2006,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         $"autonomous kill-intent decomposition (#{_combatChainCount}/{MaxCombatChainAttacks}): {commitmentSummary}",
                 };
             }
+            // Chain gate was OPEN with an active commitment yet nothing minted —
+            // surface the internal reason (e.g. no-matching-monster: the committed
+            // kind is not visible) so the chain-never-fires tempo gap is diagnosable.
+            if (chainCommitmentActive) chainNoMintReason = chainSkipReason ?? "no-target";
+        }
+        else if (chainCommitmentActive)
+        {
+            // A commitment is active but the chain GATE is closed — the LLM is
+            // consulted instead. Record WHICH gate starved the chain (e.g. a
+            // loot/dialog/zone interrupting-event after each kill, a sticky goal,
+            // stuck, or a picker wake) so the tempo gap is observable.
+            chainNoMintReason =
+                currentGoal is not null ? "gate:sticky-goal-redrive"
+                : stuck ? "gate:stuck"
+                : chainInterrupting ? "gate:chain-interrupting-event"
+                : pickerArrived ? "gate:picker-arrived"
+                : "gate:picker-start-wake";
+        }
+        if (chainNoMintReason is not null && chainNoMintReason != _lastChainNoMintReason)
+        {
+            _lastChainNoMintReason = chainNoMintReason;
+            Console.WriteLine(
+                $"[combat-chain] no-mint reason={chainNoMintReason} " +
+                $"commitment={_stack?.Top?.Completion.Summary() ?? "?"} " +
+                $"budget={_combatChainCount}/{MaxCombatChainAttacks}");
         }
 
         _lastCalledAtUtc = nowUtc;
@@ -7043,6 +7073,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // real LLM call is made (so each grind run gets a fresh budget).
     internal const int MaxCombatChainAttacks = 6;
     private int _combatChainCount;
+    // Throttle for the [combat-chain] no-mint diagnostic: only log when the
+    // reason CHANGES (the chain gate is evaluated ~4x/sec, so logging every tick
+    // would spam). Diagnostic-only state; no behavior.
+    private string? _lastChainNoMintReason;
 
     // On an HTTP 413 the adaptive prompt ceiling steps DOWN by this factor
     // rather than collapsing straight to the floor. A single 413 — e.g. from a
@@ -7610,13 +7644,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int chainCount,
         int maxChain,
         float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits)
-    {
-        if (!enabled) return null;
-        if (chainCount >= maxChain) return null; // periodic forced LLM re-check
-        if (visible is null || visible.Count == 0) return null;
-        if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) return null;
+        => ChooseCombatChainTarget(
+            top, visible, history, selfLevel, enabled, chainCount, maxChain,
+            out _, perceptionRadius);
 
-        return visible
+    /// <summary>
+    /// Overload that also reports WHY no target was minted (diagnostic only — the
+    /// returned target is identical). <paramref name="skipReason"/> is null when a
+    /// target is returned, else a stable tag (chain-disabled / budget-exhausted /
+    /// no-visible / no-active-commitment / no-matching-monster) so the
+    /// chain-never-fires tempo gap is observable in the log. Pure classification;
+    /// no behavior change, no game knowledge.
+    /// </summary>
+    internal static VisibleObjectProjection? ChooseCombatChainTarget(
+        Intent.Intent? top,
+        IReadOnlyList<VisibleObjectProjection>? visible,
+        IReadOnlyList<CombatHistoryEntry>? history,
+        int? selfLevel,
+        bool enabled,
+        int chainCount,
+        int maxChain,
+        out string? skipReason,
+        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits)
+    {
+        skipReason = null;
+        if (!enabled) { skipReason = "chain-disabled"; return null; }
+        if (chainCount >= maxChain) { skipReason = "budget-exhausted"; return null; } // periodic forced LLM re-check
+        if (visible is null || visible.Count == 0) { skipReason = "no-visible"; return null; }
+        if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) { skipReason = "no-active-commitment"; return null; }
+
+        var target = visible
             // Match the LLM-decided Hunt decomposition's target set
             // (NoQuestKnowledgePolicy attacks any visible, non-corpse, non-beaten
             // `IsMonster`) AND the self-defense set (anything actively
@@ -7636,7 +7693,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Where(v => !IsBeatenKind(history, v.Wcid, v.Name, selfLevel))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
+        if (target is null) skipReason = "no-matching-monster";
+        return target;
     }
+
 
     /// <summary>
     /// Renders the inline raw-record annotation for a visible monster (or
