@@ -20,11 +20,13 @@ public class SystemMessagesTests
     // Status lines (corpse location, advancement, recall, etc.) arrive on the
     // Broadcast channel (ChatMessageType 0x00) — live-confirmed: the server's
     // "Welcome to Asheron's Call ..." status banner is delivered on chatType 0x0.
-    // This is NOT one of the excluded high-frequency combat/spell channels.
     private const int StatusChannelBroadcast = 0x00;
-    // Per-action combat/spell feedback channels (ChatMessageType Combat=0x06,
-    // Magic=0x07, Spellcasting=0x11) — the high-frequency flood the durable
-    // store must exclude so it cannot evict a rare status line.
+    // High-frequency per-action feedback channels (ChatMessageType Combat=0x06,
+    // Magic=0x07 spell casts/resists, Spellcasting=0x11 procs). These are NOT
+    // excluded from the durable store — channel-aware eviction keeps a single
+    // channel's flood from crowding out a cross-channel status line. (Magic 0x07
+    // also carries low-frequency high-value status, e.g. an experience/penalty
+    // line — live-observed — so it must not be excluded wholesale.)
     private const int CombatChannel = 0x06;
     private const int MagicChannel = 0x07;
     private const int SpellcastingChannel = 0x11;
@@ -89,26 +91,54 @@ public class SystemMessagesTests
     }
 
     [Fact]
-    public void ServerMessages_HighVolumeCombatChannel_DoesNotEvictStatusLine()
+    public void ServerMessages_SingleChannelFlood_DoesNotEvictCrossChannelStatus()
     {
         var es = new EventStream();
         // A rare, high-value status line on the Broadcast channel (0x00).
         es.Append(ServerMsg("Your corpse is located at (43.2N, 36.4E)."));
-        // A burst of DISTINCT per-action messages on the real high-frequency
-        // combat/magic/spellcasting channels (ChatMessageType 0x06/0x07/0x11) —
-        // the kind of feedback that floods every combat tick and would blow past
-        // the cap-6 store if it were captured.
-        int[] floodChannels = { CombatChannel, MagicChannel, SpellcastingChannel };
+        // A burst of DISTINCT spell-cast/resist lines on the Magic channel (0x07)
+        // — the kind of flood a caster-mob fight produces. Channel-aware eviction
+        // must shed these among THEMSELVES, never the cross-channel status line.
         for (int i = 0; i < 18; i++)
+            es.Append(CombatMsg($"You resist the spell cast by attacker {i}.", MagicChannel));
+
+        // The single-channel flood must NOT have evicted the cross-channel status.
+        Assert.Contains(es.RecentServerMessages(),
+            e => e.ChatType == StatusChannelBroadcast && e.Text!.Contains("corpse is located"));
+        // The flood channel is retained too (bounded), but bounded by the cap.
+        Assert.True(es.RecentServerMessages().Count <= 6);
+    }
+
+    [Fact]
+    public void ServerMessages_MixedChannelFlood_ProtectsEachMinorityStatusLine()
+    {
+        var es = new EventStream();
+        // Two cross-channel status singletons...
+        es.Append(ServerMsg("Your corpse is located at (43.2N, 36.4E)."));      // 0x00
+        es.Append(CombatMsg("Your experience has reduced your Vitae penalty!", MagicChannel)); // 0x07 (single)
+        // ...then a heavy combat flood interleaving the Combat (0x06) and
+        // Spellcasting (0x11) channels (the most-represented channels).
+        int[] floodChannels = { CombatChannel, SpellcastingChannel };
+        for (int i = 0; i < 20; i++)
             es.Append(CombatMsg($"You hit the target for {i} points of damage.",
                 floodChannels[i % floodChannels.Length]));
 
-        // The combat burst must NOT have evicted the status line...
-        Assert.Contains(es.RecentServerMessages(), e => e.Text!.Contains("corpse is located"));
-        // ...and none of the high-frequency combat/spell channels are retained.
-        Assert.DoesNotContain(es.RecentServerMessages(),
-            e => e.ChatType == CombatChannel || e.ChatType == MagicChannel
-                 || e.ChatType == SpellcastingChannel);
+        // Both minority-channel status singletons survive the Combat flood.
+        Assert.Contains(es.RecentServerMessages(),
+            e => e.ChatType == StatusChannelBroadcast && e.Text!.Contains("corpse is located"));
+        Assert.Contains(es.RecentServerMessages(),
+            e => e.ChatType == MagicChannel && e.Text!.Contains("Vitae"));
+    }
+
+    [Fact]
+    public void ServerMessages_MagicChannelStatusLine_IsRetained()
+    {
+        // The Magic channel (0x07) carries low-frequency high-value status lines
+        // (live-observed) — they must be captured, NOT filtered out.
+        var es = new EventStream();
+        es.Append(CombatMsg("Your experience has reduced your Vitae penalty!", MagicChannel));
+        Assert.Contains(es.RecentServerMessages(),
+            e => e.ChatType == MagicChannel && e.Text!.Contains("Vitae"));
     }
 
     [Fact]
