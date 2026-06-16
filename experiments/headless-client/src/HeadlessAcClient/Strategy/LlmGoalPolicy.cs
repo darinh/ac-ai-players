@@ -6767,6 +6767,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
         }
 
+        // ── ## Beaten kinds capsule (protected-tail cut-proof) ──
+        // The body combat-history lines (the bot's own per-kind outcomes) render
+        // in the body and are dropped by the dense-scene body hard-cut. Live:
+        // with them gone, the LLM repeatedly ordered Attack on a kind its own
+        // ledger marks beaten; the Motor's beaten-kind veto dropped each Attack
+        // ("deferring to fallback"), wasting the decision. Re-surface the kinds
+        // that veto would drop — the SAME source (CombatHistoryFull) and the SAME
+        // predicate it uses (a recorded death + IsBeatenKind, lethal-retestable
+        // only once out-levelled) — in the PROTECTED salience tail. Raw own-ledger
+        // counts + the mechanical veto consequence; no advice, the LLM owns the
+        // next action. Gated, so it costs nothing when there are no beaten kinds.
+        if (world.CombatHistoryFull is { Count: > 0 } fullLedger)
+        {
+            var beatenKinds = fullLedger
+                .Where(h => h.Deaths > 0 && IsBeatenKind(
+                    world.CombatHistoryFull, h.Wcid, h.Name, world.Self.Level,
+                    lethalRetestableWhenOutleveled: true))
+                .ToList();
+            if (beatenKinds.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine(
+                    "## Beaten kinds (your own combat ledger; the Motor DECLINES an offensive Attack you order on a " +
+                    "kind below — it has killed you with 0 kills for you — and allows fighting back only when that " +
+                    "kind is attacking you now)");
+                foreach (var h in beatenKinds)
+                    sb.AppendLine(
+                        $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
+                        $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective} (last: {h.LastOutcome})");
+            }
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);

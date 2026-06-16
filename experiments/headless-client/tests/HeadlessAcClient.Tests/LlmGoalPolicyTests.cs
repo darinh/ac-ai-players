@@ -3952,6 +3952,75 @@ public class LlmGoalPolicyTests
         Assert.Contains("Wield it to load): Arrows", capsuleText);
     }
 
+    private static WorldStateProjection BuildBeatenLedgerWorld(params CombatHistoryEntry[] full) =>
+        BuildXpWorld(69296, 0) with { CombatHistoryFull = full };
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_RendersBeatenButNotWinnableKinds()
+    {
+        // cp2916: the body combat-history lines are dropped by the dense-scene
+        // body hard-cut, so the LLM keeps ordering Attack on a kind its own
+        // ledger marks beaten and the Motor veto drops it. Re-surface the
+        // beaten kinds (the SAME predicate the veto uses: a recorded death +
+        // IsBeatenKind, not out-levelled) in the protected tail. A kind with
+        // kills (winnable) or a survived loss (Deaths==0) must NOT appear.
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
+            new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
+                NearDeaths: 3, Fights: 3, LastOutcome: "near-death"),
+            // A lethal loss the bot has since OUT-LEVELLED (loss at level 5, bot
+            // now level 9): the veto re-tests it (lethalRetestableWhenOutleveled)
+            // so it is no longer beaten and must NOT appear.
+            new CombatHistoryEntry("Outlevelled Kind", 99u, Kills: 0, Deaths: 1,
+                NearDeaths: 0, Fights: 1, LastOutcome: "death", MaxLossBotLevel: 5));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Beaten kinds", prompt);
+        var capsuleText = prompt.Substring(prompt.IndexOf("## Beaten kinds", System.StringComparison.Ordinal));
+        Assert.Contains("Drudge Slinker: fights 2, kills 0, deaths 2", capsuleText);
+        // Winnable (has kills) and survived-loss (Deaths==0) kinds are excluded —
+        // the veto would not drop an Attack on them.
+        Assert.DoesNotContain("Black Rabbit", capsuleText);
+        Assert.DoesNotContain("Mosswart", capsuleText);
+        // An out-levelled lethal kind is re-testable, so it is excluded too.
+        Assert.DoesNotContain("Outlevelled Kind", capsuleText);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_SurvivesBodyHardCut()
+    {
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
+        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx);
+        // Body sections cut, but the beaten-kinds capsule survived in the tail.
+        Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
+        Assert.Contains("## Beaten kinds", tight);
+        Assert.Contains("Drudge Slinker", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_OmittedWhenNoBeatenKinds()
+    {
+        // A ledger of only winnable / survived-loss kinds yields no capsule.
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Beaten kinds", prompt);
+    }
+
 
     [Fact]
     public void BuildUserPrompt_RetainsEarlyExitPopup_UnderLaterPopupFlood()
