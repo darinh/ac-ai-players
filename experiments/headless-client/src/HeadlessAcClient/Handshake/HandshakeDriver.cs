@@ -1936,6 +1936,16 @@ internal sealed class HandshakeDriver : IDisposable
                                     worldState.SeedSelfAttributes(pdAttrs);
                                 bool seededSkills = pdesc.Skills is { Count: > 0 } pdSkills &&
                                     worldState.SeedSelfSkills(pdSkills);
+                                // Raisable = wire AdvancementClass Trained(2)/
+                                // Specialized(3): the only skills RaiseSkill can
+                                // target. Surface the count (and names) here so a
+                                // "skills=N raisable=0" login — a character with no
+                                // trained/specialized skills — is diagnosable from
+                                // the log rather than presenting only as a silently
+                                // absent `trained skills` prompt projection.
+                                var raisableSkillNames = pdesc.Skills is { Count: > 0 } rsk
+                                    ? rsk.Where(s => s.IsRaisable).Select(s => s.Name).ToList()
+                                    : new List<string>();
                                 Console.WriteLine(
                                     $"[playerdesc] login bundle: level={pdesc.Level?.ToString() ?? "?"}" +
                                     $"{(seededLvl ? "" : "(skip)")} " +
@@ -1946,7 +1956,9 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"attrs={pdesc.Attributes?.Count ?? 0}" +
                                     $"{(seededAttrs ? "" : "(skip)")} " +
                                     $"skills={pdesc.Skills?.Count ?? 0}" +
-                                    $"{(seededSkills ? "" : "(skip)")}");
+                                    $"{(seededSkills ? "" : "(skip)")} " +
+                                    $"raisable={raisableSkillNames.Count}" +
+                                    $"{(raisableSkillNames.Count > 0 ? $" ({string.Join(",", raisableSkillNames)})" : "")}");
                                 MaybeEmitSelfProgress(ref lastObservedUnspentXp, worldState, eventStream);
                             }
                             // fellowship-perception: route the server's

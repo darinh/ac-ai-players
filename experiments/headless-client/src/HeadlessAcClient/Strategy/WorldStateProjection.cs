@@ -718,7 +718,7 @@ internal sealed record WorldStateProjection
         if (self.SelfSkills is { } ss)
         {
             var raisable = ss
-                .Where(s => s.AdvancementClass is 2u or 3u)
+                .Where(s => s.IsRaisable)
                 .OrderBy(s => s.Name, StringComparer.Ordinal)
                 .Select(s => new SelfSkillProjection
                 {

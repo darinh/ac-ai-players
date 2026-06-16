@@ -548,7 +548,17 @@ internal sealed record PdAttribute(string Name, uint Base, uint Ranks, uint Expe
 /// attribute contribution to the displayed skill value).
 /// </summary>
 internal sealed record PdSkill(
-    string Name, uint Id, uint AdvancementClass, uint Ranks, uint InitLevel, uint ExperienceSpent);
+    string Name, uint Id, uint AdvancementClass, uint Ranks, uint InitLevel, uint ExperienceSpent)
+{
+    /// <summary>
+    /// True when the wire <see cref="AdvancementClass"/> is Trained(2) or
+    /// Specialized(3) — the only classes the server lets a `RaiseSkill` spend
+    /// target. Single source of truth for "raisable" (the prompt projection
+    /// and the login diagnostic both read it) so the wire-enum predicate is
+    /// not duplicated.
+    /// </summary>
+    public bool IsRaisable => AdvancementClass is 2u or 3u;
+}
 
 /// <summary>
 /// Vendor trade terms from a GameEventApproachVendor (0x0062) — the event the

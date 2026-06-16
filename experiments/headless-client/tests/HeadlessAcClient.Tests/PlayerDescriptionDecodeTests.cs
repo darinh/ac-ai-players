@@ -311,4 +311,19 @@ public class PlayerDescriptionSeedTests
         Assert.False(ws.SeedSelfAttributes(new[] { new PdAttribute("self", 10u, 0u, 0u) }));
         Assert.False(ws.SeedSelfSkills(new[] { new PdSkill("Healing", 21u, 2u, 0u, 0u, 0u) }));
     }
+
+    [Theory]
+    [InlineData(0u, false)]  // Inactive
+    [InlineData(1u, false)]  // Untrained
+    [InlineData(2u, true)]   // Trained
+    [InlineData(3u, true)]   // Specialized
+    public void PdSkill_IsRaisable_TrueOnlyForTrainedOrSpecialized(uint advancementClass, bool expected)
+    {
+        // IsRaisable is the single source of truth for "RaiseSkill can target
+        // this skill" — read by both the `trained skills` prompt projection and
+        // the login diagnostic. Only the wire SkillAdvancementClass Trained(2)
+        // and Specialized(3) are raisable; Inactive(0)/Untrained(1) are not.
+        var skill = new PdSkill("anything", 1u, advancementClass, 0u, 0u, 0u);
+        Assert.Equal(expected, skill.IsRaisable);
+    }
 }
