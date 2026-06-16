@@ -10754,6 +10754,81 @@ public class LlmGoalPolicyTests
         Assert.Contains("RaiseAttribute, RaiseVital, and RaiseSkill are executable right now", withPrompt);
     }
 
+    private static WorldStateProjection BuildWorldWithTrainedSkill() =>
+        BuildXpWorld(69296, 5475) with
+        {
+            Self = BuildXpWorld(69296, 5475).Self with
+            {
+                TrainedSkills = new[]
+                {
+                    new SelfSkillProjection
+                    {
+                        Name = "two handed combat", Advancement = "trained", RaisedRanks = 0,
+                    },
+                },
+            },
+        };
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedSelfCapsule_RendersCoreFactsInSalienceTail()
+    {
+        // cp2914: the full `## Self` section renders in the body just after the
+        // ~19KB RULES preamble and is dropped when the request-size fitter's
+        // body hard-cut lands right after the preamble (a dense scene). The
+        // decision-critical compact self facts must ALSO render in the protected
+        // salience tail so they always survive. The capsule must appear AFTER
+        // the body `## Self` and carry the trained skills.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithTrainedSkill(), new EventStream(), null);
+        var nl = prompt.Contains("\r\n") ? "\r\n" : "\n";
+
+        Assert.Contains("## Self (core state — re-surfaced", prompt);
+        // The trained skill renders TWICE: body `## Self` + protected capsule.
+        int bodySelf = prompt.IndexOf(nl + "## Self" + nl, System.StringComparison.Ordinal);
+        int capsule = prompt.IndexOf("## Self (core state", System.StringComparison.Ordinal);
+        Assert.True(bodySelf >= 0 && capsule > bodySelf,
+            "the protected capsule must render after the body ## Self (i.e. in the salience tail)");
+        Assert.Contains("two handed combat (trained, raised 0)",
+            prompt.Substring(capsule));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedSelfCapsule_SurvivesBodyHardCut()
+    {
+        // The whole point: when the body is hard-cut past the body `## Self`,
+        // the trained skills must STILL reach the LLM via the protected capsule.
+        var world = BuildWorldWithTrainedSkill();
+        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodySelfIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        Assert.True(bodySelfIdx > 0, "body ## Self should render in the untruncated prompt");
+
+        // A ceiling at the body `## Self` position forces the body hard-cut to
+        // land before it (the protected tail is reserved first, then the body is
+        // fit into the remainder).
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, promptCeiling: bodySelfIdx);
+
+        Assert.True(tight.Length <= bodySelfIdx, "the tight ceiling must be respected");
+        // The body `## Self` (its `- name:` line) was cut away...
+        Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
+        // ...but the protected capsule and its trained skills survived.
+        Assert.Contains("## Self (core state — re-surfaced", tight);
+        Assert.Contains("two handed combat (trained, raised 0)", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedSelfCapsule_OmittedWhenNoCoreFactsKnown()
+    {
+        // No attributes/skills/deaths and unknown health => no core facts, so the
+        // capsule header must be rolled back (it costs nothing until data exists).
+        var world = BuildXpWorld(69296, 0) with
+        {
+            Self = BuildXpWorld(69296, 0).Self with { HealthFraction = null, HealthCurrent = null },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Self (core state", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_SurfacesSurvivalFacts_WhenMaxHpAndDeathsKnown()
     {
