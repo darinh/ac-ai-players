@@ -1804,6 +1804,16 @@ public class LlmGoalPolicyTests
         // RaiseAttribute verb now uses a neutral <attribute> placeholder.
         Assert.Contains("RaiseAttribute{target: {name: \"<attribute>\"}", prompt);
         Assert.DoesNotContain("RaiseAttribute{target: {name: \"endurance\"}", prompt);
+
+        // cp2912: the RaiseSkill verb now hard-guards the target. Live evidence
+        // (a melee bot with unspent XP but no `trained skills` list surfaced)
+        // showed the LLM passing its WIELDED WEAPON's item name to RaiseSkill 5x
+        // in a row; the motor rejected each as an unknown skill. The verb text
+        // must forbid a weapon ITEM name and forbid RaiseSkill entirely when no
+        // `trained skills` list is present, so a missing projection can never
+        // drive that loop.
+        Assert.Contains("NEVER a weapon ITEM's name", prompt);
+        Assert.Contains("if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill`", prompt);
     }
 
     [Fact]
@@ -10693,10 +10703,55 @@ public class LlmGoalPolicyTests
         // cp-2336: re-surface the unspent-XP fact in the most decision-proximate
         // slot (end of prompt) so the Raise* verbs compete with the parked local
         // affordance. Facts only; the amount is echoed and the verbs named.
+        // cp2912: this world has no `trained skills` list, so RaiseSkill is NOT
+        // advertised as executable here (it would contradict the SPEND XP rule's
+        // RaiseSkill guard); only the attribute/vital verbs render.
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
         Assert.Contains("## Unspent XP", prompt);
         Assert.Contains("5475 unspent experience available this tick", prompt);
-        Assert.Contains("RaiseAttribute, RaiseVital, and RaiseSkill are executable right now", prompt);
+        Assert.Contains("RaiseAttribute and RaiseVital are executable right now", prompt);
+        Assert.DoesNotContain("RaiseSkill are executable right now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXp_AdvertisesRaiseSkillOnlyWhenTrainedSkillsPresent()
+    {
+        // cp2912: the experience cue and the `## Unspent XP` capsule both named
+        // RaiseSkill as an executable spend verb whenever unspent XP > 0, even
+        // when `## Self` surfaced NO `trained skills` list. In that exact shape
+        // (the live failure: a melee bot with unspent XP but an empty trained-
+        // skills projection) the prompt then contradicted the SPEND XP rule's
+        // RaiseSkill guard ("if no trained skills list, do NOT use RaiseSkill"),
+        // and the bot looped RaiseSkill on its wielded weapon's item name. Both
+        // cues must drop RaiseSkill when no trained skills are present and only
+        // advertise it when at least one IS present.
+        var withoutSkills = BuildXpWorld(69296, 5475);
+        var withoutPrompt = LlmGoalPolicy.BuildUserPrompt(withoutSkills, new EventStream(), null);
+
+        // No trained skills: neither cue names RaiseSkill as executable.
+        Assert.DoesNotContain("RaiseAttribute/RaiseVital/RaiseSkill", withoutPrompt);
+        Assert.Contains("via RaiseAttribute/RaiseVital — see SPEND XP", withoutPrompt);
+        Assert.DoesNotContain("RaiseSkill are executable right now", withoutPrompt);
+        Assert.Contains("RaiseAttribute and RaiseVital are executable right now", withoutPrompt);
+
+        var withSkills = BuildXpWorld(69296, 5475) with
+        {
+            Self = BuildXpWorld(69296, 5475).Self with
+            {
+                TrainedSkills = new[]
+                {
+                    new SelfSkillProjection
+                    {
+                        Name = "melee defense", Advancement = "trained", RaisedRanks = 0,
+                    },
+                },
+            },
+        };
+        var withPrompt = LlmGoalPolicy.BuildUserPrompt(withSkills, new EventStream(), null);
+
+        // A trained skill IS present: both cues advertise RaiseSkill again.
+        Assert.Contains("RaiseAttribute/RaiseVital/RaiseSkill", withPrompt);
+        Assert.Contains("RaiseAttribute, RaiseVital, and RaiseSkill are executable right now", withPrompt);
     }
 
     [Fact]
