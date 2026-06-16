@@ -5830,16 +5830,50 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // NO recommendation about which attribute to raise; no game knowledge.
             var endcapSwingsLanded = world.CumulativeSwingsLanded;
             var endcapSwingsEvaded = world.CumulativeSwingsEvaded;
-            if (endcapSwingsLanded + endcapSwingsEvaded > 0)
+            var endcapHasSwings = endcapSwingsLanded + endcapSwingsEvaded > 0;
+            if (endcapHasSwings)
                 spendFacts.Add(
                     $"your melee swings this session have landed {endcapSwingsLanded} time(s) and " +
                     $"been evaded {endcapSwingsEvaded} time(s)");
             if (spendFacts.Count > 0)
                 sb.AppendLine($"- raw fact: {string.Join("; ", spendFacts)}.");
-            sb.AppendLine(
-                "- raw fact, not a recommendation: see `## Self` above for your trained skills, and " +
-                "the SPEND XP rule for what each verb does and how attributes affect survivability " +
-                "versus offense. Whether, how much, and which to raise is your call.");
+            // cp2924: pointing at the SPEND XP rule (a far-away preamble bullet) is
+            // weaker than re-stating its symptom->lever mapping AT the spend
+            // decision (the cp-2336/2387 salience finding; cp2920 precedent for
+            // re-stating an existing rule imperatively in a capsule). Live the bot
+            // read its OWN evade-heavy split yet poured XP into endurance/strength
+            // (HP/damage) and kept dying to the kind it could not hit, because the
+            // mapping lived only in the distant rule. Re-state that EXISTING mapping
+            // here, tied to the bot's own facts above; it names only the attribute/
+            // skill vocabulary the SPEND XP rule already uses (no NPC/quest/item/
+            // landblock name), and the allocation stays the LLM's call. Gated on the
+            // bot having actually swung (so the text never references a landed-vs-
+            // evaded split that did NOT render), and the weapon-skill clause mirrors
+            // the rule's RaiseSkill guard (RaiseSkill is server-rejected when
+            // `## Self` lists no trained skills).
+            if (endcapHasSwings)
+            {
+                var hasTrainedSkill = world.Self.TrainedSkills is { Count: > 0 };
+                var accuracyLevers = hasTrainedSkill
+                    ? "your trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill` using a name from your `trained skills` in `## Self`) and coordination"
+                    : "coordination (`## Self` lists no `trained skills`, so `RaiseSkill` is unavailable here — raise the attribute)";
+                var hurtLever = hasTrainedSkill ? "strength / your weapon skill" : "strength";
+                sb.AppendLine(
+                    "- apply the SPEND XP rule to YOUR facts above (which to raise stays your call): swings being " +
+                    $"EVADED (the landed-vs-evaded split) is an ACCURACY/miss problem — driven by {accuracyLevers}, " +
+                    "and NOT fixed by endurance/health (which only raise max HP) or by strength alone (which only adds " +
+                    $"damage once a hit lands). Being OUT-DAMAGED after your hits LAND points to {hurtLever}; dying " +
+                    "FAST points to endurance/health. Pouring XP into max HP while your swings keep evading does NOT " +
+                    "fix accuracy — read your own landed-vs-evaded and kills above and raise the lever your evidence " +
+                    "points to.");
+            }
+            else
+            {
+                sb.AppendLine(
+                    "- raw fact, not a recommendation: see `## Self` above for your trained skills, and " +
+                    "the SPEND XP rule for what each verb does and how attributes affect survivability " +
+                    "versus offense. Whether, how much, and which to raise is your call.");
+            }
         }
 
         // ── ## Contracts (tracked-objective perception, end-of-prompt capsule) ─
