@@ -248,6 +248,65 @@ public class IntentStackWiringTests
     }
 
     [Fact]
+    public void Applier_TryApply_FullStackWithTerminalRoot_ReapsThenPushSucceeds()
+    {
+        // Regression (council d8c4ca5): the LLM path goes through TryApply's
+        // dry-run mirror, which must simulate IntentStack.ReapTerminalFrames —
+        // otherwise a full stack with a buried Completed root permanently
+        // RejectedOverflow's every push (incl. compiling a quest), even though a
+        // finished frame is reclaimable. Direct IntentStack.TryPush already reaps;
+        // this proves the applier mirror reaps in lockstep.
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        var alloc = new IntentIdAllocator();
+        var stack = new IntentStack(maxDepth: 3);
+        stack.TryPush(new Intent { Id = "i-001", Kind = "done-root", Status = IntentLifecycle.Completed,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-002", Kind = "live-a", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-003", Kind = "live-b", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b }); // full at depth 3
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf(kind: "new-quest"), Reason = "compile quest" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(3, stack.Depth);
+        Assert.Equal("new-quest", stack.Top!.Kind);
+        Assert.DoesNotContain("done-root", stack.Frames.Select(f => f.Kind));
+    }
+
+    [Fact]
+    public void Applier_TryApply_FullStackAllActive_StillRejectsOverflow()
+    {
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        var alloc = new IntentIdAllocator();
+        var stack = new IntentStack(maxDepth: 3);
+        stack.TryPush(new Intent { Id = "i-001", Kind = "a", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-002", Kind = "b", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-003", Kind = "c", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf(kind: "d"), Reason = "x" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+
+        // Nothing terminal to reclaim -> the overflow guard still rejects the batch.
+        Assert.Equal(BatchApplyResult.RejectedOverflow, outcome.Result);
+        Assert.Equal(3, stack.Depth);
+    }
+
+    [Fact]
     public void Applier_TryApply_PushOnlyBatch_ToleratesStaleRevision_FromRootDeadlineBlock()
     {
         // Faithfully reproduce the ONLY stale-revision source that reaches the

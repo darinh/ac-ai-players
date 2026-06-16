@@ -49,6 +49,107 @@ public class IntentStackTests
         Assert.Equal("root",  s.Root!.Kind);
     }
 
+    private static Intent Framed(string id, string kind, IntentLifecycle status, IntentBaseline baseline) =>
+        new()
+        {
+            Id = id, Kind = kind, Rationale = $"test:{kind}", Status = status,
+            Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        };
+
+    [Fact]
+    public void ReapTerminalFrames_RemovesBuriedCompletedAndExpired_KeepsActiveAndBlocked()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack();
+        s.TryPush(Framed("i-001", "done-root",       IntentLifecycle.Completed, b));
+        s.TryPush(Framed("i-002", "live-quest",      IntentLifecycle.Active,    b));
+        s.TryPush(Framed("i-003", "expired",         IntentLifecycle.Expired,   b));
+        s.TryPush(Framed("i-004", "blocked-marker",  IntentLifecycle.Blocked,   b));
+        s.TryPush(Framed("i-005", "live-top",        IntentLifecycle.Active,    b));
+
+        var removed = s.ReapTerminalFrames();
+
+        Assert.Equal(2, removed);
+        Assert.Equal(3, s.Depth);
+        var kinds = s.Frames.Select(f => f.Kind).ToList();
+        Assert.Equal(new[] { "live-quest", "blocked-marker", "live-top" }, kinds);
+    }
+
+    [Fact]
+    public void TryPush_AtMaxDepth_ReapsBuriedTerminalFrame_ThenSucceeds()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack(maxDepth: 3);
+        s.TryPush(Framed("i-001", "done-root",  IntentLifecycle.Completed, b)); // terminal root
+        s.TryPush(Framed("i-002", "live-quest", IntentLifecycle.Active,    b));
+        s.TryPush(Framed("i-003", "live-grind", IntentLifecycle.Active,    b)); // full at depth 3
+
+        // The new push would overflow, but the Completed root is reclaimable.
+        Assert.Equal(StackOpResult.Ok, s.TryPush(Framed("i-004", "new-objective", IntentLifecycle.Active, b)));
+
+        Assert.Equal(3, s.Depth);
+        Assert.Equal("new-objective", s.Top!.Kind);
+        Assert.DoesNotContain("done-root", s.Frames.Select(f => f.Kind));
+    }
+
+    [Fact]
+    public void TryPush_AtMaxDepth_AllActiveFrames_StillRefusesOverflow()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack(maxDepth: 3);
+        s.TryPush(Framed("i-001", "a", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-002", "b", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-003", "c", IntentLifecycle.Active, b));
+
+        // Nothing terminal to reclaim -> the overflow guard still holds.
+        Assert.Equal(StackOpResult.RefusedOverflow, s.TryPush(Framed("i-004", "d", IntentLifecycle.Active, b)));
+        Assert.Equal(3, s.Depth);
+    }
+
+    [Fact]
+    public void TryPush_AtMaxDepth_BlockedFramesNotReaped_RefusesOverflow()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack(maxDepth: 3);
+        s.TryPush(Framed("i-001", "blocked-marker", IntentLifecycle.Blocked, b)); // durable, not terminal
+        s.TryPush(Framed("i-002", "b", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-003", "c", IntentLifecycle.Active, b));
+
+        // Blocked is a deliberate durable marker, never reaped -> overflow holds.
+        Assert.Equal(StackOpResult.RefusedOverflow, s.TryPush(Framed("i-004", "d", IntentLifecycle.Active, b)));
+        Assert.Contains("blocked-marker", s.Frames.Select(f => f.Kind));
+    }
+
+    [Fact]
+    public void ReapTerminalFrames_AllTerminal_KeepsNewest_NeverEmpties()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack();
+        s.TryPush(Framed("i-001", "done",        IntentLifecycle.Completed, b));
+        s.TryPush(Framed("i-002", "expired-top", IntentLifecycle.Expired,   b));
+
+        var removed = s.ReapTerminalFrames();
+
+        Assert.Equal(1, removed);
+        Assert.Equal(1, s.Depth);
+        Assert.False(s.IsEmpty);
+        Assert.Equal("expired-top", s.Top!.Kind);
+    }
+
+    [Fact]
+    public void ReapTerminalFrames_NoTerminal_ReturnsZero_LeavesStackUnchanged()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack();
+        s.TryPush(Framed("i-001", "a", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-002", "b", IntentLifecycle.Active, b));
+        var rev = s.Revision;
+
+        Assert.Equal(0, s.ReapTerminalFrames());
+        Assert.Equal(2, s.Depth);
+        Assert.Equal(rev, s.Revision);
+    }
+
     [Fact]
     public void PopTop_NeverPopsRoot()
     {
