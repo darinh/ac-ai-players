@@ -188,6 +188,27 @@ public class CombatChainTests
             null, 5, enabled: false, chainCount: 0, maxChain: 6));
 
     [Fact]
+    public void ChooseChainTarget_ChainsPassiveMonster_NotJustHostile()
+    {
+        // cp2918 (reduce-llm-call-volume): AC's weak grind kinds are PASSIVE
+        // (IsMonster but NOT ObservedHostile). The chain must still execute an
+        // LLM-authored kill-count commitment against them — the SAME set the
+        // Hunt decomposition attacks — else a passive-monster grind (the common
+        // case) falls back to a per-kill LLM call. Requiring ObservedHostile
+        // (the prior behavior) defeated the whole purpose.
+        var passive = new VisibleObjectProjection
+        {
+            Guid = 0x9001u, Name = "Quarry Passive", Distance = 8f,
+            IsMonster = true, ObservedHostile = false, IsCorpse = false,
+        };
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            NewIntent(new KillCountTotalAtLeastPredicate(10)), new[] { passive },
+            history: null, selfLevel: 5, enabled: true, chainCount: 0, maxChain: 6);
+        Assert.NotNull(chosen);
+        Assert.Equal(0x9001u, chosen!.Guid);
+    }
+
+    [Fact]
     public void ChooseChainTarget_Null_WhenChainCapReached()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3)), OneCloseMob,

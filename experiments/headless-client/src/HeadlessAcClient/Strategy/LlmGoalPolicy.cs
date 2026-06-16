@@ -6809,6 +6809,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
 
+        // ── ## Winnable kinds capsule (protected-tail cut-proof) ──
+        // The body combat-history lines and the inline `[your record: ...]`
+        // annotations on visible monsters are dropped by the body hard-cut, so
+        // the LLM cannot see which kinds it is ALREADY winning against — the
+        // exact evidence the COMMIT A WINNING GRIND AS A KILL-COUNT INTENT rule
+        // needs to push a kill-count commitment that lets the Motor chain kills
+        // WITHOUT a per-monster LLM call (reduce-llm-call-volume). Live: that
+        // autonomous chain fired 0 times because this evidence never reached the
+        // LLM. Re-surface the clearly-winnable kinds (own ledger: kills recorded,
+        // no death) in the PROTECTED salience tail — the complement of the cp2916
+        // beaten-kinds capsule. Raw own-ledger counts; the existing rule owns the
+        // grind decision (and a quest/server directive outranks it); no new
+        // advice. Gated, so it costs nothing when no winnable kinds are recorded.
+        if (world.CombatHistoryFull is { Count: > 0 } winLedger)
+        {
+            var winnableKinds = winLedger
+                .Where(h => h.Kills > 0 && h.Deaths == 0)
+                .ToList();
+            if (winnableKinds.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine(
+                    "## Winnable kinds (your own combat ledger — kinds you have killed with no recorded death; a " +
+                    "candidate to COMMIT A WINNING GRIND AS A KILL-COUNT INTENT so the Motor repeats the kills " +
+                    "without a per-kill decision)");
+                foreach (var h in winnableKinds)
+                    sb.AppendLine(
+                        $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
+                        $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective} (last: {h.LastOutcome})");
+            }
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
@@ -7416,7 +7448,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     /// <summary>
     /// Pure target selection for the Motor's autonomous kill-intent
-    /// decomposition. Returns the visible hostile the Motor may Attack NEXT
+    /// decomposition. Returns the visible monster the Motor may Attack NEXT
     /// toward an LLM-authored kill-count commitment WITHOUT a per-monster LLM
     /// round-trip — or null when no autonomous Attack should be minted (caller
     /// then falls through to a real LLM decision).
@@ -7425,10 +7457,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// stack top is an LLM-authored TYPED kill-count commitment
     /// (<see cref="CombatCommitment.IsActiveKillCommitment"/>) — the LLM itself
     /// committed to "kill N [of X]" with a numeric predicate. It then picks the
-    /// nearest in-PERCEPTION (<paramref name="perceptionRadius"/>) hostile
-    /// creature that is not a corpse, matches the LLM's authored name filter
-    /// (when the commitment carried one), and is not an <see cref="IsBeatenKind"/>
-    /// the bot keeps losing to. It assigns NO object-type urgency and names no
+    /// nearest in-PERCEPTION (<paramref name="perceptionRadius"/>) non-corpse
+    /// target that is either a monster (`IsMonster`, hostile OR passive — the
+    /// SAME set the LLM-decided Hunt decomposition attacks, so a passive-monster
+    /// grind chains too) or an actively-`ObservedHostile` creature (self-
+    /// defense), that matches the LLM's authored name filter (when the
+    /// commitment carried one) and is not an <see cref="IsBeatenKind"/> the bot
+    /// keeps losing to. It assigns NO object-type urgency and names no
     /// wcid/NPC/landblock. Flee precedence is NOT enforced here — the Motor's
     /// dispatch self-preservation gate refuses the Attack while health is low /
     /// the threat is on the avoid cooldown, and the CALLER only invokes this on
@@ -7456,7 +7491,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) return null;
 
         return visible
-            .Where(v => v.IsCreature && v.ObservedHostile && !v.IsCorpse)
+            // Match the LLM-decided Hunt decomposition's target set
+            // (NoQuestKnowledgePolicy attacks any visible, non-corpse, non-beaten
+            // `IsMonster`) AND the self-defense set (anything actively
+            // `ObservedHostile`) — NOT just `ObservedHostile`. The LLM committed
+            // to "kill N [of X]", so executing that commitment means attacking the
+            // next matching monster whether or not it is currently attacking the
+            // bot; AC's weak grind kinds are PASSIVE, so requiring ObservedHostile
+            // made the common passive-monster grind fall back to a per-kill LLM
+            // call — defeating the reduce-llm-call-volume purpose. Bounds are
+            // unchanged (perception radius, name filter, beaten-skip, maxChain
+            // re-check, deadline, and the Motor's low-health dispatch gate).
+            .Where(v => (v.IsMonster || v.ObservedHostile) && !v.IsCorpse)
             .Where(v => (v.Distance ?? float.MaxValue) <= perceptionRadius)
             .Where(v => nameFilter is null
                         || (v.Name is { Length: > 0 } n
