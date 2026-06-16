@@ -118,7 +118,9 @@ public class SystemMessagesTests
         es.Append(ServerMsg("Your corpse is located at (43.2N, 36.4E)."));
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             MinimalWorld(), es, currentGoal: null, stack: new IntentStack());
-        Assert.Contains("## System messages", prompt);
+        // Match the section HEADER (rule text also references `## System messages`
+        // in backticks as a source to read, so a bare substring is ambiguous).
+        Assert.Contains("## System messages (recent", prompt);
         Assert.Contains("Your corpse is located at (43.2N, 36.4E).", prompt);
     }
 
@@ -127,6 +129,68 @@ public class SystemMessagesTests
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             MinimalWorld(), new EventStream(), currentGoal: null, stack: new IntentStack());
-        Assert.DoesNotContain("## System messages", prompt);
+        // The SECTION header must be absent; rule text may still cite the section
+        // name in backticks, so assert on the header form only.
+        Assert.DoesNotContain("## System messages (recent", prompt);
+    }
+
+    [Fact]
+    public void DurableSystemMessage_StillTriggersDirectiveCompilerRule_AfterRingEviction()
+    {
+        var es = new EventStream();
+        // An actionable server line arrives, then perception traffic floods the
+        // 256-event ring and evicts it from Recent() — but it persists in the
+        // durable `## System messages` store.
+        es.Append(ServerMsg("Your corpse is located at (43.2N, 36.4E)."));
+        for (int i = 0; i < EventStream.DefaultCapacity + 50; i++) es.Append(Noise());
+
+        // Precondition: the line is gone from the perception ring...
+        Assert.DoesNotContain(es.Recent(EventStream.DefaultCapacity),
+            e => e.Kind == EventKind.ServerMessage);
+        // ...but survives in the durable store.
+        Assert.Contains(es.RecentServerMessages(), e => e.Text!.Contains("corpse is located"));
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            MinimalWorld(), es, currentGoal: null, stack: new IntentStack());
+        // The directive-compiler gate is broadened to the durable store, so the
+        // compiler rule still renders for an actionable line the ring dropped —
+        // without this, an evicted corpse-location / leave-instruction would be
+        // shown but the rule telling the LLM it can act on it would be gone.
+        Assert.Contains("QUEST-DIALOG COMPILER", prompt);
+    }
+
+    [Fact]
+    public void DurableSystemMessage_StaleNonActionableLine_DoesNotPinCompilerRuleOn()
+    {
+        var es = new EventStream();
+        // A non-actionable banner arrives at session start (Broadcast 0x00)...
+        es.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = T0,
+            Kind = EventKind.ServerMessage,
+            Text = "Welcome to the world.",
+            ChatType = StatusChannelBroadcast,
+        });
+        // ...then much-later perception traffic floods the ring, so the banner is
+        // far older than the actionable-recency window, with NO recent server text.
+        var muchLater = T0.AddMinutes(30);
+        for (int i = 0; i < EventStream.DefaultCapacity + 50; i++)
+            es.Append(new StreamEvent { Sequence = 0, Utc = muchLater, Kind = EventKind.HealthChanged });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            MinimalWorld(), es, currentGoal: null, stack: new IntentStack());
+
+        // The banner still SHOWS (the durable store has no TTL)...
+        Assert.Contains("## System messages (recent", prompt);
+        // ...but it is too stale to keep the heavy QUEST-DIALOG COMPILER rule
+        // pinned on for the whole session (the prompt sits at its hard ceiling,
+        // so a permanently-on rule would crowd out trimmable world state).
+        Assert.DoesNotContain("QUEST-DIALOG COMPILER", prompt);
+        // The stale line is not HIDDEN: it is still shown above, and the always-on
+        // SERVER-INSTRUCTION PRECEDENCE rule (covering leave/advance/proceed
+        // directives) still renders and cites `## System messages`. Only the heavy
+        // compiler nudge is recency-bounded.
+        Assert.Contains("SERVER-INSTRUCTION PRECEDENCE", prompt);
     }
 }
