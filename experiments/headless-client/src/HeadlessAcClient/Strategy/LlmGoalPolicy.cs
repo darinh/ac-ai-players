@@ -6648,13 +6648,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "pursuing it against optional grinding instead of dismissing its existence.");
         }
 
+        // ── ## System messages (protected-tail durable status capsule) ──
+        // Low-volume, high-value SYSTEM status lines the server sends are easily
+        // evicted from the perception-dominated event ring within seconds, so the
+        // body `## Server hints` may no longer carry them. RecentServerMessages()
+        // is a dedicated durable store that keeps the most-recent distinct ones.
+        // Surface them VERBATIM (like `## Server hints`) with no interpretation —
+        // no game knowledge, no priority, the decision is the LLM's.
+        var recentSystemMessages = events.RecentServerMessages();
+        if (recentSystemMessages.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## System messages (recent — status text the server sent you, newest last)");
+            foreach (var m in recentSystemMessages)
+                sb.AppendLine($"  - \"{Truncate(m.Text, 240)}\"");
+            sb.AppendLine(
+                "- raw fact, not a recommendation: these are the server's own status lines, not an " +
+                "instruction from me. Whether any still applies, and what to do about it, is your call.");
+        }
+
         // ── ## Held items (protected-tail cut-proof inventory, cp-2389) ──
         // The full `## Inventory` section renders in the BODY and is among the
         // first things the request-size fitter omits when the prompt overflows
-        // (live: in a dense academy scene `## Inventory` was "omitted to fit
-        // prompt budget", so the bot could not see a server-given quest item —
-        // the Academy Exit Token it had to give back to leave — and grinded
-        // instead of finishing the step). Re-surface a COMPACT held-items list
+        // (live: in a dense scene `## Inventory` was "omitted to fit
+        // prompt budget", so the bot could not see a server-given quest item it
+        // had to hand back to advance — and grinded instead of finishing the
+        // step). Re-surface a COMPACT held-items list
         // (name + short_desc, deduped, char-bounded) in the PROTECTED salience
         // tail so the bot always knows what it is carrying even when the body
         // `## Inventory` is trimmed. Purely the bot's OWN inventory wire data,

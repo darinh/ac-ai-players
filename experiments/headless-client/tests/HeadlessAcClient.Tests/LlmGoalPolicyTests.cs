@@ -4306,7 +4306,7 @@ public class LlmGoalPolicyTests
         Assert.NotNull(goal);
         Assert.Single(requestBodies);
 
-        var body = requestBodies[0];
+        var body = PromptFromRequest(requestBodies[0]);
 
         // The dedicated Server hints section must be present.
         // Match the exact section header — the RULES block also
@@ -4321,7 +4321,20 @@ public class LlmGoalPolicyTests
         Assert.True(recentIdx > hintsIdx, "## Server hints must come before ## Recent events");
 
         var hintsBlock = body.Substring(hintsIdx, recentIdx - hintsIdx);
-        var recentBlock = body.Substring(recentIdx);
+        // Scope the Recent events block to JUST the Recent(25) event entries
+        // that follow the header. Each entry is a "- {event}" line and the dump
+        // ends at the first blank line / next section. The durable
+        // `## Server hints` and `## System messages` capsules legitimately
+        // re-surface this evicted ServerMessage elsewhere in the prompt — that
+        // must not be mistaken for it leaking into the raw `## Recent events`
+        // log. Parse line-by-line (newline-normalized) so the scoping is robust
+        // to section ordering and line-ending quirks in the assembled prompt.
+        var lines = body.Replace("\r\n", "\n").Split('\n');
+        var startLine = System.Array.FindIndex(
+            lines, l => l.StartsWith(recentHeader, StringComparison.Ordinal));
+        Assert.True(startLine >= 0, "## Recent events section must be present");
+        var recentBlock = string.Join("\n", lines.Skip(startLine + 1)
+            .TakeWhile(l => l.StartsWith("- ", StringComparison.Ordinal)));
 
         // Tutorial hint must be in the Server hints block.
         Assert.Contains(lifestoneHint, hintsBlock);
@@ -4332,7 +4345,7 @@ public class LlmGoalPolicyTests
             hintsBlock, System.Text.RegularExpressions.Regex.Escape(lifestoneHint)).Count;
         Assert.Equal(1, hintsHits);
 
-        // It must NOT be in the Recent events block (was evicted).
+        // It must NOT be in the raw Recent events dump (evicted from Recent(25)).
         Assert.DoesNotContain(lifestoneHint, recentBlock);
 
         // Life Stone visible-nearby line still carries the lifestone tag.

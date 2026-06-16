@@ -305,8 +305,26 @@ internal sealed class EventStream
     // Captured by event KIND + text only — never parsed (no game knowledge).
     private const int MaxRecentPopups = 4;
     private const int MaxRecentNpcDialogs = 4;
+    private const int MaxRecentServerMessages = 6;
+    // Wire ChatMessageType channel ids (a ServerMessage carries a single
+    // channel-id; the AUTHORITATIVE enum is SEQUENTIAL — see ACE
+    // Source/ACE.Entity/Enum/ChatMessageType.cs, e.g. Combat=0x06, Magic=0x07,
+    // Spellcasting=0x11 — NOT the legacy power-of-two squelch-mask values).
+    // These are the per-action combat/spell feedback channels delivered on the
+    // ServerMessage opcode (0xF7E0) — the highest-frequency ServerMessage
+    // traffic (a per-swing / per-cast / per-proc line every combat tick). They
+    // are excluded from the bounded durable store below purely as volume
+    // bookkeeping (by wire channel, not by parsing text), so a fight's burst
+    // cannot evict a rare low-frequency status line — the same reason high-volume
+    // ambient speech is kept out of the main ring. No content interpretation,
+    // priority, or game knowledge. (Combat_Enemy/Combat_Self 0x15/0x16 are NOT
+    // sent on 0xF7E0, so they cannot reach this store and need no exclusion.)
+    private const int ChatChannelCombat = 0x06;
+    private const int ChatChannelMagic = 0x07;
+    private const int ChatChannelSpellcasting = 0x11;
     private readonly List<StreamEvent> _recentPopups = new();
     private readonly List<StreamEvent> _recentNpcDialogs = new();
+    private readonly List<StreamEvent> _recentServerMessages = new();
 
     // npc-local-speech-perception — heard local/area speech (HeardSpeech). This
     // is AMBIENT and potentially HIGH-VOLUME (creature emotes, other players'/
@@ -399,6 +417,16 @@ internal sealed class EventStream
             _recentNpcDialogs.Add(stamped);
             while (_recentNpcDialogs.Count > MaxRecentNpcDialogs)
                 _recentNpcDialogs.RemoveAt(0);
+        }
+        if (stamped.Kind == EventKind.ServerMessage && !string.IsNullOrEmpty(stamped.Text)
+            && stamped.ChatType != ChatChannelCombat
+            && stamped.ChatType != ChatChannelMagic
+            && stamped.ChatType != ChatChannelSpellcasting)
+        {
+            _recentServerMessages.RemoveAll(e => string.Equals(e.Text, stamped.Text, StringComparison.Ordinal));
+            _recentServerMessages.Add(stamped);
+            while (_recentServerMessages.Count > MaxRecentServerMessages)
+                _recentServerMessages.RemoveAt(0);
         }
 
         // Durable goal-emission window (see _recentGoalEmissions): retain recent
@@ -510,6 +538,20 @@ internal sealed class EventStream
     /// instruction survives even after the earliest store is full.
     /// </summary>
     public IReadOnlyList<StreamEvent> RecentPersistentNpcDialogs() => _recentNpcDialogs;
+
+    /// <summary>
+    /// The MOST-RECENT distinct low-volume SYSTEM messages (ServerMessage),
+    /// oldest-first, capped at <see cref="MaxRecentServerMessages"/> and deduped
+    /// by text. The per-action combat/spell feedback channels
+    /// (<see cref="ChatChannelCombat"/>, <see cref="ChatChannelMagic"/>,
+    /// <see cref="ChatChannelSpellcasting"/>) are excluded so their high-frequency
+    /// bursts cannot evict a rare status line.
+    /// The event ring is dominated by high-volume perception traffic, so without
+    /// this dedicated store a rare but high-value status line is evicted within
+    /// seconds; this keeps it available to the prompt long enough for the brain
+    /// to act on it.
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentServerMessages() => _recentServerMessages;
 
     /// <summary>
     /// The MOST-RECENT heard local/area speech (HeardSpeech), capped at
