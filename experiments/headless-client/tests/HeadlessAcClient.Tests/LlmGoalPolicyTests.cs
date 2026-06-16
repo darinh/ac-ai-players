@@ -4015,6 +4015,65 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("tapped out: level", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_ProtectedLocationCapsule_RendersDwellValueInTail()
+    {
+        // cp2919: the body `## Location & recency` renders `minutes in current
+        // landblock` — the dwell value the LOOP-BREAK (town-stuck) and HUNT
+        // EXCURSION rules gate on — but that body section is dropped by the
+        // dense-scene body hard-cut, so those rules cannot evaluate "dwelled too
+        // long". Re-surface the raw dwell value in the protected tail.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), null, null, null, null,
+            dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(12));
+
+        int capsule = prompt.IndexOf("## Location (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(capsule > 0);
+        Assert.Contains("minutes in current landblock: 12", prompt.Substring(capsule));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedLocationCapsule_SurvivesBodyHardCut()
+    {
+        var world = BuildXpWorld(69296, 0);
+        var entry = System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(12);
+        var full = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, dwellEntryUtc: entry);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            dwellEntryUtc: entry, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx);
+        Assert.Contains("## Location (re-surfaced", tight);
+        Assert.Contains("minutes in current landblock:", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedLocationCapsule_OmittedWhenDwellUnknown()
+    {
+        // No dwellEntryUtc => dwell is unknown => no capsule (don't fabricate 0.0).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.DoesNotContain("## Location (re-surfaced", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_LoopBreakRule_HasDwellBoundedTownEscape()
+    {
+        // The LOOP-BREAK rule must bound canvassing: leave to hunt after dwelling
+        // too long EVEN IF untalked NPCs remain (a dense town has more npcs than
+        // are worth talking). Without this, `untalked npcs in view > 0` keeps the
+        // bot canvassing forever in a town it cannot exhaust.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), new EventStream(), null);
+        Assert.Contains("LOOP-BREAK (town-stuck)", prompt);
+        Assert.Contains("Explore away to hunt EVEN IF some untalked", prompt);
+    }
+
     private static WorldStateProjection BuildBeatenLedgerWorld(params CombatHistoryEntry[] full) =>
         BuildXpWorld(69296, 0) with { CombatHistoryFull = full };
 

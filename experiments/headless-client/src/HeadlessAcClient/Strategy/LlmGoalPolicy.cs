@@ -4519,7 +4519,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (the cp-2335 per-rule gating pattern). Behaviour-preserving: each
         // still renders identically whenever no monster is in view.
         if (!monsterInView)
-        sb.AppendLine("- LOOP-BREAK (town-stuck): if `minutes in current landblock` > 5 AND `nearest monster: (none in view)` AND every visible creature is `npc` (no `monster` tag anywhere) AND `untalked npcs in view: 0`, you are STUCK in a town — emit `Explore{target: {name: \"anywhere\"}}` immediately. The picker walks you through visible Doors/portals to new areas. UNLESS `untalked npcs in view` is above 0 — first `Talk` each untalked `npc` ONCE (a task-giver looks like any other npc; you only know by talking) to check for a task; only Explore away once `untalked npcs in view: 0`. This OVERRIDES RE-talking ALREADY-talked NPCs — talking the SAME npc again is still not progress with no monsters in view.");
+        sb.AppendLine("- LOOP-BREAK (town-stuck): if `minutes in current landblock` > 5 AND `nearest monster: (none in view)` AND every visible creature is `npc` (no `monster` tag anywhere) AND `untalked npcs in view: 0`, you are STUCK in a town — emit `Explore{target: {name: \"anywhere\"}}` immediately. The picker walks you through visible Doors/portals to new areas. UNLESS `untalked npcs in view` is above 0 — first `Talk` each untalked `npc` ONCE (a task-giver looks like any other npc; you only know by talking) to check for a task; only Explore away once `untalked npcs in view: 0`. This OVERRIDES RE-talking ALREADY-talked NPCs — talking the SAME npc again is still not progress with no monsters in view. BUT canvassing is BOUNDED: once `minutes in current landblock` is more than ~10, Explore away to hunt EVEN IF some untalked `npc`s remain — a large town has far more npcs than are worth talking, and leaving to find `monster`s you can fight to LEVEL outranks talking every last townsperson when no task is locally actionable. You can return later; hunting/leveling is the productive fallback, and endlessly Talking fresh townsfolk while `minutes in current landblock` keeps climbing is the exact stuck-in-town loop this rule exists to break.");
         if (!monsterInView)
         sb.AppendLine("- HUNT EXCURSION (leave a tapped-out safe zone to find monsters): monsters do NOT spawn in safe zones — you must travel OUT to surrounding open country. When combat-ready, NO `monster` anywhere in `Visible nearby`, NO un-acted server/quest directive naming a specific next target (re-talking an NPC with no NEW dialog and browsing vendors do NOT count), AND `minutes in current landblock` is more than a few with local progress dried up (no new level, quest item, or unique hint), the zone is TAPPED OUT. Emit `Explore{target: {name: \"anywhere\"}}` — crossing out takes MANY ticks, so KEEP emitting it every cycle (your own recent `Explore` does NOT mean the excursion is done; do NOT revert to talking the same town NPCs mid-excursion) until your `landblock` actually changes OR a `monster` appears (then `Attack` it). A NEW server/quest directive, quest item, danger, or fresh dialog step interrupts the hunt — act on it. Quest progress outranks an optional hunt.");
         if (!monsterInView)
@@ -6839,6 +6839,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
                         $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective} (last: {h.LastOutcome})");
             }
+        }
+
+        // ── ## Location capsule (protected-tail cut-proof) ──
+        // The body `## Location & recency` renders `minutes in current
+        // landblock` — the dwell value the LOOP-BREAK (town-stuck) and HUNT
+        // EXCURSION rules gate on — but that body section is dropped by the
+        // dense-scene body hard-cut, so the LLM has those rules yet cannot see
+        // the value they reference (live: the bot canvassed a town's NPCs
+        // indefinitely, `minutes in current landblock` invisible, never leaving
+        // to hunt/level). Re-surface the raw dwell value here so the rules can
+        // evaluate "dwelled too long". Own-progress projection; no game knowledge.
+        if (dwellMinForHunt is double dwellMinTail)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Location (re-surfaced because `## Location & recency` above can be trimmed to fit the prompt)");
+            sb.AppendLine($"- minutes in current landblock: {dwellMinTail:F1}");
         }
 
         var assembled = sb.ToString();
