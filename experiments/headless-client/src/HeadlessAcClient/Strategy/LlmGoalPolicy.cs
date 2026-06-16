@@ -5654,6 +5654,48 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "completion to use, and what per-tick goal to emit are your strategic choices from the facts above.");
         }
 
+        // ── ## Persistent objectives (intent stack re-surfaced, protected tail) ─
+        // The full `## Intent stack` renders in the BODY (RenderStackForPrompt) and
+        // is dropped by the dense-scene body hard-cut, so in a busy combat scene the
+        // LLM loses sight of its OWN persistent intents — including a multi-step
+        // task it compiled earlier that is now a PAUSED ancestor under newer hunt
+        // frames — and reverts to tick-by-tick grinding as if the scene were
+        // objective-free (live: it pushed a compiled quest intent, then later
+        // rationalised "no active quest" while grinding unrelated mobs). Re-surface
+        // a COMPACT frame list (bounded by MaxDepth) so the persistent plan always
+        // survives the cut. Bot-own stack state; the LLM still decides; no game
+        // knowledge.
+        if (stack is not null && stack.Depth > 0)
+        {
+            var frames = stack.Frames;
+            sb.AppendLine();
+            sb.AppendLine(
+                "## Persistent objectives (re-surfaced because the full `## Intent stack` above can be trimmed " +
+                $"to fit; revision={stack.Revision}, depth={stack.Depth}/{stack.MaxDepth})");
+            var hasActionableObjective = false;
+            for (int i = 0; i < frames.Count; i++)
+            {
+                var f = frames[i];
+                var role = i == frames.Count - 1 ? "TOP" : $"ancestor[{i}]";
+                var tgt = string.IsNullOrEmpty(f.TargetName) ? "" : $" target=\"{f.TargetName}\"";
+                var rat = string.IsNullOrEmpty(f.Rationale) ? "" : $" — {Truncate(f.Rationale, 110)}";
+                sb.AppendLine($"- {role}: kind={f.Kind} status={f.Status}{tgt}{rat}");
+                if (f.Status == IntentLifecycle.Active)
+                    hasActionableObjective = true;
+            }
+            if (hasActionableObjective)
+                sb.AppendLine(
+                    "- raw fact, not a recommendation: these are your OWN persistent objectives. An `Active` " +
+                    "ancestor resurfaces as TOP when the frames above it pop — an earlier compiled task is NOT " +
+                    "gone just because a newer frame sits on top, so do not treat the scene as having no directive " +
+                    "while an `Active` one is listed above. Whether to pursue an unfinished one now is your call.");
+            else
+                sb.AppendLine(
+                    "- raw fact, not a recommendation: every objective above has reached a terminal state " +
+                    "(Blocked/Completed/Expired), so none is currently actionable; a `stack_ops` push or replace " +
+                    "sets a new persistent objective if you want one. Your strategic call.");
+        }
+
         // ── ## Unseen objective target (end-of-prompt salience capsule) ──────
         // Complements `## No active objective`: here there IS an Active top
         // intent, but its named target has NEVER entered the world model since

@@ -13578,6 +13578,110 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ProtectedPersistentObjectivesCapsule_ListsAllFrames()
+    {
+        // cp2922: the full ## Intent stack renders in the body (RenderStackForPrompt)
+        // and is dropped by the dense-scene body hard-cut, so a quest the bot
+        // compiled earlier that is now a PAUSED ancestor goes invisible and the LLM
+        // reverts to "no active objective" grinding. Re-surface every frame compactly
+        // in the protected tail so the buried plan always survives.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "quest:recover-heirloom", TargetName = "Warden",
+            Rationale = "the warden asked me to recover the heirloom",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        stack.TryPush(new Intent
+        {
+            Id = "i-002", Kind = "hunt", TargetName = "Rat",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.Contains("## Persistent objectives", prompt);
+        var cap = prompt.Substring(prompt.IndexOf("## Persistent objectives", StringComparison.Ordinal));
+        Assert.Contains("ancestor[0]: kind=quest:recover-heirloom", cap);
+        Assert.Contains("target=\"Warden\"", cap);
+        Assert.Contains("the warden asked me to recover the heirloom", cap);
+        Assert.Contains("TOP: kind=hunt", cap);
+        // Both frames are Active, so the actionable-directive prose fires.
+        Assert.Contains("do not treat the scene as having no directive", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedPersistentObjectivesCapsule_TerminalOnlyStackOmitsDirectiveProse()
+    {
+        // gpt-5.4 + gemini: a non-top/terminal frame must NOT be implied to be a
+        // resumable directive. When every frame is terminal (here a Blocked root),
+        // the capsule still lists it (status=Blocked) but the "do not treat the
+        // scene as having no directive" prose must be SUPPRESSED — otherwise it
+        // contradicts the adjacent ## No active objective capsule.
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "quest:recover-heirloom", TargetName = "Warden",
+            Status = IntentLifecycle.Blocked,
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.Contains("## Persistent objectives", prompt);
+        var cap = prompt.Substring(prompt.IndexOf("## Persistent objectives", StringComparison.Ordinal));
+        Assert.Contains("status=Blocked", cap);
+        Assert.DoesNotContain("do not treat the scene as having no directive", cap);
+        Assert.Contains("none is currently actionable", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedPersistentObjectivesCapsule_SurvivesBodyHardCut()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "quest:recover-heirloom", TargetName = "Warden",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        stack.TryPush(new Intent
+        {
+            Id = "i-002", Kind = "hunt", TargetName = "Rat",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        var full = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, stack, null, null, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx);
+        Assert.Contains("## Persistent objectives", tight);
+        Assert.Contains("quest:recover-heirloom", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedPersistentObjectivesCapsule_OmittedWhenStackEmpty()
+    {
+        var world = BuildExitTokenWorld();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
+        Assert.DoesNotContain("## Persistent objectives", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_RendersUnseenObjectiveTarget_WhenNamedTargetNeverObserved()
     {
         // The top intent names a target that has never entered the world model
