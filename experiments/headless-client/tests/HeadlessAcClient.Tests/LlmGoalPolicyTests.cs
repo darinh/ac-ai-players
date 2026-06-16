@@ -5351,6 +5351,82 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void Contracts_WithLocationBearing_GuidesSettingExploreDirection()
+    {
+        // cp2921: live, the bot knew a turn-in/objective was ~Nu SW (rendered
+        // here) but emitted Explore with direction:null and stalled against
+        // terrain. The bearing data must be paired with an imperative to copy the
+        // compass word into the Explore `direction` field (the cp2387 salience
+        // pattern) so the bot COMMITS that heading instead of wandering.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 100u, Stage = 2u,
+                Name = "Heirloom Recovery",
+                Description = "Recover the heirloom and return it.",
+                NpcEnd = "Warden",
+                TurnInWorldX = 100000f, TurnInWorldY = 100000f,
+            }), new EventStream(), null);
+
+        var cap = CapsuleSection(prompt, "## Contracts");
+        Assert.Contains("turn-in location: ~", cap);
+        Assert.Contains("the compass word from that bearing", cap);
+        Assert.Contains("direction", cap);
+    }
+
+    [Fact]
+    public void Contracts_NoLocationBearing_OmitsDirectionGuidance()
+    {
+        // No dat-defined location => no bearing => no direction nudge (it would
+        // reference a bearing that isn't there).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 100u, Stage = 2u, Name = "Deskwork",
+                Description = "Sort the ledgers.",
+            }), new EventStream(), null);
+
+        Assert.Contains("## Contracts", prompt);
+        var cap = CapsuleSection(prompt, "## Contracts");
+        Assert.DoesNotContain("the compass word from that bearing", cap);
+    }
+
+    [Fact]
+    public void Contracts_BearingRowDroppedByBudget_OmitsDirectionGuidance()
+    {
+        // Reviewer-found edge (gpt-5.4 + gemini): a bearing contract whose row is
+        // BUILT (so the old code flipped the flag) but then DROPPED by the protected
+        // char budget must NOT leave the direction instruction orphaned. Two large
+        // filler contracts bring the budget near full; a third, large, bearing
+        // contract is then dropped at its own budget check.
+        var pad = new string('x', 250);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 1u, Stage = 2u, Name = "Filler One",
+                Description = pad, DescriptionProgress = pad, NpcStart = "S", NpcEnd = "E",
+            },
+            new ContractProjection
+            {
+                ContractId = 2u, Stage = 2u, Name = "Filler Two",
+                Description = pad, DescriptionProgress = pad, NpcStart = "S", NpcEnd = "E",
+            },
+            new ContractProjection
+            {
+                ContractId = 3u, Stage = 2u, Name = "Bearing",
+                Description = pad, DescriptionProgress = pad, NpcEnd = "Warden",
+                TurnInWorldX = 100000f, TurnInWorldY = 100000f,
+            }), new EventStream(), null);
+
+        Assert.Contains("## Contracts", prompt);
+        var cap = CapsuleSection(prompt, "## Contracts");
+        // The bearing row (contract 3) was dropped by the budget...
+        Assert.DoesNotContain("turn-in location: ~", cap);
+        // ...so the direction instruction must be omitted (no orphaned reference).
+        Assert.DoesNotContain("the compass word from that bearing", cap);
+    }
+
+    [Fact]
     public void Contracts_Enriched_BlankFieldsOmitted_FallsBackToIdAndStage()
     {
         // No name/objective in the catalog (e.g. dat unavailable): the row must
