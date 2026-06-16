@@ -1789,6 +1789,9 @@ public class LlmGoalPolicyTests
         // Offensive + utility mechanics are now stated as facts, not just the
         // defensive endurance->MAX HEALTH mechanic.
         Assert.Contains("strength and coordination drive MELEE offense", prompt);
+        // cp2911: the trained weapon SKILL is now surfaced as a primary melee-
+        // offense lever (live: the bot raised attributes 10x but RaiseSkill 0x).
+        Assert.Contains("TRAINED WEAPON SKILL you fight with", prompt);
         Assert.Contains("focus and self power magic", prompt);
         Assert.Contains("quickness aids defense and missile play", prompt);
         Assert.Contains("endurance and health raise MAX HEALTH", prompt);
