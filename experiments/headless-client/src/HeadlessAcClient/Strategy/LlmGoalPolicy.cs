@@ -4683,36 +4683,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : string.Empty;
             sb.AppendLine($"- experience: {txp} total{avail}");
         }
-        if (world.Self.Attributes is { Count: > 0 } selfAttrs)
-        {
-            // RAW base attribute values (unbuffed), seeded at login and kept
-            // live by discrete PrivateUpdateAttribute (0x02E3) after a raise.
-            sb.AppendLine($"- attributes: {string.Join(", ", selfAttrs.Select(a => $"{a.Name} {a.Base}"))}");
-        }
-        if (world.Self.TrainedSkills is { Count: > 0 } selfSkills)
-        {
-            // RAW list of the skills the character actually has (wire
-            // AdvancementClass Trained/Specialized) — the only valid RaiseSkill
-            // targets. Seeded at login, kept live by discrete
-            // PrivateUpdateSkill (0x02DD) after a raise.
-            sb.AppendLine(
-                "- trained skills (valid RaiseSkill targets): " +
-                string.Join(", ", selfSkills.Select(s =>
-                    $"{s.Name} ({s.Advancement}, raised {s.RaisedRanks})")));
-        }
-        if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string selfHealthLine)
-            sb.AppendLine(selfHealthLine);
-        if (world.Self.NumDeaths is int nd)
-        {
-            // Cumulative total + (when known) how long ago the most recent
-            // in-session death was, so the LLM can tell a fresh respawn from an
-            // old count and decide whether to head back out. Raw telemetry — no
-            // urgency/recommendation baked in by source.
-            var recency = secondsSinceLastDeath is int ds
-                ? $" (most recent observed ~{ds}s ago)"
-                : "";
-            sb.AppendLine($"- deaths (server-tracked): {nd}{recency}");
-        }
+        // Attributes, raisable skills, health, and deaths — the compact,
+        // decision-critical self facts, rendered via the shared helper so the
+        // protected-tail `## Self` capsule (below) stays identical.
+        AppendSelfCoreFacts(sb, world, secondsSinceLastDeath);
         if (world.Self.CoinValue is int cv) sb.AppendLine($"- coin (server-tracked): {cv} pyreals");
         sb.AppendLine();
 
@@ -6742,6 +6716,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
 
+        // ── ## Self core capsule (protected-tail cut-proof) ──
+        // The full `## Self` section renders in the BODY just after the ~19KB
+        // RULES preamble. When a dense scene inflates the prompt past the
+        // ceiling, the request-size fitter's body hard-cut can land right after
+        // the preamble and drop the ENTIRE mid-body — including `## Self`. Live:
+        // the bot then could not see its own attributes / trained skills /
+        // health, and (lacking a `trained skills` list) reached for a weapon
+        // ITEM name when trying to RaiseSkill. Re-surface the same compact self
+        // facts in the PROTECTED salience tail so the bot always knows its core
+        // state, mirroring the `## Held items` cut-proofing (cp-2389). Same raw
+        // projection facts via AppendSelfCoreFacts; no advice. The header is
+        // rolled back when no core facts are known (e.g. pre-login), so it costs
+        // nothing until the data exists.
+        {
+            int selfCapsuleStart = sb.Length;
+            sb.AppendLine();
+            sb.AppendLine("## Self (core state — re-surfaced because `## Self` above can be trimmed to fit the prompt)");
+            int afterSelfCapsuleHeader = sb.Length;
+            AppendSelfCoreFacts(sb, world, secondsSinceLastDeath);
+            if (sb.Length == afterSelfCapsuleHeader)
+                sb.Length = selfCapsuleStart;
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
@@ -7437,6 +7434,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.Append(')');
         }
         return sb.ToString();
+    }
+
+    // Append the decision-critical, COMPACT self facts — attributes, raisable
+    // (trained/specialized) skills, health, and death count — in their stable
+    // line format. Shared by the body `## Self` section and the protected-tail
+    // `## Self` capsule so the two never diverge. Raw projection facts only; no
+    // advice, priority, or game knowledge. Appends nothing when none are known.
+    private static void AppendSelfCoreFacts(
+        StringBuilder sb, WorldStateProjection world, int? secondsSinceLastDeath)
+    {
+        if (world.Self.Attributes is { Count: > 0 } selfAttrs)
+            // RAW base attribute values (unbuffed), seeded at login and kept
+            // live by discrete PrivateUpdateAttribute (0x02E3) after a raise.
+            sb.AppendLine($"- attributes: {string.Join(", ", selfAttrs.Select(a => $"{a.Name} {a.Base}"))}");
+        if (world.Self.TrainedSkills is { Count: > 0 } selfSkills)
+            // RAW list of the skills the character actually has (wire
+            // AdvancementClass Trained/Specialized) — the only valid RaiseSkill
+            // targets. Seeded at login, kept live by discrete PrivateUpdateSkill
+            // (0x02DD) after a raise.
+            sb.AppendLine(
+                "- trained skills (valid RaiseSkill targets): " +
+                string.Join(", ", selfSkills.Select(s =>
+                    $"{s.Name} ({s.Advancement}, raised {s.RaisedRanks})")));
+        if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string selfHealthLine)
+            sb.AppendLine(selfHealthLine);
+        if (world.Self.NumDeaths is int nd)
+        {
+            // Cumulative total + (when known) how long ago the most recent
+            // in-session death was, so the LLM can tell a fresh respawn from an
+            // old count. Raw telemetry — no urgency/recommendation baked in.
+            var recency = secondsSinceLastDeath is int ds
+                ? $" (most recent observed ~{ds}s ago)"
+                : "";
+            sb.AppendLine($"- deaths (server-tracked): {nd}{recency}");
+        }
     }
 
     /// <summary>
