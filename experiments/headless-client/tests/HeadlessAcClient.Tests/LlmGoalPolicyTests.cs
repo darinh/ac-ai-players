@@ -11078,6 +11078,62 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_RestatesEvadeToAccuracyLeverMapping_NoTrainedSkill()
+    {
+        // cp2924: live the bot read its own evade-heavy split yet poured XP into
+        // endurance/strength (HP/damage), misdiagnosing an ACCURACY problem and
+        // dying to the kind it could not hit. Re-state the SPEND XP rule's
+        // symptom->lever mapping AT the spend decision (cp-2336/2387 salience;
+        // cp2920 precedent). With NO trained skills (BuildXpWorld), the mapping
+        // must NOT advise RaiseSkill (the server rejects it) — coordination leads.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.Contains("EVADED", cap);
+        Assert.Contains("ACCURACY/miss problem", cap);
+        Assert.Contains("does NOT fix accuracy", cap);
+        // No trained skills -> must not advise raising a (server-rejected) skill.
+        Assert.DoesNotContain("the main accuracy lever, raised via `RaiseSkill`", cap);
+        Assert.Contains("`RaiseSkill` is unavailable", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_NamesWeaponSkill_WhenTrained()
+    {
+        // gpt-5.4 fix: when `## Self` DOES list a trained skill, the weapon skill
+        // is the main accuracy lever and RaiseSkill is valid -> the mapping says so.
+        var world = BuildWorldWithTrainedSkill() with
+        {
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.Contains("trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill`", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_OmitsAccuracyMapping_WhenNoSwings()
+    {
+        // gemini fix: with unspent XP but NO resolved swings (e.g. exploration or
+        // turn-in XP), the landed-vs-evaded split is withheld, so the mapping that
+        // tells the LLM to interpret that split must NOT render -- fall back to the
+        // generic pointer instead (no hallucinated reference to a withheld fact).
+        var world = BuildXpWorld(69296, 5475); // cumulative swings default to 0
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.DoesNotContain("ACCURACY/miss problem", cap);
+        Assert.Contains("survivability", cap); // the generic pointer fallback
+    }
+
+    [Fact]
     public void BuildUserPrompt_PriorityBand_IncludesInvestUnspentXp()
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
