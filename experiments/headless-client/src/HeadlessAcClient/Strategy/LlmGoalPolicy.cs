@@ -6748,6 +6748,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
             sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+            // The `tapped out` hunt-discovery fact (combat-ready + farmed this
+            // area past the dwell threshold with +0 levels) renders in the body
+            // `## Combat readiness` and is dropped by the same hard-cut — leaving
+            // the always-rendered TAPPED OUT rule with no fact to act on (inert).
+            // Re-surface it here (gated: HuntTappedOutFact returns null unless
+            // actually tapped out) so the rule can fire and the bot moves to a
+            // better hunting area. Same own-progress projection; no game knowledge.
+            if (HuntTappedOutFact(armedForHunt, world.Self.Level, levelAtLandblockEntry,
+                    dwellMinForHunt, EgressDwellMinutes) is string tappedOutCapsuleFact)
+                sb.AppendLine($"- {tappedOutCapsuleFact}");
             // How-to-arm affordances. Each variable is already null-computed for
             // its applicable case (bagWeapon/groundWeapon are null when armed;
             // bagAmmo is null unless a missile weapon is wielded with empty

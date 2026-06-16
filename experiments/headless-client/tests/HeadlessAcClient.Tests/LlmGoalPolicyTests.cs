@@ -3952,6 +3952,69 @@ public class LlmGoalPolicyTests
         Assert.Contains("Wield it to load): Arrows", capsuleText);
     }
 
+    private static WorldStateProjection BuildTappedOutWorld(int level)
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u },
+        };
+        var w = BuildInventoryWorld(inv);
+        return w with { Self = w.Self with { Level = level } };
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_RendersTappedOutFactInTail()
+    {
+        // cp2917: the body `## Combat readiness` tapped-out fact (combat-ready +
+        // farmed this area with +0 levels) is dropped by the dense-scene body
+        // hard-cut, leaving the always-rendered TAPPED OUT rule with no fact to
+        // act on. Re-surface it in the protected capsule so the rule can fire.
+        var world = BuildTappedOutWorld(level: 9);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
+            levelAtLandblockEntry: 9);
+
+        int capsule = prompt.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(capsule > 0);
+        Assert.Contains("tapped out: level 9", prompt.Substring(capsule));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_TappedOutSurvivesBodyHardCut()
+    {
+        var world = BuildTappedOutWorld(level: 9);
+        var entry = System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10);
+        var full = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            dwellEntryUtc: entry, levelAtLandblockEntry: 9);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            dwellEntryUtc: entry, levelAtLandblockEntry: 9, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx);
+        Assert.Contains("## Combat readiness (re-surfaced", tight);
+        Assert.Contains("tapped out: level 9", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_OmitsTappedOutWhenLevelGained()
+    {
+        // Gained a level here (level 9 > entry 5) => the area is still
+        // productive => HuntTappedOutFact returns null => no tapped-out line.
+        var world = BuildTappedOutWorld(level: 9);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
+            levelAtLandblockEntry: 5);
+        Assert.DoesNotContain("tapped out: level", prompt);
+    }
+
     private static WorldStateProjection BuildBeatenLedgerWorld(params CombatHistoryEntry[] full) =>
         BuildXpWorld(69296, 0) with { CombatHistoryFull = full };
 
