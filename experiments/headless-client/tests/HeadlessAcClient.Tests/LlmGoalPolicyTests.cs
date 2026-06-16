@@ -4180,18 +4180,60 @@ public class LlmGoalPolicyTests
         var world = BuildBeatenLedgerWorld(
             new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
+        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack(), null, null);
         var nl = full.Contains("\r\n") ? "\r\n" : "\n";
         int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
         Assert.True(bodyIdx > 0);
 
         var tight = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
+            world, new EventStream(), null, new IntentStack(), null, null, promptCeiling: bodyIdx);
 
         Assert.True(tight.Length <= bodyIdx);
         Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
         Assert.Contains("## Winnable kinds", tight);
         Assert.Contains("Black Rabbit", tight);
+        // cp2920: the whole ## Winnable kinds capsule (header + the stack-gated
+        // commit-nudge bullet + the per-kind lines) lives in the protected
+        // salience tail, so the imperative nudge survives the body hard-cut.
+        Assert.Contains("ACT ON THIS NOW", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_ReStatesCommitDirectiveImperatively()
+    {
+        // cp2920 (salience): listing winnable kinds was not enough — live, the LLM
+        // pushed 0 kill-count commitments over 59 decisions, so the cp2918
+        // autonomous kill-chain never fired and every kill cost a full LLM cycle.
+        // The COMMIT A WINNING GRIND directive lives in the long preamble (reliably
+        // ignored per the cp-2336/2337 salience finding). Re-state it IMPERATIVELY
+        // in the decision-proximate tail capsule so the LLM acts on it (the cp-2387
+        // precedent), pointing back to the preamble rule for the exact shape. Gated
+        // on a non-null IntentStack (the nudge references `stack_ops`).
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
+        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
+        Assert.Contains("ACT ON THIS NOW", capsuleText);
+        Assert.Contains("stack_ops", capsuleText);
+        Assert.Contains("kill-count", capsuleText);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmitsCommitNudgeWhenStackDisabled()
+    {
+        // The commit nudge references `stack_ops`, which is absent from the schema
+        // when the IntentStack is disabled (stack == null). The capsule (and its
+        // kind list) still render, but the stack_ops nudge must NOT — otherwise we
+        // instruct the LLM to emit a field the schema omits.
+        var world = BuildBeatenLedgerWorld(
+            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
+                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, (IntentStack?)null);
+        Assert.Contains("## Winnable kinds", prompt);
+        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
+        Assert.Contains("Black Rabbit", capsuleText);
+        Assert.DoesNotContain("ACT ON THIS NOW", capsuleText);
     }
 
     [Fact]
