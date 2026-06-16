@@ -3859,6 +3859,99 @@ public class LlmGoalPolicyTests
         Assert.Contains("omitted to fit prompt budget", fitted);
     }
 
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_RendersWeaponLineInTail()
+    {
+        // cp2915: the body `## Combat readiness` is dropped by the dense-scene
+        // body hard-cut. Re-surface the armed/UNARMED weapon line in the
+        // protected salience tail so the bot can always confirm it is armed.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        var nl = p.Contains("\r\n") ? "\r\n" : "\n";
+
+        Assert.Contains("## Combat readiness (re-surfaced", p);
+        // The capsule renders AFTER the body `## Combat readiness` (i.e. in the
+        // protected tail) and carries the weapon line.
+        int body = p.IndexOf(nl + "## Combat readiness" + nl, System.StringComparison.Ordinal);
+        int capsule = p.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(body >= 0 && capsule > body,
+            "the protected capsule must render after the body ## Combat readiness");
+        Assert.Contains("- weapon: melee weapon wielded", p.Substring(capsule));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_SurvivesBodyHardCut_Unarmed()
+    {
+        // The point: when the body is hard-cut past the body `## Combat
+        // readiness`, the UNARMED state must STILL reach the LLM via the capsule
+        // (the live failure: lacking it, the LLM avoided combat, unsure if armed).
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x5u, Name = "Apple", Wcid = 5u, ItemType = 0x0u, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
+        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
+        int bodyIdx = full.IndexOf(nl + "## Combat readiness" + nl + "- weapon:", System.StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0, "body ## Combat readiness should render in the untruncated prompt");
+
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
+
+        Assert.True(tight.Length <= bodyIdx, "the tight ceiling must be respected");
+        // Body `## Combat readiness` was cut away...
+        Assert.DoesNotContain(nl + "## Combat readiness" + nl + "- weapon:", tight);
+        // ...but the protected capsule + the UNARMED state survived.
+        Assert.Contains("## Combat readiness (re-surfaced", tight);
+        Assert.Contains("NONE wielded - UNARMED", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_ShowsArmInstructionWhenUnarmed()
+    {
+        // UNARMED but a melee weapon sits unwielded in the bag: the capsule must
+        // also surface HOW to arm so the bot can act, not just note it is unarmed.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = null },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        int capsule = p.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(capsule > 0);
+        var capsuleText = p.Substring(capsule);
+        Assert.Contains("NONE wielded - UNARMED", capsuleText);
+        Assert.Contains("Wield it to arm): Spadone", capsuleText);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_ShowsAmmoInstructionWhenMissileWieldedButEmpty()
+    {
+        // cp2915 review (gemini): with a missile weapon wielded but EMPTY ammo,
+        // the weapon line says EMPTY, so the capsule must ALSO surface which ammo
+        // to wield. An earlier outer `!melee && !missile` gate made this row dead
+        // code (bagAmmo requires a wielded missile weapon, which the gate
+        // excluded). This guards that the ammo affordance renders in the capsule.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+            new InventoryItemProjection
+            { Guid = 0x2u, Name = "Arrows", Wcid = 3u, ItemType = 0x800u, ValidLocations = 0x00800000u, WieldedAt = null },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        int capsule = p.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(capsule > 0);
+        var capsuleText = p.Substring(capsule);
+        Assert.Contains("missile ammo: EMPTY", capsuleText);
+        Assert.Contains("Wield it to load): Arrows", capsuleText);
+    }
+
 
     [Fact]
     public void BuildUserPrompt_RetainsEarlyExitPopup_UnderLaterPopupFlood()

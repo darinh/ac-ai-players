@@ -5033,14 +5033,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var monstersInView = world.Visible.Count(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
-        string weaponLine;
-        if (meleeWeaponWielded)
-            weaponLine = "melee weapon wielded";
-        else if (missileWeaponWielded)
-            weaponLine = $"missile weapon wielded; missile ammo: {(ammoLoaded ? "loaded" : "EMPTY (wield ammo to fire)")}";
-        else
-            weaponLine = "NONE wielded - UNARMED";
-        sb.AppendLine($"- weapon: {weaponLine}");
+        sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
             sb.AppendLine(crHealthLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
@@ -6739,6 +6732,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.Length = selfCapsuleStart;
         }
 
+        // ── ## Combat readiness capsule (protected-tail cut-proof) ──
+        // The body `## Combat readiness` renders just after the RULES preamble
+        // and is dropped by the same dense-scene body hard-cut that drops
+        // `## Self`. Live: lacking it, the LLM could not confirm whether it was
+        // armed ("no combat readiness info to confirm safe fight. Unarmed or no
+        // viable weapon indicated") and AVOIDED combat, choosing Explore over a
+        // winnable fight. Re-surface the single most decision-critical compact
+        // signal — the weapon/armed (UNARMED) line, plus how to arm when UNARMED
+        // — in the PROTECTED salience tail via the shared WeaponReadinessLine.
+        // Threat counts already survive via the tail's monster sections and
+        // max-HP/deaths via the `## Self` capsule, so only the arm-state is
+        // re-surfaced here. Raw wire-state; no advice.
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
+            sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+            // How-to-arm affordances. Each variable is already null-computed for
+            // its applicable case (bagWeapon/groundWeapon are null when armed;
+            // bagAmmo is null unless a missile weapon is wielded with empty
+            // ammo), so they are surfaced directly — exactly like the body
+            // section — WITHOUT an outer armed-state gate. An earlier outer
+            // `if (!melee && !missile)` gate made the bagAmmo row dead code (it
+            // requires a wielded missile weapon, which the gate excluded), so a
+            // missile-empty bot was told ammo is EMPTY but never which to wield.
+            if (bagWeapon is not null)
+                sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
+            if (groundWeapon is not null)
+            {
+                var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
+                sb.AppendLine($"- melee weapon nearby (Pickup it to arm): {groundWeapon.Name}{gwd}");
+            }
+            if (bagAmmo is not null)
+                sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
+        }
+
         var assembled = sb.ToString();
         var salienceTail = assembled.Substring(salienceTailStart);
         var body = assembled.Substring(0, salienceTailStart);
@@ -7434,6 +7462,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.Append(')');
         }
         return sb.ToString();
+    }
+
+    // The armed/UNARMED weapon-readiness line for `## Combat readiness`. Shared
+    // by the body section and the protected-tail capsule so the two never
+    // diverge. Mechanical wire-state rendering (what is wielded + whether the
+    // missile weapon has ammo loaded); no advice, priority, or game knowledge.
+    private static string WeaponReadinessLine(
+        bool meleeWeaponWielded, bool missileWeaponWielded, bool ammoLoaded)
+    {
+        if (meleeWeaponWielded)
+            return "melee weapon wielded";
+        if (missileWeaponWielded)
+            return $"missile weapon wielded; missile ammo: {(ammoLoaded ? "loaded" : "EMPTY (wield ammo to fire)")}";
+        return "NONE wielded - UNARMED";
     }
 
     // Append the decision-critical, COMPACT self facts — attributes, raisable
