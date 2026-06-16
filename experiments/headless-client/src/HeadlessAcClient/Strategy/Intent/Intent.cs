@@ -191,11 +191,46 @@ internal sealed class IntentStack
     public StackOpResult TryPush(Intent intent, long? expectedRevision = null)
     {
         if (expectedRevision is long er && er != _revision) return StackOpResult.RefusedRevision;
+        // If the stack is full, first reclaim any buried terminal frames so a
+        // pile-up of FINISHED intents cannot permanently block a new push (for
+        // example compiling a fresh quest). See ReapTerminalFrames.
+        if (_frames.Count >= _maxDepth) ReapTerminalFrames();
         if (_frames.Count >= _maxDepth) return StackOpResult.RefusedOverflow;
 
         _frames.Add(intent);
         _revision++;
         return StackOpResult.Ok;
+    }
+
+    /// <summary>
+    /// Reclaim buried terminal frames. Only the TOP auto-pops on completion
+    /// (<see cref="CheckTopForCompletion"/>), and a Completed/Expired ROOT is
+    /// marked in place, so a finished intent that ends up BELOW a newer frame is
+    /// never reclaimed. Over a long session those accumulate until the stack
+    /// reaches <see cref="MaxDepth"/> and EVERY subsequent push is
+    /// <see cref="StackOpResult.RefusedOverflow"/> — which blocks the LLM from
+    /// compiling a new objective (live-observed: a sustained grind saturated the
+    /// stack at depth 8, then 7+ consecutive overflow-rejected pushes). Drop
+    /// every Completed/Expired frame; <see cref="IntentLifecycle.Blocked"/>
+    /// frames are deliberate durable markers and are KEPT, as is any Active
+    /// frame. The stack is NEVER emptied: if every frame is terminal the newest
+    /// is retained so a later push/replace can supersede it (this is the only
+    /// case that removes the root, and only because it too is finished). Pure
+    /// mechanical stack hygiene — no game knowledge. Returns the count removed.
+    /// </summary>
+    public int ReapTerminalFrames()
+    {
+        if (_frames.Count == 0) return 0;
+        var kept = _frames
+            .Where(f => f.Status is not (IntentLifecycle.Completed or IntentLifecycle.Expired))
+            .ToList();
+        if (kept.Count == _frames.Count) return 0;   // nothing terminal to reclaim
+        if (kept.Count == 0) kept.Add(_frames[^1]);  // all terminal — keep the newest
+        var removed = _frames.Count - kept.Count;
+        _frames.Clear();
+        _frames.AddRange(kept);
+        _revision++;
+        return removed;
     }
 
     /// <summary>

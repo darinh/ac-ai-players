@@ -126,7 +126,7 @@ internal static class IntentStackOpsApplier
         var maxDepth = stack.MaxDepth;
         var mirror = new List<MirrorFrame>(stack.Frames.Count + ops.Count);
         foreach (var f in stack.Frames)
-            mirror.Add(new MirrorFrame(SemanticKey(f.Kind, f.TargetName), f.Status == IntentLifecycle.Active));
+            mirror.Add(new MirrorFrame(SemanticKey(f.Kind, f.TargetName), f.Status));
         var suppressed = new bool[ops.Count];
 
         for (int i = 0; i < ops.Count; i++)
@@ -150,15 +150,33 @@ internal static class IntentStackOpsApplier
                     // the stack is redundant and would otherwise stack a
                     // duplicate. A Blocked/Completed/Expired frame does not
                     // suppress, so a legitimate retry is still allowed.
-                    if (mirror.Any(m => m.Active && string.Equals(m.Key, pushKey, StringComparison.Ordinal)))
+                    if (mirror.Any(m => m.Status == IntentLifecycle.Active && string.Equals(m.Key, pushKey, StringComparison.Ordinal)))
                     {
                         // Redundant with a live Active intent — idempotent no-op.
                         suppressed[i] = true;
                         break;
                     }
+                    // Mirror IntentStack.TryPush: when the stack is full, reclaim
+                    // buried terminal frames (Completed/Expired) BEFORE refusing,
+                    // so a pile-up of finished intents can't permanently block a
+                    // new push. Kept in lockstep with IntentStack.ReapTerminalFrames
+                    // (Blocked is durable and kept; never empty — keep the newest
+                    // when all are terminal) so the dry-run matches the real apply.
+                    if (mirror.Count >= maxDepth)
+                    {
+                        var kept = mirror
+                            .Where(m => m.Status is not (IntentLifecycle.Completed or IntentLifecycle.Expired))
+                            .ToList();
+                        if (kept.Count == 0) kept.Add(mirror[^1]);
+                        if (kept.Count < mirror.Count)
+                        {
+                            mirror.Clear();
+                            mirror.AddRange(kept);
+                        }
+                    }
                     if (mirror.Count >= maxDepth)
                         return Reject(BatchApplyResult.RejectedOverflow, $"op[{i}] push: would exceed max depth {maxDepth}");
-                    mirror.Add(new MirrorFrame(pushKey, true));
+                    mirror.Add(new MirrorFrame(pushKey, IntentLifecycle.Active));
                     break;
 
                 case IntentStackOpKind.PopTop:
@@ -176,7 +194,7 @@ internal static class IntentStackOpsApplier
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing intent");
                     if (op.Intent.Completion is null)
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing completion predicate");
-                    mirror[^1] = new MirrorFrame(SemanticKey(op.Intent.Kind, op.Intent.TargetName), true);
+                    mirror[^1] = new MirrorFrame(SemanticKey(op.Intent.Kind, op.Intent.TargetName), IntentLifecycle.Active);
                     break;
 
                 case IntentStackOpKind.MarkTopBlocked:
@@ -184,7 +202,7 @@ internal static class IntentStackOpsApplier
                         return Reject(BatchApplyResult.RejectedEmpty, $"op[{i}] mark_top_blocked: stack empty");
                     if (string.IsNullOrWhiteSpace(op.Reason))
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] mark_top_blocked: reason required");
-                    mirror[^1] = mirror[^1] with { Active = false };
+                    mirror[^1] = mirror[^1] with { Status = IntentLifecycle.Blocked };
                     break;
 
                 default:
@@ -319,7 +337,7 @@ internal static class IntentStackOpsApplier
         + (target ?? string.Empty).Trim().ToLowerInvariant();
 
     /// <summary>Logical batch-validation mirror entry: a frame's semantic key and whether it is still Active.</summary>
-    private readonly record struct MirrorFrame(string Key, bool Active);
+    private readonly record struct MirrorFrame(string Key, IntentLifecycle Status);
 
     /// <summary>
     /// Build the human-readable "## Intent stack" block surfaced to
