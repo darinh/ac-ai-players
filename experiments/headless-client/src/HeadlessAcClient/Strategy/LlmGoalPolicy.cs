@@ -6831,9 +6831,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 sb.AppendLine();
                 sb.AppendLine(
-                    "## Winnable kinds (your own combat ledger — kinds you have killed with no recorded death; a " +
-                    "candidate to COMMIT A WINNING GRIND AS A KILL-COUNT INTENT so the Motor repeats the kills " +
-                    "without a per-kill decision)");
+                    "## Winnable kinds (your own combat ledger — kinds you have killed with no recorded death)");
+                // The commit nudge references `stack_ops`, which only exists in the
+                // decision schema when the IntentStack is enabled — gate it on the
+                // same `stack is not null` condition as the COMMIT A WINNING GRIND
+                // rule it points back to, so we never instruct the LLM to emit a
+                // field the schema omits.
+                if (stack is not null)
+                    sb.AppendLine(
+                        "- ACT ON THIS NOW, do not just read it: if you are about to Attack one of the kinds below and " +
+                        "have NO active kill-count intent on the stack for it, COMMIT A WINNING GRIND in the SAME " +
+                        "response — add a `hunt` kill-count push to `stack_ops` (per the COMMIT A WINNING GRIND AS A " +
+                        "KILL-COUNT INTENT rule above, which gives the exact shape) so the Motor repeats the kills " +
+                        "with NO per-kill LLM call. This is the reduce-llm-call-volume lever: while no such commitment " +
+                        "is on the stack EVERY kill costs a full decision and leveling stalls. A quest/server directive " +
+                        "still outranks this grind; push only for a kind you are genuinely winning against (listed below).");
                 foreach (var h in winnableKinds)
                     sb.AppendLine(
                         $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
