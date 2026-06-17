@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// vendor-browse-nudge: a relevance-gated rule that surfaces an unbrowsed in-view
-// vendor as a possible kill-task (contract) source. It is a COMBAT-ONLY carveout:
-// it fires ONLY when a monster is in view (the monster-gated task-seeking rules
-// are suppressed in combat, so the bot would otherwise grind past the vendor),
-// AND a `vendor`-tagged object is visible, no vendor panel is open, and no
-// contract is tracked. Zero prompt budget otherwise, never nags once on a
-// contract, and never duplicates/conflicts with the no-monster hunt/seek rules.
-// The rule surfaces a fact + a cheap option; the LLM decides.
+// kill-task-source-nudge: a relevance-gated rule that surfaces an un-engaged
+// in-view kill-task (contract) SOURCE — a `vendor`-tagged object (browse with
+// Use) OR an un-talked dialog `npc` (reached by Talk; a source need not carry
+// the wire ObjectDescriptionFlag.Vendor bit). It is a COMBAT-ONLY carveout: it
+// fires ONLY when a monster is in view (the no-monster task-seeking rules — SEEK
+// A KILL-TASK / LOOP-BREAK — already cover the source, and HUNT EXCURSION would
+// conflict), AND a vendor (panel not open) OR an un-talked npc is visible, and
+// no ACTIONABLE contract is tracked. Zero prompt budget otherwise, never nags
+// while on a contract, never duplicates/conflicts with the no-monster
+// hunt/seek rules. The rule surfaces a fact + a cheap option; the LLM decides.
 
 using System;
 using HeadlessAcClient.Strategy;
@@ -17,18 +19,30 @@ namespace HeadlessAcClient.Tests;
 public class VendorBrowseNudgeTests
 {
     private const uint SelfGuid = 0x5000000C;
-    private const string NudgeMarker = "BROWSE A VENDOR FOR A KILL-TASK";
+    private const string NudgeMarker = "FIND A KILL-TASK SOURCE";
 
     private static WorldStateProjection World(
         bool vendorVisible, bool monsterVisible = false,
         bool vendorPanelOpen = false, bool hasContract = false, uint contractStage = 2u,
-        uint[]? contractStages = null)
+        uint[]? contractStages = null, bool npcVisible = false, bool vendorIsCreature = false)
     {
         var visible = new System.Collections.Generic.List<VisibleObjectProjection>();
         if (vendorVisible)
+            // IsCreature and IsVendor are independent wire bits; a live vendor is
+            // BOTH. vendorIsCreature models that overlap so the npc-arm exclusion
+            // can be tested.
             visible.Add(new VisibleObjectProjection
             {
-                Guid = 0x9001u, Name = "Provisioner", IsVendor = true, Distance = 10f,
+                Guid = 0x9001u, Name = "Provisioner", IsVendor = true,
+                IsCreature = vendorIsCreature, Distance = 10f,
+            });
+        if (npcVisible)
+            // An un-talked dialog NPC: a creature that is not a monster, with no
+            // ObjectDescriptionFlag.Vendor bit (reached by Talk, not a trade panel).
+            visible.Add(new VisibleObjectProjection
+            {
+                Guid = 0x9003u, Name = "Townsperson", IsCreature = true, IsMonster = false,
+                Distance = 9f,
             });
         if (monsterVisible)
             visible.Add(new VisibleObjectProjection
@@ -139,5 +153,69 @@ public class VendorBrowseNudgeTests
         // The panel is open -> ## Vendor offerings already shows the wares.
         Assert.DoesNotContain(NudgeMarker,
             Prompt(World(vendorVisible: true, monsterVisible: true, vendorPanelOpen: true)));
+    }
+
+    [Fact]
+    public void Nudge_Present_WhenUntalkedNpcInView_NoVendor()
+    {
+        // A contract SOURCE need not carry the wire Vendor bit: an un-talked
+        // dialog NPC is reached by Talk, not a vendor trade panel. With a monster
+        // in view + an un-talked npc + the batch DONE, the nudge must fire even
+        // with NO vendor present, so the bot Talks the npc to seek a fresh task
+        // instead of grinding past it.
+        Assert.Contains(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: true,
+                npcVisible: true, contractStages: new uint[] { 3u, 3u })));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenUntalkedNpcButActionableContract()
+    {
+        // An un-talked npc is in view but an ACTIONABLE contract (stage 2)
+        // remains -> pursue it; do NOT nudge seeking a fresh source.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: true,
+                npcVisible: true, hasContract: true)));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenNpcInViewButNoMonster()
+    {
+        // No monster -> the no-monster LOOP-BREAK rule already drives Talking
+        // un-talked npcs in a town; this combat-only nudge stays off to avoid
+        // duplicating it.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: false, npcVisible: true)));
+    }
+
+    [Fact]
+    public void Nudge_Present_WhenUntalkedNpcDespiteOpenVendorPanel()
+    {
+        // The npc arm does NOT depend on `world.Vendor is null`: an un-talked
+        // task-giver is worth a Talk even while some other vendor's panel is open
+        // (the open panel only makes the VENDOR arm redundant, not the npc arm).
+        Assert.Contains(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: true, npcVisible: true,
+                vendorPanelOpen: true, contractStages: new uint[] { 3u, 3u })));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenOnlySourceIsAnOpenPanelVendorCreature()
+    {
+        // A live vendor is BOTH IsVendor and IsCreature. With its panel OPEN and
+        // no other source, the nudge must stay OFF: the vendor arm is suppressed
+        // by the open panel, and the npc arm must NOT re-trigger on the same
+        // vendor-creature (CountUntalkedNpcsInView excludeVendors:true).
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: true, vendorIsCreature: true, monsterVisible: true,
+                vendorPanelOpen: true, contractStages: new uint[] { 3u, 3u })));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenNeitherVendorNorNpcVisible()
+    {
+        // Only a monster in view, no kill-task source of either kind -> absent.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: true)));
     }
 }
