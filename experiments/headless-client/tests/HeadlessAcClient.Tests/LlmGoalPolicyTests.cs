@@ -5631,6 +5631,151 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_BagWeaponRecentlyRefused_SkipsToNextWieldableWeapon()
+    {
+        // Unarmed with TWO unwielded melee weapons in the bag, but the
+        // server RECENTLY REFUSED the first one (an ActionRejected carrying
+        // its guid — e.g. an InventoryServerSaveFailed for a wield the
+        // server would not actuate). The "Wield it to arm" suggestion must
+        // SKIP the refused weapon and surface the next wieldable one,
+        // instead of looping on an un-equippable item every decision while
+        // a usable weapon sits ignored.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = null },
+                new InventoryItemProjection
+                { Guid = 0x444u, Name = "Lugian Hammer", Wcid = 31764u, ItemType = 0x1u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ItemGuid = 0x222u,
+            ErrorLabel = "InventoryServerSaveFailed",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
+        Assert.Contains("melee weapon in your inventory (Wield it to arm): Lugian Hammer", prompt);
+        Assert.DoesNotContain("Wield it to arm): Training Spadone", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_OnlyBagWeaponRefused_SuppressesWieldAffordance()
+    {
+        // Unarmed with a SINGLE unwielded melee weapon the server recently
+        // refused. With no other wieldable weapon to fall through to, the
+        // suggestion must be suppressed entirely (do not re-emit a Wield the
+        // server rejects) rather than re-surface the refused item.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ItemGuid = 0x222u,
+            ErrorLabel = "InventoryServerSaveFailed",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
+        Assert.DoesNotContain("Wield it to arm", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagWeaponTransportFailure_DoesNotSuppressWieldAffordance()
+    {
+        // A synthetic motor TRANSPORT failure (Unreachable, reserved code
+        // 0xFFFE) carries the TARGET's guid, NOT a server wield refusal.
+        // Inventory items and world objects share a guid space (a ground
+        // weapon keeps its guid after pickup), so a stale walk-timeout toward
+        // an item the bot has since picked up must NOT suppress its in-bag
+        // Wield suggestion — a wield is never a transport failure. The
+        // suggestion must still surface.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ItemGuid = 0x222u,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.Contains("melee weapon in your inventory (Wield it to arm): Training Spadone", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagAmmoServerRefused_SuppressesLoadAffordance()
+    {
+        // A wielded missile weapon with no ammo loaded normally surfaces a
+        // "Wield it to load" suggestion for unwielded ammo in the bag. But if
+        // the server recently REFUSED to load that ammo (e.g. wrong ammo type
+        // for the weapon → InventoryServerSaveFailed), re-surfacing it makes
+        // the LLM loop on a load the server rejects. The suggestion must be
+        // suppressed, mirroring the bag-weapon behavior.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                // A wielded missile weapon (ItemType MissileWeapon bit, slot non-zero).
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Yumi", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                // Unwielded ammo in the bag (ValidLocations MissileAmmoSlot bit).
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Arrows", Wcid = 301u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ItemGuid = 0x222u,
+            ErrorLabel = "InventoryServerSaveFailed",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.DoesNotContain("Wield it to load", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_VisibleGroundWeapon_SurfacesPickupAffordance()
     {
         // Unarmed, empty bag, but a melee weapon lies on the ground →
@@ -5652,6 +5797,41 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("melee weapon nearby (Pickup it to arm): Hand Axe", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_GroundWeaponServerRefused_SuppressesPickupAffordance()
+    {
+        // A ground melee weapon the server recently SEMANTICALLY refused to
+        // pick up (e.g. inventory full → InventoryServerSaveFailed, NOT a
+        // walk-timeout) must not be re-suggested: IsGoalRecentlyRejected does
+        // NOT clear a semantic refusal on arrival, so the LLM's Pickup would be
+        // dropped every decision — the same wasted round-trip loop as the bag
+        // weapon. A transport failure (Unreachable) is excluded from the
+        // refused set, so this does not withhold a now-reachable pickup.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x333u, Name = "Hand Axe", Wcid = 303u, ItemType = 0x1u, Distance = 12f, IsMonster = false },
+            },
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ItemGuid = 0x333u,
+            ErrorLabel = "InventoryServerSaveFailed",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
+        Assert.DoesNotContain("Pickup it to arm", prompt);
     }
 
     [Fact]

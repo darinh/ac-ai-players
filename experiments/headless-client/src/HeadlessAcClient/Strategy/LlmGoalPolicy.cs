@@ -5031,9 +5031,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             i.ItemType is uint mit && (mit & ItemTypeMasks.MissileWeapon) != 0);
         var ammoLoaded = world.Inventory.Any(i =>
             i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
+        // Items the server SEMANTICALLY refused for the bot recently — used
+        // below to drop a self-arm suggestion the server would only refuse
+        // again. An ActionRejected (e.g. an InventoryServerSaveFailed for a
+        // wield/load the server would not actuate) carries the item guid.
+        // EXCLUDE synthetic motor-side TRANSPORT failures (Unreachable /
+        // Blocked / NoIndoorPath — reserved codes 0xFFFC-0xFFFE via
+        // IsTransportFailureRejection): those mean "could not WALK to a world
+        // target", carry that TARGET's guid, and clear once the bot arrives.
+        // Inventory items and visible world objects share one guid space (a
+        // ground item keeps its guid after pickup), so counting a transport
+        // failure here could wrongly suppress a bag item the bot earlier
+        // walk-timed-out toward and has since picked up. A wield/load is never
+        // a transport failure, so excluding them loses nothing for inventory
+        // suggestions and keeps this set to genuine server refusals. Same
+        // 32-event ActionRejected window NoQuestKnowledgePolicy's
+        // recentlyRejectedGuids uses; guids age out naturally, so a later
+        // retry once the blocker is gone is fair game. Mechanical: reads the
+        // bot's OWN rejection bookkeeping; the guid comes from the wire, not a
+        // name/wcid list.
+        var recentlyServerRefusedGuids = events
+            .RecentOfKind(EventKind.ActionRejected, 32)
+            .Where(e => e.ItemGuid is uint && !IsTransportFailureRejection(e))
+            .Select(e => e.ItemGuid!.Value)
+            .ToHashSet();
         var bagAmmo = (!missileWeaponWielded || ammoLoaded) ? null : world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint baw || baw == 0) &&
-            i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0);
+            i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
+            !recentlyServerRefusedGuids.Contains(i.Guid));
         var armed = meleeWeaponWielded || missileWeaponWielded;
         // Acquisition affordances surfaced ONLY when unarmed, so the LLM
         // can act on "arm yourself" instead of merely noting it is
@@ -5042,12 +5067,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // melee weapon lying in the world (→ Pickup it). Both are pure
         // typed-affordance projections (ItemType MeleeWeapon bit), no
         // names/wcids/landblocks.
+        //
+        // ALL THREE self-arm suggestions — bagWeapon, bagAmmo (above) and
+        // groundWeapon (below) — skip an item the server recently REFUSED
+        // (recentlyServerRefusedGuids): re-surfacing an item the server will
+        // only refuse again makes the LLM loop on it every decision (re-emit
+        // the Wield/Pickup → server refuses → IsGoalRecentlyRejected drops it,
+        // burning an LLM round-trip) while a DIFFERENT, usable item in the bag
+        // / on the ground is never suggested, and each refusal is itself an
+        // ActionRejected that also stalls the autonomous combat chain. The set
+        // is SEMANTIC refusals only (transport failures were excluded above),
+        // which is exactly the set IsGoalRecentlyRejected does NOT clear on
+        // arrival — so withholding these suggestions matches what the dedup
+        // would drop anyway. A transport-failed (could-not-walk-there) pickup
+        // is deliberately NOT suppressed here: it clears once the bot arrives,
+        // and that arrival-clearing is owned by IsGoalRecentlyRejected and the
+        // picker's own rejection filter, not this arrival-unaware set.
         var bagWeapon = armed ? null : world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint bw || bw == 0) &&
-            i.ItemType is uint bit && (bit & ItemTypeMasks.MeleeWeapon) != 0);
+            i.ItemType is uint bit && (bit & ItemTypeMasks.MeleeWeapon) != 0 &&
+            !recentlyServerRefusedGuids.Contains(i.Guid));
         var groundWeapon = armed ? null : world.Visible
             .Where(v => !v.IsMonster &&
-                        v.ItemType is uint vit && (vit & ItemTypeMasks.MeleeWeapon) != 0)
+                        v.ItemType is uint vit && (vit & ItemTypeMasks.MeleeWeapon) != 0 &&
+                        !recentlyServerRefusedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         var nearestMonster = world.Visible
