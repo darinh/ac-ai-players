@@ -2926,6 +2926,62 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"(source-autonomous wield; not an LLM goal)");
                                     break;
                                 }
+                                // A prerequisite dequip whose item the server
+                                // refuses to move. To wield an item that needs an
+                                // occupied slot freed, the Motor dequips the
+                                // blocking item first (PutItemInContainer) and
+                                // defers the wield to that dequip's put-ack
+                                // (pendingWieldAfterDequip). If the server rejects
+                                // the dequip, the put-ack never arrives, the
+                                // deferred wield never fires, and the rejection is
+                                // keyed on the BLOCKING item — but the policy's
+                                // recently-rejected dedup keys on a goal's TARGET,
+                                // so a blocker-keyed rejection never dedups the
+                                // repeated wield goal and it is re-emitted every
+                                // cycle. Only for a FRESH in-flight swap entry
+                                // (the same StartedUtc window the dispatch loop's
+                                // pendingFresh check uses), re-attribute the
+                                // rejection to the deferred TARGET so the dedup
+                                // keys align and the policy re-deliberates; clear
+                                // the consumed pending entry. A STALE entry is
+                                // ignored — an abandoned swap must not intercept a
+                                // later unrelated rejection of the same item guid,
+                                // which falls through to the generic surface below.
+                                // Mechanical: keyed on the wire rejection guid +
+                                // the in-flight swap map + its dispatch timestamp;
+                                // no game knowledge.
+                                if (SwapRejectionAttribution.ForRejectedBlocker(
+                                        isf.ItemGuid,
+                                        g => pendingWieldAfterDequip.TryGetValue(g, out var sw)
+                                             && (DateTime.UtcNow - sw.StartedUtc) < TimeSpan.FromSeconds(10)
+                                            ? sw.TargetGuid
+                                            : (uint?)null,
+                                        g =>
+                                        {
+                                            var s = worldState.TryGet(g);
+                                            return (s?.Name, s?.WeenieClassId);
+                                        })
+                                    is { } swapReject)
+                                {
+                                    pendingWieldAfterDequip.Remove(isf.ItemGuid);
+                                    Console.WriteLine(
+                                        $"[strategy] SWAP-WIELD failed: blocker=0x{isf.ItemGuid:X8} could not be " +
+                                        $"unequipped (err=0x{isf.ErrorType:X}); re-attributing rejection to target " +
+                                        $"'{swapReject.Name}' guid=0x{swapReject.TargetGuid:X8} so the wield loop breaks.");
+                                    eventStream.Append(new StreamEvent
+                                    {
+                                        Sequence = 0,
+                                        Utc = DateTimeOffset.UtcNow,
+                                        Kind = EventKind.ActionRejected,
+                                        Text = swapReject.Text,
+                                        ItemGuid = swapReject.TargetGuid,
+                                        Wcid = swapReject.Wcid,
+                                        Name = swapReject.Name,
+                                        ErrorCode = isf.ErrorType,
+                                        ErrorLabel = invLabel,
+                                    });
+                                    break;
+                                }
                                 // Look up the failed item by guid in the full
                                 // object set (worldState.TryGet), NOT a spatial
                                 // radius scan: a bagged inventory item (e.g. a
