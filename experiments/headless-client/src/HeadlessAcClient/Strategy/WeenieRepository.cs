@@ -34,6 +34,11 @@ internal sealed class WeenieRepository : IWeenieRepository
     private const int PropNameId      = 1;
     private const int PropLongDescId  = 14;
     private const int PropShortDescId = 16;
+    // PropertyInt.WeaponSkill (48): the Skill enum ordinal that governs
+    // attacks with this weapon (e.g. TwoHandedCombat, HeavyWeapons). The
+    // wire does not deliver it; it is static weenie data the LLM needs to
+    // compare a weapon against the skills it has trained.
+    private const int PropWeaponSkillId = 48;
 
     private readonly string _connString;
     private readonly ConcurrentDictionary<uint, WeenieStringRecord?> _cache = new();
@@ -107,8 +112,26 @@ internal sealed class WeenieRepository : IWeenieRepository
                     case PropLongDescId:  ld   = v; break;
                 }
             }
-            if (name is null && sd is null && ld is null) return (null, false);
-            return (new WeenieStringRecord(wcid, name, sd, ld), false);
+            await rdr.DisposeAsync().ConfigureAwait(false);
+
+            // Second query: the weapon's governing skill (PropertyInt.WeaponSkill
+            // 48), from weenie_properties_int. Most items have no such row
+            // (null), only weapons. Same connection, no extra round-trip cost
+            // beyond the query itself.
+            int? weaponSkill = null;
+            await using (var intCmd = conn.CreateCommand())
+            {
+                intCmd.CommandText =
+                    "SELECT value FROM weenie_properties_int WHERE object_Id = @w AND type = @ws";
+                intCmd.Parameters.AddWithValue("@w", wcid);
+                intCmd.Parameters.AddWithValue("@ws", PropWeaponSkillId);
+                var raw = await intCmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+                if (raw is not null && raw is not DBNull)
+                    weaponSkill = Convert.ToInt32(raw);
+            }
+
+            if (name is null && sd is null && ld is null && weaponSkill is null) return (null, false);
+            return (new WeenieStringRecord(wcid, name, sd, ld, weaponSkill), false);
         }
         catch (Exception ex)
         {
@@ -128,6 +151,6 @@ internal sealed class WeenieRepository : IWeenieRepository
     /// <summary>
     /// Direct cache poke for tests. Production code should use EnsureLoadedAsync.
     /// </summary>
-    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc)
-        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc);
+    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc, int? weaponSkillId = null)
+        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, weaponSkillId);
 }

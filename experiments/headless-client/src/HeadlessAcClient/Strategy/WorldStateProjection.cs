@@ -35,6 +35,15 @@ internal sealed record InventoryItemProjection
     [JsonPropertyName("wielded_at")] public uint? WieldedAt { get; init; }
 
     /// <summary>
+    /// For a weapon: the NAME of the Skill that governs attacks with it
+    /// (e.g. "TwoHandedCombat", "HeavyWeapons", "LightWeapons"), decoded from
+    /// the weenie's PropertyInt.WeaponSkill via WeenieRepository. Null for
+    /// non-weapons / unknown. The LLM compares this against its `trained
+    /// skills` to prefer a weapon it is actually skilled with.
+    /// </summary>
+    [JsonPropertyName("governing_skill")] public string? GoverningSkill { get; init; }
+
+    /// <summary>
     /// Sourced from WeenieRepository (MariaDB ace_world); the wire
     /// protocol does not deliver this. Null if unknown / not yet
     /// looked up. THIS is the field the LLM uses to derive quest
@@ -542,11 +551,24 @@ internal sealed record WorldStateProjection
             .Select(o =>
             {
                 string? sd = null, ld = null;
+                string? governingSkill = null;
                 if (o.WeenieClassId is uint wcid && weenies is not null)
                 {
                     var rec = weenies.TryGet(wcid);
                     sd = rec?.ShortDesc;
                     ld = rec?.LongDesc;
+                    // Decode the weapon's governing-skill ordinal to its name
+                    // using the SAME Skill enum the trained-skills projection
+                    // uses (GameEventPayloadDecoder: ((Skill)id).ToString()),
+                    // so the LLM can string-match it against `trained skills`.
+                    // Pure enum decode of static weenie data — no hardcoded
+                    // weapon->skill table.
+                    if (rec?.WeaponSkillId is int wsId && wsId != 0)
+                    {
+                        var sk = (HeadlessAcClient.Protocol.Skill)wsId;
+                        if (System.Enum.IsDefined(typeof(HeadlessAcClient.Protocol.Skill), sk))
+                            governingSkill = sk.ToString();
+                    }
                 }
                 return new InventoryItemProjection
                 {
@@ -558,6 +580,7 @@ internal sealed record WorldStateProjection
                     WieldedAt = o.CurrentWieldedLocation,
                     ShortDesc = sd,
                     LongDesc = ld,
+                    GoverningSkill = governingSkill,
                 };
             })
             .ToList();

@@ -5903,6 +5903,136 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("Pickup it to arm", prompt);
     }
 
+    private static WorldStateProjection BuildWeaponSkillWorld(
+        string trainedSkill, string wieldedSkill, string? bagSkill)
+    {
+        var inv = new System.Collections.Generic.List<InventoryItemProjection>
+        {
+            // Wielded melee weapon governed by `wieldedSkill`.
+            new InventoryItemProjection
+            { Guid = 0x111u, Name = "Lugian Hammer", Wcid = 31764u, ItemType = 0x1u, WieldedAt = 0x100000u, GoverningSkill = wieldedSkill },
+        };
+        if (bagSkill is not null)
+            inv.Add(new InventoryItemProjection
+            { Guid = 0x222u, Name = "Training Spadone", Wcid = 41512u, ItemType = 0x1u, ValidLocations = 0x2000000u, WieldedAt = null, GoverningSkill = bagSkill });
+        return new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = trainedSkill, Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = inv,
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+    }
+
+    [Fact]
+    public void WeaponSkillSwapAdvisory_WieldedUntrained_TrainedInBag_Advises()
+    {
+        // Live cp2928-combat: bot trained TwoHandedCombat but wielded an
+        // untrained-skill 1H weapon (HeavyWeapons) with the trained-skill 2H
+        // weapon in the bag — and died. The advisory must flag the mismatch and
+        // name the trained-skill bag weapon to swap to.
+        var world = BuildWeaponSkillWorld("TwoHandedCombat", "HeavyWeapons", "TwoHandedCombat");
+        var advisory = LlmGoalPolicy.WeaponSkillSwapAdvisory(world);
+        Assert.NotNull(advisory);
+        Assert.Contains("weapon skill MISMATCH", advisory);
+        Assert.Contains("HeavyWeapons", advisory);          // the untrained wielded skill
+        Assert.Contains("Training Spadone", advisory);      // the trained-skill bag weapon
+        Assert.Contains("TwoHandedCombat", advisory);       // its trained skill
+    }
+
+    [Fact]
+    public void WeaponSkillSwapAdvisory_WieldedTrainedSkill_NoAdvisory()
+    {
+        // Already wielding a weapon whose skill is trained → no swap advisory.
+        var world = BuildWeaponSkillWorld("TwoHandedCombat", "TwoHandedCombat", "TwoHandedCombat");
+        Assert.Null(LlmGoalPolicy.WeaponSkillSwapAdvisory(world));
+    }
+
+    [Fact]
+    public void WeaponSkillSwapAdvisory_NoTrainedSkillWeaponAvailable_NoAdvisory()
+    {
+        // Wielded weapon is untrained-skill, but no trained-skill weapon is in
+        // the bag to swap to → no advisory (do not nag with no actionable swap).
+        var world = BuildWeaponSkillWorld("TwoHandedCombat", "HeavyWeapons", bagSkill: null);
+        Assert.Null(LlmGoalPolicy.WeaponSkillSwapAdvisory(world));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WeaponSkillMismatch_SurfacesAdvisoryAndRule()
+    {
+        var world = BuildWeaponSkillWorld("TwoHandedCombat", "HeavyWeapons", "TwoHandedCombat");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        // The advisory FACT renders in `## Combat readiness`.
+        Assert.Contains("weapon skill MISMATCH", prompt);
+        // The backing rule is present.
+        Assert.Contains("WIELD A WEAPON YOU ARE SKILLED WITH", prompt);
+    }
+
+    [Fact]
+    public void NoQuestFallback_DoesNotAutoWieldShieldThatWouldDequipTwoHandedWeapon()
+    {
+        // Live cp2929: the bot wielded its trained 2H weapon, then the source
+        // fallback auto-wielded an unwielded Kite Shield — which (via the
+        // cp2928 swap) DEQUIPPED the 2H weapon, undoing the loadout. The
+        // fallback must NOT auto-equip gear whose wield would dequip a wielded
+        // WEAPON (a loadout downgrade the LLM owns).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                // Wielded two-handed melee weapon.
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Training Spadone", Wcid = 41512u, ItemType = 0x1u, ValidLocations = 0x2000000u, WieldedAt = 0x2000000u },
+                // Unwielded shield — wielding it would dequip the 2H weapon.
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Kite Shield", Wcid = 91u, ItemType = 0x2u, ValidLocations = 0x200000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var goal = new NoQuestKnowledgePolicy().ProposeGoal(world, new EventStream(), null);
+        Assert.False(
+            goal is { Kind: GoalKind.Wield } && goal.Item?.Guid == 0x222u,
+            $"fallback must not auto-wield the shield; got {goal?.Kind} item={goal?.Item?.Name}");
+    }
+
+    [Fact]
+    public void NoQuestFallback_StillAutoWieldsArmorThatDoesNotDequipAWeapon()
+    {
+        // The guard must NOT over-filter: an unwielded armor piece (occupies an
+        // armor slot, conflicts with no weapon) is still auto-wielded.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Training Spadone", Wcid = 41512u, ItemType = 0x1u, ValidLocations = 0x2000000u, WieldedAt = 0x2000000u },
+                // Unwielded head armor (slot 0x1) — no weapon conflict.
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Cap", Wcid = 1234u, ItemType = 0x2u, ValidLocations = 0x1u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var goal = new NoQuestKnowledgePolicy().ProposeGoal(world, new EventStream(), null);
+        Assert.True(
+            goal is { Kind: GoalKind.Wield } && goal.Item?.Guid == 0x333u,
+            $"fallback should auto-wield the non-conflicting armor; got {goal?.Kind} item={goal?.Item?.Name}");
+    }
+
     [Fact]
     public void CombatReadiness_MultipleMonsters_RendersThreatCount()
     {
