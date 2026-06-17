@@ -1146,12 +1146,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int CountUntalkedNpcsInView(
         WorldStateProjection world,
         IReadOnlySet<uint>? talkedNpcGuids,
-        IReadOnlySet<string>? talkedNpcNames = null)
+        IReadOnlySet<string>? talkedNpcNames = null,
+        bool excludeVendors = false)
         => world.Visible.Count(v =>
             v.IsCreature
             && !v.IsMonster
             && !v.IsCorpse
             && !v.ObservedHostile
+            // IsCreature and IsVendor are independent wire bits: a live vendor is
+            // BOTH. Callers that already have a separate vendor path (the
+            // kill-task-source gate) pass excludeVendors:true so a vendor-creature
+            // is not double-counted as a dialog npc.
+            && (!excludeVendors || !v.IsVendor)
             && !IsNpcAlreadyTalked(v, talkedNpcGuids, talkedNpcNames));
 
     // A visible NPC counts as already-talked when EITHER its resolved guid or
@@ -4703,13 +4709,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the LLM still decides; no game knowledge.
         var portalInView = world.Visible.Any(v => v.IsPortal);
         var doorInView = world.Visible.Any(v => v.IsDoor);
-        // cp vendor-browse-nudge: a `vendor`-tagged object is in view. Gate the
-        // browse nudge on observed wire facts only (IsVendor bit), so it costs
-        // zero budget when no vendor is around. Unlike the monster-gated
-        // task-seeking rules, this fires even with monsters in view, because a
-        // vendor that sells a kill-task contract is a directed-progress
-        // opportunity the bot would otherwise walk past while grinding.
+        // cp kill-task-source-nudge: a `vendor`-tagged object OR an un-talked
+        // dialog `npc` is in view. The combat-only contract-refresh nudge below
+        // recognizes BOTH because a kill-task source is not required to carry the
+        // wire ObjectDescriptionFlag.Vendor bit — an un-talked dialog npc is a
+        // source the LLM reaches by `Talk`. The no-monster LOOP-BREAK rule already
+        // drives Talking un-talked npcs to find a task; this only extends the SAME
+        // un-talked-npc fact into the monster-in-view case LOOP-BREAK is gated out
+        // of. Gate on observed wire facts only (the IsVendor bit / the existing
+        // untalked-npc projection), so it costs zero budget when no such object is
+        // around. Talked-set membership keeps it to one Talk per npc.
         var vendorInView = world.Visible.Any(v => v.IsVendor);
+        // Exclude vendors from the npc arm (excludeVendors:true): a vendor that is
+        // ALSO a creature is handled by the vendor arm above, which an open panel
+        // suppresses — counting it here too would let an open-panel vendor-creature
+        // re-trigger the nudge through the npc arm, defeating that suppression.
+        var untalkedNpcInView =
+            CountUntalkedNpcsInView(world, talkedNpcGuids, talkedNpcNames, excludeVendors: true) > 0;
         if (doorInView || portalInView)
         sb.AppendLine("- TRANSITIONS — doors and portals: `door`/`portal`-tagged objects are activated with `Use{target: name=\"<name>\"}` (the picker never auto-opens them). When parked at a door/portal with no better verb, `Use` it — that's how the bot moves between rooms/buildings/landblocks. If a door rejects Use as Locked and you hold an item whose `short_desc`/name says key, retry `Use{target: name=\"<door>\", item: name=\"<key>\"}`.");
         // The EXPLORATION CANDIDATES rule only applies when that section is
@@ -4722,18 +4738,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Combat-only carveout: the task-seeking rules above (SEEK A KILL-TASK,
         // talk-NPCs-for-tasks, HUNT EXCURSION) are gated on !monsterInView, so a
         // monster in a town SUPPRESSES them and the bot grinds past a contract
-        // vendor. This nudge fills exactly that gap — it fires ONLY when a
-        // monster IS in view (otherwise SEEK A KILL-TASK already covers the
-        // vendor and HUNT EXCURSION would conflict), AND an unbrowsed vendor is
-        // visible, no panel is open, and no ACTIONABLE contract is tracked — i.e.
-        // none held, OR every tracked contract is DONE (stage 3, the current
-        // batch finished) so a fresh batch is the only way to keep earning a
-        // contract reward. Zero budget otherwise; the LLM still decides (a
-        // winnable monster may come first). Stage is wire ContractStage data; no
-        // source-side decision to buy or pursue.
-        if (monsterInView && vendorInView && world.Vendor is null
+        // vendor / task-giver. This nudge fills exactly that gap — it fires ONLY
+        // when a monster IS in view (otherwise SEEK A KILL-TASK / LOOP-BREAK
+        // already cover the source and HUNT EXCURSION would conflict), AND an
+        // unbrowsed vendor (no vendor panel open) OR an un-talked npc is visible,
+        // and no ACTIONABLE contract is tracked — i.e. none held, OR every
+        // tracked contract is DONE (stage 3, the current batch finished) so a
+        // fresh batch is the only way to keep earning a contract reward. The
+        // vendor arm needs `world.Vendor is null` (an OPEN panel already shows the
+        // wares in `## Vendor offerings`); the npc arm does not — an un-talked
+        // task-giver is worth a Talk whether or not some other vendor panel is
+        // open. Zero budget otherwise; the LLM still decides (a winnable monster
+        // may come first). Stage is wire ContractStage data; no source-side
+        // decision to buy or pursue.
+        if (monsterInView
+            && ((vendorInView && world.Vendor is null) || untalkedNpcInView)
             && (world.Contracts.Count == 0 || world.Contracts.All(c => c.Stage == 3u)))
-        sb.AppendLine("- BROWSE A VENDOR FOR A KILL-TASK: a `vendor`-tagged object in `Visible nearby` may sell task contracts — a kill-task you accept, complete, and turn in for a reward — as well as ordinary goods, but you CANNOT see what it offers until you open it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` is in view, it is worth one `Use{target: name=\"<vendor>\"}` (or `Talk`) on it to reveal its wares in `## Vendor offerings` — a kill-task is DIRECTED progression, unlike open grinding. Browsing itself is not quest progress, and you still decide whether anything it sells is worth `Buy`ing once you can see it; a winnable `monster` already in view may still be the better immediate move.");
+        sb.AppendLine("- FIND A KILL-TASK SOURCE (vendor or task-giver npc): a `vendor`-tagged object OR a dialog `npc` in `Visible nearby` may offer task contracts — a kill-task you accept, complete, and turn in for a reward. You CANNOT see what a `vendor` offers until you `Use` it to reveal its wares in `## Vendor offerings`; a task-giver looks like any other `npc` — you only learn it offers a task by `Talk`ing it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` OR an un-talked `npc` is in view, it is worth ONE `Use{target: name=\"<vendor>\"}` on a vendor (or ONE `Talk{target: name=\"<npc>\"}` on an un-talked npc) to check for a task — DIRECTED progression, unlike open grinding. Checking is not itself quest progress, and you still decide whether anything offered is worth pursuing; a winnable `monster` already in view may still be the better immediate move. Talk each un-talked npc only ONCE — re-talking an already-talked npc is not progress.");
         sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: `## Server hints`, `## Early server directives`, or `## System messages` text that tells you how to LEAVE, EXIT, PROCEED PAST, ADVANCE BEYOND, SKIP, or otherwise COMPLETE or move on from the area or tutorial — especially naming a person/place or warning the step is irreversible — OUTRANKS repeating a local interaction you already observed (re-picking an item you hold, re-talking an NPC who gave no new dialog, re-using an object that didn't change) AND starting a FRESH incidental local interaction that does not itself advance the directive — looting a NEW corpse, picking up NEW loot, talking an as-yet-untalked NPC the directive did not name, or attacking another OPTIONAL monster (a first-time local action is no more 'progress' than a repeated one while an unacted leave/advance directive is shown); it likewise OUTRANKS optional grinding/exploration (the same way FINISH MULTI-STEP DIRECTIVES outranks incidental looting/exploration). When such an instruction is present and unacted, emit a `Talk`/`Use`/`Explore` toward the named target (even if not visible) INSTEAD of looping completed steps or grinding/looting for optional gains. This NEVER overrides health-critical safety, nor an action the directive ITSELF names or requires (reading a `sign` it told you to read, fetching/`Use`-ing/`Give`-ing an item it told you to get or turn in) — those ARE the directive, so do them. An OPTIONAL framing (\"if you wish\", \"when you are ready\", \"you may\") or a promise of EQUIVALENT rewards does NOT make such a directive absent — it is still an ACTIVE, pursuable progression option, so do NOT reason that the scene has 'no directive pending' while one is shown above.");
         sb.AppendLine("- AREA COMPLETE means MOVE ON: when server/NPC text states the current area's training or objective is DONE / COMPLETE / FINISHED (e.g. \"you have completed ...\", \"well done, you may now ...\", \"your training is finished\") — usually naming an exit, `portal`, or next place to go — the required purpose of THIS area is ACHIEVED. Continuing to grind the SAME (often respawning) monsters here for more XP is OPTIONAL and does NOT advance your progression; the named exit / next-step IS the progression. Pursue it — `Use` a named `portal`/exit if one is in view, else `Explore`/`Talk` toward the named next place — rather than re-grinding the area after it reports complete. (Health-critical safety and any step the exit directive ITSELF requires still come first; but absent those, do NOT justify 'one more fight' or 'a little more loot/XP' while the exit/next-step directive sits unacted — pursue the exit.)");
         sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: if you hold an item the server gave you for an unfinished objective (\"take this and bring it back\", \"give X to Y\", \"use this to leave\"), completing it OUTRANKS incidental looting/exploration — return to the NAMED npc/object and `Give`/`Use` it. Treat an unused objective item as an open task, not as done.");
