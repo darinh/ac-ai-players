@@ -1969,11 +1969,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the threat is on the avoid cooldown) and the losing-fight disengage
         // reflexes. Bounded by MaxCombatChainAttacks (periodic forced LLM
         // re-check), the intent's completion predicate + deadline, and the
-        // stuck-timeout.
+        // chain-interrupting-event routing above.
+        //
+        // NOT gated by the wall-clock stuck-timeout. `stuck` means "no LLM call
+        // in the last StuckTimeout" — a re-engagement backstop for IDLE/aimless
+        // ticks. But minting the next Attack toward an ACTIVE kill-count
+        // commitment with a matching target IN VIEW is the productive action, not
+        // idleness. A single kill cycle (travel + swing + post-action cooldown)
+        // routinely exceeds StuckTimeout, so gating the chain on !stuck starved it
+        // to zero mints — every kill fell back to a per-kill LLM round-trip, the
+        // exact reduce-llm-call-volume regression this decomposition exists to
+        // remove. The backstop's purpose survives WITHOUT the gate: when no
+        // committed target is in view ChooseCombatChainTarget returns null and
+        // control falls through to the normal stuck-timeout LLM call below.
         var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out _);
         var chainInterrupting = HasNewChainInterruptingEvent(events);
         string? chainNoMintReason = null;
-        if (currentGoal is null && !stuck
+        if (currentGoal is null
             && !chainInterrupting && !pickerArrived && !pickerStartWake)
         {
             var chainTarget = ChooseCombatChainTarget(
@@ -2016,10 +2028,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // A commitment is active but the chain GATE is closed — the LLM is
             // consulted instead. Record WHICH gate starved the chain (e.g. a
             // loot/dialog/zone interrupting-event after each kill, a sticky goal,
-            // stuck, or a picker wake) so the tempo gap is observable.
+            // or a picker wake) so the tempo gap is observable. The wall-clock
+            // stuck-timeout is deliberately NOT a chain gate (see above), so it is
+            // not a reason here.
             chainNoMintReason =
                 currentGoal is not null ? "gate:sticky-goal-redrive"
-                : stuck ? "gate:stuck"
                 : chainInterrupting ? "gate:chain-interrupting-event"
                 : pickerArrived ? "gate:picker-arrived"
                 : "gate:picker-start-wake";
@@ -7680,8 +7693,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// ActionRejected external event, which keeps the caller out of here). The
     /// chain is bounded: it yields once
     /// <paramref name="chainCount"/> reaches <paramref name="maxChain"/> so the
-    /// LLM re-checks at least every maxChain autonomous kills (the intent's own
-    /// completion predicate + deadline and the stuck-timeout also end it).
+    /// LLM re-checks at least every maxChain autonomous minted attacks (the
+    /// intent's own completion predicate + deadline and a chain-interrupting
+    /// event also end it). The chain is deliberately NOT bounded by the
+    /// wall-clock stuck-timeout — a slow kill cycle (travel + swing + cooldown)
+    /// routinely exceeds it and would otherwise starve the chain; see the mint
+    /// call site.
     /// Disabled via <paramref name="enabled"/>.
     /// </summary>
     internal static VisibleObjectProjection? ChooseCombatChainTarget(

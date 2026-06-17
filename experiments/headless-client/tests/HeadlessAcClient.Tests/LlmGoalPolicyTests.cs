@@ -8122,6 +8122,72 @@ public class LlmGoalPolicyTests
         },
     };
 
+    [Fact]
+    public void CombatChain_MintsUnderActiveKillCommitment_DespiteStuckTimeout()
+    {
+        // gate:stuck regression. The autonomous kill-chain (reduce-llm-call-
+        // volume) must mint the next Attack toward an LLM-authored kill-count
+        // commitment even after the wall-clock stuck-timeout has elapsed (no LLM
+        // call within StuckTimeout). `stuck` is a re-engagement backstop for IDLE
+        // ticks; attacking a committed, winnable target IN VIEW is the productive
+        // action, not idleness. A single kill cycle (travel + swing + post-action
+        // cooldown) routinely exceeds StuckTimeout, so gating the chain on !stuck
+        // starved it to ZERO mints — every kill fell back to a per-kill LLM round
+        // trip (observed live: budget 0/N). The chain stays bounded by
+        // MaxCombatChainAttacks and the chain-interrupting-event routing.
+        var llmCalled = false;
+        var http = new HttpClient(new AsyncStubHandler((_, _) =>
+        {
+            llmCalled = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}"),
+            });
+        }));
+
+        const uint QuarryGuid = 0xD00u;
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
+            ItemType = 0x10u, IsCreature = true, IsMonster = true,
+            ObservedHostile = false, IsCorpse = false,
+        });
+
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "kc-1",
+            Kind = "quest:kill-task",
+            Rationale = "test kill-count commitment",
+            Completion = new KillCountSincePushAtLeastPredicate(3),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo(),
+            stack: stack)
+        {
+            // A fresh policy has never called the LLM (_lastCalledAtUtc == default
+            // => stuck already true); pin StuckTimeout to zero to make the stuck
+            // precondition explicit and robust to that initialization.
+            StuckTimeout = TimeSpan.Zero,
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var goal = policy.ProposeGoal(world, new EventStream(), null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(QuarryGuid, goal.Target.Guid);
+        Assert.Contains("autonomous kill-intent decomposition", goal.Rationale);
+        Assert.False(llmCalled);          // chain minted with no LLM round-trip
+        Assert.False(policy.HasInflight); // and no async LLM call was kicked off
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> _fn;
