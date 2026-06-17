@@ -2,13 +2,16 @@
 // kill-task-source-nudge: a relevance-gated rule that surfaces an un-engaged
 // in-view kill-task (contract) SOURCE — a `vendor`-tagged object (browse with
 // Use) OR an un-talked dialog `npc` (reached by Talk; a source need not carry
-// the wire ObjectDescriptionFlag.Vendor bit). It is a COMBAT-ONLY carveout: it
-// fires ONLY when a monster is in view (the no-monster task-seeking rules — SEEK
-// A KILL-TASK / LOOP-BREAK — already cover the source, and HUNT EXCURSION would
-// conflict), AND a vendor (panel not open) OR an un-talked npc is visible, and
-// no ACTIONABLE contract is tracked. Zero prompt budget otherwise, never nags
-// while on a contract, never duplicates/conflicts with the no-monster
-// hunt/seek rules. The rule surfaces a fact + a cheap option; the LLM decides.
+// the wire ObjectDescriptionFlag.Vendor bit). It fires when a vendor (panel not
+// open) OR an un-talked npc is visible, no ACTIONABLE contract is tracked, AND
+// EITHER a monster is in view (a combat scene SUPPRESSES the !monsterInView
+// task-seeking rules — SEEK A KILL-TASK / LOOP-BREAK — so the bot would
+// otherwise grind past the source) OR the bot holds a FINISHED batch (every
+// tracked contract DONE, stage 3) so a fresh source is the only way to keep
+// earning even with no monster present (the no-monster arm requires a held
+// finished batch, NOT merely zero contracts, so a fresh character is not
+// canvassed). Zero prompt budget otherwise, never nags while on an actionable
+// contract. The rule surfaces a fact + a cheap option; the LLM decides.
 
 using System;
 using HeadlessAcClient.Strategy;
@@ -85,9 +88,10 @@ public class VendorBrowseNudgeTests
     [Fact]
     public void Nudge_Absent_WhenNoMonsterInView()
     {
-        // No monster -> the !monsterInView SEEK A KILL-TASK rule already covers
-        // vendors and HUNT EXCURSION would conflict, so this combat-only nudge
-        // stays off.
+        // No monster AND no held contract batch -> the !monsterInView SEEK A
+        // KILL-TASK / LOOP-BREAK rules already cover finding a first source, so
+        // this nudge stays off (the no-monster arm requires a HELD finished
+        // batch, not a fresh character with zero contracts).
         Assert.DoesNotContain(NudgeMarker, Prompt(World(vendorVisible: true, monsterVisible: false)));
     }
 
@@ -181,11 +185,56 @@ public class VendorBrowseNudgeTests
     [Fact]
     public void Nudge_Absent_WhenNpcInViewButNoMonster()
     {
-        // No monster -> the no-monster LOOP-BREAK rule already drives Talking
-        // un-talked npcs in a town; this combat-only nudge stays off to avoid
-        // duplicating it.
+        // No monster AND no held contract batch -> the no-monster LOOP-BREAK rule
+        // already drives Talking un-talked npcs in a town to find a first source;
+        // this nudge stays off to avoid duplicating it (the no-monster arm
+        // requires a HELD finished batch, not a fresh character).
         Assert.DoesNotContain(NudgeMarker,
             Prompt(World(vendorVisible: false, monsterVisible: false, npcVisible: true)));
+    }
+
+    [Fact]
+    public void Nudge_Present_WhenNoMonsterButHeldBatchAllDone_Vendor()
+    {
+        // The common town-refresh case: NO monster, but the bot holds a FINISHED
+        // batch (every tracked contract stage 3) and an unbrowsed vendor source
+        // is in view. The nudge fires so the bot re-engages the source for a
+        // fresh batch WITHOUT waiting for the >5min LOOP-BREAK town-dwell timer.
+        Assert.Contains(NudgeMarker,
+            Prompt(World(vendorVisible: true, monsterVisible: false,
+                contractStages: new uint[] { 3u, 3u })));
+    }
+
+    [Fact]
+    public void Nudge_Present_WhenNoMonsterButHeldBatchAllDone_Npc()
+    {
+        // Same refresh case via a dialog-NPC source: NO monster, a FINISHED batch,
+        // and an un-talked npc in view -> fire so the bot Talks it to seek a fresh
+        // task instead of idling/leaving before the town-dwell timer elapses.
+        Assert.Contains(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: false,
+                npcVisible: true, contractStages: new uint[] { 3u, 3u })));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenNoMonsterAndActiveContract()
+    {
+        // NO monster + a source in view, but an ACTIONABLE contract (stage 2)
+        // remains -> pursue it; the no-monster arm needs a fully DONE batch, so
+        // it must NOT nag here.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: true, monsterVisible: false, hasContract: true)));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenNoMonsterAndContractsMixedDoneAndInProgress()
+    {
+        // NO monster + an un-talked npc, but one contract is still in progress
+        // (stage 2) alongside a done one -> an actionable contract remains, so the
+        // no-monster refresh arm stays off.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: false, monsterVisible: false,
+                npcVisible: true, contractStages: new uint[] { 3u, 2u })));
     }
 
     [Fact]
