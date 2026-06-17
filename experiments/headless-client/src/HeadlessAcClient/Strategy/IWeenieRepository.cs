@@ -18,7 +18,7 @@
 
 namespace HeadlessAcClient.Strategy;
 
-internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc);
+internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc, int? WeaponSkillId = null);
 
 internal interface IWeenieRepository
 {

@@ -256,22 +256,27 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .Where(i => !_recentProposedGuids.Contains(i.Guid))
-            // Do NOT auto-wield a primary weapon (melee/missile/caster) that
-            // the server would refuse because another primary weapon is
-            // already wielded. Without this guard the fallback proposed a
-            // Wield of a redundant second weapon (e.g. a Royal Atlatl while
-            // a Training Spadone is wielded); the LLM Wield dispatch's
-            // cp-2244 dequip-before-wield swap then DEQUIPPED the working
-            // melee weapon to wield the ammoless atlatl, SELF-DISARMING the
-            // bot (readiness flips to "missile ammo: EMPTY" → it stops
-            // hunting). An intentional weapon swap stays the LLM's job; the
-            // mechanical fallback only equips into non-colliding slots. Pure
-            // server-precondition mirror — no weapon preference, no game
-            // knowledge; non-weapons never trigger a blocker, and the first
-            // weapon into an empty weapon slot is unaffected.
-            .Where(i => WeaponSwap.FindBlockingWieldedWeapon(
-                new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt),
-                nqpInventoryFacts) is null)
+            // Do NOT auto-wield gear whose wield would dequip a currently-
+            // wielded WEAPON — a loadout DOWNGRADE the LLM owns, not the
+            // mechanical fallback. The earlier guard only caught a redundant
+            // second WEAPON (self-disarm: e.g. auto-wielding a second ranged
+            // weapon while a melee weapon is wielded). But the dequip-before-
+            // wield swap now also frees the off-hand for a two-handed weapon,
+            // so auto-wielding an off-hand SHIELD would dequip the bot's
+            // (possibly trained-skill) two-handed weapon. Skip any gear whose
+            // blocking set includes a wielded weapon; gear that displaces only
+            // non-weapons (armor) or nothing is fine. Pure server-precondition
+            // mirror (WeaponSwap mirrors the server's CheckWeaponCollision) —
+            // no weapon preference, no game knowledge; the first weapon into an
+            // empty slot is unaffected.
+            .Where(i =>
+            {
+                var blockers = WeaponSwap.FindBlockingWieldedItems(
+                    new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt),
+                    nqpInventoryFacts);
+                return !blockers.Any(bg =>
+                    nqpInventoryFacts.Any(f => f.Guid == bg && WeaponSwap.IsWieldedWeapon(f)));
+            })
             // No source-side gear-class ordering: ranking inventory by
             // "weapons/armor first" is a game-knowledge rule-of-thumb the
             // LLM owns, not the mechanical fallback. The fallback wields

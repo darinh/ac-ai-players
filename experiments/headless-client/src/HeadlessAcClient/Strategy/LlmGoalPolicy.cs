@@ -4460,6 +4460,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             selfArmMeleeWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
         if (!selfArmCombatEffective)
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
         // can be gated on it too). The rules below reuse it.
@@ -5107,6 +5108,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
         sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+        if (WeaponSkillSwapAdvisory(world) is string crSkillAdvisory)
+            sb.AppendLine($"- {crSkillAdvisory}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
             sb.AppendLine(crHealthLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
@@ -6920,6 +6923,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
             sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+            if (WeaponSkillSwapAdvisory(world) is string capSkillAdvisory)
+                sb.AppendLine($"- {capSkillAdvisory}");
             // The `tapped out` hunt-discovery fact (combat-ready + farmed this
             // area past the dwell threshold with +0 levels) renders in the body
             // `## Combat readiness` and is dropped by the same hard-cut — leaving
@@ -7794,6 +7799,44 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (missileWeaponWielded)
             return $"missile weapon wielded; missile ammo: {(ammoLoaded ? "loaded" : "EMPTY (wield ammo to fire)")}";
         return "NONE wielded - UNARMED";
+    }
+
+    /// <summary>
+    /// Advisory FACT for `## Combat readiness` when the bot is wielding a melee
+    /// weapon whose governing skill it has NOT trained while a melee weapon
+    /// matching a skill it HAS trained sits in the bag — so the LLM can swap to
+    /// a weapon it actually hits with (the trained weapon skill is the main
+    /// melee-accuracy driver). Returns null when the wielded weapon already uses
+    /// a trained skill, no governing skill is known, or no trained-skill melee
+    /// weapon is available. Pure projection: each weapon's GoverningSkill is
+    /// decoded weenie data compared against the bot's OWN trained skills; source
+    /// names no specific weapon/skill and makes no choice — the LLM decides
+    /// whether to swap.
+    /// </summary>
+    internal static string? WeaponSkillSwapAdvisory(WorldStateProjection world)
+    {
+        var trained = world.Self.TrainedSkills;
+        if (trained is null || trained.Count == 0) return null;
+
+        bool IsTrained(string? skill) => !string.IsNullOrEmpty(skill) &&
+            trained.Any(t => string.Equals(t.Name, skill, StringComparison.OrdinalIgnoreCase));
+
+        var wielded = world.Inventory.FirstOrDefault(i =>
+            i.WieldedAt is uint w && w != 0 &&
+            i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0);
+        if (wielded?.GoverningSkill is not string wieldedSkill) return null;
+        if (IsTrained(wieldedSkill)) return null; // already on a trained-skill weapon
+
+        var trainedBagWeapon = world.Inventory.FirstOrDefault(i =>
+            (i.WieldedAt is not uint bw || bw == 0) &&
+            i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0 &&
+            IsTrained(i.GoverningSkill));
+        if (trainedBagWeapon?.GoverningSkill is not string bagSkill) return null;
+
+        return $"weapon skill MISMATCH: your wielded {wielded.Name} uses the {wieldedSkill} skill, " +
+               $"which is NOT one of your trained skills — an UNTRAINED weapon skill lands far fewer " +
+               $"hits; a weapon governed by a skill you HAVE trained is in your bag: " +
+               $"{trainedBagWeapon.Name} ({bagSkill}). Wield it to hit far more often.";
     }
 
     // Append the decision-critical, COMPACT self facts — attributes, raisable
