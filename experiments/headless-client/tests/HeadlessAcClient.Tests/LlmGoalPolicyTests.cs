@@ -9628,6 +9628,164 @@ public class LlmGoalPolicyTests
         }
     }
 
+    // ---- IsRovingMultiNpcTalkChurn (roving 2-NPC ping-pong across cells) ----
+    // IsMultiNpcTalkChurn resets on intra-landblock movement (see
+    // MultiNpcTalkChurn_ResetsWhenBotMoves), and IsRovingNpcTalkLoop needs a
+    // single target, so a referral ping-pong between two NPCs at DIFFERENT cells
+    // of one landblock slips past BOTH. This roving variant counts stale Talks
+    // over a <=2-NPC cycle WITHOUT the movement reset, firing at
+    // RovingMultiNpcTalkChurnStaleThreshold (4 stale after the episode start).
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_Fires_OnTwoNpcPingPongAcrossCells_NoProgress()
+    {
+        // The live Academy stall: the bot walks between two tutorial NPCs in
+        // DIFFERENT cells of one landblock, both re-greeting with no new content.
+        // This is the exact scenario MultiNpcTalkChurn_ResetsWhenBotMoves shows
+        // the stationary guard does NOT catch — the roving guard must.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es)); // start
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcB, WorldAt(0xA9B4u, 0xA9B4001Au, 0, 0), es)); // stale 1
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B4001Bu, 0, 0), es)); // stale 2
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcB, WorldAt(0xA9B4u, 0xA9B4001Cu, 0, 0), es)); // stale 3
+        Assert.True(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B4001Du, 0, 0), es));  // stale 4 -> fire
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_NeverFires_WhenDialogNovelEachTalk()
+    {
+        // QUESTING SAFETY: a legitimate 2-NPC referral chain that advances the
+        // dialog each Talk (new server text) resets the stale streak even while
+        // roving — never suppressed.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+        var goals = new[] { npcA, npcB, npcA, npcB, npcA, npcB, npcA, npcB };
+
+        for (var i = 0; i < goals.Length; i++)
+        {
+            es.Append(NpcDialog($"advancing dialogue line number {i}"));
+            Assert.False(
+                policy.IsRovingMultiNpcTalkChurn(goals[i], WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es),
+                $"must not fire on novel-dialog roving chain at step {i}");
+        }
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_NeverFires_WhenInventoryProgresses()
+    {
+        // A real turn-in chain across two NPCs: each Talk grants an item.
+        // Inventory progress resets the episode even while roving; never fires.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+        var goals = new[] { npcA, npcB, npcA, npcB, npcA, npcB };
+
+        for (var i = 0; i < goals.Length; i++)
+        {
+            es.Append(InvAdded("Quest Token"));
+            Assert.False(policy.IsRovingMultiNpcTalkChurn(goals[i], WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es));
+        }
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_ResetsOnLandblockChange()
+    {
+        // Leaving the landblock is genuine traversal, not a cycle — the episode
+        // resets, so a ping-pong that crosses into a NEW landblock never fires.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var npcB = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+
+        // Each Talk crosses into a different landblock -> never accumulates.
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B40019u, 0, 0), es));
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcB, WorldAt(0xA9B5u, 0xA9B50019u, 0, 0), es));
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B6u, 0xA9B60019u, 0, 0), es));
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcB, WorldAt(0xA9B7u, 0xA9B70019u, 0, 0), es));
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B8u, 0xA9B80019u, 0, 0), es));
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_DoesNotFire_ForSingleNpcRepeat()
+    {
+        // A single-NPC roving fixation is IsRovingNpcTalkLoop's job; this one
+        // requires >=2 distinct targets so the two never double-count.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var npcA = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+
+        for (var i = 0; i < 10; i++)
+            Assert.False(policy.IsRovingMultiNpcTalkChurn(npcA, WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es));
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_AbandonsWhenFrontierExceedsTwoTargets()
+    {
+        // Three-plus distinct NPCs while roving looks like traversal across a
+        // crowded area, not a tight 2-node cycle — abandon, never fire.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var a = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80002625u } };
+        var b = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80001234u } };
+        var c = new Goal { Kind = GoalKind.Talk, Target = new Selector { Guid = 0x80009999u } };
+        var goals = new[] { a, b, c, a, b, c, a, b, c };
+
+        for (var i = 0; i < goals.Length; i++)
+            Assert.False(policy.IsRovingMultiNpcTalkChurn(goals[i], WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es));
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_IgnoresNonTalkGoals()
+    {
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Guid = 0x80002625u } };
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = new Selector { Guid = 0x80001234u } };
+
+        for (var i = 0; i < 8; i++)
+        {
+            Assert.False(policy.IsRovingMultiNpcTalkChurn(attack, WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es));
+            Assert.False(policy.IsRovingMultiNpcTalkChurn(pickup, WorldAt(0xA9B4u, 0xA9B40019u + (uint)i, 0, 0), es));
+        }
+    }
+
+    [Fact]
+    public void RovingMultiNpcTalkChurn_Fires_OnSameNamedDistinctGuidNpcs_ResolvedByVisibleGuid()
+    {
+        // Same-name blind spot: two DIFFERENT NPCs sharing a name (e.g. two
+        // generic townsfolk) at different cells of one landblock. A NAME-only
+        // Talk goal resolves to the NEAREST visible instance's GUID, so the two
+        // are distinguished by guid and the <=2-NPC cycle accumulates. A name-only
+        // key would conflate them to one target and never reach the >=2 needed to
+        // fire — so this pins that the guard keys on the resolved guid.
+        var policy = MakeStationaryUsePolicy();
+        var es = new EventStream();
+        var talkGuard = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Guard" } };
+        const uint gA = 0x80002625u, gB = 0x80001234u;
+        // Each tick the bot stands next to a DIFFERENT same-named guard.
+        WorldStateProjection AtGuard(uint guid, uint cell) =>
+            WorldAt(0xA9B4u, cell, 0, 0) with
+            {
+                Visible = new[]
+                {
+                    new VisibleObjectProjection { Guid = guid, Name = "Guard", Distance = 1f, IsCreature = true },
+                },
+            };
+
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(talkGuard, AtGuard(gA, 0xA9B40019u), es)); // start
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(talkGuard, AtGuard(gB, 0xA9B4001Au), es)); // stale 1
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(talkGuard, AtGuard(gA, 0xA9B4001Bu), es)); // stale 2
+        Assert.False(policy.IsRovingMultiNpcTalkChurn(talkGuard, AtGuard(gB, 0xA9B4001Cu), es)); // stale 3
+        Assert.True(policy.IsRovingMultiNpcTalkChurn(talkGuard, AtGuard(gA, 0xA9B4001Du), es));  // stale 4 -> fire
+    }
+
     [Fact]
     public void ExhaustedNpcTalk_IgnoresNonTalkGoals()
     {
