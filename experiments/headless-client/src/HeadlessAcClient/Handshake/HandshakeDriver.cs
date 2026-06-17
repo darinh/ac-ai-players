@@ -2144,6 +2144,60 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (pendingWieldAfterDequip.TryGetValue(putAck.ItemGuid, out var swap))
                                 {
                                     pendingWieldAfterDequip.Remove(putAck.ItemGuid);
+
+                                    // Multi-blocker swap: a two-handed weapon is
+                                    // blocked by BOTH a main-hand weapon AND an
+                                    // off-hand shield, so more than one item may
+                                    // have been dequipped for the same target.
+                                    // Only wield once EVERY blocker is gone.
+                                    // Recompute the remaining blockers from the
+                                    // current world state (robust to put-ack
+                                    // ordering): if another blocker for this
+                                    // target is still wielded, this is not the
+                                    // last ack — leave the other blocker's pending
+                                    // entry to fire the wield when it acks.
+                                    var swapBlockersRemain = false;
+                                    var swapTargetAlreadyWielded = false;
+                                    if (worldState.SelfGuid is uint swapSelfGuid &&
+                                        worldState.Objects.TryGetValue(swap.TargetGuid, out var swapTargetObj))
+                                    {
+                                        // If the target is already wielded (a sibling
+                                        // blocker's ack completed the swap, or it was
+                                        // re-issued after success), there is nothing
+                                        // left to do — do not re-send a redundant wield.
+                                        swapTargetAlreadyWielded =
+                                            swapTargetObj.CurrentWieldedLocation is uint cwl && cwl != 0;
+                                        var swapInv = new List<WeaponSwap.ItemFacts>();
+                                        foreach (var so in worldState.Objects.Values)
+                                        {
+                                            var ownedBag  = so.ContainerGuid is uint scg2 && scg2 == swapSelfGuid;
+                                            var ownedWorn = so.WielderGuid   is uint swg2 && swg2 == swapSelfGuid;
+                                            if (!ownedBag && !ownedWorn) continue;
+                                            swapInv.Add(new WeaponSwap.ItemFacts(
+                                                so.Guid, so.ItemType, so.ValidLocations, so.CurrentWieldedLocation));
+                                        }
+                                        swapBlockersRemain = WeaponSwap.FindBlockingWieldedItems(
+                                            new WeaponSwap.ItemFacts(
+                                                swapTargetObj.Guid, swapTargetObj.ItemType,
+                                                swapTargetObj.ValidLocations, swapTargetObj.CurrentWieldedLocation),
+                                            swapInv).Count > 0;
+                                    }
+
+                                    if (swapTargetAlreadyWielded)
+                                    {
+                                        Console.WriteLine(
+                                            $"[strategy] SWAP-WIELD skipped: target=0x{swap.TargetGuid:X8} is already " +
+                                            $"wielded (blocker=0x{putAck.ItemGuid:X8} dequip ack); nothing to do.");
+                                    }
+                                    else if (swapBlockersRemain)
+                                    {
+                                        Console.WriteLine(
+                                            $"[strategy] SWAP-WIELD deferred: blocker=0x{putAck.ItemGuid:X8} unequipped, " +
+                                            $"but another hand is still occupied for target=0x{swap.TargetGuid:X8}; " +
+                                            $"awaiting its dequip ack.");
+                                    }
+                                    else
+                                    {
                                     // Suppress the startup auto-equip pass from
                                     // racing this exact wield.
                                     inventoryEquipSent.Add(swap.TargetGuid);
@@ -2171,6 +2225,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"[strategy] SWAP-WIELD after dequip: blocker=0x{putAck.ItemGuid:X8} unequipped -> " +
                                         $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
                                         $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
+                                    }
                                 }
                             }
                             // M1.6 — PopupString is the canonical
@@ -6009,14 +6064,42 @@ internal sealed class HandshakeDriver : IDisposable
                                     swapInventory.Add(new WeaponSwap.ItemFacts(
                                         so.Guid, so.ItemType, so.ValidLocations, so.CurrentWieldedLocation));
                                 }
-                                var blockerGuid = WeaponSwap.FindBlockingWieldedWeapon(
+                                // Retarget cleanup: the LLM has committed to
+                                // wieldItem as THIS decision's wield target. Drop
+                                // any stale deferred swap-wields aimed at a
+                                // DIFFERENT target left over from an abandoned
+                                // earlier multi-blocker swap, so a late blocker
+                                // put-ack cannot resurrect a wield the bot no
+                                // longer wants (e.g. it switched from a two-handed
+                                // weapon to a one-handed one mid-swap). Entries for
+                                // THIS target (a swap still in progress) are kept.
+                                if (pendingWieldAfterDequip.Count > 0)
+                                {
+                                    var staleSwapKeys = new List<uint>();
+                                    foreach (var pend2 in pendingWieldAfterDequip)
+                                        if (pend2.Value.TargetGuid != wieldItem.Guid)
+                                            staleSwapKeys.Add(pend2.Key);
+                                    foreach (var staleKey in staleSwapKeys)
+                                        pendingWieldAfterDequip.Remove(staleKey);
+                                }
+                                // Find EVERY currently-wielded item that blocks
+                                // this wield. For a one-handed weapon this is the
+                                // main-hand weapon (if any); for a TWO-HANDED
+                                // weapon it ALSO includes an off-hand shield
+                                // (both hands must be free). Dequip them all; the
+                                // put-ack handler fires the deferred wield only
+                                // once no blocker remains. Mirrors the server's
+                                // CheckWeaponCollision precondition.
+                                var blockers = WeaponSwap.FindBlockingWieldedItems(
                                     new WeaponSwap.ItemFacts(
                                         wieldItem.Guid, wieldItem.ItemType,
                                         wieldItem.ValidLocations, wieldItem.CurrentWieldedLocation),
                                     swapInventory);
 
-                                if (blockerGuid is uint blocker)
+                                if (blockers.Count > 0)
                                 {
+                                  foreach (var blocker in blockers)
+                                  {
                                     // A stale pending entry means the dequip
                                     // never acked (e.g. the pack was full) — do
                                     // not soft-lock this blocker forever; let it
@@ -6090,6 +6173,7 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                             $"sent PutItemInContainer pktSeq={dqPktSeq} fragSeq={dqFragSeq} bytes={dqSent}");
                                     }
+                                  }
                                     tactics.Clear("dequip-before-wield dispatched", eventStream);
                                 }
                                 else
