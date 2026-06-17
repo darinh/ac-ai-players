@@ -168,4 +168,93 @@ public class CombatDeathAttributionTests
     {
         Assert.Equal(TimeSpan.FromSeconds(12), CombatDeathAttribution.DefaultFreshness);
     }
+
+    // ---- ChooseDeathFoe: engaged-foe primary, recent-damager fallback ----
+
+    [Fact]
+    public void ChooseDeathFoe_FreshEngagedFoe_PrefersIt()
+    {
+        var now = DateTime.UtcNow;
+        var foe = CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: (1234u, "Foe Alpha", now - TimeSpan.FromSeconds(3)),
+            lastDamager: (null, "Foe Beta", now - TimeSpan.FromSeconds(1)),
+            now, CombatDeathAttribution.DefaultFreshness);
+        Assert.NotNull(foe);
+        Assert.Equal(1234u, foe!.Value.Wcid);
+        Assert.Equal("Foe Alpha", foe.Value.Name);
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_StaleEngagedFoe_FallsBackToFreshDamager()
+    {
+        // THE FIX: the bot was last swinging at a (now-stale) foe but died to a
+        // DIFFERENT foe that landed damage moments ago (a swarm add / a mob that
+        // aggroed mid-travel). Attribute to the damager so the lethal kind is
+        // learned instead of dropping the death entirely.
+        var now = DateTime.UtcNow;
+        var foe = CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: (1234u, "Foe Alpha", now - TimeSpan.FromSeconds(30)),
+            lastDamager: (null, "Foe Beta", now - TimeSpan.FromSeconds(2)),
+            now, CombatDeathAttribution.DefaultFreshness);
+        Assert.NotNull(foe);
+        Assert.Null(foe!.Value.Wcid);
+        Assert.Equal("Foe Beta", foe.Value.Name);
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_NoEngagedFoe_UsesFreshDamager()
+    {
+        var now = DateTime.UtcNow;
+        var foe = CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: null,
+            lastDamager: (null, "Foe Beta", now - TimeSpan.FromSeconds(2)),
+            now, CombatDeathAttribution.DefaultFreshness);
+        Assert.NotNull(foe);
+        Assert.Equal("Foe Beta", foe!.Value.Name);
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_BothStale_ReturnsNull()
+    {
+        // Neither anchor fresh -> leave the ledger untouched rather than guess.
+        var now = DateTime.UtcNow;
+        Assert.Null(CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: (1234u, "Foe Alpha", now - TimeSpan.FromSeconds(30)),
+            lastDamager: (null, "Foe Beta", now - TimeSpan.FromSeconds(30)),
+            now, CombatDeathAttribution.DefaultFreshness));
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_BothNull_ReturnsNull()
+    {
+        Assert.Null(CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: null, lastDamager: null,
+            DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness));
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_EngagedFoeUnresolvable_FallsBackToDamager()
+    {
+        // A fresh engaged foe whose identity does NOT resolve (no wcid, unusable
+        // "(unknown)" name) must not be used; fall through to a resolvable fresh
+        // damager rather than recording against a non-key.
+        var now = DateTime.UtcNow;
+        var foe = CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: (null, "(unknown)", now - TimeSpan.FromSeconds(1)),
+            lastDamager: (null, "Foe Beta", now - TimeSpan.FromSeconds(1)),
+            now, CombatDeathAttribution.DefaultFreshness);
+        Assert.NotNull(foe);
+        Assert.Equal("Foe Beta", foe!.Value.Name);
+    }
+
+    [Fact]
+    public void ChooseDeathFoe_FreshDamagerUnresolvable_ReturnsNull()
+    {
+        // A fresh damager with no usable identity cannot key the ledger -> null.
+        var now = DateTime.UtcNow;
+        Assert.Null(CombatDeathAttribution.ChooseDeathFoe(
+            lastCombatFoe: null,
+            lastDamager: (null, null, now - TimeSpan.FromSeconds(1)),
+            now, CombatDeathAttribution.DefaultFreshness));
+    }
 }
