@@ -1958,10 +1958,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // inventory change, NPC dialog, zone change, readable text, or an action
         // rejection incl. a fresh disengage all route to the LLM instead; a
         // kill's own combat ServerMessage/feedback/damage do NOT, so the chain
-        // is not made inert by its own kills) AND no picker discovery/arrival
-        // (!pickerArrived / !pickerStartWake also route to the LLM). So a
-        // genuinely decision-worthy event is never masked by one more autonomous
-        // Attack. If the stack top is a kill-count commitment and a matching,
+        // is not made inert by its own kills). So a genuinely decision-worthy
+        // event is never masked by one more autonomous Attack. If the stack top
+        // is a kill-count commitment and a matching,
         // in-perception, not-beaten hostile is visible, mint that Attack WITHOUT
         // the LLM round-trip (returning it as currentGoal so the Motor drives
         // it). Flee precedence is enforced downstream by the Motor's dispatch
@@ -1982,11 +1981,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // remove. The backstop's purpose survives WITHOUT the gate: when no
         // committed target is in view ChooseCombatChainTarget returns null and
         // control falls through to the normal stuck-timeout LLM call below.
+        //
+        // ALSO not gated by the autonomous picker's arrival/start (pickerArrived
+        // / pickerStartWake). Those flags wake the LLM to name a verb when the
+        // picker parks at / switches to a target it chose on its own — a safety
+        // valve against standing idle next to a discovery. That valve is
+        // REDUNDANT here: the chain already supplies the verb (Attack) for a
+        // matching committed target, so the chain minted 0/N live (no-mint reason
+        // gate:picker-arrived after each kill) while the LLM was re-consulted for
+        // a target it had already committed to kill. The valve survives WITHOUT
+        // the gate: the chain acts ONLY on a matching committed monster — a
+        // non-matching pick (an NPC, a portal, a different kind) yields no chain
+        // target, so ChooseCombatChainTarget returns null and control falls
+        // through to the LLM, which still weighs the discovery.
         var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out _);
         var chainInterrupting = HasNewChainInterruptingEvent(events);
         string? chainNoMintReason = null;
-        if (currentGoal is null
-            && !chainInterrupting && !pickerArrived && !pickerStartWake)
+        if (currentGoal is null && !chainInterrupting)
         {
             var chainTarget = ChooseCombatChainTarget(
                 _stack?.Top,
@@ -2001,6 +2012,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 _combatChainCount++;
                 _lastChainNoMintReason = null;
+                // Consume the events pending at this mint so a deliberately
+                // ignored picker arrival/start (and own-loot / combat-progress)
+                // does NOT linger and kick a redundant LLM call on a later tick
+                // — that call would reset _combatChainCount and collapse the
+                // MaxCombatChainAttacks batch to a single mint, defeating the
+                // tempo win. The gate above proved none are chain-interrupting,
+                // so this hides nothing decision-worthy: the LLM re-reads the
+                // full world at the next bounded re-engagement. Mirrors the
+                // sticky-objective re-emit floor-advance + picker-start record.
+                _lastEventConsideredSequence = events.NextSequence;
+                if (pickerStartWake && pickerStartKey is not null)
+                {
+                    _lastPickerStartWakeKey = pickerStartKey;
+                    _lastPickerStartWakeAtUtc = nowUtc;
+                }
                 var commitmentSummary = _stack?.Top?.Completion.Summary() ?? "kill-count";
                 Console.WriteLine(
                     $"[combat-chain] mint #{_combatChainCount}/{MaxCombatChainAttacks} " +
@@ -2026,16 +2052,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         else if (chainCommitmentActive)
         {
             // A commitment is active but the chain GATE is closed — the LLM is
-            // consulted instead. Record WHICH gate starved the chain (e.g. a
-            // loot/dialog/zone interrupting-event after each kill, a sticky goal,
-            // or a picker wake) so the tempo gap is observable. The wall-clock
-            // stuck-timeout is deliberately NOT a chain gate (see above), so it is
-            // not a reason here.
+            // consulted instead. Record WHICH gate starved the chain: either a
+            // sticky goal redrive is active (currentGoal != null) or a
+            // genuinely decision-worthy interrupting event (item-removal, dialog,
+            // zone, readable, rejection) arrived. The wall-clock stuck-timeout and
+            // the autonomous picker's arrival/start are deliberately NOT chain
+            // gates (see above), so they are not reasons here.
             chainNoMintReason =
                 currentGoal is not null ? "gate:sticky-goal-redrive"
-                : chainInterrupting ? "gate:chain-interrupting-event"
-                : pickerArrived ? "gate:picker-arrived"
-                : "gate:picker-start-wake";
+                : "gate:chain-interrupting-event";
         }
         if (chainNoMintReason is not null && chainNoMintReason != _lastChainNoMintReason)
         {
