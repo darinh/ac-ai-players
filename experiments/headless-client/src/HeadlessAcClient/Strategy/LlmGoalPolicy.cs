@@ -524,6 +524,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const int MultiNpcTalkChurnStaleThreshold = 3;
     private const int MultiNpcTalkChurnMaxTargets = 2;
 
+    // cp roving-multi-npc-talk-loop: IsMultiNpcTalkChurn resets on intra-landblock
+    // MOVEMENT (cell/position), so a referral PING-PONG between a small set of
+    // NPCs at DIFFERENT cells of the SAME landblock resets its episode on every
+    // walk and never accumulates (and the roving SINGLE-NPC guard needs one
+    // target). This sibling episode counts STALE Talks over a <=MaxTargets cycle
+    // WITHOUT the movement reset — resetting only on LEAVING the landblock or
+    // server-observable PROGRESS or DIALOG NOVELTY — so an advancing multi-NPC
+    // conversation is never suppressed, but a position-independent cycle of <=N
+    // exhausted NPCs in one landblock fires. Reuses TalkChurnEpisode (its
+    // Cell/X/Y are unused for the reset here).
+    private TalkChurnEpisode? _rovingTalkChurnEpisode;
+    // Higher than the stationary MultiNpcTalkChurnStaleThreshold (3) and equal to
+    // the roving single-NPC threshold: roving is a weaker loop signal than a
+    // stationary cycle, so require one more stale repeat before breaking.
+    private const int RovingMultiNpcTalkChurnStaleThreshold = 4;
+
     // cp-2365: roving single-NPC Talk-loop guard. IsExhaustedNpcTalkRepeat
     // resets on MOVEMENT, and IsMultiNpcTalkChurn requires >=2 targets, so a bot
     // that keeps walking up to (or around) the SAME NPC loops past BOTH and
@@ -2497,6 +2513,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
+        // Roving multi-NPC Talk-churn (cp roving-multi-npc-talk-loop): the
+        // stationary multi-NPC guard above resets on intra-landblock movement, so
+        // a ping-pong between a small set of NPCs at DIFFERENT cells of one
+        // landblock slips past it (and the roving SINGLE-NPC guard needs one
+        // target). This fires on a position-independent no-progress, no-dialog-
+        // novelty cycle over <=2 NPCs in the same landblock and breaks it via the
+        // SAME egress.
+        if (IsRovingMultiNpcTalkChurn(goal, world, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — roving multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: roving no-progress multi-NPC Talk cycle");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
+
         // Roving single-NPC Talk-loop break (cp-2365): the stationary single-NPC
         // guard resets on MOVEMENT and the multi-NPC guard needs >=2 targets, so a
         // bot that keeps walking up to the SAME NPC loops past both. This fires on
@@ -3407,6 +3440,107 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         ep.StaleTalks++;
         return ep.StaleTalks >= MultiNpcTalkChurnStaleThreshold && ep.Targets.Count >= 2;
+    }
+
+    /// <summary>
+    /// True when the bot is cycling Talk over a SMALL set (&lt;= <see
+    /// cref="MultiNpcTalkChurnMaxTargets"/>) of NPCs while ROVING — walking
+    /// between them across the cells of one landblock. <see
+    /// cref="IsMultiNpcTalkChurn"/> resets on intra-landblock movement and <see
+    /// cref="IsRovingNpcTalkLoop"/> needs a single target, so a referral
+    /// ping-pong between two NPCs at different cells slips past BOTH. Counts STALE
+    /// (no dialog-novelty) Talks over the &lt;=N-target cycle, resetting on LEAVING
+    /// the landblock or any server-observable PROGRESS (inventory add/remove,
+    /// landblock change, self-progression) or NEW dialog text by hash — so an
+    /// advancing multi-NPC conversation is never suppressed. Unlike the stationary
+    /// multi-NPC guard it does NOT reset on cell/position movement, so an
+    /// intra-landblock roving cycle is caught. Fires at <see
+    /// cref="RovingMultiNpcTalkChurnStaleThreshold"/> and resets on fire so
+    /// suppression is never permanent. Pure mechanical bookkeeping: the bot's OWN
+    /// Talk emissions + progress-event PRESENCE + dialog-text novelty by hash. No
+    /// NPC names, wcids, or quest content.
+    /// </summary>
+    internal bool IsRovingMultiNpcTalkChurn(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+
+        // GUID-backed identity (mirrors IsRovingNpcTalkLoop): an LLM Talk goal is
+        // NAME-only, so a name key would CONFLATE two DIFFERENT NPCs that share a
+        // name (e.g. two generic townsfolk) into one target — the <=2-NPC cycle
+        // would never reach 2 and never fire on a same-named ping-pong.
+        // RovingTalkTargetGuidKey re-keys a name to the NEAREST visible instance's
+        // guid, distinguishing same-named NPCs by position; fall back to the
+        // canonical name key when the target resolves to no visible object.
+        var key = RovingTalkTargetGuidKey(goal.Target, world) ?? CanonicalUseTargetKey(goal.Target);
+        if (key is null) return false;
+
+        var self = world.Self;
+        var ep = _rovingTalkChurnEpisode;
+
+        // Reset on LEAVING the landblock (genuine traversal) or server-observable
+        // progress — but NOT on intra-landblock cell/position movement (the sole
+        // distinction from IsMultiNpcTalkChurn). An A<->B ping-pong across the
+        // cells of ONE landblock is a roving loop, not traversal.
+        bool leftLandblock = ep is null || ep.Landblock != self.Landblock;
+        bool progressed = ep is not null &&
+            (events.HasNewSince(EventKind.InventoryItemAdded, ep.FloorSequence)
+             || events.HasNewSince(EventKind.InventoryItemRemoved, ep.FloorSequence)
+             || events.HasNewSince(EventKind.LandblockChanged, ep.FloorSequence)
+             || events.HasNewSince(EventKind.SelfProgressChanged, ep.FloorSequence));
+
+        if (ep is null || leftLandblock || progressed)
+        {
+            ep = new TalkChurnEpisode
+            {
+                FloorSequence = events.NextSequence,
+                Landblock = self.Landblock,
+                Cell = self.CellId,
+                X = self.PositionX,
+                Y = self.PositionY,
+                StaleTalks = 0,
+            };
+            ep.Targets.Add(key);
+            // Seed with dialog already in the buffer so a later re-send of the
+            // SAME greeting reads as repetition, not novelty.
+            foreach (var fp in DialogFingerprintsSince(events, 0))
+                ep.SeenDialogFingerprints.Add(fp);
+            _rovingTalkChurnEpisode = ep;
+            return false;
+        }
+
+        bool novelDialog = false;
+        foreach (var fp in DialogFingerprintsSince(events, ep.FloorSequence))
+            if (ep.SeenDialogFingerprints.Add(fp))
+                novelDialog = true;
+
+        ep.Targets.Add(key);
+        ep.FloorSequence = events.NextSequence;
+
+        // The Talk frontier grew past a tight cycle → traversal (the bot is
+        // talking many DISTINCT NPCs as it moves), not a loop.
+        if (ep.Targets.Count > MultiNpcTalkChurnMaxTargets)
+        {
+            _rovingTalkChurnEpisode = null;
+            return false;
+        }
+
+        if (novelDialog)
+        {
+            ep.StaleTalks = 0;
+            return false;
+        }
+
+        ep.StaleTalks++;
+        if (ep.StaleTalks >= RovingMultiNpcTalkChurnStaleThreshold && ep.Targets.Count >= 2)
+        {
+            // Reset on fire so suppression is never permanent (mirrors the roving
+            // single-NPC guard): the drop defers to the fallback (the bot does
+            // something else), and a later re-attempt at these NPCs starts a FRESH
+            // streak that only re-fires if it loops again.
+            _rovingTalkChurnEpisode = null;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
