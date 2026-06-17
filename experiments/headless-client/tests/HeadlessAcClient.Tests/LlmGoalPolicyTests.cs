@@ -15663,4 +15663,54 @@ public class LlmGoalPolicyTests
         Assert.Equal(floor, LlmGoalPolicy.LowerCeilingOnPayloadTooLarge(
             floor, System.Net.HttpStatusCode.RequestEntityTooLarge, error: null, floor));
     }
+
+    // ---- swap-dequip rejection attribution (wield-loop break) ----------
+
+    [Fact]
+    public void IsGoalRecentlyRejected_WieldGoal_DedupedWhenRejectionNamesTheTargetWeapon()
+    {
+        // A swap-blocker dequip rejection re-attributed to the swap TARGET
+        // (SwapRejectionAttribution) carries the target weapon's name, so the
+        // LLM's repeated Wield{target} matches a recent ActionRejected and is
+        // dropped — breaking the doomed wield-swap loop (live: 43x Wield of a
+        // weapon whose blocker the server refused to unequip).
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Name = "TargetWeapon",
+            Wcid = 7001u,
+            Text = "Could not wield 'TargetWeapon': the currently-equipped weapon "
+                + "could not be unequipped to free the slot.",
+        });
+
+        var goal = new Goal { Kind = GoalKind.Wield, Target = new Selector { Name = "TargetWeapon" } };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(goal, events));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_WieldGoal_NotDedupedWhenRejectionNamesOnlyTheBlocker()
+    {
+        // The bug the re-attribution fixes: a rejection keyed on the BLOCKER
+        // weapon (the item being dequipped) does NOT match a Wield goal whose
+        // target is a DIFFERENT weapon, so without re-attribution the loop never
+        // breaks. This pins WHY the rejection must name the TARGET, not the
+        // blocker.
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            Name = "BlockerWeapon",
+            Wcid = 7002u,
+            Text = "Inventory action failed on 'BlockerWeapon': rejected by the "
+                + "server (the item was not accepted)",
+        });
+
+        var goal = new Goal { Kind = GoalKind.Wield, Target = new Selector { Name = "TargetWeapon" } };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, events));
+    }
 }
