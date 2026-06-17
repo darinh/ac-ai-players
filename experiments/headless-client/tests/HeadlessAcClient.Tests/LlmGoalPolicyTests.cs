@@ -1787,8 +1787,12 @@ public class LlmGoalPolicyTests
         Assert.Contains("RaiseSkill", prompt);
 
         // Offensive + utility mechanics are now stated as facts, not just the
-        // defensive endurance->MAX HEALTH mechanic.
-        Assert.Contains("strength and coordination drive MELEE offense", prompt);
+        // defensive endurance->MAX HEALTH mechanic. Strength is the DAMAGE
+        // (HARD) lever; coordination + trained weapon skill are the ACCURACY
+        // (LAND) levers — stated without conflation so the LLM does not raise
+        // strength for a miss/evade problem.
+        Assert.Contains("strength PRIMARILY drives DAMAGE", prompt);
+        Assert.Contains("are your PRIMARY ACCURACY levers (how OFTEN your swings LAND)", prompt);
         // cp2911: the trained weapon SKILL is now surfaced as a primary melee-
         // offense lever (live: the bot raised attributes 10x but RaiseSkill 0x).
         Assert.Contains("TRAINED WEAPON SKILL you fight with", prompt);
@@ -1814,6 +1818,42 @@ public class LlmGoalPolicyTests
         // drive that loop.
         Assert.Contains("NEVER a weapon ITEM's name", prompt);
         Assert.Contains("if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill`", prompt);
+    }
+
+    [Fact]
+    public void LlmGoalPolicy_SpendXp_SeparatesDamageLeverFromAccuracyLever()
+    {
+        // cp2926-followup: live (mistral-small, char with coordination 10 /
+        // strength 47, swings evading ~84%) the bot poured its WHOLE XP balance
+        // into strength 37x — rationale "Strength is the main driver of melee
+        // damage" — while its swings kept MISSING. The old rule conflated the
+        // two ("strength and coordination drive MELEE offense (how hard and how
+        // often your swings land)"; "raise coordination/strength when melee
+        // swings miss or barely hurt"), giving the LLM cover to raise the DAMAGE
+        // lever for a MISS problem. The corrected rule attributes strength
+        // PRIMARILY to damage (not the main accuracy lever) and maps the
+        // evade/miss symptom to coordination + the trained weapon skill, while
+        // still mapping a landed-but-low-damage swing to strength.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        // Strength is PRIMARILY the DAMAGE lever and not the main accuracy lever.
+        Assert.Contains("strength PRIMARILY drives DAMAGE", prompt);
+        Assert.Contains("is NOT your main accuracy lever", prompt);
+
+        // Coordination + trained weapon skill are the ACCURACY (LAND) levers.
+        Assert.Contains("are your PRIMARY ACCURACY levers (how OFTEN your swings LAND)", prompt);
+
+        // The evade/miss symptom prioritizes accuracy levers OVER strength.
+        Assert.Contains("the limit is ACCURACY \u2014 PRIORITIZE coordination and your trained weapon skill (your accuracy levers) over strength", prompt);
+
+        // A landed-but-low-damage swing still maps to strength (no over-correction).
+        Assert.Contains("if your swings LAND but deal 0/low `damage`, the limit is strength", prompt);
+
+        // The old conflations AND the survivor conflations are gone.
+        Assert.DoesNotContain("strength and coordination drive MELEE offense", prompt);
+        Assert.DoesNotContain("coordination/strength", prompt);
+        Assert.DoesNotContain("and strength (so they HURT)", prompt);
     }
 
     [Fact]
@@ -11280,6 +11320,39 @@ public class LlmGoalPolicyTests
         // No trained skills -> must not advise raising a (server-rejected) skill.
         Assert.DoesNotContain("the main accuracy lever, raised via `RaiseSkill`", cap);
         Assert.Contains("`RaiseSkill` is unavailable", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_OutDamagedPointsToStrengthNotWeaponSkill_WithTrainedSkill()
+    {
+        // cp2926-followup (gemini review): the capsule's "hurt" (out-damaged)
+        // lever must be strength, NOT the weapon skill. The weapon skill is an
+        // ACCURACY lever (whether swings LAND), not a DAMAGE lever — mapping the
+        // OUT-DAMAGED-after-landing symptom to weapon skill would steer XP to
+        // accuracy when the bot needs damage. The old code did
+        // `hasTrainedSkill ? "strength / your weapon skill" : "strength"`, which
+        // re-conflated damage with weapon skill whenever a trained skill existed.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            Self = BuildXpWorld(69296, 5475).Self with
+            {
+                TrainedSkills = new[]
+                {
+                    new SelfSkillProjection
+                    { Name = "two handed combat", Advancement = "trained", RaisedRanks = 0 },
+                },
+            },
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+
+        // Out-damaged after hits LAND points to strength (the damage lever) only.
+        Assert.Contains("Being OUT-DAMAGED after your hits LAND points to strength;", cap);
+        Assert.DoesNotContain("points to strength / your weapon skill", cap);
+        // The weapon skill is still surfaced as the ACCURACY lever (not damage).
+        Assert.Contains("the main accuracy lever, raised via `RaiseSkill`", cap);
     }
 
     [Fact]
