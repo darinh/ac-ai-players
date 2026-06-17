@@ -125,13 +125,23 @@ public class CombatChainTests
     [Fact]
     public void IsChainInterruptingKind_DecisionWorthy_True()
     {
-        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemAdded));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemRemoved));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.NpcDialog));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.LandblockChanged));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.PopupString));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.BookText));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.ActionRejected));
+    }
+
+    [Fact]
+    public void IsChainInterruptingKind_OwnLootPickup_NotInterrupting()
+    {
+        // Picking up a kill's own drops (InventoryItemAdded) is an EXPECTED
+        // byproduct of a committed grind, not a decision-worthy external change,
+        // so it must NOT route the chain to a per-kill LLM call. An item LEAVING
+        // inventory (give/use/sell) is a deliberate act and STILL interrupts.
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemAdded));
+        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemRemoved));
     }
 
     [Fact]

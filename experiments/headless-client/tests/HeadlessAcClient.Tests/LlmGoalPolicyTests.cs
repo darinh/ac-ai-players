@@ -8188,6 +8188,75 @@ public class LlmGoalPolicyTests
         Assert.False(policy.HasInflight); // and no async LLM call was kicked off
     }
 
+    [Fact]
+    public void CombatChain_MintsUnderActiveKillCommitment_DespiteOwnLootPickup()
+    {
+        // The bot's own corpse-loot (InventoryItemAdded) is an expected byproduct
+        // of a committed grind, not a decision-worthy external event, so it must
+        // NOT route the chain to a per-kill LLM call. Before the fix,
+        // IsChainInterruptingKind included InventoryItemAdded, so every loot
+        // starved the chain (gate:chain-interrupting-event, budget 0/N — observed
+        // live). The chain stays interrupted by genuine events (item-removal,
+        // dialog, zone, readable, rejection) and bounded by MaxCombatChainAttacks.
+        var llmCalled = false;
+        var http = new HttpClient(new AsyncStubHandler((_, _) =>
+        {
+            llmCalled = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}"),
+            });
+        }));
+
+        const uint QuarryGuid = 0xD01u;
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
+            ItemType = 0x10u, IsCreature = true, IsMonster = true,
+            ObservedHostile = false, IsCorpse = false,
+        });
+
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "kc-2",
+            Kind = "quest:kill-task",
+            Rationale = "test kill-count commitment",
+            Completion = new KillCountSincePushAtLeastPredicate(3),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo(),
+            stack: stack)
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        // A fresh loot pickup arrived since the last LLM look. Before the fix this
+        // set chainInterrupting=true and starved the chain.
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.InventoryItemAdded,
+            Text = "picked up loot",
+        });
+
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(QuarryGuid, goal.Target.Guid);
+        Assert.Contains("autonomous kill-intent decomposition", goal.Rationale);
+        Assert.False(llmCalled); // loot did not force an LLM round-trip
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> _fn;
