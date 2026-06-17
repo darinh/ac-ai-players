@@ -8257,6 +8257,165 @@ public class LlmGoalPolicyTests
         Assert.False(llmCalled); // loot did not force an LLM round-trip
     }
 
+    [Fact]
+    public void CombatChain_MintsUnderActiveKillCommitment_DespitePickerArrival()
+    {
+        // The autonomous picker parking next to a target it chose itself
+        // (PickerArrivedNoAction) wakes the LLM to name a verb — a safety valve
+        // that is REDUNDANT for the chain, which already supplies Attack for a
+        // matching committed target. Before the fix, pickerArrived gated the
+        // chain, so it minted 0/N live (gate:picker-arrived after each kill). The
+        // chain still falls through to the LLM when no matching committed target
+        // is in view (the picker valve is preserved for genuine discoveries).
+        AssertChainMintsDespiteEvent(EventKind.PickerArrivedNoAction, 0xD02u);
+    }
+
+    [Fact]
+    public void CombatChain_MintsUnderActiveKillCommitment_DespitePickerStart()
+    {
+        // The autonomous picker switching to a NEW self-chosen target
+        // (PickerActivityStarted -> pickerStartWake) likewise no longer gates the
+        // chain. A NON-matching pick (NPC/portal/other kind) still yields no chain
+        // target, so control falls through to the LLM that weighs the discovery.
+        AssertChainMintsDespiteEvent(EventKind.PickerActivityStarted, 0xD03u);
+    }
+
+    [Fact]
+    public void CombatChain_ConsumesPickerWake_NoRedundantLlmCallWhileAttacking()
+    {
+        // gpt-5.4 regression: a chain mint must CONSUME the picker wake it
+        // deliberately ignored (advance the event floor) so the same picker event
+        // does not linger and kick a redundant LLM call while the minted Attack is
+        // still executing — that call would reset _combatChainCount and collapse
+        // the MaxCombatChainAttacks batch to a single mint, re-introducing the
+        // per-kill round-trip this slice removes. StuckTimeout=MaxValue isolates
+        // the picker wake from the stuck-timeout wake (a fresh policy is otherwise
+        // always "stuck" since _lastCalledAtUtc starts at MinValue).
+        var llmCalls = 0;
+        var http = new HttpClient(new AsyncStubHandler((_, _) =>
+        {
+            System.Threading.Interlocked.Increment(ref llmCalls);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}"),
+            });
+        }));
+
+        const uint QuarryGuid = 0xD04u;
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
+            ItemType = 0x10u, IsCreature = true, IsMonster = true,
+            ObservedHostile = false, IsCorpse = false,
+        });
+
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "kc-floor",
+            Kind = "quest:kill-task",
+            Rationale = "test",
+            Completion = new KillCountSincePushAtLeastPredicate(3),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo(),
+            stack: stack)
+        {
+            MinCallInterval = TimeSpan.Zero,
+            StuckTimeout = TimeSpan.MaxValue, // never "stuck" -> only the picker can wake
+        };
+
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction, Text = "picker parked",
+        });
+
+        // Tick 1: the chain mints despite the picker arrival (no LLM call).
+        var minted = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(minted);
+        Assert.Contains("autonomous kill-intent decomposition", minted!.Rationale);
+        Assert.Equal(0, llmCalls);
+
+        // Tick 2: the minted Attack is executing (currentGoal) and NO new events
+        // arrived. The picker arrival was consumed at the mint, so it must not
+        // linger and kick an LLM call (which would reset the chain budget).
+        _ = policy.ProposeGoal(world, events, minted);
+        Assert.Equal(0, llmCalls);
+    }
+
+    // Shared harness: under an active kill-count commitment with a matching
+    // monster in view, ProposeGoal must mint a chain Attack (no LLM round-trip)
+    // even though `evt` arrived since the last LLM look.
+    private static void AssertChainMintsDespiteEvent(EventKind evt, uint monsterGuid)
+    {
+        var llmCalled = false;
+        var http = new HttpClient(new AsyncStubHandler((_, _) =>
+        {
+            llmCalled = true;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "{\"choices\":[{\"message\":{\"content\":\"{}\"}}]}"),
+            });
+        }));
+
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = monsterGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
+            ItemType = 0x10u, IsCreature = true, IsMonster = true,
+            ObservedHostile = false, IsCorpse = false,
+        });
+
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "kc-picker",
+            Kind = "quest:kill-task",
+            Rationale = "test kill-count commitment",
+            Completion = new KillCountSincePushAtLeastPredicate(3),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo(),
+            stack: stack)
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        // A fresh picker-steering event since the last LLM look. Before the fix
+        // this set pickerArrived/pickerStartWake=true and starved the chain.
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = evt,
+            ItemGuid = monsterGuid,
+            Name = "Quarry Beast",
+            Text = "picker steering",
+        });
+
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal(monsterGuid, goal.Target.Guid);
+        Assert.Contains("autonomous kill-intent decomposition", goal.Rationale);
+        Assert.False(llmCalled); // picker steering did not force an LLM round-trip
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> _fn;
