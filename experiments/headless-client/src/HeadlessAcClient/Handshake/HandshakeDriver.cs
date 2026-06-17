@@ -1435,6 +1435,12 @@ internal sealed class HandshakeDriver : IDisposable
         var                  combatFeelPath = Strategy.CombatFeelStore.ResolvePath(_characterName);
         var                  combatFeel = Strategy.CombatFeelStore.LoadOrNew(combatFeelPath);
         (uint? Wcid, string? Name, DateTime At)? lastCombatFoe = null;
+        // The foe that most recently LANDED inbound damage on the bot (name +
+        // time; the wire carries no attacker guid). Death-attribution FALLBACK
+        // for when the bot is killed by a DIFFERENT foe than the one it was
+        // swinging at — a swarm add, or a mob that aggroed mid-travel. Reset
+        // after each attributed death.
+        (uint? Wcid, string? Name, DateTime At)? lastInboundDamager = null;
         var                  selfDeathAttributed = false;
         // Publish the prompt snapshot AND durably persist any new outcome.
         // Both run at the same outcome sites (kill / death / near-death /
@@ -1465,11 +1471,12 @@ internal sealed class HandshakeDriver : IDisposable
             }
             if (selfDeathAttributed) return;
             selfDeathAttributed = true;
-            if (lastCombatFoe is { } foe &&
-                CombatDeathAttribution.IsFresh(foe.At, DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness) &&
-                CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name)) is not null)
+            var deathFoe = CombatDeathAttribution.ChooseDeathFoe(
+                lastCombatFoe, lastInboundDamager,
+                DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness);
+            if (deathFoe is { } foe)
             {
-                combatFeel.RecordDeath(new CombatFeelLedger.MobIdentity(foe.Wcid, foe.Name), ReadSelfLevel(worldState));
+                combatFeel.RecordDeath(foe, ReadSelfLevel(worldState));
                 Console.WriteLine(
                     $"[combat-feel] self DEATH attributed to '{foe.Name ?? "?"}' " +
                     $"wcid={(foe.Wcid?.ToString() ?? "?")}");
@@ -1477,9 +1484,10 @@ internal sealed class HandshakeDriver : IDisposable
             }
             else
             {
-                Console.WriteLine("[combat-feel] self DEATH not attributed (no fresh combat foe).");
+                Console.WriteLine("[combat-feel] self DEATH not attributed (no fresh combat foe or damager).");
             }
             lastCombatFoe = null;
+            lastInboundDamager = null;
         }
 
         // combat-damage-output: resets the per-fight swing-outcome counters
@@ -2807,6 +2815,14 @@ internal sealed class HandshakeDriver : IDisposable
                                             : (DateTime?)null;
                                     recentInboundHits.Add(
                                         new InboundHit(inboundHitUtc, inboundHit.Damage));
+                                    // Death-attribution fallback anchor: the foe
+                                    // that just LANDED damage on the bot. Name-only
+                                    // (the wire carries no attacker guid); recorded
+                                    // only when the name resolves so KeyOf can key
+                                    // it. ChooseDeathFoe falls back to this when the
+                                    // last actively-fought foe is stale at death.
+                                    if (CombatFeelLedger.NormalizeName(hostileName) is not null)
+                                        lastInboundDamager = (null, hostileName, inboundHitUtc);
                                     if (InboundDamageWindow.BeginsNewInboundEpisode(
                                             prevInboundHitUtc, inboundHitUtc,
                                             InboundDamageWindowSeconds))

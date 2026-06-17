@@ -75,4 +75,41 @@ internal static class CombatDeathAttribution
     /// </summary>
     public static bool IsFresh(DateTime foeAt, DateTime now, TimeSpan freshness)
         => now - foeAt < freshness;
+
+    /// <summary>
+    /// Choose the foe identity to record a self-death against, or null to leave
+    /// the ledger untouched. Prefers the foe the bot was actively fighting
+    /// (<paramref name="lastCombatFoe"/>) when that engagement is fresh and the
+    /// identity resolves; otherwise falls back to the foe that most recently
+    /// LANDED damage on the bot (<paramref name="lastDamager"/>) when fresh and
+    /// resolvable.
+    ///
+    /// Why the fallback: the bot is frequently killed by a DIFFERENT foe than the
+    /// one it was swinging at — a swarm add, or a creature that aggroed mid-travel
+    /// — so <paramref name="lastCombatFoe"/> is stale or names the wrong (weaker)
+    /// kind at the moment of death and the lethal kind is never learned. The
+    /// most-recent foe to LAND damage is the best-supported single candidate: it
+    /// dealt actual damage within the freshness window before death. Both anchors
+    /// are gated on IsFresh + a resolvable identity (KeyOf), so a stale or
+    /// unidentifiable foe never poisons the ledger. Pure identity bookkeeping —
+    /// no monster names, priorities, or game rules.
+    /// </summary>
+    public static CombatFeelLedger.MobIdentity? ChooseDeathFoe(
+        (uint? Wcid, string? Name, DateTime At)? lastCombatFoe,
+        (uint? Wcid, string? Name, DateTime At)? lastDamager,
+        DateTime now, TimeSpan freshness)
+    {
+        if (Attributable(lastCombatFoe, now, freshness) is { } engaged) return engaged;
+        if (Attributable(lastDamager, now, freshness) is { } damager) return damager;
+        return null;
+    }
+
+    private static CombatFeelLedger.MobIdentity? Attributable(
+        (uint? Wcid, string? Name, DateTime At)? anchor, DateTime now, TimeSpan freshness)
+    {
+        if (anchor is not { } a) return null;
+        if (!IsFresh(a.At, now, freshness)) return null;
+        var id = new CombatFeelLedger.MobIdentity(a.Wcid, a.Name);
+        return CombatFeelLedger.KeyOf(id) is null ? null : id;
+    }
 }
