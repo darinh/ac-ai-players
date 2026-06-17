@@ -3909,20 +3909,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Events that must ROUTE TO THE LLM rather than let the autonomous combat
     // chain (ChooseCombatChainTarget) mint another Attack toward an active
     // kill-count commitment. A NARROW allowlist of genuinely decision-worthy
-    // changes: an inventory change (loot/give), NPC dialog, a zone change,
-    // readable popup/book text, and ANY action rejection (which INCLUDES the
-    // Motor's DisengageLowHealth refusal, so a fresh disengage stops the chain).
+    // changes: an item LEAVING inventory (give/use/sell — a deliberate act),
+    // NPC dialog, a zone change, readable popup/book text, and ANY action
+    // rejection (which INCLUDES the Motor's DisengageLowHealth refusal, so a
+    // fresh disengage stops the chain).
     // It deliberately EXCLUDES the events a kill emits every time as ordinary
     // combat progress — ServerMessage ("you have slain ..."), CombatFeedback,
     // InboundDamageTaken — and SelfProgressChanged, so the chain is not made
-    // inert by its own kills. Combat SAFETY is owned by the Motor's dispatch
-    // self-preservation gate and the losing-fight disengage reflexes (not by
-    // this routing gate); the kill-count completion predicate + the
-    // MaxCombatChainAttacks cap also bound the chain. Pure wire-event-kind
-    // classification; no game-content knowledge.
+    // inert by its own kills. It ALSO excludes InventoryItemAdded: picking up a
+    // kill's own drops is an EXPECTED byproduct of the committed grind, not a
+    // decision-worthy external change, and forcing a per-kill LLM round-trip on
+    // every loot starved the chain (observed live: gate:chain-interrupting-event
+    // after each corpse-loot, budget 0/N). An objective that DEPENDS on a looted
+    // item is expressed as an inventory-bound completion predicate, NOT a
+    // kill-count one, so it does NOT activate this chain (IsActiveKillCommitment
+    // accepts only kill-count predicates) and is evaluated every tick — this
+    // chain fires ONLY for pure kill-count grinds, where the loot is an
+    // incidental trophy. The LLM re-engages at the next bound (every
+    // MaxCombatChainAttacks mints, and on any genuine event above) and re-reads
+    // inventory then (as far as prompt fitting surfaces it). Combat SAFETY is
+    // owned by the Motor's dispatch self-preservation gate and the losing-fight
+    // disengage reflexes (not by this routing gate); the kill-count completion
+    // predicate + the MaxCombatChainAttacks cap also bound the chain. Pure
+    // wire-event-kind classification; no game-content knowledge.
     internal static bool IsChainInterruptingKind(EventKind kind) =>
-        kind is EventKind.InventoryItemAdded
-             or EventKind.InventoryItemRemoved
+        kind is EventKind.InventoryItemRemoved
              or EventKind.NpcDialog
              or EventKind.LandblockChanged
              or EventKind.PopupString
