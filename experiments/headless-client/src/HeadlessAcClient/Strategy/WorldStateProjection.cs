@@ -47,10 +47,19 @@ internal sealed record InventoryItemProjection
     /// Sourced from WeenieRepository (MariaDB ace_world); the wire
     /// protocol does not deliver this. Null if unknown / not yet
     /// looked up. THIS is the field the LLM uses to derive quest
-    /// intent ("Give this token to Jonathan...").
+    /// intent (an item's own "give/return this to ..." instruction).
     /// </summary>
     [JsonPropertyName("short_desc")] public string? ShortDesc { get; init; }
     [JsonPropertyName("long_desc")]  public string? LongDesc { get; init; }
+
+    /// <summary>
+    /// The item's PropertyString.Use (type 15) — its "what to do with
+    /// it" instruction. Some items carry their actionable quest text
+    /// here instead of ShortDesc, so surfacing it lets the LLM derive
+    /// the goal without hardcoding. Sourced from WeenieRepository; the
+    /// wire does not deliver it. Null if unknown / absent.
+    /// </summary>
+    [JsonPropertyName("use_desc")]   public string? UseDesc { get; init; }
 }
 
 internal sealed record VisibleObjectProjection
@@ -550,13 +559,14 @@ internal sealed record WorldStateProjection
             .Where(o => !string.IsNullOrEmpty(o.Name))
             .Select(o =>
             {
-                string? sd = null, ld = null;
+                string? sd = null, ld = null, ud = null;
                 string? governingSkill = null;
                 if (o.WeenieClassId is uint wcid && weenies is not null)
                 {
                     var rec = weenies.TryGet(wcid);
                     sd = rec?.ShortDesc;
                     ld = rec?.LongDesc;
+                    ud = rec?.UseDesc;
                     // Decode the weapon's governing-skill ordinal to its name
                     // using the SAME Skill enum the trained-skills projection
                     // uses (GameEventPayloadDecoder: ((Skill)id).ToString()),
@@ -580,6 +590,7 @@ internal sealed record WorldStateProjection
                     WieldedAt = o.CurrentWieldedLocation,
                     ShortDesc = sd,
                     LongDesc = ld,
+                    UseDesc = ud,
                     GoverningSkill = governingSkill,
                 };
             })

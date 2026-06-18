@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // WeenieRepository — read-only lookup of weenie-class strings
-// (Name, ShortDesc, LongDesc) from the ACE `ace_world` database.
+// (Name, ShortDesc, LongDesc, UseDesc) from the ACE `ace_world`
+// database.
 //
 // The wire protocol does NOT deliver static weenie strings. The
 // Strategy/LLM layer needs them to derive content-aware decisions
@@ -19,6 +20,7 @@
 // ace_world.weenie_properties_string.type:
 //   1  = Name
 //   14 = LongDesc
+//   15 = Use       (the item's "what to do with it" instruction)
 //   16 = ShortDesc
 
 using System;
@@ -33,6 +35,11 @@ internal sealed class WeenieRepository : IWeenieRepository
 {
     private const int PropNameId      = 1;
     private const int PropLongDescId  = 14;
+    // PropertyString.Use (15): the item's "what to do with it" instruction
+    // (e.g. "Return this item to the X"). Some items carry their actionable
+    // text here rather than in ShortDesc, so the LLM needs it to derive a
+    // quest GIVE/Use goal. Static weenie data; the wire does not deliver it.
+    private const int PropUseDescId   = 15;
     private const int PropShortDescId = 16;
     // PropertyInt.WeaponSkill (48): the Skill enum ordinal that governs
     // attacks with this weapon (e.g. TwoHandedCombat, HeavyWeapons). The
@@ -93,13 +100,14 @@ internal sealed class WeenieRepository : IWeenieRepository
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                "SELECT type, value FROM weenie_properties_string WHERE object_Id = @w AND type IN (@n, @s, @l)";
+                "SELECT type, value FROM weenie_properties_string WHERE object_Id = @w AND type IN (@n, @s, @l, @u)";
             cmd.Parameters.AddWithValue("@w", wcid);
             cmd.Parameters.AddWithValue("@n", PropNameId);
             cmd.Parameters.AddWithValue("@s", PropShortDescId);
             cmd.Parameters.AddWithValue("@l", PropLongDescId);
+            cmd.Parameters.AddWithValue("@u", PropUseDescId);
 
-            string? name = null, sd = null, ld = null;
+            string? name = null, sd = null, ld = null, use = null;
             await using var rdr = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await rdr.ReadAsync(ct).ConfigureAwait(false))
             {
@@ -110,6 +118,7 @@ internal sealed class WeenieRepository : IWeenieRepository
                     case PropNameId:      name = v; break;
                     case PropShortDescId: sd   = v; break;
                     case PropLongDescId:  ld   = v; break;
+                    case PropUseDescId:   use  = v; break;
                 }
             }
             await rdr.DisposeAsync().ConfigureAwait(false);
@@ -130,8 +139,8 @@ internal sealed class WeenieRepository : IWeenieRepository
                     weaponSkill = Convert.ToInt32(raw);
             }
 
-            if (name is null && sd is null && ld is null && weaponSkill is null) return (null, false);
-            return (new WeenieStringRecord(wcid, name, sd, ld, weaponSkill), false);
+            if (name is null && sd is null && ld is null && use is null && weaponSkill is null) return (null, false);
+            return (new WeenieStringRecord(wcid, name, sd, ld, use, weaponSkill), false);
         }
         catch (Exception ex)
         {
@@ -151,6 +160,6 @@ internal sealed class WeenieRepository : IWeenieRepository
     /// <summary>
     /// Direct cache poke for tests. Production code should use EnsureLoadedAsync.
     /// </summary>
-    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc, int? weaponSkillId = null)
-        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, weaponSkillId);
+    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc, int? weaponSkillId = null, string? useDesc = null)
+        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, useDesc, weaponSkillId);
 }
