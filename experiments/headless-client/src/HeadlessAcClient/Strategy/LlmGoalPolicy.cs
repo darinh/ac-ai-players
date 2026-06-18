@@ -4604,7 +4604,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine();
         sb.AppendLine("RULES:");
         sb.AppendLine("- Reason ONLY from the observed world below. Do NOT invent NPCs, items, or wcids not listed. Prefer NAME selectors over wcid (wcids change between sessions).");
-        sb.AppendLine("- If an inventory item's short_desc says what to do with it, follow it. 'Give' requires BOTH target (the NPC) and item (the thing given).");
+        sb.AppendLine("- If an inventory item's short_desc OR its `use` text (the item's own 'what to do with it' instruction — e.g. give or return it to a named NPC) says what to do with it, follow it. 'Give' requires BOTH target (the NPC) and item (the thing given).");
         // cp-2407: split the old combined ActionRejected rule. The pre-emptive
         // double-click-Use-on-self half stays ALWAYS-on (it tells the bot to
         // self-Use an activatable item BEFORE a related Give/Talk so the
@@ -4926,7 +4926,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // so it costs zero budget when no Give is looping. No item/npc names, no
         // priority; the LLM still decides.
         if (HasRecentRepeatedGoalOfKinds(events, "Give "))
-        sb.AppendLine("- A REFUSED GIVE — DEFER TO THE ITEM'S INSTRUCTION: if you `Give{npc, item}` and the server REFUSES it because the npc does not want the item (a `doesn't want that` reply), FIRST check whether an inventory item's `short_desc` explicitly tells you to `Give` it to THIS npc. If it does, that npc IS the intended recipient and the refusal means a PREREQUISITE is unmet — do NOT abandon it and do NOT switch to `Use`: `Talk` that npc and follow the dialog/steps it gives FIRST, THEN re-`Give` once. OTHERWISE (no item's `short_desc` names this npc as the recipient), that npc is the wrong target or verb — do NOT keep `Give`-ing the same item to the same npc: the item may ACT ON ITS OWN when you `Use` it (the way a `door` or `portal` activates on `Use`), so try `Use{item}`, or `Give` it to a DIFFERENT npc that a directive or dialog named. (This is about a server REFUSAL, not a movement failure: if your `Give` merely FAILED because you could not walk to/reach the npc, keep trying to reach that same npc — the target is still right.)");
+        sb.AppendLine("- A REFUSED GIVE — DEFER TO THE ITEM'S INSTRUCTION: if you `Give{npc, item}` and the server REFUSES it because the npc does not want the item (a `doesn't want that` reply), FIRST check whether an inventory item's `short_desc` OR its `use` text explicitly tells you to `Give`/return it to THIS npc. If it does, that npc IS the intended recipient and the refusal means a PREREQUISITE is unmet — do NOT abandon it and do NOT switch to `Use`: `Talk` that npc and follow the dialog/steps it gives FIRST, THEN re-`Give` once. OTHERWISE (no item's `short_desc` or `use` text names this npc as the recipient), that npc is the wrong target or verb — do NOT keep `Give`-ing the same item to the same npc: the item may ACT ON ITS OWN when you `Use` it (the way a `door` or `portal` activates on `Use`), so try `Use{item}`, or `Give` it to a DIFFERENT npc that a directive or dialog named. (This is about a server REFUSAL, not a movement failure: if your `Give` merely FAILED because you could not walk to/reach the npc, keep trying to reach that same npc — the target is still right.)");
         sb.AppendLine(world.Self.AvailableExperience is long bandXp && bandXp > 0
             ? "- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot/invest unspent XP; 3-4 explore."
             : "- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
@@ -5103,13 +5103,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // type heuristic, no game knowledge. Goal resolution is unaffected
             // — the picker matches against world.Inventory, not this text, and
             // this section prints no per-item guid.
-            var invCounts = new Dictionary<(string Name, uint Wcid, string ShortDesc, uint Wielded), int>();
-            var invOrder = new List<(string Name, uint Wcid, string ShortDesc, uint Wielded)>();
+            var invCounts = new Dictionary<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded), int>();
+            var invOrder = new List<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded)>();
             foreach (var i in world.Inventory)
             {
                 var sd = string.IsNullOrWhiteSpace(i.ShortDesc) ? "" : i.ShortDesc!.Trim();
+                var ud = string.IsNullOrWhiteSpace(i.UseDesc) ? "" : i.UseDesc!.Trim();
+                // Key on the EFFECTIVE (rendered) use text: it is suppressed
+                // below when identical to short_desc, so normalize it to "" here
+                // too. Otherwise two items that RENDER identically (one with no
+                // use, one whose use duplicates its short_desc) would get
+                // different keys and fail to collapse.
+                if (ud.Length > 0 && ud == sd) ud = "";
                 var wielded = i.WieldedAt is uint iw ? iw : 0u;
-                var key = (i.Name, i.Wcid, sd, wielded);
+                var key = (i.Name, i.Wcid, sd, ud, wielded);
                 if (invCounts.TryGetValue(key, out var c)) invCounts[key] = c + 1;
                 else { invCounts[key] = 1; invOrder.Add(key); }
             }
@@ -5123,6 +5130,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine();
                 if (key.ShortDesc.Length > 0)
                     sb.AppendLine($"    short_desc: {key.ShortDesc}");
+                if (key.UseDesc.Length > 0)
+                    sb.AppendLine($"    use: {key.UseDesc}");
             }
         }
         sb.AppendLine();
@@ -7108,9 +7117,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             foreach (var i in world.Inventory)
             {
                 var sd = string.IsNullOrWhiteSpace(i.ShortDesc) ? "" : i.ShortDesc!.Trim();
-                var key = i.Name + "\u0001" + sd;
+                var ud = string.IsNullOrWhiteSpace(i.UseDesc) ? "" : i.UseDesc!.Trim();
+                // Normalize to the EFFECTIVE (rendered) use text: a use string
+                // identical to short_desc is not shown, so collapse it to "" so
+                // it does not split the dedup key (two items that render the same
+                // must share one row and one budget slot).
+                if (ud.Length > 0 && ud == sd) ud = "";
+                var key = i.Name + "\u0001" + sd + "\u0001" + ud;
                 if (!heldSeen.Add(key)) continue;
-                var row = sd.Length > 0 ? $"- {i.Name} — {Truncate(sd, 120)}" : $"- {i.Name}";
+                // Render the item's OWN description text — prefer ShortDesc, and
+                // also include its `use` instruction when present (some items
+                // carry their actionable "give/return this to ..." text only in
+                // the Use string, not ShortDesc). Pure projection of the item's
+                // own wire/weenie strings; the LLM reads and decides.
+                string desc;
+                if (sd.Length > 0 && ud.Length > 0) desc = $"{Truncate(sd, 110)} / use: {Truncate(ud, 110)}";
+                else if (sd.Length > 0) desc = Truncate(sd, 120);
+                else if (ud.Length > 0) desc = $"use: {Truncate(ud, 120)}";
+                else desc = "";
+                var row = desc.Length > 0 ? $"- {i.Name} — {desc}" : $"- {i.Name}";
                 if (heldBudget - row.Length < 0) break;
                 heldBudget -= row.Length;
                 heldRows.Add(row);

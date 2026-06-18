@@ -3412,6 +3412,99 @@ public class LlmGoalPolicyTests
         Assert.True(p.Length <= 26000, $"prompt length {p.Length} must respect the hard ceiling");
     }
 
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_RendersUseInstructionWhenNoShortDesc()
+    {
+        // An item whose actionable instruction lives ONLY in its `use` text
+        // (ShortDesc empty) must still surface that instruction in the
+        // protected capsule. Otherwise the bot sees a bare item name and
+        // grinds instead of acting on the held quest item (live: a token
+        // whose only instruction was a type-15 Use string rendered blank, so
+        // the bot ground a tutorial monster for thousands of ticks).
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x4003u, Name = "Brass Token", Wcid = 4242u,
+                UseDesc = "Return this item to the instructor to proceed.",
+            },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Held items", p);
+        var capsule = p.Substring(p.IndexOf("## Held items", StringComparison.Ordinal));
+        Assert.Contains("- Brass Token — use: Return this item to the instructor to proceed.", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_RendersBothShortDescAndUseWhenDistinct()
+    {
+        // When an item carries BOTH a ShortDesc and a distinct Use
+        // instruction, the capsule surfaces both so neither the description
+        // nor the actionable step is lost.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x4004u, Name = "Signet Ring", Wcid = 4243u,
+                ShortDesc = "A heavy brass signet ring.",
+                UseDesc = "Show this ring to the captain.",
+            },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var capsule = p.Substring(p.IndexOf("## Held items", StringComparison.Ordinal));
+        Assert.Contains("A heavy brass signet ring.", capsule);
+        Assert.Contains("use: Show this ring to the captain.", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_BodyInventory_RendersUseLineForHeldItem()
+    {
+        // The body `## Inventory` section also renders the item's `use`
+        // instruction (indented), so when the prompt is small enough that the
+        // body survives, the instruction is present there too.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x4005u, Name = "Brass Token", Wcid = 4244u,
+                UseDesc = "Return this item to the instructor.",
+            },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Inventory", p);
+        // The 4-space indent uniquely identifies the BODY inventory line
+        // (the protected capsule renders "— use:" instead).
+        Assert.Contains("    use: Return this item to the instructor.", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemsCapsule_DedupesItemsThatRenderIdenticallyDespiteRawUseDiff()
+    {
+        // Edge case: two items with the SAME name + short_desc render
+        // identically — one has no use string, the other a use string that
+        // merely duplicates its short_desc (which is suppressed at render).
+        // They MUST collapse to a single capsule row (and not split the
+        // protected char budget) because the dedup key is normalized to the
+        // EFFECTIVE rendered use text.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x20u, Name = "Twin Note", Wcid = 7u, ShortDesc = "An identical note." },
+            new InventoryItemProjection { Guid = 0x21u, Name = "Twin Note", Wcid = 7u, ShortDesc = "An identical note.", UseDesc = "An identical note." },
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        var capsuleStart = p.IndexOf("## Held items", StringComparison.Ordinal);
+        Assert.True(capsuleStart >= 0);
+        var capsule = p.Substring(capsuleStart);
+        var occurrences = capsule.Split(new[] { "- Twin Note" }, StringSplitOptions.None).Length - 1;
+        Assert.Equal(1, occurrences);
+        // The redundant use line is suppressed (use text equals short_desc).
+        Assert.DoesNotContain("use: An identical note.", capsule);
+    }
+
     // ---- ## Early server directives protected capsule (cp-2383) -----------
     // A one-time server PopupString (login/exit directive) is persisted past
     // the EventStream ring (cp-2382) AND re-surfaced in the protected salience

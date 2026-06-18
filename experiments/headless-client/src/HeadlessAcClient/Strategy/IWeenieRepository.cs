@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // IWeenieRepository — abstraction over ace_world MariaDB lookup
-// for static weenie-class string data (Name, ShortDesc, LongDesc).
+// for static weenie-class string data (Name, ShortDesc, LongDesc,
+// UseDesc).
 //
-// The wire protocol does NOT deliver ShortDesc/LongDesc for
+// The wire protocol does NOT deliver these description strings for
 // objects. The bot needs them in two places:
-//   1) Strategy/LLM prompt — "Give this token to Jonathan if
-//      you wish to leave the Training Academy early" is the entire
-//      reason the LLM can derive the GIVE goal without hardcoding.
+//   1) Strategy/LLM prompt — an item's own description text (a
+//      short_desc OR a use-instruction telling you what to do with
+//      it, e.g. give/return it to a named NPC) is the entire reason
+//      the LLM can derive the GIVE goal without hardcoding.
 //   2) Selector resolution — Tactics matches `short_desc_contains`
 //      against the cached desc.
 //
@@ -18,7 +20,7 @@
 
 namespace HeadlessAcClient.Strategy;
 
-internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc, int? WeaponSkillId = null);
+internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc, string? UseDesc = null, int? WeaponSkillId = null);
 
 internal interface IWeenieRepository
 {

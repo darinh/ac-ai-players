@@ -301,6 +301,29 @@ public class StrategyFoundationTests
         Assert.Equal(ItemGuid, withRepo[0].Guid);
     }
 
+    [Fact]
+    public void WorldStateProjection_FromWorldState_PopulatesUseDescWhenShortDescAbsent()
+    {
+        // Some quest items carry their actionable instruction ONLY in the
+        // PropertyString.Use (type 15) field, with an empty ShortDesc. The
+        // projection must surface UseDesc so the LLM can derive the goal from
+        // the item's own text instead of seeing a bare item name.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        const uint TokenWcid = 4242u;
+        SeedSnapshot(ws, ItemGuid, "Brass Token", wcid: TokenWcid, itemType: 0x800u, cellId: 0u, containerGuid: SelfGuid);
+
+        var repo = new FakeWeenieRepo();
+        repo.Seed(TokenWcid, "Brass Token", shortDesc: null, longDesc: null, useDesc: "Return this item to the instructor to proceed.");
+
+        var proj = WorldStateProjection.FromWorldState(ws, repo);
+        Assert.NotNull(proj);
+        var item = proj!.Inventory.Single(i => i.Guid == ItemGuid);
+        Assert.Equal("Return this item to the instructor to proceed.", item.UseDesc);
+        Assert.Null(item.ShortDesc);
+    }
+
     // Regression for racefix-run-01: after Jonathan Free Ride teleported
     // the bot to Holtburg (landblock 0xA9B4), the academy Society Greeter
     // snapshot stayed in WorldState (server never sent ObjectDelete) and
@@ -1201,8 +1224,8 @@ public class StrategyFoundationTests
     private sealed class FakeWeenieRepo : IWeenieRepository
     {
         private readonly System.Collections.Generic.Dictionary<uint, WeenieStringRecord> _map = new();
-        public void Seed(uint wcid, string? name, string? shortDesc, string? longDesc = null)
-            => _map[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc);
+        public void Seed(uint wcid, string? name, string? shortDesc, string? longDesc = null, string? useDesc = null)
+            => _map[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, useDesc);
         public WeenieStringRecord? TryGet(uint wcid) => _map.TryGetValue(wcid, out var r) ? r : null;
         public System.Threading.Tasks.Task EnsureLoadedAsync(uint wcid, System.Threading.CancellationToken ct = default)
             => System.Threading.Tasks.Task.CompletedTask;
