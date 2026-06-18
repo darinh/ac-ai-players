@@ -272,10 +272,11 @@ public class LlmGoalPolicyTests
     [Fact]
     public void BuildUserPrompt_RefusedGiveRule_RendersOnRepeatedGive_OmittedOtherwise()
     {
-        // cp give-rejected-try-use: when the bot loops a Give of the same item to
-        // the same npc (the server refuses it as unwanted), the rule fires to
-        // redirect to Use / a different recipient. Gated on the bot's OWN repeated
-        // Give-emission history so it costs zero budget otherwise.
+        // cp give-rule-defer-shortdesc: when the bot loops a Give of the same item
+        // to the same npc (the server refuses it), the rule fires to defer to the
+        // item's short_desc (named recipient -> Talk/prerequisite) or, when no item
+        // names the npc, redirect to Use / a different recipient. Gated on the
+        // bot's OWN repeated Give-emission history so it costs zero budget otherwise.
         var giveLoop = new EventStream();
         giveLoop.Append(new StreamEvent
         {
@@ -287,11 +288,11 @@ public class LlmGoalPolicyTests
             Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
             Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
         });
-        Assert.Contains("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+        Assert.Contains("A REFUSED GIVE",
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), giveLoop, null));
 
         // No repeated Give -> the rule is gated off.
-        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+        Assert.DoesNotContain("A REFUSED GIVE",
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
     }
 
@@ -306,7 +307,7 @@ public class LlmGoalPolicyTests
             Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
             Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
         });
-        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+        Assert.DoesNotContain("A REFUSED GIVE",
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), oneGive, null));
     }
 
@@ -328,8 +329,29 @@ public class LlmGoalPolicyTests
             Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
             Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
         });
-        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+        Assert.DoesNotContain("A REFUSED GIVE",
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), es, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedGiveRule_RendersBothBranches_WhenGiveLoops()
+    {
+        // The refined rule must carry BOTH branches: defer to an item's short_desc
+        // that names THIS npc as the recipient (a refusal then = a missing
+        // prerequisite, keep the npc + Talk it first), and otherwise the
+        // wrong-verb/target redirect (try Use / a different npc). This pins that
+        // the named-recipient branch (the give-rejected flaw fix) is present.
+        var giveLoop = new EventStream();
+        for (var i = 0; i < 2; i++)
+            giveLoop.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
+            });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), giveLoop, null);
+        Assert.Contains("DEFER TO THE ITEM'S INSTRUCTION", prompt); // unique rule marker
+        Assert.Contains("intended recipient", prompt);              // named-recipient branch
+        Assert.Contains("Use{item}", prompt);                       // unnamed -> wrong-verb branch
     }
 
     // ---- ## Server hints — HeardSpeech (local NPC speech perception) -------
