@@ -269,6 +269,69 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
     }
 
+    [Fact]
+    public void BuildUserPrompt_RefusedGiveRule_RendersOnRepeatedGive_OmittedOtherwise()
+    {
+        // cp give-rejected-try-use: when the bot loops a Give of the same item to
+        // the same npc (the server refuses it as unwanted), the rule fires to
+        // redirect to Use / a different recipient. Gated on the bot's OWN repeated
+        // Give-emission history so it costs zero budget otherwise.
+        var giveLoop = new EventStream();
+        giveLoop.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
+        });
+        giveLoop.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
+        });
+        Assert.Contains("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+            LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), giveLoop, null));
+
+        // No repeated Give -> the rule is gated off.
+        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+            LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedGiveRule_OmittedForSingleGive()
+    {
+        // A SINGLE Give is not a loop — the rule needs a repeat (>=2 same-target
+        // Give emissions) to fire, so it stays off after one Give.
+        var oneGive = new EventStream();
+        oneGive.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
+        });
+        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+            LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), oneGive, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedGiveRule_OmittedForDifferentItemsToSameNpc()
+    {
+        // The bot trying DIFFERENT items on the same npc is experimenting, NOT
+        // looping one refused Give — the gate keys on target+item, so two
+        // different items handed to one npc must NOT trip the rule (which would
+        // wrongly scold a legitimate item-swap).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Give target=name=\"Greeter\" item=name=\"Apple\" source=llm:test",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Give target=name=\"Greeter\" item=name=\"Stone\" source=llm:test",
+        });
+        Assert.DoesNotContain("A REFUSED GIVE IS THE WRONG VERB OR TARGET",
+            LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), es, null));
+    }
+
     // ---- ## Server hints — HeardSpeech (local NPC speech perception) -------
     // HearSpeech (0x02BB) is the spoken-aloud sibling of the directed Tell
     // (NpcDialog). The receive loop appends a non-self HeardSpeech event; it

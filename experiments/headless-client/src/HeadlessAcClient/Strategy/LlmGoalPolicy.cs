@@ -4397,6 +4397,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
             var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
             var key = verb + (gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel));
+            // Distinguish by the ITEM too, not just verb+target: a Give (or an
+            // item-bearing Use) of DIFFERENT items to the same target is the bot
+            // trying different things, NOT a no-progress repeat. Only fold the
+            // item in when present — Talk and bare object-Use carry an empty item,
+            // so their keys are byte-identical to before (no behavior change for
+            // the existing Talk/Use callers).
+            var im = System.Text.RegularExpressions.Regex.Match(txt, "item=(.*?) source=");
+            if (im.Success)
+            {
+                var itm = im.Groups[1].Value.Trim();
+                if (itm.Length > 0 && itm != "<empty>") key += " item=" + itm;
+            }
             counts[key] = counts.GetValueOrDefault(key) + 1;
             if (counts[key] >= 2) return true;
         }
@@ -4901,6 +4913,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: `## Server hints`, `## Early server directives`, or `## System messages` text that tells you how to LEAVE, EXIT, PROCEED PAST, ADVANCE BEYOND, SKIP, or otherwise COMPLETE or move on from the area or tutorial — especially naming a person/place or warning the step is irreversible — OUTRANKS repeating a local interaction you already observed (re-picking an item you hold, re-talking an NPC who gave no new dialog, re-using an object that didn't change) AND starting a FRESH incidental local interaction that does not itself advance the directive — looting a NEW corpse, picking up NEW loot, talking an as-yet-untalked NPC the directive did not name, or attacking another OPTIONAL monster (a first-time local action is no more 'progress' than a repeated one while an unacted leave/advance directive is shown); it likewise OUTRANKS optional grinding/exploration (the same way FINISH MULTI-STEP DIRECTIVES outranks incidental looting/exploration). When such an instruction is present and unacted, emit a `Talk`/`Use`/`Explore` toward the named target (even if not visible) INSTEAD of looping completed steps or grinding/looting for optional gains. This NEVER overrides health-critical safety, nor an action the directive ITSELF names or requires (reading a `sign` it told you to read, fetching/`Use`-ing/`Give`-ing an item it told you to get or turn in) — those ARE the directive, so do them. An OPTIONAL framing (\"if you wish\", \"when you are ready\", \"you may\") or a promise of EQUIVALENT rewards does NOT make such a directive absent — it is still an ACTIVE, pursuable progression option, so do NOT reason that the scene has 'no directive pending' while one is shown above.");
         sb.AppendLine("- AREA COMPLETE means MOVE ON: when server/NPC text states the current area's training or objective is DONE / COMPLETE / FINISHED (e.g. \"you have completed ...\", \"well done, you may now ...\", \"your training is finished\") — usually naming an exit, `portal`, or next place to go — the required purpose of THIS area is ACHIEVED. Continuing to grind the SAME (often respawning) monsters here for more XP is OPTIONAL and does NOT advance your progression; the named exit / next-step IS the progression. Pursue it — `Use` a named `portal`/exit if one is in view, else `Explore`/`Talk` toward the named next place — rather than re-grinding the area after it reports complete. (Health-critical safety and any step the exit directive ITSELF requires still come first; but absent those, do NOT justify 'one more fight' or 'a little more loot/XP' while the exit/next-step directive sits unacted — pursue the exit.)");
         sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: if you hold an item the server gave you for an unfinished objective (\"take this and bring it back\", \"give X to Y\", \"use this to leave\"), completing it OUTRANKS incidental looting/exploration — return to the NAMED npc/object and `Give`/`Use` it. Treat an unused objective item as an open task, not as done.");
+        // cp give-rejected-try-use: when the bot has re-emitted a `Give` of the
+        // same item to the same npc, the LLM is looping a Give the server refuses
+        // (a semantic "doesn't want it" rejection). The Motor dedups the repeat,
+        // but the LLM re-picks `Give` with no better alternative in mind. Gate on
+        // the bot's OWN repeated-Give emission history (cp-2368/2400 per-rule
+        // relevance gating) so it costs zero budget when no Give is looping.
+        // Generic Use-vs-Give guidance keyed on the refusal — no item/npc names,
+        // no priority; the LLM still decides.
+        if (HasRecentRepeatedGoalOfKinds(events, "Give "))
+        sb.AppendLine("- A REFUSED GIVE IS THE WRONG VERB OR TARGET: if you `Give{npc, item}` and the server REFUSES it because the npc does not want the item (a `doesn't want that` reply), that npc is NOT the recipient — do NOT keep `Give`-ing the same item to the same npc. Reconsider the verb and the target: the item may ACT ON ITS OWN when you `Use` it (the way a `door` or `portal` activates on `Use`), so try `Use{item}`; or `Give` it to a DIFFERENT npc that a directive or dialog named. (This is about a server REFUSAL, not a movement failure: if your `Give` merely FAILED because you could not walk to/reach the npc, keep trying to reach that same npc — the target is still right.)");
         sb.AppendLine(world.Self.AvailableExperience is long bandXp && bandXp > 0
             ? "- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot/invest unspent XP; 3-4 explore."
             : "- Priority: 9-10 health-critical; 7-8 quest progress; 5-6 fight/loot; 3-4 explore.");
