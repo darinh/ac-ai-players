@@ -270,6 +270,17 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_PursueUnseenObjectives_IncludesNamedTargetNowVisibleClause()
+    {
+        // A directive's named target may ALREADY be in `Visible nearby` even when
+        // the text placed it elsewhere (e.g. a role named "in the next room" while
+        // that npc is in view). The PURSUE UNSEEN OBJECTIVES rule must tell the bot
+        // the visible npc IS that target — Talk it now, do not grind past it.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildImmobileWorld(0), new EventStream(), null);
+        Assert.Contains("THE TARGET MAY ALREADY BE IN VIEW", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_RefusedGiveRule_RendersOnRepeatedGive_OmittedOtherwise()
     {
         // cp give-rule-defer-shortdesc: when the bot loops a Give of the same item
