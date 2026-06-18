@@ -595,6 +595,22 @@ internal sealed class HandshakeDriver : IDisposable
         // evade streak does not trip it. See CombatRetry.ShouldAbandonUnbeatable.
         const int            AbandonAllEvadedMinSwings = 12;
         const double         AbandonAllEvadedMinSec    = 25.0;
+        // Phase 7f.S — STALEMATE abandon. The no-damage / all-evaded abandons
+        // above all require ZERO offense; this catches the OPPOSITE no-progress
+        // shape — the bot LANDS hits and deals damage, yet the target out-tanks
+        // or regenerates so its OBSERVED health barely moves after a sustained
+        // fight. No danger reflex frees it (the bot takes no lethal damage), so
+        // without this it swings at an un-killable-for-now target forever.
+        // Conservative: a sustained swing count, a minimum of LANDED hits, and
+        // the target still barely scratched. See CombatRetry.ShouldAbandonStalemate.
+        const int            AbandonStalemateMinSwings = 18;
+        const int            AbandonStalemateMinLanded = 4;
+        const double         AbandonStalemateMinSec    = 30.0;
+        const double         AbandonStalemateMaxTargetHealthLostFraction = 0.15;
+        // The target-health trend must come from a sample observed within this
+        // many seconds, or the stalemate verdict is withheld (a stale reading
+        // could understate the loss and abort a winning fight).
+        const double         AbandonStalemateHealthFreshnessSec = 6.0;
         // Phase 7f.D — reactive low-health disengage (self-preservation
         // reflex). Break off combat when our OWN health is at or below
         // EITHER a fraction of max OR an absolute HP floor (a low-level
@@ -716,6 +732,12 @@ internal sealed class HandshakeDriver : IDisposable
         var                  combatFastRetryRequested = false;
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
+        // Wall-clock of the most recent target-health observation (paired with
+        // lastObservedTargetHealthFraction). The stalemate abandon requires a
+        // FRESH sample so it never concludes "barely scratched" from a STALE
+        // reading — a winning fight whose last UpdateHealth happens to lag would
+        // otherwise show a small loss and be wrongly abandoned.
+        DateTime?            lastObservedTargetHealthAt = null;
         // combat-effectiveness: the target's health fraction at the FIRST
         // observation of the current fight (paired lifecycle with
         // lastObservedTargetHealthFraction). Surfaced with the current
@@ -2424,6 +2446,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastServerCombatActivityAt = DateTime.UtcNow;
                                     }
                                     lastObservedTargetHealthFraction = updHealth.HealthFraction;
+                                    lastObservedTargetHealthAt = DateTime.UtcNow;
                                     firstObservedTargetHealthFraction ??= updHealth.HealthFraction;
                                     if (updHealth.HealthFraction <= 0.0001f)
                                     {
@@ -2488,6 +2511,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         lastCombatAttackAt = null;
                                         lastDamageAt = null;
                                         lastObservedTargetHealthFraction = null;
+                                        lastObservedTargetHealthAt = null;
                                         combatFastRetryRequested = false;
                                         ClearCombatFightStats();
                                     }
@@ -3159,6 +3183,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 lastCombatAttackAt = null;
                                 lastDamageAt = null;
                                 lastObservedTargetHealthFraction = null;
+                                lastObservedTargetHealthAt = null;
                                 combatFastRetryRequested = false;
                                 ClearCombatFightStats();
                             }
@@ -3777,6 +3802,7 @@ internal sealed class HandshakeDriver : IDisposable
                     lastCombatAttackAt = null;
                     lastDamageAt = null;
                     lastObservedTargetHealthFraction = null;
+                    lastObservedTargetHealthAt = null;
                     combatFastRetryRequested = false;
                     ClearCombatFightStats();
 
@@ -3984,6 +4010,21 @@ internal sealed class HandshakeDriver : IDisposable
                         abandonReason =
                             $"after {combatSwingsEvaded} swings all evaded (0 landed, " +
                             $"0 damage) in {sinceLastDamage:F0}s — target out-defends bot";
+                    else if ((DateTime.UtcNow - cstart).TotalSeconds >= AbandonStalemateMinSec &&
+                             CombatRetry.ShouldAbandonStalemate(
+                                 combatSwingsLanded, combatSwingsEvaded,
+                                 AbandonStalemateMinSwings, AbandonStalemateMinLanded,
+                                 firstObservedTargetHealthFraction, lastObservedTargetHealthFraction,
+                                 AbandonStalemateMaxTargetHealthLostFraction,
+                                 lastObservedTargetHealthAt is DateTime stalemateHealthAt
+                                     ? (DateTime.UtcNow - stalemateHealthAt).TotalSeconds
+                                     : double.MaxValue,
+                                 AbandonStalemateHealthFreshnessSec))
+                        abandonReason =
+                            $"after {combatSwingsLanded} hits landed over " +
+                            $"{(DateTime.UtcNow - cstart).TotalSeconds:F0}s the target is still barely " +
+                            $"scratched (<= {AbandonStalemateMaxTargetHealthLostFraction:P0} lost) — " +
+                            $"stalemate, target out-tanks the bot's damage";
                     if (abandonReason is not null)
                     {
                         Console.WriteLine(
@@ -4013,6 +4054,7 @@ internal sealed class HandshakeDriver : IDisposable
                         lastCombatAttackAt = null;
                         lastDamageAt = null;
                         lastObservedTargetHealthFraction = null;
+                        lastObservedTargetHealthAt = null;
                         combatFastRetryRequested = false;
                         ClearCombatFightStats();
                     }
@@ -8377,6 +8419,7 @@ internal sealed class HandshakeDriver : IDisposable
                             combatStartedAt  = DateTime.UtcNow;
                             lastDamageAt     = DateTime.UtcNow;
                             lastObservedTargetHealthFraction = null;
+                            lastObservedTargetHealthAt = null;
                             // Fresh target — no server combat-loop activity has
                             // been observed yet; clear any prior fight's clock so
                             // it cannot suppress this fight's loop-keeper.

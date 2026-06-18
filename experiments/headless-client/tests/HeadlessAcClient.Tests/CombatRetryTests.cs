@@ -275,4 +275,80 @@ public class CombatRetryTests
         // Fresh engagement, nothing observed — never trip on zero data.
         => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
             swingsLanded: 0, damageDealt: 0u, swingsEvaded: 0, MinEvaded));
+
+    // --- ShouldAbandonStalemate (lands hits but target won't die) -----------
+    private const int StaleMinSwings = 18;
+    private const int StaleMinLanded = 4;
+    private const double StaleMaxLost = 0.15;
+    private const double StaleMaxAge = 6.0;   // health-sample freshness window
+    private const double StaleFresh = 1.0;    // a fresh sample (1s old)
+
+    [Fact]
+    public void Stalemate_LandsHitsButTargetBarelyScratched_Abandons()
+        // Sustained fight, the bot connects (8 landed), yet the target only
+        // lost 5% — it out-tanks the bot's damage, so grinding is futile.
+        => Assert.True(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 0.95, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_TargetHealthDroppingFast_DoesNotAbandon()
+        // The target lost 50% — the bot IS making progress, so keep fighting.
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 0.50, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_TooFewLanded_DoesNotAbandon()
+        // The all-evaded / can't-connect case is owned by ShouldAbandonUnbeatable;
+        // this reflex requires the bot to demonstrably land hits first.
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 2, swingsEvaded: 20, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 1.0, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_NotSustained_DoesNotAbandon()
+        // Below the total-swing threshold — an early stretch is not conclusive.
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 5, swingsEvaded: 5, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 1.0, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_TargetHealthUnknown_DoesNotAbandon()
+        // Without an observed target-health trend we cannot tell a stalemate
+        // from progress — stay quiet (conservative).
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: null, targetHealthNow: 0.9, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_JustWithinMaxLost_Abandons()
+        // Lost ~0.14 (clearly within the 0.15 cap) — still a stalemate.
+        => Assert.True(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 6, swingsEvaded: 16, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 0.86, StaleMaxLost,
+            secondsSinceLastHealthObservation: StaleFresh, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_StaleHealthSample_DoesNotAbandon()
+        // The last health sample is older than the freshness window — its small
+        // observed loss may be stale (the target could actually be dropping
+        // fast). Withhold the verdict rather than abort a possibly-winning fight.
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 0.95, StaleMaxLost,
+            secondsSinceLastHealthObservation: 30.0, StaleMaxAge));
+
+    [Fact]
+    public void Stalemate_NoHealthSampleEver_DoesNotAbandon()
+        // No sample observed at all (age = MaxValue) — never fire.
+        => Assert.False(CombatRetry.ShouldAbandonStalemate(
+            swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
+            targetHealthAtStart: 1.0, targetHealthNow: 0.95, StaleMaxLost,
+            secondsSinceLastHealthObservation: double.MaxValue, StaleMaxAge));
 }

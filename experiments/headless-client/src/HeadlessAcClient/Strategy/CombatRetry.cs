@@ -195,4 +195,71 @@ internal static class CombatRetry
     public static bool ShouldAbandonUnbeatable(
         int swingsLanded, uint damageDealt, int swingsEvaded, int minEvadedSwings)
         => swingsLanded == 0 && damageDealt == 0u && swingsEvaded >= minEvadedSwings;
+
+    /// <summary>
+    /// True when the bot should abandon a NO-PROGRESS STALEMATE: it IS landing
+    /// hits on the target (so the all-evaded <see cref="ShouldAbandonUnbeatable"/>
+    /// does NOT apply) over a sustained run of swings, yet the target's OBSERVED
+    /// health has barely moved — it has dropped at most
+    /// <paramref name="maxTargetHealthLostFraction"/> since the fight began. That
+    /// means the bot's damage cannot kill this target in a reasonable time (it
+    /// out-tanks or regenerates faster than the bot whittles it down), so
+    /// grinding it is futile; break off so the bot picks a winnable target or
+    /// pursues a directive instead of swinging forever. This is the NON-danger,
+    /// NON-all-evaded counterpart to the existing abandons: the bot is neither
+    /// being beaten (it takes no lethal damage — the danger reflexes own that)
+    /// nor whiffing (it connects); it simply cannot out-damage the target's
+    /// defense.
+    ///
+    /// Conservative gates so a slow-but-winnable trade is never aborted: a
+    /// minimum of LANDED hits (the bot demonstrably connects), a minimum total
+    /// swing count (sustained, not an unlucky burst), and the target STILL
+    /// barely scratched after all of it. Target health unknown (not yet
+    /// observed) ⇒ does NOT fire. Mechanical: keys ONLY on the bot's own swing
+    /// outcomes and the target's OBSERVED health fraction — no monster KIND,
+    /// name, wcid, landblock, or server text, and it never chooses a new target.
+    /// </summary>
+    /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
+    /// <param name="swingsEvaded">Swings the target evaded this fight.</param>
+    /// <param name="minSwings">
+    /// Minimum total swings (landed + evaded) before the stalemate verdict is
+    /// conclusive.
+    /// </param>
+    /// <param name="minLanded">
+    /// Minimum LANDED hits required, so this fires only when the bot
+    /// demonstrably connects (the all-evaded case is owned by
+    /// <see cref="ShouldAbandonUnbeatable"/>).
+    /// </param>
+    /// <param name="targetHealthAtStart">Target health fraction at fight start, or null.</param>
+    /// <param name="targetHealthNow">Target's latest observed health fraction, or null.</param>
+    /// <param name="maxTargetHealthLostFraction">
+    /// The most the target may have lost (start − now) and still count as a
+    /// stalemate; above this the bot IS making progress, so it stays quiet.
+    /// </param>
+    /// <param name="secondsSinceLastHealthObservation">
+    /// Wall-clock age of the most recent target-health sample. The verdict is
+    /// withheld on a STALE reading (see <paramref name="maxHealthObservationAgeSec"/>):
+    /// a winning fight whose UpdateHealth lagged would otherwise show only a
+    /// small loss in its last sample and be wrongly abandoned. Pass a large
+    /// value (e.g. double.MaxValue) when no sample has been observed.
+    /// </param>
+    /// <param name="maxHealthObservationAgeSec">
+    /// Maximum age of the health sample for the trend to be trusted.
+    /// </param>
+    public static bool ShouldAbandonStalemate(
+        int swingsLanded, int swingsEvaded, int minSwings, int minLanded,
+        double? targetHealthAtStart, double? targetHealthNow,
+        double maxTargetHealthLostFraction,
+        double secondsSinceLastHealthObservation, double maxHealthObservationAgeSec)
+    {
+        if (swingsLanded < minLanded) return false;
+        if (swingsLanded + swingsEvaded < minSwings) return false;
+        // The trend must come from a CURRENT reading — a stale sample could
+        // understate the loss and abort a winning fight whose UpdateHealth
+        // lagged.
+        if (secondsSinceLastHealthObservation > maxHealthObservationAgeSec) return false;
+        if (targetHealthAtStart is not double tStart) return false;
+        if (targetHealthNow is not double tNow) return false;
+        return (tStart - tNow) <= maxTargetHealthLostFraction;
+    }
 }
