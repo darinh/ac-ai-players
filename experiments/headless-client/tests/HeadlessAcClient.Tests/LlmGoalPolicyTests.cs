@@ -3528,6 +3528,38 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_PursueUnseenRule_ClarifiesExploreOnlyWalksNeverInteracts()
+    {
+        // Live (ece746d-validate, fresh char): the bot Explored to a named
+        // skip-NPC and ARRIVED 6x but never interacted — Explore only WALKS and
+        // sends no action on arrival, so the bot stood beside the exit NPC and
+        // re-decided / switched targets, never triggering the skip. The PURSUE
+        // UNSEEN OBJECTIVES rule must spell out that Explore never interacts and
+        // you must switch to Talk/Give/Use once the target is in view.
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), new EventStream(), null);
+        Assert.Contains("no talk/give/use happens when an", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EarlyDirectiveReminder_ClarifiesExploreWalksOnly()
+    {
+        // The decision-proximate tail reminder (fires when a directive is
+        // present) must ALSO clarify Explore-walks-only, so that on reaching a
+        // named directive target the bot interacts instead of re-Exploring.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PopupString,
+            Text = "Go talk to the gatekeeper in the next room to leave.",
+        });
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildWorldWithMonsters(), es, null);
+
+        Assert.Contains("## Early server directives", p);
+        Assert.Contains("leaves you standing beside it having done nothing", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_EarlyServerDirectivesCapsule_SurfacesLatestDirectivePastEarliestCap()
     {
         // cp-2393: the capsule must ALSO surface the most-recent directive so a
