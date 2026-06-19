@@ -34,6 +34,12 @@ namespace HeadlessAcClient.Strategy;
 internal sealed class WeenieRepository : IWeenieRepository
 {
     private const int PropNameId      = 1;
+    // PropertyString.Quality (5): an NPC's role/title shown under its name
+    // (e.g. a generic profession/role such as "a guard", "the captain"). The
+    // wire delivers only the Name; the LLM needs this to match a directive
+    // that names a target by ROLE ("go talk to the captain") rather than by
+    // proper name. Static weenie data.
+    private const int PropTitleId     = 5;
     private const int PropLongDescId  = 14;
     // PropertyString.Use (15): the item's "what to do with it" instruction
     // (e.g. "Return this item to the X"). Some items carry their actionable
@@ -100,14 +106,15 @@ internal sealed class WeenieRepository : IWeenieRepository
 
             await using var cmd = conn.CreateCommand();
             cmd.CommandText =
-                "SELECT type, value FROM weenie_properties_string WHERE object_Id = @w AND type IN (@n, @s, @l, @u)";
+                "SELECT type, value FROM weenie_properties_string WHERE object_Id = @w AND type IN (@n, @s, @l, @u, @t)";
             cmd.Parameters.AddWithValue("@w", wcid);
             cmd.Parameters.AddWithValue("@n", PropNameId);
             cmd.Parameters.AddWithValue("@s", PropShortDescId);
             cmd.Parameters.AddWithValue("@l", PropLongDescId);
             cmd.Parameters.AddWithValue("@u", PropUseDescId);
+            cmd.Parameters.AddWithValue("@t", PropTitleId);
 
-            string? name = null, sd = null, ld = null, use = null;
+            string? name = null, sd = null, ld = null, use = null, title = null;
             await using var rdr = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
             while (await rdr.ReadAsync(ct).ConfigureAwait(false))
             {
@@ -119,6 +126,7 @@ internal sealed class WeenieRepository : IWeenieRepository
                     case PropShortDescId: sd   = v; break;
                     case PropLongDescId:  ld   = v; break;
                     case PropUseDescId:   use  = v; break;
+                    case PropTitleId:     title = v; break;
                 }
             }
             await rdr.DisposeAsync().ConfigureAwait(false);
@@ -139,8 +147,8 @@ internal sealed class WeenieRepository : IWeenieRepository
                     weaponSkill = Convert.ToInt32(raw);
             }
 
-            if (name is null && sd is null && ld is null && use is null && weaponSkill is null) return (null, false);
-            return (new WeenieStringRecord(wcid, name, sd, ld, use, weaponSkill), false);
+            if (name is null && sd is null && ld is null && use is null && title is null && weaponSkill is null) return (null, false);
+            return (new WeenieStringRecord(wcid, name, sd, ld, use, title, weaponSkill), false);
         }
         catch (Exception ex)
         {
@@ -160,6 +168,6 @@ internal sealed class WeenieRepository : IWeenieRepository
     /// <summary>
     /// Direct cache poke for tests. Production code should use EnsureLoadedAsync.
     /// </summary>
-    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc, int? weaponSkillId = null, string? useDesc = null)
-        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, useDesc, weaponSkillId);
+    internal void SeedForTest(uint wcid, string? name, string? shortDesc, string? longDesc, int? weaponSkillId = null, string? useDesc = null, string? title = null)
+        => _cache[wcid] = new WeenieStringRecord(wcid, name, shortDesc, longDesc, useDesc, title, weaponSkillId);
 }

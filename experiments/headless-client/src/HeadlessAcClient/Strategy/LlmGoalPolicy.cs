@@ -7701,6 +7701,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         var sb = new StringBuilder();
         sb.Append($"- {v.Name}");
+        // Role/title (weenie Quality string) in quotes after the name, so the
+        // LLM can match a directive that names a target by ROLE ("talk to the
+        // captain") to the visible NPC whose title carries that role. Only
+        // objects that have one (typically NPCs) render it; pure projection.
+        // SANITIZED to a single bounded line with no embedded double-quote, so
+        // a multi-line or quote-bearing weenie string can never split this row
+        // into extra prompt lines or close the role quote early.
+        if (OneLine(v.Title) is string roleTitle)
+            sb.Append($" \"{Truncate(roleTitle.Replace('"', '\''), 60)}\"");
         if (v.Wcid is uint vw) sb.Append($" (wcid={vw}");
         else sb.Append(" (");
         if (v.IsCreature)

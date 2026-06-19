@@ -72,6 +72,15 @@ internal sealed record VisibleObjectProjection
 
     [JsonPropertyName("cell")]      public uint? CellId { get; init; }
 
+    /// <summary>
+    /// The object's role/title (weenie PropertyString.Quality, type 5),
+    /// e.g. a generic profession/role shown under an NPC's name. Sourced from
+    /// WeenieRepository; the wire delivers only the Name. Lets the LLM match
+    /// a directive that names a target by ROLE ("talk to the captain") to the
+    /// visible NPC whose title carries that role. Null if absent / unknown.
+    /// </summary>
+    [JsonPropertyName("title")]     public string? Title { get; init; }
+
     /// <summary>True if ItemType has Creature bit AND object is not us.</summary>
     [JsonPropertyName("is_creature")] public bool IsCreature { get; init; }
 
@@ -670,6 +679,15 @@ internal sealed record WorldStateProjection
                 // already covered by the Step 5b openable-Use path.
                 var isMonster = EntityClassifier.IsMonster(itemType, descFlags, weenieFlags);
 
+                // Role/title (weenie PropertyString.Quality) for role-based
+                // directive matching — preloaded on sighting (HandshakeDriver),
+                // so TryGet is a cache hit. Only NPCs typically carry one;
+                // null otherwise. Pure projection of the object's own static
+                // string; the LLM does the role matching.
+                string? title = (o.WeenieClassId is uint vwcid && weenies is not null)
+                    ? weenies.TryGet(vwcid)?.Title
+                    : null;
+
                 return new VisibleObjectProjection
                 {
                     Guid = o.Guid,
@@ -678,6 +696,7 @@ internal sealed record WorldStateProjection
                     ItemType = o.ItemType,
                     Distance = dist,
                     CellId = o.CellId,
+                    Title = title,
                     IsCreature = isCreature,
                     IsPortal = isPortal,
                     IsDoor = isDoor,
