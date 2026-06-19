@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // IWeenieRepository — abstraction over ace_world MariaDB lookup
 // for static weenie-class string data (Name, ShortDesc, LongDesc,
-// UseDesc).
+// UseDesc, Title).
 //
 // The wire protocol does NOT deliver these description strings for
 // objects. The bot needs them in two places:
@@ -20,7 +20,7 @@
 
 namespace HeadlessAcClient.Strategy;
 
-internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc, string? UseDesc = null, int? WeaponSkillId = null);
+internal sealed record WeenieStringRecord(uint Wcid, string? Name, string? ShortDesc, string? LongDesc, string? UseDesc = null, string? Title = null, int? WeaponSkillId = null);
 
 internal interface IWeenieRepository
 {
