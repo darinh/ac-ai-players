@@ -3593,6 +3593,97 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_RefusedItemsCapsule_RendersWhenServerRefusedAnEquip()
+    {
+        // Live (cp021-validate.log): a weak model re-selected an item whose equip
+        // the server refused ~50x, each dropped, wasting decisions. Surface the
+        // refusal so the LLM stops re-Wielding it and does something else.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x4002u, Name = "Heavy Maul", Wcid = 31764u },
+        });
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x4002u, ErrorCode = 0x046Au, ErrorLabel = "InventoryServerSaveFailed",
+        });
+
+        var p = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        var start = p.IndexOf("## Recently refused items", StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var capsule = p.Substring(start);
+        Assert.Contains("Heavy Maul", capsule);
+        Assert.Contains("unlikely to work right now", capsule);
+    }
+
+    [Fact]
+    public void WeaponSkillSwapAdvisory_SuppressedWhenTrainedBagWeaponWasRefused()
+    {
+        // Contradiction fix: if the trained bag weapon the advisory would push the
+        // bot to Wield is the very item the server recently refused, do NOT advise
+        // it (the `## Recently refused items` capsule simultaneously says it is
+        // unlikely to work). Passing the refused guid suppresses the advisory.
+        var world = BuildWeaponSkillWorld(
+            trainedSkill: "TwoHandedCombat", wieldedSkill: "HeavyWeapons", bagSkill: "TwoHandedCombat");
+
+        // Without the refused set, the advisory fires (mismatch present).
+        Assert.NotNull(LlmGoalPolicy.WeaponSkillSwapAdvisory(world));
+        // With the trained bag weapon's guid (0x222) refused, it is suppressed.
+        Assert.Null(LlmGoalPolicy.WeaponSkillSwapAdvisory(world, new HashSet<uint> { 0x222u }));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedItemsCapsule_OmittedWithoutRejection()
+    {
+        // Zero prompt budget in the common case: no recent refusal -> no capsule.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x4002u, Name = "Heavy Maul", Wcid = 31764u },
+        });
+        Assert.DoesNotContain("## Recently refused items",
+            LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedItemsCapsule_ExcludesTransportFailures()
+    {
+        // A could-not-walk (transport) failure is not a server refusal of the
+        // item itself; it clears on arrival, so it must NOT surface as refused.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x4002u, Name = "Heavy Maul", Wcid = 31764u },
+        });
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x4002u, ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable",
+        });
+        Assert.DoesNotContain("## Recently refused items",
+            LlmGoalPolicy.BuildUserPrompt(world, es, null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RefusedItemsCapsule_OmittedWhenRefusedGuidNotAHeldItem()
+    {
+        // A refusal whose guid is not a held inventory item (e.g. a world object)
+        // does not surface here — this capsule is about the bot's OWN inventory.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x4002u, Name = "Heavy Maul", Wcid = 31764u },
+        });
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x9999u, ErrorCode = 0x046Au, ErrorLabel = "InventoryServerSaveFailed",
+        });
+        Assert.DoesNotContain("## Recently refused items",
+            LlmGoalPolicy.BuildUserPrompt(world, es, null));
+    }
+
+    [Fact]
     public void BuildUserPrompt_HeldItemsCapsule_SurvivesGlobalTrimInDenseScene()
     {
         // CORE PROPERTY: in a scene dense enough to overflow the request
