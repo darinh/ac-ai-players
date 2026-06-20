@@ -7080,6 +7080,73 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void AmmoTypeCompatible_RejectsOnlyWhenBothKnownAndDiffer()
+    {
+        // Mirrors the server precondition: compatible unless BOTH AmmoTypes are
+        // known and differ; an unknown (null) AmmoType on either side is not
+        // rejected.
+        Assert.True(LlmGoalPolicy.AmmoTypeCompatible(null, null));
+        Assert.True(LlmGoalPolicy.AmmoTypeCompatible(5, null));
+        Assert.True(LlmGoalPolicy.AmmoTypeCompatible(null, 5));
+        Assert.True(LlmGoalPolicy.AmmoTypeCompatible(5, 5));
+        Assert.False(LlmGoalPolicy.AmmoTypeCompatible(5, 7));
+    }
+
+    [Fact]
+    public void CombatReadiness_MissileEmpty_IncompatibleBagAmmo_SaysNoLoadableAmmo()
+    {
+        // The bag holds ammo whose AmmoType does NOT match the wielded launcher
+        // (e.g. arrows for an atlatl): the launcher cannot load it, so neither the
+        // "wield ammo to fire" cue nor the "Wield it to load" affordance is shown.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 1 },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Stray Arrow", Wcid = 301u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 2 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo: EMPTY, no loadable ammo", prompt);
+        Assert.DoesNotContain("wield ammo to fire", prompt);
+        Assert.DoesNotContain("missile ammo in your inventory (Wield it to load)", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_MissileEmpty_CompatibleBagAmmo_SurfacesLoadAffordance()
+    {
+        // The bag holds ammo whose AmmoType matches the wielded launcher: it IS
+        // loadable, so the actionable cue and the "Wield it to load" affordance show.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 1 },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 1 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo: EMPTY (wield ammo to fire)", prompt);
+        Assert.Contains("missile ammo in your inventory (Wield it to load): Royal Dart", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_CurrentFight_RendersLandedEvadedCounts()
     {
         // combat-damage-output: the live fight outcome (all swings evaded,

@@ -53,6 +53,12 @@ internal sealed class WorldObjectSnapshot
     // wouldn't survive a localized server or a custom door named "Iron Gate".
     public uint? ObjectDescriptionFlags { get; internal set; }
     public uint? ValidLocations { get; internal set; }
+    // AmmoType (W_AMMO_TYPE) wire value. For a missile launcher it is the ammo
+    // type the launcher fires; for ammunition it is the ammo's own type. The
+    // server only lets a launcher and loaded ammo coexist when these match, so a
+    // consumer can mechanically tell compatible ammo from incompatible. Null when
+    // the item carries no AmmoType.
+    public ushort? AmmoType { get; internal set; }
     public uint? CurrentWieldedLocation { get; internal set; }
 
     // Container / wielder linkage (populated by ObjectCreate from the
