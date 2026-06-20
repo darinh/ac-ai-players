@@ -312,4 +312,71 @@ public class CombatChainTests
         Assert.NotNull(chosen);
         Assert.Null(r6);
     }
+
+    [Fact]
+    public void ChooseChainTarget_NotCombatCapable_SkipsEvenWithMatchingTarget()
+    {
+        // cp047: the chain must NOT mint an Attack while the bot cannot deal damage
+        // (no usable weapon) — even with an active commitment and a matching target
+        // in view. Yields to the LLM (which sees the UNARMED readiness line).
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason, combatCapable: false);
+        Assert.Null(chosen);
+        Assert.Equal("not-combat-capable", reason);
+    }
+
+    [Fact]
+    public void ChooseChainTarget_CombatCapable_MintsMatchingTarget()
+    {
+        // The guard does NOT block a combat-capable bot: an explicit combatCapable:true
+        // still mints the matching committed target (no behavior change when armed).
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason, combatCapable: true);
+        Assert.NotNull(chosen);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void IsCombatCapable_TruthTable()
+    {
+        const uint meleeType = 0x1u, missileType = 0x100u;
+        const uint meleeSlot = 0x100000u, missileSlot = 0x400000u, ammoSlot = 0x800000u;
+
+        // A wielded melee weapon -> capable.
+        Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = meleeType, WieldedAt = meleeSlot },
+        }));
+        // A wielded missile weapon WITH ammo loaded -> capable.
+        Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot },
+            new InventoryItemProjection { Guid = 0x3u, Name = "Ammo", Wcid = 3u, ItemType = missileType, WieldedAt = ammoSlot },
+        }));
+        // A wielded missile weapon with NO ammo loaded -> NOT capable.
+        Assert.False(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot },
+        }));
+        // Loaded ammo WITHOUT a launcher -> NOT capable. Ammo sits in the ammo slot
+        // (outside the main-weapon slots) and can carry the MissileWeapon ItemType
+        // bit, so it must NOT be mistaken for a wielded launcher.
+        Assert.False(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x3u, Name = "Loose Ammo", Wcid = 3u, ItemType = missileType, WieldedAt = ammoSlot },
+        }));
+        // A weapon sitting un-wielded in the bag -> NOT capable.
+        Assert.False(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = meleeType, ValidLocations = meleeSlot, WieldedAt = null },
+        }));
+        // Empty inventory -> NOT capable.
+        Assert.False(LlmGoalPolicy.IsCombatCapable(System.Array.Empty<InventoryItemProjection>()));
+    }
 }

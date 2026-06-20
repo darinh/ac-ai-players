@@ -9644,6 +9644,15 @@ public class LlmGoalPolicyTests
         Visible = visible,
     };
 
+    // A minimal combat-capable loadout (one wielded melee weapon) for the
+    // kill-chain tests, which exercise chain minting and now require the bot to be
+    // able to deal damage (cp047 combat-capable gate). Domain-neutral placeholder.
+    private static InventoryItemProjection[] ChainCombatLoadout() => new[]
+    {
+        new InventoryItemProjection
+        { Guid = 0xC0u, Name = "Chain Test Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u },
+    };
+
     private static VisibleObjectProjection CivilianNpc(uint guid) => new()
     {
         Guid = guid,
@@ -9791,7 +9800,7 @@ public class LlmGoalPolicyTests
             Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
             ItemType = 0x10u, IsCreature = true, IsMonster = true,
             ObservedHostile = false, IsCorpse = false,
-        });
+        }) with { Inventory = ChainCombatLoadout() };
 
         var stack = new IntentStack();
         Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
@@ -9854,7 +9863,7 @@ public class LlmGoalPolicyTests
             Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
             ItemType = 0x10u, IsCreature = true, IsMonster = true,
             ObservedHostile = false, IsCorpse = false,
-        });
+        }) with { Inventory = ChainCombatLoadout() };
 
         var stack = new IntentStack();
         Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
@@ -9947,7 +9956,7 @@ public class LlmGoalPolicyTests
             Guid = QuarryGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
             ItemType = 0x10u, IsCreature = true, IsMonster = true,
             ObservedHostile = false, IsCorpse = false,
-        });
+        }) with { Inventory = ChainCombatLoadout() };
 
         var stack = new IntentStack();
         Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
@@ -10011,7 +10020,7 @@ public class LlmGoalPolicyTests
             Guid = monsterGuid, Name = "Quarry Beast", Wcid = 9001u, Distance = 3f,
             ItemType = 0x10u, IsCreature = true, IsMonster = true,
             ObservedHostile = false, IsCorpse = false,
-        });
+        }) with { Inventory = ChainCombatLoadout() };
 
         var stack = new IntentStack();
         Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
