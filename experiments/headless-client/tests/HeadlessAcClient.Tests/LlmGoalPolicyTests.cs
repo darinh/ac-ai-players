@@ -667,6 +667,133 @@ public class LlmGoalPolicyTests
         Assert.Contains("OUTRANKS open monster-grinding for XP", prompt);
     }
 
+    private static StreamEvent ExploreEmission(string targetName) => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+        Text = $"Explore target=name=\"{targetName}\" item= source=llm:test",
+    };
+
+    private static VisibleObjectProjection NamedVisible(string name, float distance) => new()
+    {
+        Guid = 0x800000A1u, Name = name, Distance = distance, IsCreature = true,
+    };
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_DetectsRepeatedExploreTargetNowInReach()
+    {
+        // Live (criterion-2, cp020-validate.log): the bot Explored toward a named
+        // NPC and arrived beside it 28x but never interacted. When a recent Explore
+        // target is now in Visible nearby within reach, the detector returns it so
+        // the prompt can tell the LLM to switch from walking to interacting.
+        var es = new EventStream();
+        es.Append(ExploreEmission("Wayfarer"));
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+
+        Assert.True(LlmGoalPolicy.TryDetectReachedExploreTarget(
+            world, es, out var name, out var dist));
+        Assert.Equal("Wayfarer", name);
+        Assert.Equal(2f, dist, 3);
+    }
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_FalseWhenReachedTargetStillFar()
+    {
+        // The same named target visible but BEYOND the reached radius means the
+        // bot is still travelling — Explore is appropriate, so no switch cue.
+        var es = new EventStream();
+        es.Append(ExploreEmission("Wayfarer"));
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 40f));
+
+        Assert.False(LlmGoalPolicy.TryDetectReachedExploreTarget(world, es, out _, out _));
+    }
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_FalseWithoutRecentExploreEmission()
+    {
+        // A near named object the bot did NOT Explore toward is not a reached
+        // Explore target — the cue keys on the bot's OWN Explore pursuit history.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+
+        Assert.False(LlmGoalPolicy.TryDetectReachedExploreTarget(
+            world, new EventStream(), out _, out _));
+    }
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_FalseForUntargetedAnywhereExplore()
+    {
+        // The schema "anywhere" sentinel is a Motor-owned traversal with no target
+        // to interact with — it must never trip the reached-target cue.
+        var es = new EventStream();
+        es.Append(ExploreEmission("anywhere"));
+        var world = BuildVisibleWorld(NamedVisible("anywhere", 1f));
+
+        Assert.False(LlmGoalPolicy.TryDetectReachedExploreTarget(world, es, out _, out _));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ReachedExploreTargetCapsule_RendersAndNamesTarget()
+    {
+        // When the bot has reached a named Explore target now in view, the
+        // protected-tail capsule appears, names the target, and states Explore
+        // never interacts (the decision-proximate switch-to-interaction cue).
+        var es = new EventStream();
+        es.Append(ExploreEmission("Wayfarer"));
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+
+        var capsule = CapsuleSection(
+            LlmGoalPolicy.BuildUserPrompt(world, es, null), "## Reached Explore target");
+        Assert.Contains("Wayfarer", capsule);
+        Assert.Contains("NEVER interacts", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ReachedExploreTargetCapsule_OmittedWhenNotReached()
+    {
+        // No recent Explore toward a now-visible target -> capsule absent (zero
+        // prompt budget in the common case).
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+
+        Assert.DoesNotContain("## Reached Explore target",
+            LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null));
+    }
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_MatchesNameContainsSelector()
+    {
+        // The Explore target schema allows name_contains; a partial-name Explore
+        // that arrives at the matching visible object must still fire the cue
+        // (gemini review: a name_contains pursuit was a false negative before).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name_contains=\"Way\" item= source=llm:test",
+        });
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer the Bold", 2f));
+
+        Assert.True(LlmGoalPolicy.TryDetectReachedExploreTarget(
+            world, es, out var name, out _));
+        Assert.Equal("Wayfarer the Bold", name);
+    }
+
+    [Fact]
+    public void TryDetectReachedExploreTarget_FalseAfterSwitchingToInteraction()
+    {
+        // Once the bot's NEWEST goal is an interaction (Talk) rather than the
+        // earlier Explore, it is already acting on the target — the cue must NOT
+        // keep firing off stale Explore history (gpt-5.4 + gemini false positive).
+        var es = new EventStream();
+        es.Append(ExploreEmission("Wayfarer"));
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"Wayfarer\" item= source=llm:test",
+        });
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+
+        Assert.False(LlmGoalPolicy.TryDetectReachedExploreTarget(world, es, out _, out _));
+    }
+
     [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {

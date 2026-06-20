@@ -4131,6 +4131,73 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && string.Equals(t.Name?.Trim(), "anywhere", StringComparison.OrdinalIgnoreCase);
     }
 
+    // "Reached" distance for an Explore target: within this many XY units the
+    // Motor's walk-tick has already declared arrival (MotorStopRadius is 1u
+    // default / 4u portal), so the target is adjacent and interactable. The
+    // margin above those radii absorbs the small drift between the projection
+    // sample and the post-arrival decision; it stays far below the perception
+    // radius so the signal means "reached", not merely "visible across the
+    // area". Pure motor-geometry bookkeeping; no game knowledge.
+    internal const float ReachedExploreTargetDistanceUnits = 5.0f;
+
+    // Detect that the bot has been Exploring toward a NAMED target that is NOW
+    // within reach in `Visible nearby` — i.e. it ARRIVED, but because `Explore`
+    // never interacts it is standing beside the target having done nothing. A
+    // weak model then re-`Explore`s the reached target (or walks to another)
+    // forever. Returns the matched visible target's name + distance so the
+    // caller can re-state, decision-proximate, the (hard-cut-buried) rule that
+    // an arrived Explore must switch to an interaction verb. Pure structural
+    // parse of the bot's OWN recent Explore emissions matched by name to a
+    // visible object — no game knowledge, no priority, no source-side decision
+    // (the LLM still chooses whether/how to interact or to move on).
+    internal static bool TryDetectReachedExploreTarget(
+        WorldStateProjection world, EventStream events,
+        out string? targetName, out float distance)
+    {
+        targetName = null;
+        distance = 0f;
+        if (world?.Visible is null || events is null) return false;
+
+        // The bot's CURRENT pursuit is its most-recent goal emission
+        // (RecentGoalEmissions is newest-first). Fire only when that newest goal
+        // is an Explore toward a NAMED target: the moment the bot switches to an
+        // interaction verb (Talk/Give/Use/Attack) its newest goal is no longer an
+        // Explore, so the cue stops (it must NOT keep firing while the bot is
+        // already interacting); and an OLDER Explore toward some other target is
+        // stale history, not the current pursuit. Supports both `name="X"`
+        // (exact match) and `name_contains="X"` (substring match) selectors;
+        // skips the untargeted "anywhere" sentinel.
+        var newest = events.RecentGoalEmissions()
+            .FirstOrDefault(e => !string.IsNullOrEmpty(e.Text));
+        if (newest is null) return false;
+        var txt = newest.Text!;
+        if (!txt.StartsWith("Explore ", StringComparison.Ordinal)) return false;
+        if (!TryExtractGoalTargetSelector(txt, out var sel)) return false;
+        var nm = System.Text.RegularExpressions.Regex.Match(sel, "name(_contains)?=\"([^\"]+)\"");
+        if (!nm.Success) return false;
+        var token = nm.Groups[2].Value;
+        if (string.IsNullOrWhiteSpace(token)) return false;
+        if (string.Equals(token.Trim(), "anywhere", StringComparison.OrdinalIgnoreCase)) return false;
+        var isContains = nm.Groups[1].Success;
+
+        // The closest visible object whose name matches the pursued selector and
+        // is within reach. name= matches by equality; name_contains= by substring.
+        VisibleObjectProjection? best = null;
+        foreach (var v in world.Visible)
+        {
+            if (v.Distance is not float d || d > ReachedExploreTargetDistanceUnits) continue;
+            var match = isContains
+                ? v.Name is not null && v.Name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0
+                : string.Equals(v.Name, token, StringComparison.OrdinalIgnoreCase);
+            if (!match) continue;
+            if (best is null || d < (best.Distance ?? float.MaxValue)) best = v;
+        }
+        if (best is null) return false;
+        targetName = best.Name;
+        distance = best.Distance ?? 0f;
+        return true;
+    }
+
     // break-sticky-on-self-interact: true iff the Motor emitted a
     // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
     // last LLM look whose identity is selector-compatible with the spatial
@@ -7079,6 +7146,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "skip/advance\", \"when you are ready\") or promises the same rewards: an unacted " +
                 "skip/advance/leave directive is a PENDING option, not 'no directive' — weigh " +
                 "pursuing it against optional grinding instead of dismissing its existence.");
+        }
+
+        // ── ## Reached Explore target (protected-tail decision-proximate cue) ──
+        // cp reached-explore-target. Live (criterion-2 open-world run, cp020-validate.log):
+        // the bot Explored toward a named NPC and ARRIVED beside it 28x, but never
+        // switched to an interaction verb — it re-`Explore`d the reached target (or
+        // ping-ponged to a second one) indefinitely, never acting. `Explore` is
+        // navigate-only (HandshakeDriver's arrival short-circuit sends NO opcode), so
+        // a reached Explore makes no progress. The PURSUE UNSEEN OBJECTIVES rule
+        // already says switch to Talk/Give/Use on arrival, but it sits in the long
+        // preamble that is hard-cut at the prompt-byte ceiling on every decision, and
+        // the only re-statement is gated on a FRESH server/NPC directive (absent when
+        // the pursuit comes from a held contract's objective). Re-state it here,
+        // decision-proximate and UNgated, NAMING the specific reached target (the
+        // bot's OWN Explore goal target echoed back + matched to a visible object).
+        // No game knowledge, no priority, no source-side target decision — a
+        // mechanical "you have arrived; Explore does not interact" fact; the LLM
+        // still decides whether to interact, and how, or to move on.
+        if (TryDetectReachedExploreTarget(world, events, out var reachedName, out var reachedDist)
+            && OneLine(reachedName) is string reachedDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Reached Explore target");
+            sb.AppendLine(
+                $"- you have been `Explore`-ing toward `{reachedDisplay}` and it is visible NOW " +
+                $"(~{reachedDist:F0}u away) — you have REACHED it. `Explore` " +
+                "only WALKS toward a target and NEVER interacts, so re-`Explore`-ing it (or " +
+                "walking off to a different target) leaves you standing beside it having done " +
+                "nothing. To ACT on it, switch to `Talk`/`Give`/`Use` on it now. If you have " +
+                "nothing left to do with it (you already `Talk`ed it and it only repeats the same " +
+                "flavor, or its task is already done), pursue DIFFERENT progress instead (another " +
+                "un-talked npc, a vendor/contract source, or a fresh objective) — do NOT keep " +
+                "`Explore`-ing a target you have already reached.");
         }
 
         // ── ## System messages (protected-tail durable status capsule) ──
