@@ -462,8 +462,8 @@ public class LlmGoalPolicyTests
         es.Append(new StreamEvent
         { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "earlier" });
         es.Append(new StreamEvent
-        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged });
-        Assert.Equal(EventKind.LandblockChanged, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "later" });
+        Assert.Equal(EventKind.PopupString, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
     }
 
     [Fact]
@@ -508,6 +508,25 @@ public class LlmGoalPolicyTests
         var e = new StreamEvent
         { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "you have slain a foe" };
         Assert.False(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_LandblockChanged_DoesNotInterrupt()
+    {
+        // cp029: crossing a cell boundary mid-grind is not itself decision-worthy
+        // for the kill-count chain — ChooseCombatChainTarget's visible-target filter
+        // already yields (no-matching-monster) when the committed kind is absent in
+        // the new area, while if the same kind is still visible the grind simply
+        // continued across the boundary. So LandblockChanged no longer preempts the
+        // chain (bounded by the MaxCombatChainAttacks cap + the 0xFFFB disengage,
+        // which still interrupts). The kind, event, and scan helpers all agree.
+        var e = new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged };
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.LandblockChanged));
+        Assert.False(LlmGoalPolicy.IsChainInterruptingEvent(e));
+        var es = new EventStream();
+        es.Append(e);
+        Assert.Null(LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
     }
 
     [Fact]
@@ -15267,6 +15286,14 @@ public class LlmGoalPolicyTests
         Assert.Contains("COMMIT A WINNING GRIND", prompt);
         Assert.Contains("kill_count_since_push_at_least", prompt);
         Assert.Contains("deadline_seconds", prompt);
+        // cp029: the autonomous grind no longer stops on a zone/landblock change —
+        // the chain continues across cell boundaries while the committed kind is
+        // visible. The re-decision contract must NOT promise a zone-change stop
+        // (gpt-5.4 review) and must state the bounds that DO hold (the kind leaving
+        // view + the periodic self re-check), so the LLM does not push a kill-count
+        // intent relying on a stop that no longer exists.
+        Assert.DoesNotContain("a zone change, danger", prompt);
+        Assert.Contains("re-checks on its own after a few autonomous attacks", prompt);
     }
 
     [Fact]
