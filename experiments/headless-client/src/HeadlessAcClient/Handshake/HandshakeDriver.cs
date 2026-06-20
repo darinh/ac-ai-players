@@ -5959,6 +5959,21 @@ internal sealed class HandshakeDriver : IDisposable
                                 // (or for as long as we remain too hurt to engage).
                                 if (combatAvoidUntil.TryGetValue(snap.Guid, out var cauE) &&
                                     (DateTime.UtcNow < cauE || selfCombatSuppressed)) continue;
+                                // cp040 — while too hurt to engage, never pick an
+                                // attackable MONSTER as the Explore landmark: the
+                                // low-health Attack-defer egress substitutes an
+                                // Explore{anywhere}, and a monster chosen here would be
+                                // locked as a GoalKind.Explore and walked toward — a
+                                // path the Attack-keyed dispatch flee/suppress guards do
+                                // NOT cover — carrying the suppressed bot back into
+                                // danger. combatAvoidUntil (above) only covers a
+                                // just-fled threat; this adds the generic monster case
+                                // so the recover-egress heads to a safe landmark/frontier.
+                                if (selfCombatSuppressed &&
+                                    HeadlessAcClient.Strategy.EntityClassifier.IsMonster(
+                                        snap.ItemType ?? 0u,
+                                        snap.ObjectDescriptionFlags ?? 0u,
+                                        snap.WeenieFlags ?? 0u)) continue;
                                 if (!WorldDistance.TrySquaredDistance(tacticsSelf, snap, out var dsq)) continue;
                                 var d = (float)Math.Sqrt(dsq);
                                 if (d > bestDist)

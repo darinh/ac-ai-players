@@ -8748,6 +8748,71 @@ public class LlmGoalPolicyTests
             PickupGoalNamed("Apple"), world, es));
     }
 
+    // ---- IsLowHealthDeferredAttackRepeat (cp040): the Motor refuses to walk an
+    //      Attack into melee while self-health is below the re-engage threshold; a
+    //      weak model re-emits Attack every cycle, burning LLM calls instead of
+    //      recovering. After >=2 such deferrals the caller substitutes an Explore
+    //      egress to leave the fight and regen. ----
+
+    private static void AppendLowHealthDeferFail(EventStream es, string targetName = "Drudge")
+        => es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
+            Name = targetName,
+            // Mirrors HandshakeDriver's low-health Attack-defer Fail reason verbatim,
+            // wrapped in the TacticsExecutor "{Kind}: {reason}" envelope.
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_TwoDeferrals_True()
+    {
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        Assert.True(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es));
+    }
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_OneDeferral_False()
+    {
+        // A single defer is normal (recover one tick); only a sustained loop egresses.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es));
+    }
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_DeferralsAcrossDifferentTargets_StillCounts()
+    {
+        // The defer is about the BOT's health, not a specific target — re-targeting a
+        // different monster while low-health still counts toward the egress.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es, "Drudge Skulker");
+        AppendLowHealthDeferFail(es, "Mite Scion");
+        Assert.True(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es));
+    }
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_OtherFailsDoNotCount()
+    {
+        // The no-live-object / out-of-reach failures are a DIFFERENT signal and must
+        // not trip the low-health egress.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge", kind: "Attack");
+        AppendNoLiveObjectFail(es, "Drudge", kind: "Attack");
+        AppendOutOfReachFail(es, "Apple");
+        AppendOutOfReachFail(es, "Apple");
+        Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es));
+    }
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_EmptyStream_False()
+    {
+        Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(new EventStream()));
+    }
+
     [Fact]
     public void BuildUserPrompt_VisibleDoor_RendersClosedState()
     {
