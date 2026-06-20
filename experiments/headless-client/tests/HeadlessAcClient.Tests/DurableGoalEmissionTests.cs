@@ -103,6 +103,45 @@ public class DurableGoalEmissionTests
         Assert.Equal(2, LlmGoalPolicy.CountRecentTalkGoalsToName(es, "Npc", since));
     }
 
+    private static StreamEvent ExploreGoal(string target, DateTimeOffset utc) => new()
+    {
+        Sequence = 0,
+        Utc = utc,
+        Kind = EventKind.GoalEmitted,
+        Text = $"Explore target=name=\"{target}\" item= source=llm",
+    };
+
+    [Fact]
+    public void CountRecentExploreGoalsToName_CountsExploresToName_Since_OnlyTheNamed()
+    {
+        // cp030 diagnostic: a stage-3 "locate" contract is pursued via Explore, so
+        // the Explore-pursuit count is the analogue of the Talk hand-in count. It
+        // counts only Explore goals (not Talk), only to the named target, only
+        // at/after `since`, and survives perception eviction via the durable window.
+        var es = new EventStream();
+        var since = T0.AddSeconds(10);
+        es.Append(ExploreGoal("Npc", T0));                 // before `since` -> excluded
+        es.Append(TalkGoal("Npc", T0.AddSeconds(11)));     // a Talk -> not an Explore
+        es.Append(ExploreGoal("Npc", T0.AddSeconds(12)));
+        for (int i = 0; i < 400; i++) es.Append(Noise(T0.AddSeconds(13)));
+        es.Append(ExploreGoal("Other", T0.AddSeconds(14)));
+        es.Append(ExploreGoal("Npc", T0.AddSeconds(15)));
+        Assert.Equal(2, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Npc", since));
+        Assert.Equal(1, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Other", since));
+    }
+
+    [Fact]
+    public void CountRecentExploreGoalsToName_DoesNotCountTalkGoals()
+    {
+        // The Explore-pursuit count must be DISTINCT from the Talk hand-in count:
+        // a stream of only Talk goals to the named NPC yields zero Explores.
+        var es = new EventStream();
+        es.Append(TalkGoal("Npc", T0.AddSeconds(1)));
+        es.Append(TalkGoal("Npc", T0.AddSeconds(2)));
+        Assert.Equal(0, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Npc", T0));
+        Assert.Equal(2, LlmGoalPolicy.CountRecentTalkGoalsToName(es, "Npc", T0));
+    }
+
     [Fact]
     public void RecentGoalEmissions_EvictsGoalsOlderThanRetention()
     {
