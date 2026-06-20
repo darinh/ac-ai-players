@@ -1159,6 +1159,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
         => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
+    // True iff there IS at least one attackable monster in view AND every such
+    // monster is a kind the bot's own ledger marks LETHAL-beaten — the SAME
+    // definition the veto and the ## Beaten kinds capsule use (a recorded DEATH
+    // plus IsBeatenKind, lethal-retestable only once out-levelled) — i.e. there
+    // is nothing in view the bot can currently win against and nothing it should
+    // re-attempt. Used to break the beaten-kind STALEMATE: a beaten kind still
+    // counts as a monster-in-view, so the general stuck-loop egress (which
+    // requires NO monster in view) never fires and the bot stays parked; the LLM
+    // is then re-asked every decision and re-picks the SAME vetoed Attack, burning
+    // scarce LLM budget. Matching the veto's LETHAL-only definition is deliberate:
+    // a merely SURVIVED (non-lethal) beaten kind in view is one the bot MAY still
+    // re-attempt (the veto honors that), so its presence DEFERS this egress. An
+    // actively-hostile monster in view is a live threat the Motor's flee/defend
+    // reflexes must own, so its presence also DEFERS (return false). Likewise a
+    // winnable (not-beaten) monster in view DEFERS — engage that XP target, do not
+    // wander off. Own-perception wire flags + own combat ledger + own level only;
+    // no game content, no priority on object types.
+    internal static bool OnlyBeatenMonstersInView(WorldStateProjection world)
+    {
+        var monsters = world.Visible
+            .Where(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile))
+            .ToList();
+        if (monsters.Count == 0) return false;
+        if (monsters.Any(v => v.ObservedHostile)) return false;
+        return monsters.All(v => IsLethalBeatenKind(
+            world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
+    }
+
     internal static int CountUntalkedNpcsInView(
         WorldStateProjection world,
         IReadOnlySet<uint>? talkedNpcGuids,
@@ -2675,6 +2703,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — own combat ledger marks this kind beaten (losses, no kills); deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-override: LLM Attack on a beaten kind (own ledger: losses, no kills)");
+            // Beaten-kind STALEMATE egress: when EVERY attackable monster in view
+            // is a beaten kind (nothing winnable, no live threat), the plain
+            // fallback would keep the bot parked here (a beaten kind still counts
+            // as a monster-in-view, so the stuck-loop egress cannot fire), so the
+            // next no-current-goal decision re-presents the same scene and a weak
+            // model re-picks the SAME vetoed Attack — burning quota on a veto that
+            // can never pass. Explore OUT to find a winnable target instead of
+            // re-deferring. Self-limiting: as the bot moves, the beaten kinds leave
+            // view and a fresh scene unblocks normal play. (reduce-llm-call-volume)
+            if (OnlyBeatenMonstersInView(world))
+            {
+                Console.WriteLine(
+                    "[llm-override] beaten-kind egress: every attackable monster in view is a " +
+                    "beaten kind — substituting Explore{anywhere} to leave and find a winnable target.");
+                return MakeEgressExploreGoal(
+                    nowUtc, "override:beaten-kind-egress",
+                    "mechanical beaten-kind egress: every attackable monster in view is a kind the " +
+                    "bot's own ledger marks beaten; leaving to find a winnable target instead of " +
+                    "re-emitting a vetoed Attack");
+            }
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "beaten-kind Attack");
         }
 
@@ -2974,12 +3022,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // survived loss does not raise, so vetoing here would bar re-engagement
         // indefinitely. A FATAL-loss kind stays beaten, re-testable only once
         // the bot out-levels the death. Bot-owned outcome counts + own level
-        // only; no game knowledge.
-        var record = FindCombatRecord(world.CombatHistoryFull, target.Wcid, targetName);
-        if (record is null || record.Deaths == 0) return false;
+        // only; no game knowledge. The lethal-beaten verdict itself is the shared
+        // IsLethalBeatenKind helper, so this veto and the stalemate egress gate
+        // (OnlyBeatenMonstersInView) can never disagree about which kinds count.
+        return IsLethalBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
+            world.Self.Level);
+    }
 
-        return IsBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
-            world.Self.Level, lethalRetestableWhenOutleveled: true);
+    // The DECISION-path definition of a LETHAL-beaten kind: the bot's own
+    // AGGREGATE ledger for this kind records an actual DEATH (Deaths>0) AND
+    // IsBeatenKind still holds (0 kills, not out-levelled). Shared by the
+    // explicit-Attack veto (IsOptionalAttackOnBeatenKind) and the stalemate
+    // egress gate (OnlyBeatenMonstersInView) so the two NEVER drift — a kind the
+    // veto blocks is exactly a kind that counts toward the egress, and vice
+    // versa. A merely SURVIVED loss (Deaths==0) is NOT lethal-beaten, so both
+    // sites keep the deadlock-fix option to re-attempt it. Aggregate own ledger +
+    // own level only; no game knowledge.
+    internal static bool IsLethalBeatenKind(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+    {
+        var record = FindCombatRecord(history, wcid, name);
+        return record is { Deaths: > 0 }
+            && IsBeatenKind(history, wcid, name, currentLevel,
+                lethalRetestableWhenOutleveled: true);
     }
 
     /// <summary>
