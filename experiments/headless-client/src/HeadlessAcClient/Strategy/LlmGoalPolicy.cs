@@ -5433,12 +5433,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // safe — a done batch's contracts share a source area, so the first row's
         // bearing is the relevant one.
         var firstContract = world.Contracts.Count > 0 ? world.Contracts[0] : null;
-        var aContractBearingRenders = world.Self.CellId is not null
+        var selfPositionKnown = world.Self.CellId is not null;
+        var aContractBearingRenders = selfPositionKnown
             && firstContract is { } fc
             && ((fc.TurnInWorldX is not null && fc.TurnInWorldY is not null)
                 || (fc.QuestAreaWorldX is not null && fc.QuestAreaWorldY is not null));
-        if (heldBatchAllDone && noContractSourceInView && aContractBearingRenders)
-        sb.AppendLine("- RETURN TO A CONTRACT SOURCE: every tracked contract is DONE (stage 3) — your batch is finished and you need a FRESH source to keep earning — but NO contract source (a `vendor` or un-talked `npc`) is in `Visible nearby`. A fresh source sits back in the populated area your batch came from, in the direction of a contract's `objective area` / `turn-in location` bearing listed with your contracts below. TRAVEL back there — follow the travel instruction shown with your contracts to `Explore` toward that bearing — instead of grinding monsters that carry you FURTHER from any source. This is TRAVEL to reach a source area, NOT a hand-in: do NOT re-`Talk` a done contract's settled turn-in NPC. The moment a `vendor` or un-talked `npc` comes into view, switch to checking it for a new task (the FIND A KILL-TASK SOURCE rule). Health-critical safety and any active server/quest directive still come first.");
+        // cp037: a contract can carry NO dat location — its objective names a
+        // turn-in / start NPC but has no coords — so aContractBearingRenders is
+        // false and the bearing branch below stays dormant for it. The contract's
+        // turn-in / start NPC NAME is still a navigate-back ANCHOR: that NPC stands
+        // in the populated source area, and the PURSUE UNSEEN OBJECTIVES machinery
+        // already lets the bot Explore toward a NAMED not-yet-visible target. Gate
+        // on the FIRST contract's RENDERED name (the capsule emits "turn-in NPC:" /
+        // "start NPC:" for the first row regardless of coords; mirrors the
+        // conservative first-row bearing gate). Require self-position known for the
+        // SAME reason the bearing branch does — the motor cannot travel toward a
+        // target when the bot does not know where it is. Also require that NO contract
+        // row the ## Contracts capsule actually RENDERS shows a bearing
+        // (AnyRenderedContractBearing mirrors the capsule's budget pass exactly): a
+        // precise compass bearing is a better anchor than a name, and the name-branch
+        // text asserts "no contract shows a travel bearing" — so the name branch must
+        // only speak when that is true of what the LLM actually sees. Gating on
+        // RENDERED bearings (not raw coords) also fires correctly when a later
+        // contract HAS coords but its row is budget-dropped (no bearing visible).
+        // Mutually exclusive with the bearing branch. Own contract projection + own
+        // perception; no object-type priority, no source-side decision, no game
+        // content in source.
+        var anyRenderedContractBearing = AnyRenderedContractBearing(world, events);
+        var aContractTurnInNameRenders = selfPositionKnown
+            && !anyRenderedContractBearing
+            && firstContract is { } fcn
+            && (OneLine(fcn.NpcEnd) is not null || OneLine(fcn.NpcStart) is not null);
+        if (heldBatchAllDone && noContractSourceInView
+            && (aContractBearingRenders || aContractTurnInNameRenders))
+        {
+            if (aContractBearingRenders)
+                sb.AppendLine("- RETURN TO A CONTRACT SOURCE: every tracked contract is DONE (stage 3) — your batch is finished and you need a FRESH source to keep earning — but NO contract source (a `vendor` or un-talked `npc`) is in `Visible nearby`. A fresh source sits back in the populated area your batch came from, in the direction of a contract's `objective area` / `turn-in location` bearing listed with your contracts below. TRAVEL back there — follow the travel instruction shown with your contracts to `Explore` toward that bearing — instead of grinding monsters that carry you FURTHER from any source. This is TRAVEL to reach a source area, NOT a hand-in: do NOT re-`Talk` a done contract's settled turn-in NPC. The moment a `vendor` or un-talked `npc` comes into view, switch to checking it for a new task (the FIND A KILL-TASK SOURCE rule). Health-critical safety and any active server/quest directive still come first.");
+            else
+                sb.AppendLine("- RETURN TO A CONTRACT SOURCE: every tracked contract is DONE (stage 3) — your batch is finished and you need a FRESH source to keep earning — but NO contract source (a `vendor` or un-talked `npc`) is in `Visible nearby`, and no contract shows a travel `bearing` to copy. A fresh source sits back in the populated area your batch came from, where a contract's `turn-in NPC` / `start NPC` (named with each contract below) stands. TRAVEL back there — emit `Explore{target: {name: \"<that NPC name>\"}}` to head toward that NPC's area — instead of grinding monsters that carry you FURTHER from any source. This is TRAVEL to reach the source AREA, not a hand-in: do NOT re-`Talk` a done contract's settled turn-in NPC — `Explore` only WALKS you toward the name and NEVER Talks, so simply reach the area and let the FIND A KILL-TASK SOURCE rule engage a `vendor` or `npc` the moment one is in `Visible nearby`. Health-critical safety and any active server/quest directive still come first.");
+        }
         sb.AppendLine("- SERVER-INSTRUCTION PRECEDENCE: `## Server hints`, `## Early server directives`, or `## System messages` text that tells you how to LEAVE, EXIT, PROCEED PAST, ADVANCE BEYOND, SKIP, or otherwise COMPLETE or move on from the area or tutorial — especially naming a person/place or warning the step is irreversible — OUTRANKS repeating a local interaction you already observed (re-picking an item you hold, re-talking an NPC who gave no new dialog, re-using an object that didn't change) AND starting a FRESH incidental local interaction that does not itself advance the directive — looting a NEW corpse, picking up NEW loot, talking an as-yet-untalked NPC the directive did not name, or attacking another OPTIONAL monster (a first-time local action is no more 'progress' than a repeated one while an unacted leave/advance directive is shown); it likewise OUTRANKS optional grinding/exploration (the same way FINISH MULTI-STEP DIRECTIVES outranks incidental looting/exploration). When such an instruction is present and unacted, emit a `Talk`/`Use`/`Explore` toward the named target (even if not visible) INSTEAD of looping completed steps or grinding/looting for optional gains. This NEVER overrides health-critical safety, nor an action the directive ITSELF names or requires (reading a `sign` it told you to read, fetching/`Use`-ing/`Give`-ing an item it told you to get or turn in) — those ARE the directive, so do them. An OPTIONAL framing (\"if you wish\", \"when you are ready\", \"you may\") or a promise of EQUIVALENT rewards does NOT make such a directive absent — it is still an ACTIVE, pursuable progression option, so do NOT reason that the scene has 'no directive pending' while one is shown above.");
         sb.AppendLine("- AREA COMPLETE means MOVE ON: when server/NPC text states the current area's training or objective is DONE / COMPLETE / FINISHED (e.g. \"you have completed ...\", \"well done, you may now ...\", \"your training is finished\") — usually naming an exit, `portal`, or next place to go — the required purpose of THIS area is ACHIEVED. Continuing to grind the SAME (often respawning) monsters here for more XP is OPTIONAL and does NOT advance your progression; the named exit / next-step IS the progression. Pursue it — `Use` a named `portal`/exit if one is in view, else `Explore`/`Talk` toward the named next place — rather than re-grinding the area after it reports complete. (Health-critical safety and any step the exit directive ITSELF requires still come first; but absent those, do NOT justify 'one more fight' or 'a little more loot/XP' while the exit/next-step directive sits unacted — pursue the exit.)");
         sb.AppendLine("- FINISH MULTI-STEP DIRECTIVES: if you hold an item the server gave you for an unfinished objective (\"take this and bring it back\", \"give X to Y\", \"use this to leave\"), completing it OUTRANKS incidental looting/exploration — return to the NAMED npc/object and `Give`/`Use` it. Treat an unused objective item as an open task, not as done.");
@@ -6764,98 +6797,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "3 done or pending repeat, 4+ in progress with a step counter):");
             var contractsShown = 0;
             var contractsChars = 0;
-            // The bot's own global (worldX, worldY), used to turn a contract's
-            // dat-defined location into a bearing+distance it can act on (via an
-            // Explore `direction`). Computed once. Self is non-null here.
-            (float Gx, float Gy)? selfXY = world.Self.CellId is uint selfCell
-                ? AcCoords.ToGlobalXY(selfCell,
-                    new System.Numerics.Vector3(world.Self.PositionX, world.Self.PositionY, world.Self.PositionZ))
-                : null;
-            string? BearingTo(float? tx, float? ty)
-            {
-                if (selfXY is not { } s || tx is not float x || ty is not float y) return null;
-                var dx = x - s.Gx;
-                var dy = y - s.Gy;
-                var dist = MathF.Sqrt(dx * dx + dy * dy);
-                return $"~{dist:F0}u {Compass8(dx, dy)}";
-            }
+            // selfXY + per-row entry building are shared with AnyRenderedContractBearing
+            // (see BuildContractEntry) so the rendered-bearing gate cannot drift from
+            // what this capsule shows.
+            var selfXY = ContractSelfXY(world);
             var anyContractBearing = false;
             foreach (var c in world.Contracts)
             {
-                var entry = new StringBuilder();
-                var hasBearingThisContract = false;
-                var name = OneLine(c.Name);
-                entry.AppendLine(name is null
-                    ? $"  - contract {c.ContractId}: stage {c.Stage}"
-                    : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
-                var objective = OneLine(c.Description);
-                if (objective is not null)
-                    entry.AppendLine($"      objective: {objective}");
-                var progress = OneLine(c.DescriptionProgress);
-                if (progress is not null)
-                    entry.AppendLine($"      in progress: {progress}");
-                var npcStart = OneLine(c.NpcStart);
-                if (npcStart is not null)
-                    entry.AppendLine($"      start NPC: {npcStart}");
-                var npcEnd = OneLine(c.NpcEnd);
-                if (npcEnd is not null)
-                    entry.AppendLine($"      turn-in NPC: {npcEnd}");
-                // Dat-defined locations as a bearing+distance from the bot, so it
-                // can head there (Explore accepts a compass `direction`). Only
-                // when the dat carried the location AND the bot's position is
-                // known. Raw facts; the LLM decides whether to travel.
-                if (BearingTo(c.QuestAreaWorldX, c.QuestAreaWorldY) is string areaAt)
-                {
-                    entry.AppendLine($"      objective area: {areaAt} from you");
-                    hasBearingThisContract = true;
-                }
-                if (BearingTo(c.TurnInWorldX, c.TurnInWorldY) is string turnInAt)
-                {
-                    entry.AppendLine($"      turn-in location: {turnInAt} from you");
-                    hasBearingThisContract = true;
-                }
-
-                // A stage-3 contract is already complete. If the bot has ALREADY
-                // PURSUED its turn-in NPC repeatedly SINCE the contract became
-                // stage 3 — by Talking it to hand in OR Exploring toward it (a
-                // "locate/reach" objective is pursued via navigate-only Explore,
-                // NOT Talk) — and it is STILL stage 3, that contract has no
-                // separate hand-in (its reward is the issuer's to grant on its own
-                // terms) — surface that mechanical fact + the bot's OWN
-                // post-completion attempt count so the LLM stops re-attempting a
-                // turn-in/locate that has had no effect. Only when the turn-in NPC
-                // is UNIQUE among tracked contracts (a shared turn-in NPC makes
-                // per-contract attribution ambiguous). cp030 diagnostic: a done,
-                // Explore-pursued contract (npcEnd set, unique, stage-3) stalled
-                // because this count was Talk-only — counting Explore-toward-npcEnd
-                // too lets the note fire and breaks the roving-Explore loop between
-                // two done contracts. Structural read of the bot's goal history
-                // scoped to the done window (no server text, no game knowledge);
-                // the LLM still decides what to do next.
-                if (c.Stage == 3u && npcEnd is not null && c.Stage3SinceUtc is { } since3
-                    && world.Contracts.Count(o =>
-                        string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1)
-                {
-                    var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
-                    var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
-                    // Fire on the Talk threshold OR the (higher) Explore threshold
-                    // independently, NOT on the sum. A locate/reach objective is
-                    // pursued ONLY via navigate-only Explore (0 Talk), which the
-                    // old Talk-only count missed; but the FIRST Explore is ordinary
-                    // travel-to-reach, so the Explore threshold is higher than the
-                    // Talk one (see StageDoneExploreThreshold) — ordinary travel to
-                    // a far turn-in NPC before the first hand-in Talk must NOT be
-                    // mistaken for a done, roved contract.
-                    if (talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold)
-                        entry.AppendLine(
-                            $"      DONE (stage 3, complete): you have already gone to " +
-                            $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
-                            $"contract completed and it is STILL stage 3 — it has no separate " +
-                            $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
-                            $"will not change anything. Treat it as finished and spend your " +
-                            $"turn on other progress (accept or complete another task).");
-                }
-
+                var entry = BuildContractEntry(c, world, events, selfXY, out var hasBearingThisContract);
                 // Always render the first contract; stop once the rows would
                 // exceed the capsule's char budget (the tail is non-trimmable,
                 // so it must self-limit).
@@ -8188,6 +8137,119 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (collapsed.Length == 0) return null;
         return collapsed.Length <= 200 ? collapsed : collapsed[..200] + "...";
+    }
+
+    // The bot's own global (worldX, worldY) — used to turn a contract's dat-defined
+    // location into a bearing+distance. Null when the bot's position is unknown.
+    private static (float Gx, float Gy)? ContractSelfXY(WorldStateProjection world) =>
+        world.Self.CellId is uint selfCell
+            ? AcCoords.ToGlobalXY(selfCell,
+                new System.Numerics.Vector3(world.Self.PositionX, world.Self.PositionY, world.Self.PositionZ))
+            : null;
+
+    // Build ONE `## Contracts` capsule row's text and report whether it carries a
+    // travel bearing. Single source of truth shared by the capsule emit and the
+    // early AnyRenderedContractBearing pre-pass, so the rendered-bearing gate the
+    // RETURN-TO-A-CONTRACT-SOURCE nudge consults can never drift from what the
+    // capsule actually shows. Pure projection of contract dat facts + the bot's own
+    // goal history; no object-type priority, no source-side decision.
+    private static StringBuilder BuildContractEntry(
+        ContractProjection c, WorldStateProjection world, EventStream events,
+        (float Gx, float Gy)? selfXY, out bool hasBearing)
+    {
+        var entry = new StringBuilder();
+        hasBearing = false;
+        var name = OneLine(c.Name);
+        entry.AppendLine(name is null
+            ? $"  - contract {c.ContractId}: stage {c.Stage}"
+            : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
+        var objective = OneLine(c.Description);
+        if (objective is not null)
+            entry.AppendLine($"      objective: {objective}");
+        var progress = OneLine(c.DescriptionProgress);
+        if (progress is not null)
+            entry.AppendLine($"      in progress: {progress}");
+        var npcStart = OneLine(c.NpcStart);
+        if (npcStart is not null)
+            entry.AppendLine($"      start NPC: {npcStart}");
+        var npcEnd = OneLine(c.NpcEnd);
+        if (npcEnd is not null)
+            entry.AppendLine($"      turn-in NPC: {npcEnd}");
+        // Dat-defined locations as a bearing+distance from the bot, so it can head
+        // there (Explore accepts a compass `direction`). Only when the dat carried
+        // the location AND the bot's position is known. Raw facts; the LLM decides.
+        string? BearingTo(float? tx, float? ty)
+        {
+            if (selfXY is not { } s || tx is not float x || ty is not float y) return null;
+            var dx = x - s.Gx;
+            var dy = y - s.Gy;
+            var dist = MathF.Sqrt(dx * dx + dy * dy);
+            return $"~{dist:F0}u {Compass8(dx, dy)}";
+        }
+        if (BearingTo(c.QuestAreaWorldX, c.QuestAreaWorldY) is string areaAt)
+        {
+            entry.AppendLine($"      objective area: {areaAt} from you");
+            hasBearing = true;
+        }
+        if (BearingTo(c.TurnInWorldX, c.TurnInWorldY) is string turnInAt)
+        {
+            entry.AppendLine($"      turn-in location: {turnInAt} from you");
+            hasBearing = true;
+        }
+        // A stage-3 contract is already complete. If the bot has ALREADY PURSUED its
+        // turn-in NPC repeatedly SINCE the contract became stage 3 — by Talking it to
+        // hand in OR Exploring toward it (a "locate/reach" objective is pursued via
+        // navigate-only Explore, NOT Talk) — and it is STILL stage 3, that contract
+        // has no separate hand-in (its reward is the issuer's to grant on its own
+        // terms) — surface that mechanical fact + the bot's OWN post-completion
+        // attempt count so the LLM stops re-attempting a turn-in/locate that has had
+        // no effect. Only when the turn-in NPC is UNIQUE among tracked contracts (a
+        // shared turn-in NPC makes per-contract attribution ambiguous).
+        if (c.Stage == 3u && npcEnd is not null && c.Stage3SinceUtc is { } since3
+            && world.Contracts.Count(o =>
+                string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1)
+        {
+            var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
+            var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
+            // Fire on the Talk threshold OR the (higher) Explore threshold
+            // independently, NOT on the sum — a locate/reach objective is pursued
+            // ONLY via navigate-only Explore (0 Talk), but the FIRST Explore is
+            // ordinary travel-to-reach, so the Explore threshold is the higher one.
+            if (talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold)
+                entry.AppendLine(
+                    $"      DONE (stage 3, complete): you have already gone to " +
+                    $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
+                    $"contract completed and it is STILL stage 3 — it has no separate " +
+                    $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
+                    $"will not change anything. Treat it as finished and spend your " +
+                    $"turn on other progress (accept or complete another task).");
+        }
+        return entry;
+    }
+
+    // Does ANY contract row that the `## Contracts` capsule actually RENDERS carry a
+    // travel bearing? Mirrors the capsule's budget pass EXACTLY (same shared
+    // BuildContractEntry, same ContractsProtectedCharBudget break, first row always
+    // kept) so the RETURN-TO-A-CONTRACT-SOURCE name branch fires precisely when no
+    // bearing is shown to copy — including when a later contract HAS coords but its
+    // row is budget-dropped (no bearing visible). Read-only; no game knowledge.
+    private static bool AnyRenderedContractBearing(WorldStateProjection world, EventStream events)
+    {
+        if (world.Contracts.Count == 0) return false;
+        var selfXY = ContractSelfXY(world);
+        var contractsShown = 0;
+        var contractsChars = 0;
+        foreach (var c in world.Contracts)
+        {
+            var entry = BuildContractEntry(c, world, events, selfXY, out var hasBearing);
+            if (contractsShown > 0 && contractsChars + entry.Length > ContractsProtectedCharBudget)
+                break;
+            if (hasBearing)
+                return true;
+            contractsChars += entry.Length;
+            contractsShown++;
+        }
+        return false;
     }
 
     /// <summary>

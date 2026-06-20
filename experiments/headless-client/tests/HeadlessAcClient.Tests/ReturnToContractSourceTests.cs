@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// return-to-contract-source (cp035): a relevance-gated nudge that, when the bot
-// holds a FINISHED contract batch (every tracked contract DONE, stage 3), NO
-// contract source (vendor / un-talked npc) is in Visible nearby, AND a contract
-// carries a dat location (a bearing in ## Contracts), surfaces the option to
-// TRAVEL back toward that populated area to find a fresh source — instead of
-// grinding monsters that carry the bot further from any source. Navigation only
-// (Explore toward the bearing's compass), never a re-Talk of a settled turn-in
-// NPC. The FIND-A-KILL-TASK-SOURCE rule (source IN VIEW) is the complement.
+// return-to-contract-source (cp035 + cp037): a relevance-gated nudge that, when the
+// bot holds a FINISHED contract batch (every tracked contract DONE, stage 3) and NO
+// contract source (vendor / un-talked npc) is in Visible nearby, surfaces the option
+// to TRAVEL back toward the populated area the batch came from to find a fresh source
+// — instead of grinding monsters that carry the bot further from any source. Two
+// mutually-exclusive anchor branches share one marker: when a contract carries a dat
+// location, point at the rendered BEARING (cp035); when none does (a coordless
+// objective), point at the contract's turn-in / start NPC NAME (cp037) via the
+// existing Explore-toward-name machinery. Navigation only, never a re-Talk of a
+// settled turn-in NPC. The FIND-A-KILL-TASK-SOURCE rule (source IN VIEW) is the
+// complement.
 
 using System;
 using HeadlessAcClient.Strategy;
@@ -18,12 +21,17 @@ public class ReturnToContractSourceTests
 {
     private const uint SelfGuid = 0x5000000D;
     private const string Marker = "RETURN TO A CONTRACT SOURCE";
+    // Branch-distinguishing substrings (the nudge shares one Marker but adapts):
+    private const string BearingMarker = "bearing listed with your contracts below";
+    private const string NameMarker = "no contract shows a travel";
 
     private static WorldStateProjection World(
         uint[] contractStages, bool withBearing,
         bool npcVisible = false, bool vendorVisible = false,
         bool vendorPanelOpen = false, bool monsterVisible = false,
-        bool selfCellKnown = true, bool coordsOnFirstContract = true)
+        bool selfCellKnown = true, bool coordsOnFirstContract = true,
+        bool nameOnFirstContract = true, bool coordsOnlyOnLast = false,
+        bool padDescriptions = false)
     {
         var visible = new System.Collections.Generic.List<VisibleObjectProjection>();
         if (npcVisible)
@@ -49,13 +57,25 @@ public class ReturnToContractSourceTests
         {
             // Coords present when withBearing; coordsOnFirstContract lets a test
             // give coords only to a LATER contract (first row lacks them) to
-            // exercise the conservative first-row gate.
-            var hasCoords = withBearing && (i == 0 ? coordsOnFirstContract : true);
+            // exercise the conservative first-row gate. nameOnFirstContract does
+            // the same for the turn-in NPC name (cp037's coordless anchor).
+            // coordsOnlyOnLast + padDescriptions build a batch whose ONLY coords
+            // sit on a row the capsule char budget DROPS, so no bearing renders.
+            var isLast = i == contracts.Length - 1;
+            var hasCoords = coordsOnlyOnLast
+                ? isLast
+                : withBearing && (i == 0 ? coordsOnFirstContract : true);
+            var hasName = i == 0 ? nameOnFirstContract : true;
             contracts[i] = new ContractProjection
             {
                 ContractId = (uint)(i + 1),
                 Stage = contractStages[i],
-                NpcEnd = "Buckminster",
+                NpcEnd = hasName ? "Buckminster" : null,
+                // A long objective inflates each rendered row so the protected char
+                // budget drops later rows (exercises the rendered-bearing gate).
+                Description = padDescriptions
+                    ? new string('x', 200) + " objective text for budget padding"
+                    : null,
                 TurnInWorldX = hasCoords ? 2000f : (float?)null,
                 TurnInWorldY = hasCoords ? 3000f : (float?)null,
             };
@@ -82,8 +102,15 @@ public class ReturnToContractSourceTests
     [Fact]
     public void Present_WhenDoneBatch_NoSourceInView_WithBearing()
     {
-        // Finished batch, nothing in view, a contract has a dat bearing -> nudge.
-        Assert.Contains(Marker, Prompt(World(new uint[] { 3u, 3u }, withBearing: true)));
+        // Finished batch, nothing in view, a contract has a dat bearing -> nudge
+        // via the BEARING branch (cp035): point at the rendered compass bearing.
+        // The world here has the first contract carrying BOTH coords and a name, so
+        // the absence of NameMarker also proves the bearing branch WINS when both
+        // anchors are present (the if/else mutual-exclusivity precedence).
+        var p = Prompt(World(new uint[] { 3u, 3u }, withBearing: true));
+        Assert.Contains(Marker, p);
+        Assert.Contains(BearingMarker, p);
+        Assert.DoesNotContain(NameMarker, p);
     }
 
     [Fact]
@@ -139,31 +166,91 @@ public class ReturnToContractSourceTests
     }
 
     [Fact]
-    public void Absent_WhenNoBearing()
+    public void Present_WhenNoBearing_TurnInNameIsAnchor()
     {
-        // Done batch, no source in view, but no contract carries a dat location ->
-        // there is nowhere to head, so the nudge stays off.
-        Assert.DoesNotContain(Marker, Prompt(World(new uint[] { 3u, 3u }, withBearing: false)));
+        // cp037: done batch, no source in view, NO contract carries a dat location
+        // (the bearing branch is dormant) -> the first contract's turn-in/start NPC
+        // NAME is still a navigate-back anchor, so the nudge fires via the NAME
+        // branch and points the bot to Explore toward that NPC's area.
+        var p = Prompt(World(new uint[] { 3u, 3u }, withBearing: false));
+        Assert.Contains(Marker, p);
+        Assert.Contains(NameMarker, p);
+        Assert.DoesNotContain(BearingMarker, p);
+    }
+
+    [Fact]
+    public void NameBranch_CarriesReTalkProhibition()
+    {
+        // The name branch NAMES the turn-in NPC as an Explore target, so (unlike
+        // cp035's bare-compass bearing branch) it MUST carry the same explicit
+        // "do NOT re-Talk a done contract's settled turn-in NPC" guard the bearing
+        // branch has -- otherwise, once the bot Explores to the now-visible (and
+        // already-talked) turn-in NPC, nothing stands against a re-Talk hand-in loop.
+        var p = Prompt(World(new uint[] { 3u, 3u }, withBearing: false));
+        Assert.Contains(NameMarker, p);
+        Assert.Contains("do NOT re-`Talk` a done contract's settled turn-in NPC", p);
     }
 
     [Fact]
     public void Absent_WhenSelfPositionUnknown()
     {
         // Coords exist but the bot's own position is unknown, so ## Contracts can
-        // render NO bearing to copy -> gate on the RENDERED bearing, not raw
-        // coords: the nudge must stay off rather than point at an unshown bearing.
+        // render NO bearing to copy AND the motor cannot travel toward a target
+        // when the bot does not know where it is -> BOTH branches (bearing and
+        // cp037 name) require self-position known, so the nudge stays off.
         Assert.DoesNotContain(Marker,
             Prompt(World(new uint[] { 3u, 3u }, withBearing: true, selfCellKnown: false)));
     }
 
     [Fact]
-    public void Absent_WhenOnlyLaterContractHasBearing()
+    public void Absent_WhenFirstContractHasNeitherCoordsNorName()
     {
-        // Conservative gate: only the FIRST contract row is GUARANTEED rendered
-        // (a later row can be dropped by the contracts char budget). If only a
-        // later contract carries coords, the nudge stays OFF rather than risk
-        // pointing at a bearing the budget could drop.
+        // Conservative gate: only the FIRST contract row is GUARANTEED rendered (a
+        // later row can be dropped by the contracts char budget). When the first
+        // contract carries NEITHER a dat location NOR a turn-in/start NPC name --
+        // even though a LATER contract has both -- both branches stay OFF rather
+        // than risk pointing at a bearing/name the budget could drop.
+        Assert.DoesNotContain(Marker,
+            Prompt(World(new uint[] { 3u, 3u }, withBearing: true,
+                coordsOnFirstContract: false, nameOnFirstContract: false)));
+    }
+
+    [Fact]
+    public void Absent_WhenFirstHasNameButLaterContractRendersBearing()
+    {
+        // gpt-5.4 review: the name fallback must NOT fire (and must NOT assert "no
+        // contract shows a travel bearing") when a LATER contract still RENDERS a
+        // dat bearing. A precise compass bearing is a better anchor than a name. Here
+        // both contracts render (a 2-row batch fits the budget), so the second row's
+        // bearing is visible -> AnyRenderedContractBearing is true -> the name branch
+        // stays off; cp035's bearing branch also stays off (it gates on the FIRST
+        // row, which lacks coords), so the nudge is absent, not a false "no bearing".
         Assert.DoesNotContain(Marker,
             Prompt(World(new uint[] { 3u, 3u }, withBearing: true, coordsOnFirstContract: false)));
+    }
+
+    [Fact]
+    public void Present_WhenLaterCoordsRowIsBudgetDropped_NameAnchorFires()
+    {
+        // gpt-5.4 review (precision): gate on RENDERED bearings, not raw coords. Here
+        // a long-objective batch overflows the ## Contracts char budget so only the
+        // first few (coordless, name-only) rows render and the ONLY coords-bearing
+        // row (the last) is DROPPED -> NO bearing is visible to copy. The name branch
+        // MUST fire (the turn-in NPC name is the only visible anchor); a raw-coords
+        // gate would have wrongly suppressed it.
+        var p = Prompt(World(new uint[] { 3u, 3u, 3u, 3u, 3u, 3u }, withBearing: false,
+            coordsOnlyOnLast: true, padDescriptions: true));
+        Assert.Contains(Marker, p);
+        Assert.Contains(NameMarker, p);
+        Assert.DoesNotContain(BearingMarker, p);
+    }
+
+    [Fact]
+    public void Absent_WhenNoBearingAndNoName()
+    {
+        // Done batch, no source in view, the first contract has no coords AND no
+        // name -> there is no anchor to head toward at all, so the nudge stays off.
+        Assert.DoesNotContain(Marker,
+            Prompt(World(new uint[] { 3u, 3u }, withBearing: false, nameOnFirstContract: false)));
     }
 }
