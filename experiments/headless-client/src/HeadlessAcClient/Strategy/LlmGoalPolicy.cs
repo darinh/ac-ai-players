@@ -1641,9 +1641,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // landblock boundary since our last LLM look, the prior goal
         // was derived for a world we are no longer in. Drop it from
         // the prompt anchor so the LLM re-deliberates from the new
-        // observations rather than re-emitting (e.g.) the academy
-        // Give-to-Society-Greeter goal after a Free Ride teleport
-        // to Holtburg. The SelectorResolver landblock filter is the
+        // observations rather than re-emitting a goal that was only
+        // valid in the area we just left after a teleport into a new
+        // one. The SelectorResolver landblock filter is the
         // belt; this is the suspenders that stop the LLM from
         // burning tokens re-proposing the same dead goal.
         // Mechanical plan-invalidation signals since our last LLM look,
@@ -1675,9 +1675,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // so the LLM is not anchored on the failed goal in the
         // prompt's '## Current goal' section. Parallels the
         // landblock-change guard above. Stops the loop observed in
-        // stalefix-run-01 where the Society Greeter kept rejecting
-        // the Calling Stone with TradeAiDoesntWant and the LLM kept
-        // re-emitting Give(Society Greeter, Calling Stone) forever.
+        // a stale-goal run where an NPC kept rejecting an offered
+        // quest item with TradeAiDoesntWant and the LLM kept
+        // re-emitting Give(that NPC, that item) forever.
         // Transport-failure rejections (could-not-walk) are excluded
         // by HasRejectionSince — they don't invalidate the goal.
         if (currentGoal is not null && semanticRejectSinceLook)
@@ -2690,8 +2690,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     internal static bool IsGoalRecentlyRejected(Goal goal, EventStream events)
     {
-        // Slice O — widened from 15 to 30 events. In spike9 the LLM
-        // attempted Give(Society Greeter, Calling Stone) 3 times across
+        // Slice O — widened from 15 to 30 events. In one spike the LLM
+        // attempted Give(an NPC, a quest item) 3 times across
         // ~7000 log lines while accumulating Unreachable + walk-tick
         // events between attempts; the original 15-event window only
         // caught the first repeat. 30 events ~= 10 LLM decisions of
@@ -5255,7 +5255,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // when a spatial Use/Pickup action cycle completes) for objects that
         // are STILL VISIBLE, so the LLM can see "you already interacted with
         // this chest/door N times" and stop re-picking it. Live-observed
-        // loop: the bot Used the same Holtburg chest 3x + revisited the same
+        // loop: the bot Used the same chest 3x + revisited the same
         // door, burning a ~5s LLM round-trip each cycle, because nothing in
         // the prompt told it those objects were already worked. Telemetry
         // ONLY — unlike the inventory dedup, the policy does NOT drop the
@@ -5843,11 +5843,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the LLM cannot miss them in the 15-event tail. These are
         // strong "don't retry that" signals from the server.
         //
-        // Slice O — diversify by (label, target). In spike9 the bot
+        // Slice O — diversify by (label, target). In one spike the bot
         // accumulated 95 Unreachable rejections while a critical
-        // TradeAiDoesntWant rejection (Greeter refused Calling Stone)
+        // TradeAiDoesntWant rejection (an NPC refused an offered item)
         // never made it into the 5-most-recent window the LLM was
-        // shown — the bot kept retrying Give(Greeter, CallingStone)
+        // shown — the bot kept retrying Give(that NPC, that item)
         // for 30+ minutes. Bucket the recent rejections by their
         // (ErrorLabel, Text/Name) tuple and keep only the most-recent
         // of each bucket so every distinct rejection class surfaces.
