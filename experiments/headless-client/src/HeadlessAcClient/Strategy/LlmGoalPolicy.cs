@@ -2940,35 +2940,51 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const string NoLiveObjectFailSuffix =
         ": selector resolved to no live object";
 
+    // A SECOND terminal-failure signal IsUnreachableTargetRepeat keys on, distinct
+    // from the no-live-object suffix: the server refused an interaction as OUT OF
+    // REACH — after the Use/Pickup it walked the bot TOWARD the very target instead
+    // of completing it (the object sat at a different elevation/footing than the
+    // XY-only arrival check assumed). Unlike a despawn, the object is still
+    // PHYSICALLY IN VIEW, so the in-view short-circuit must NOT exempt it: re-emitting
+    // the same goal just re-walks to the unreachable object and re-fails every cycle.
+    // Matched as a substring of the GoalFailed Text ("{Kind}: interaction target out
+    // of reach: ..."), keyed on the failed goal's own selector name; no server
+    // dialogue, no hardcoded names/wcids/landblocks, no game knowledge.
+    private const string InteractOutOfReachFailMarker =
+        "interaction target out of reach";
+
     /// <summary>
     /// True iff an LLM goal is re-proposing a target the motor has REPEATEDLY
-    /// (≥ <c>UnreachableRepeatThreshold</c>) failed to reach with a terminal
-    /// "selector resolved to no live object" GoalFailed — i.e. the named target
-    /// is out of PVS, the bot has no explored sighting route to it, and frontier
-    /// exploration found nothing. Re-emitting it just re-fails instantly
-    /// (cp-2272's 6s no-lock fast-fail) and wakes another no-current-goal LLM
-    /// call, burning per-day quota.
+    /// (≥ <c>UnreachableRepeatThreshold</c>) failed to reach. Two distinct terminal
+    /// failures count, each ≥2 within its window:
+    /// <list type="bullet">
+    /// <item>a "selector resolved to no live object" GoalFailed — the named target
+    /// is out of PVS (despawned/wandered off), no explored sighting route, frontier
+    /// found nothing. Skipped the instant the target re-enters PVS so a real
+    /// engagement is never suppressed.</item>
+    /// <item>an "interaction target out of reach" GoalFailed — the object is
+    /// PHYSICALLY IN VIEW but the server refused the Use/Pickup, walking the bot
+    /// toward it (a different elevation/footing the XY-only arrival check misread as
+    /// "arrived"). This case is NOT skipped while in view — that is the whole point:
+    /// re-emitting the same goal just re-walks to the visible-but-unreachable object
+    /// and re-fails (live: a weak model re-emitted Pickup of an out-of-reach world
+    /// item across many cycles, never dropped because it stayed in view).</item>
+    /// </list>
+    /// Either way, re-emitting just re-fails and wakes another no-current-goal LLM
+    /// call, burning per-day quota; the caller drops the repeat and defers to
+    /// <see cref="EscapeOrFallback"/> (a real Explore that MOVES the bot).
     ///
-    /// Scoped to the world-target verbs that name an object/creature which can
-    /// VANISH from the world (an <see cref="GoalKind.Attack"/> creature that
-    /// wandered off, a <see cref="GoalKind.Pickup"/> corpse/item that was looted
-    /// or despawned, or a <see cref="GoalKind.Use"/> on a world object — a corpse
-    /// to loot, a chest, a door — that despawned/was removed). NPC-directed verbs
+    /// Scoped to the world-target verbs (<see cref="GoalKind.Attack"/>/<see
+    /// cref="GoalKind.Pickup"/>/bare <see cref="GoalKind.Use"/>). NPC-directed verbs
     /// (Talk/Give) have their own dedicated loop guards and are deliberately not
-    /// covered here. Complements the world-object Use-churn guards
-    /// (<see cref="IsStationaryWorldUseRepeat"/>/<see cref="IsLandblockWorldUseChurn"/>),
-    /// which count Use EMISSIONS within a landblock: this one fires on the SPECIFIC
-    /// terminal "no live object" FAILURE (the target is gone), keyed on the failed
-    /// name, after 2 fails, and is NOT landblock-scoped — so it catches a vanished
-    /// Use target faster and across a landblock boundary.
+    /// covered here; a two-object item-Use is exempt (item-miss vs target-miss
+    /// ambiguity). Complements the world-object Use-churn guards
+    /// (<see cref="IsStationaryWorldUseRepeat"/>/<see cref="IsLandblockWorldUseChurn"/>).
     ///
-    /// Pure, no policy state: the implicit cooldown is the recent-event
-    /// window — once the failures age out the goal flows again (and the
-    /// motor's cp-2271 sighting-route path gets another try). Skipped the
-    /// instant the target re-enters PVS (<see cref="VisibleMatchesSelector"/>)
-    /// so a real engagement is never suppressed. Correlates by the failed
-    /// goal's OWN selector name (carried on the GoalFailed event) — no server
-    /// dialogue text, no hardcoded names/wcids/landblocks.
+    /// Pure, no policy state: the implicit cooldown is the recent-event window — once
+    /// the failures age out the goal flows again. Correlates by the failed goal's OWN
+    /// selector name (carried on the GoalFailed event) — no server dialogue text, no
+    /// hardcoded names/wcids/landblocks.
     /// </summary>
     internal static bool IsUnreachableTargetRepeat(
         Goal goal, WorldStateProjection world, EventStream events)
@@ -2991,6 +3007,44 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var target = goal.Target;
         var targetName = target?.Name;
         if (target is null || string.IsNullOrWhiteSpace(targetName)) return false;
+
+        const int OutOfReachLookbackEvents = 40;
+        const int OutOfReachRepeatThreshold = 2;
+        // Visible-but-UNREACHABLE case: a target the server repeatedly refused as OUT
+        // OF REACH (it walked the bot toward the object after the interaction instead
+        // of completing it — a different elevation/footing) is dropped EVEN WHILE IN
+        // VIEW. The in-view short-circuit below is for the despawn case (let the motor
+        // re-resolve a live snapshot); it must NOT rescue a goal that keeps re-walking
+        // to a visible object the server will not let it interact with — that just
+        // re-fails and wakes another no-current-goal LLM call every cycle (live: a weak
+        // model re-emitted Pickup of an out-of-reach world item across many cycles,
+        // each walking to it and failing, never dropped because it stayed in view).
+        //
+        // Drop the whole NAME (not just the failing guid). A nearer-but-suppressed
+        // same-named object does NOT let the motor fall through to a farther reachable
+        // sibling: Pickup/Use resolution (SelectorResolver.ResolveSingleNearest) picks
+        // the NEAREST match and HandshakeDriver only NULLS it when it is suppressed
+        // (treats it as unresolved) — it does not re-resolve to the next sibling. So
+        // while a nearer instance stays out-of-reach, re-emitting the NAME just keeps
+        // resolving and nulling that nearer guid. Dropping the name and deferring to
+        // EscapeOrFallback (a real Explore that MOVES the bot) is the correct escape:
+        // repositioning is what makes a different instance the nearest/reachable one.
+        // Same name-keyed, window-bounded, self-expiring shape as the no-live-object
+        // count; correlates by the failed goal's OWN selector name only.
+        {
+            var outOfReach = 0;
+            foreach (var ev in events.Recent(OutOfReachLookbackEvents))
+            {
+                if (ev.Kind != EventKind.GoalFailed) continue;
+                if (ev.Text is null ||
+                    ev.Text.IndexOf(InteractOutOfReachFailMarker, StringComparison.Ordinal) < 0)
+                    continue;
+                if (string.IsNullOrWhiteSpace(ev.Name) ||
+                    !string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (++outOfReach >= OutOfReachRepeatThreshold) return true;
+            }
+        }
 
         // Target currently in view → never suppress; the motor will resolve a
         // live snapshot and the real Attack can fire.

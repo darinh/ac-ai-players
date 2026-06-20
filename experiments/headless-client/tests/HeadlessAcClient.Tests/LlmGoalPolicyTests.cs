@@ -8612,6 +8612,142 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(talk, world, es));
     }
 
+    // ---- IsUnreachableTargetRepeat now also covers the VISIBLE-but-UNREACHABLE
+    //      (server out-of-reach) case, where the despawn in-view short-circuit
+    //      would otherwise rescue a doomed re-walk loop. ----
+
+    private static void AppendOutOfReachFail(EventStream es, string targetName, string kind = "Pickup")
+        => es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
+            Name = targetName,
+            // Mirrors HandshakeDriver's out-of-reach Fail reason verbatim, wrapped in
+            // the TacticsExecutor "{Kind}: {reason}" envelope.
+            Text = $"{kind}: interaction target out of reach: server walked us toward " +
+                   $"'{targetName}' after the use instead of completing it " +
+                   $"(likely a different elevation or footing)",
+        });
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_TwoOutOfReachFails_Suppresses_EvenInView()
+    {
+        // The KEY new behavior: the object is PHYSICALLY IN VIEW but the server keeps
+        // refusing the interaction as out-of-reach (different elevation/footing). The
+        // despawn in-view short-circuit must NOT rescue it — re-emitting just re-walks
+        // and re-fails. Two out-of-reach fails -> drop.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Apple");
+        AppendOutOfReachFail(es, "Apple");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Apple", ItemType = 0x2u, Distance = 1.2f,
+        });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OneOutOfReachFail_AllowsRetry()
+    {
+        // A single out-of-reach fail may be a transient footing glitch; allow a retry.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Apple");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Apple", ItemType = 0x2u, Distance = 1.2f,
+        });
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_DifferentName_DoesNotLeak()
+    {
+        // Out-of-reach fails for one name must not suppress a goal for another.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Apple");
+        AppendOutOfReachFail(es, "Apple");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Pear", ItemType = 0x2u, Distance = 1.2f,
+        });
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Pear"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_UseEvenInView_Suppresses()
+    {
+        // A bare world-object Use the server refuses out-of-reach (a chest under a
+        // ledge) loops the same way -> drop while in view.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Ornate Chest", kind: "Use");
+        AppendOutOfReachFail(es, "Ornate Chest", kind: "Use");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Ornate Chest", ItemType = 0x2u, Distance = 1.0f,
+        });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            UseGoalNamed("Ornate Chest"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_TalkKind_DoesNotFire()
+    {
+        // NPC-directed verbs are excluded from this world-target suppressor entirely.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Samuel", kind: "Talk");
+        AppendOutOfReachFail(es, "Samuel", kind: "Talk");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Samuel", Distance = 1.2f, IsCreature = true,
+        });
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Samuel" } };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(talk, world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_TwoObjectItemUse_DoesNotFire()
+    {
+        // A two-object Use (item ON a target) stays exempt — the item-miss vs
+        // target-miss ambiguity that exempts it for the no-live-object case applies
+        // here too; deliberately out of scope.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Wooden Door", kind: "Use");
+        AppendOutOfReachFail(es, "Wooden Door", kind: "Use");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Wooden Door", Distance = 1.2f,
+        });
+        var use = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Wooden Door" },
+            Item = new Selector { Name = "Brass Key" },
+        };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(use, world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_MultipleVisibleSameName_StillDrops()
+    {
+        // Design note (gpt-5.4 review): the name-level drop fires EVEN when several
+        // same-named objects are visible. Pickup/Use resolution picks the NEAREST match
+        // and the Motor only nulls it when suppressed — it never falls through to a
+        // farther sibling — so a nearer out-of-reach instance keeps the loop alive
+        // while the name is re-emitted. Dropping the name and Exploring (which moves
+        // the bot, changing which instance is nearest) is the correct escape.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Apple");
+        AppendOutOfReachFail(es, "Apple");
+        var world = BuildWorldWithVisible(
+            new VisibleObjectProjection { Guid = 0x90000051u, Name = "Apple", ItemType = 0x2u, Distance = 1.0f },
+            new VisibleObjectProjection { Guid = 0x90000052u, Name = "Apple", ItemType = 0x2u, Distance = 7.0f });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es));
+    }
+
     [Fact]
     public void BuildUserPrompt_VisibleDoor_RendersClosedState()
     {
