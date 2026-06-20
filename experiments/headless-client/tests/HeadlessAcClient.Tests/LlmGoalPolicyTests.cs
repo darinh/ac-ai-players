@@ -6941,6 +6941,8 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: missile weapon wielded; missile ammo: loaded", prompt);
         Assert.DoesNotContain("weapon: NONE wielded - UNARMED", prompt);
+        Assert.DoesNotContain("UNARMED",
+            prompt.Split('\n').First(l => l.Contains("- weapon:")));
         Assert.DoesNotContain("Wield it to arm", prompt);
     }
 
@@ -7026,6 +7028,11 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: missile weapon wielded; missile ammo: loaded", prompt);
         Assert.DoesNotContain("melee weapon in your inventory (Wield it to arm)", prompt);
+        // A combat-capable (ammo-loaded) missile weapon must NOT carry the
+        // empty-missile UNARMED marker — check the weapon line itself (the rule
+        // text on other lines legitimately mentions UNARMED).
+        Assert.DoesNotContain("UNARMED",
+            prompt.Split('\n').First(l => l.Contains("- weapon:")));
     }
 
     [Fact]
@@ -7033,7 +7040,9 @@ public class LlmGoalPolicyTests
     {
         // Empty missile weapon with NO loadable ammo in the bag: the readiness
         // line must NOT advertise "wield ammo to fire" (a load the bot cannot
-        // perform) — it states plainly that no loadable ammo exists.
+        // perform) — it states plainly that no loadable ammo exists AND carries the
+        // UNARMED marker (the weapon cannot fire), so the combat rules stop pushing
+        // a doomed Attack and steer the bot to arm / do non-combat progress.
         var world = new WorldStateProjection
         {
             Self = new SelfProjection
@@ -7049,7 +7058,7 @@ public class LlmGoalPolicyTests
             Visible = System.Array.Empty<VisibleObjectProjection>(),
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("missile ammo: EMPTY, no loadable ammo", prompt);
+        Assert.Contains("missile ammo: EMPTY, no loadable ammo - UNARMED (cannot fire)", prompt);
         Assert.DoesNotContain("wield ammo to fire", prompt);
     }
 
@@ -7077,6 +7086,11 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("missile ammo: EMPTY (wield ammo to fire)", prompt);
         Assert.DoesNotContain("no loadable ammo", prompt);
+        // Loadable ammo means the bot CAN become combat-capable by wielding it, so
+        // the weapon line must NOT carry the empty-missile UNARMED marker (the rule
+        // text on other lines legitimately mentions UNARMED).
+        Assert.DoesNotContain("UNARMED",
+            prompt.Split('\n').First(l => l.Contains("- weapon:")));
     }
 
     [Fact]

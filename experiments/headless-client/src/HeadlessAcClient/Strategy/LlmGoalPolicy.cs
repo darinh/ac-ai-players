@@ -9079,8 +9079,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // missile weapon has ammo loaded); no advice, priority, or game knowledge.
     // `hasLoadableAmmo` says whether the bag holds ammo the wield path could load;
     // when a missile weapon is empty it decides whether to point at that ammo or
-    // state plainly that none is loadable, so the line never advertises a load
-    // the bot cannot perform.
+    // state plainly that none is loadable. An empty missile weapon with no loadable
+    // ammo cannot fire, so it carries the same UNARMED marker as no weapon at all —
+    // the combat rules gate on that marker to stop pushing a doomed Attack and steer
+    // the bot to arm or do non-combat progress instead.
     private static string WeaponReadinessLine(
         bool meleeWeaponWielded, bool missileWeaponWielded, bool ammoLoaded,
         bool hasLoadableAmmo)
@@ -9091,7 +9093,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             var ammoState = ammoLoaded
                 ? "loaded"
-                : hasLoadableAmmo ? "EMPTY (wield ammo to fire)" : "EMPTY, no loadable ammo";
+                : hasLoadableAmmo
+                    ? "EMPTY (wield ammo to fire)"
+                    : "EMPTY, no loadable ammo - UNARMED (cannot fire)";
             return $"missile weapon wielded; missile ammo: {ammoState}";
         }
         return "NONE wielded - UNARMED";
