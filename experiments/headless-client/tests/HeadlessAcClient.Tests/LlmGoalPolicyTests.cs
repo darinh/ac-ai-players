@@ -8813,6 +8813,117 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(new EventStream()));
     }
 
+    // ---- IsWieldNoWeaponRepeat (cp041): the Motor rejects a Wield whose selector
+    //      resolves to no equippable in-bag weapon; a model can re-emit it every
+    //      cycle (e.g. trying to wield missile ammo with an empty quiver), burning
+    //      LLM calls. After >=2 rejects the caller drops the Wield + defers. ----
+
+    private static void AppendWieldNoWeaponFail(EventStream es)
+        => es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
+            // A Wield goal carries no Target, so the Motor's Fail Name is null; the
+            // reason text is what the loop-break keys on. Mirrors HandshakeDriver
+            // wrapped in TacticsExecutor's "{Kind}: {reason}" envelope.
+            Name = null,
+            Text = "Wield: wield: no equippable inventory weapon",
+        });
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_TwoRejects_True()
+    {
+        var es = new EventStream();
+        AppendWieldNoWeaponFail(es);
+        AppendWieldNoWeaponFail(es);
+        Assert.True(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_OneReject_False()
+    {
+        var es = new EventStream();
+        AppendWieldNoWeaponFail(es);
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_OtherFailsDoNotCount()
+    {
+        // The low-health-defer / no-live-object / out-of-reach signals are distinct
+        // and must not trip the wield loop-break.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        AppendNoLiveObjectFail(es, "Corpse", kind: "Wield");
+        AppendNoLiveObjectFail(es, "Corpse", kind: "Wield");
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_EmptyStream_False()
+    {
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(new EventStream()));
+    }
+
+    [Fact]
+    public void HasEquippableInventoryWeapon_UnwieldedWeaponInBag_True()
+    {
+        // An un-wielded item whose ValidLocations names a primary-weapon slot
+        // (melee = 0x00100000) is wieldable: the loop-break must be withheld so a
+        // swap to it can flow.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x5001u, Name = "Spare Blade", Wcid = 1u,
+                ItemType = 0x1u, ValidLocations = 0x00100000u, WieldedAt = null,
+            },
+        });
+        Assert.True(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
+    [Fact]
+    public void HasEquippableInventoryWeapon_OnlyAmmo_False()
+    {
+        // Ammo lives in the dedicated ammo slot (0x00800000), which is NOT a weapon
+        // slot — even when it carries a weapon ItemType bit. Keying on the equip slot
+        // (not ItemType) keeps the bag-of-only-ammo case reading as "no weapon", so
+        // the loop-break still fires.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x5002u, Name = "Loose Ammo", Wcid = 2u,
+                ItemType = 0x100u, ValidLocations = 0x00800000u, WieldedAt = null,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
+    [Fact]
+    public void HasEquippableInventoryWeapon_OnlyWieldedWeapon_False()
+    {
+        // A weapon already wielded in its slot is nothing to swap TO — there is no
+        // equippable weapon waiting in the bag, so the loop-break is not withheld.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x5003u, Name = "Held Weapon", Wcid = 3u,
+                ItemType = 0x1u, ValidLocations = 0x00100000u, WieldedAt = 0x00100000u,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
+    [Fact]
+    public void HasEquippableInventoryWeapon_EmptyBag_False()
+    {
+        var world = BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>());
+        Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
     [Fact]
     public void BuildUserPrompt_VisibleDoor_RendersClosedState()
     {
