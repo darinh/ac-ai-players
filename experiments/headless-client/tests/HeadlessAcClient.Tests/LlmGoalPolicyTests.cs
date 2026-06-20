@@ -795,6 +795,74 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsExploreToReachedTarget_TrueForReachedNamedExplore()
+    {
+        // The bot is re-driving an Explore toward a named target it has reached;
+        // the Motor must recognise the no-op so it can yield to a fresh decision.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Wayfarer" } };
+
+        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_TrueForReachedNameContainsExplore()
+    {
+        // A name_contains Explore that has reached a matching object also counts.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer the Bold", 2f));
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { NameContains = "Way" } };
+
+        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_FalseForUntargetedExplore()
+    {
+        // An "anywhere" Explore is a Motor-owned traversal with nothing to
+        // interact with — it must keep free-re-driving (budget-exempt), not break
+        // on a coincidentally-near object.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
+
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_FalseWhenGoalNotExplore()
+    {
+        // Only a navigate-only Explore can strand the bot beside a reached target;
+        // a Talk/Attack goal is handled by other gates, so this must not fire.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Wayfarer" } };
+
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_FalseWhenTargetNotYetReached()
+    {
+        // The named Explore target is still far (not arrived) — keep re-driving
+        // the Explore; do not break mid-travel.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 40f));
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Wayfarer" } };
+
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_FalseForDifferentTargetThanReachedObject()
+    {
+        // Keys on the GOAL's OWN target, not on which objects happen to be near:
+        // an Explore toward a NOT-yet-visible target must NOT be flagged just
+        // because some other object is within reach (else a fresh redirect to a
+        // new target would be wrongly dropped).
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Stonekeeper" } };
+
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+    }
+
+    [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {
         // A single not-yet-talked NPC that is the nearest object is already in
