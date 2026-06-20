@@ -33,6 +33,10 @@ internal sealed record InventoryItemProjection
     [JsonPropertyName("item_type")] public uint? ItemType { get; init; }
     [JsonPropertyName("valid_locations")] public uint? ValidLocations { get; init; }
     [JsonPropertyName("wielded_at")] public uint? WieldedAt { get; init; }
+    // AmmoType (W_AMMO_TYPE): a missile launcher's fired ammo type, or an ammo
+    // item's own type. Used to tell whether bag ammo matches the wielded
+    // launcher. Not rendered to the LLM directly.
+    [JsonPropertyName("ammo_type")] public ushort? AmmoType { get; init; }
 
     /// <summary>
     /// For a weapon: the NAME of the Skill that governs attacks with it
@@ -597,6 +601,7 @@ internal sealed record WorldStateProjection
                     ItemType = o.ItemType,
                     ValidLocations = o.ValidLocations,
                     WieldedAt = o.CurrentWieldedLocation,
+                    AmmoType = o.AmmoType,
                     ShortDesc = sd,
                     LongDesc = ld,
                     UseDesc = ud,

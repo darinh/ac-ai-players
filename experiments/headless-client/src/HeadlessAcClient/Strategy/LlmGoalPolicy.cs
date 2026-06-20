@@ -6152,9 +6152,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // whether ammo is loaded to decide whether to wield ammo first.
         // Pure typed-affordance projection (ItemType MissileWeapon bit /
         // MissileAmmo SLOT bit), no names/wcids/landblocks.
-        var missileWeaponWielded = world.Inventory.Any(i =>
+        var wieldedMissileLauncher = world.Inventory.FirstOrDefault(i =>
             i.WieldedAt is uint mw && mw != 0 &&
             i.ItemType is uint mit && (mit & ItemTypeMasks.MissileWeapon) != 0);
+        var missileWeaponWielded = wieldedMissileLauncher is not null;
         var ammoLoaded = world.Inventory.Any(i =>
             i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
         // Items the server SEMANTICALLY refused for the bot recently — used
@@ -6184,6 +6185,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var bagAmmo = (!missileWeaponWielded || ammoLoaded) ? null : world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint baw || baw == 0) &&
             i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
+            AmmoTypeCompatible(wieldedMissileLauncher?.AmmoType, i.AmmoType) &&
             !recentlyServerRefusedGuids.Contains(i.Guid));
         // A wielded MISSILE weapon with no ammo loaded is NOT combat-effective
         // (it cannot fire), so for the purpose of surfacing how-to-arm
@@ -9094,6 +9096,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         return "NONE wielded - UNARMED";
     }
+
+    // Mirror the server's launcher/ammo precondition: a missile launcher and its
+    // ammo may coexist only when their AmmoType (W_AMMO_TYPE) matches, and the
+    // server does NOT reject when either side's AmmoType is unknown (null). So a
+    // bag-ammo affordance is compatible unless BOTH types are known and differ.
+    // Pure wire-value comparison; no names/wcids, no game knowledge.
+    internal static bool AmmoTypeCompatible(ushort? launcherAmmoType, ushort? ammoType)
+        => launcherAmmoType is not ushort lt || ammoType is not ushort at || lt == at;
 
     /// <summary>
     /// Advisory FACT for `## Combat readiness` when the bot is wielding a melee

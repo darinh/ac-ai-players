@@ -773,6 +773,7 @@ internal sealed class WorldState
         snap.WeenieFlags2 = (uint)oc.Weenie.Flags2;
         snap.ObjectDescriptionFlags = (uint)oc.Weenie.DescriptionFlags;
         snap.ValidLocations = oc.Weenie.ValidLocations;
+        snap.AmmoType = oc.Weenie.AmmoType;
         snap.CurrentWieldedLocation = oc.Weenie.CurrentlyWieldedLocation;
         // ContainerGuid/WielderGuid: populate when the header carries
         // them. ObjectCreate for landscape items omits both; for items
