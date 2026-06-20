@@ -6972,6 +6972,63 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_MissileWieldedAmmoEmpty_BagMeleeWeapon_SurfacesMeleeArmHint()
+    {
+        // A wielded missile weapon with EMPTY ammo is NOT combat-effective, so the
+        // how-to-arm affordances must treat it as unarmed: with an un-wielded melee
+        // weapon in the bag, surface the "Wield it to arm" hint so the bot switches
+        // to a usable weapon instead of looping on an ammo wield it cannot complete.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                new InventoryItemProjection
+                { Guid = 0x224u, Name = "Practice Blade", Wcid = 400u, ItemType = 0x1u, ValidLocations = 0x100000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: missile weapon wielded; missile ammo: EMPTY", prompt);
+        Assert.Contains("melee weapon in your inventory (Wield it to arm): Practice Blade", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_MissileWieldedAmmoLoaded_BagMeleeWeapon_NoMeleeArmHint()
+    {
+        // A combat-effective missile weapon (ammo loaded) IS armed: the how-to-arm
+        // affordances stay suppressed even with a melee weapon in the bag, so the
+        // bot is never nudged to swap a working weapon.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x800000u },
+                new InventoryItemProjection
+                { Guid = 0x224u, Name = "Practice Blade", Wcid = 400u, ItemType = 0x1u, ValidLocations = 0x100000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: missile weapon wielded; missile ammo: loaded", prompt);
+        Assert.DoesNotContain("melee weapon in your inventory (Wield it to arm)", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_CurrentFight_RendersLandedEvadedCounts()
     {
         // combat-damage-output: the live fight outcome (all swings evaded,

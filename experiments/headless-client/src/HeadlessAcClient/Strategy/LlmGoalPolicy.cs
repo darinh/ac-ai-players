@@ -6185,7 +6185,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             (i.WieldedAt is not uint baw || baw == 0) &&
             i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
             !recentlyServerRefusedGuids.Contains(i.Guid));
-        var armed = meleeWeaponWielded || missileWeaponWielded;
+        // A wielded MISSILE weapon with no ammo loaded is NOT combat-effective
+        // (it cannot fire), so for the purpose of surfacing how-to-arm
+        // affordances — an un-wielded melee weapon already in the bag (→ Wield
+        // it) or a melee weapon on the ground (→ Pickup it) — treat it the same
+        // as UNARMED. This mirrors `selfArmCombatEffective` and the SELF-ARM
+        // rule's combat-effective test (a missile weapon counts only with ammo
+        // loaded), so a bot holding an empty missile weapon WITH a usable melee
+        // weapon in its bag is shown that weapon instead of having the
+        // acquisition hints suppressed — the suppression left it looping on an
+        // ammo wield it cannot complete. Pure wire-state (WieldedAt + typed
+        // masks); the LLM still decides; no advice, no game knowledge.
+        var armed = meleeWeaponWielded || (missileWeaponWielded && ammoLoaded);
         // Acquisition affordances surfaced ONLY when unarmed, so the LLM
         // can act on "arm yourself" instead of merely noting it is
         // unarmed (the live failure mode): an unwielded melee weapon
