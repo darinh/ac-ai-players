@@ -7029,6 +7029,57 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CombatReadiness_MissileWieldedAmmoEmpty_NoLoadableAmmo_SaysNoLoadableAmmo()
+    {
+        // Empty missile weapon with NO loadable ammo in the bag: the readiness
+        // line must NOT advertise "wield ammo to fire" (a load the bot cannot
+        // perform) — it states plainly that no loadable ammo exists.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo: EMPTY, no loadable ammo", prompt);
+        Assert.DoesNotContain("wield ammo to fire", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_MissileWieldedAmmoEmpty_LoadableAmmo_SaysWieldAmmoToFire()
+    {
+        // Empty missile weapon WITH loadable ammo in the bag (ValidLocations
+        // carries the ammo slot): keep the actionable "wield ammo to fire" cue.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                new InventoryItemProjection
+                { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo: EMPTY (wield ammo to fire)", prompt);
+        Assert.DoesNotContain("no loadable ammo", prompt);
+    }
+
+    [Fact]
     public void CombatReadiness_CurrentFight_RendersLandedEvadedCounts()
     {
         // combat-damage-output: the live fight outcome (all swings evaded,

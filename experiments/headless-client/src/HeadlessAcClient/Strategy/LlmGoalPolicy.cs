@@ -6243,7 +6243,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var monstersInView = world.Visible.Count(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
-        sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+        sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null)}");
         if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string crSkillAdvisory)
             sb.AppendLine($"- {crSkillAdvisory}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
@@ -8080,7 +8080,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
-            sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
+            sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null)}");
             if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string capSkillAdvisory)
                 sb.AppendLine($"- {capSkillAdvisory}");
             // The `tapped out` hunt-discovery fact (combat-ready + farmed this
@@ -9075,13 +9075,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // by the body section and the protected-tail capsule so the two never
     // diverge. Mechanical wire-state rendering (what is wielded + whether the
     // missile weapon has ammo loaded); no advice, priority, or game knowledge.
+    // `hasLoadableAmmo` says whether the bag holds ammo the wield path could load;
+    // when a missile weapon is empty it decides whether to point at that ammo or
+    // state plainly that none is loadable, so the line never advertises a load
+    // the bot cannot perform.
     private static string WeaponReadinessLine(
-        bool meleeWeaponWielded, bool missileWeaponWielded, bool ammoLoaded)
+        bool meleeWeaponWielded, bool missileWeaponWielded, bool ammoLoaded,
+        bool hasLoadableAmmo)
     {
         if (meleeWeaponWielded)
             return "melee weapon wielded";
         if (missileWeaponWielded)
-            return $"missile weapon wielded; missile ammo: {(ammoLoaded ? "loaded" : "EMPTY (wield ammo to fire)")}";
+        {
+            var ammoState = ammoLoaded
+                ? "loaded"
+                : hasLoadableAmmo ? "EMPTY (wield ammo to fire)" : "EMPTY, no loadable ammo";
+            return $"missile weapon wielded; missile ammo: {ammoState}";
+        }
         return "NONE wielded - UNARMED";
     }
 
