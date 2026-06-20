@@ -6684,6 +6684,67 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void WieldAnnotation_SurfacesWeaponSkillAndTrainedStatus()
+    {
+        // cp028: pure projection of a weapon's own governing skill against the bot's
+        // trained-skill names. Scoped to weapons (GoverningSkill != null); everything
+        // else (already-wielded, non-weapon) gets no annotation.
+        var trained = new HashSet<string>(new[] { "TwoHandedCombat" }, StringComparer.OrdinalIgnoreCase);
+        InventoryItemProjection Item(uint? validLoc, string? skill, uint? wieldedAt = null) =>
+            new() { Guid = 0x1u, Name = "X", Wcid = 1u, ValidLocations = validLoc, GoverningSkill = skill, WieldedAt = wieldedAt };
+
+        // Wieldable weapon, trained skill.
+        Assert.Equal(" [weapon skill TwoHandedCombat: trained]", LlmGoalPolicy.WieldAnnotation(Item(0x2000000u, "TwoHandedCombat"), trained));
+        // Wieldable weapon, UNTRAINED skill (the live missile-weapon case).
+        Assert.Equal(" [weapon skill MissileWeapons: UNTRAINED — far fewer hits]", LlmGoalPolicy.WieldAnnotation(Item(0x400000u, "MissileWeapons"), trained));
+        // Unknown trained set (null or empty: skills not loaded yet) -> surface the
+        // skill name but make NO trained/untrained claim (do not falsely brand it).
+        Assert.Equal(" [weapon skill TwoHandedCombat]", LlmGoalPolicy.WieldAnnotation(Item(0x2000000u, "TwoHandedCombat"), null));
+        Assert.Equal(" [weapon skill TwoHandedCombat]", LlmGoalPolicy.WieldAnnotation(Item(0x2000000u, "TwoHandedCombat"), new HashSet<string>(StringComparer.OrdinalIgnoreCase)));
+        // Already-wielded weapon -> no annotation (the wielded@ marker conveys it).
+        Assert.Equal("", LlmGoalPolicy.WieldAnnotation(Item(0x2000000u, "TwoHandedCombat", wieldedAt: 0x100000u), trained));
+        // Non-weapon (no governing skill) -> no annotation, whether wieldable or not.
+        Assert.Equal("", LlmGoalPolicy.WieldAnnotation(Item(0x1u, null), trained));
+        Assert.Equal("", LlmGoalPolicy.WieldAnnotation(Item(0u, null), trained));
+        Assert.Equal("", LlmGoalPolicy.WieldAnnotation(Item(null, null), trained));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_Inventory_AnnotatesWeaponGoverningSkill()
+    {
+        // Live cp027-validate.log: a melee char (TwoHandedCombat) burned >50% of one
+        // run's LLM budget re-Wielding a missile weapon it has no skill for, because
+        // ## Inventory showed no weapon skill. Surface that wire fact so the LLM stops
+        // choosing a refused / unusable Wield. A non-weapon item renders unchanged.
+        // (Invented fixture item names; real AC skill identifiers as used elsewhere.)
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "M", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                // Wieldable missile weapon governed by an UNTRAINED skill.
+                new InventoryItemProjection { Guid = 0x10u, Name = "Wayfarer Sling", Wcid = 100u, ValidLocations = 0x400000u, GoverningSkill = "MissileWeapons" },
+                // Non-weapon trophy (no governing skill) — renders unchanged.
+                new InventoryItemProjection { Guid = 0x11u, Name = "Trophy Skull", Wcid = 101u, ValidLocations = 0u },
+                // Wieldable weapon governed by the TRAINED skill.
+                new InventoryItemProjection { Guid = 0x12u, Name = "Heavy Maul", Wcid = 102u, ValidLocations = 0x2000000u, GoverningSkill = "TwoHandedCombat" },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("Wayfarer Sling (wcid=100) [weapon skill MissileWeapons: UNTRAINED — far fewer hits]", prompt);
+        Assert.Contains("Heavy Maul (wcid=102) [weapon skill TwoHandedCombat: trained]", prompt);
+        // The non-weapon renders with no wield annotation appended.
+        Assert.Contains("Trophy Skull (wcid=101)\n", prompt.Replace("\r\n", "\n"));
+    }
+
+    [Fact]
     public void NoQuestFallback_DoesNotAutoWieldShieldThatWouldDequipTwoHandedWeapon()
     {
         // Live cp2929: the bot wielded its trained 2H weapon, then the source

@@ -5307,8 +5307,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // type heuristic, no game knowledge. Goal resolution is unaffected
             // — the picker matches against world.Inventory, not this text, and
             // this section prints no per-item guid.
-            var invCounts = new Dictionary<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded), int>();
-            var invOrder = new List<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded)>();
+            var invTrainedSkillNames = world.Self.TrainedSkills?
+                .Select(s => s.Name)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var invCounts = new Dictionary<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded, string Wield), int>();
+            var invOrder = new List<(string Name, uint Wcid, string ShortDesc, string UseDesc, uint Wielded, string Wield)>();
             foreach (var i in world.Inventory)
             {
                 var sd = string.IsNullOrWhiteSpace(i.ShortDesc) ? "" : i.ShortDesc!.Trim();
@@ -5320,7 +5324,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // different keys and fail to collapse.
                 if (ud.Length > 0 && ud == sd) ud = "";
                 var wielded = i.WieldedAt is uint iw ? iw : 0u;
-                var key = (i.Name, i.Wcid, sd, ud, wielded);
+                var key = (i.Name, i.Wcid, sd, ud, wielded, WieldAnnotation(i, invTrainedSkillNames));
                 if (invCounts.TryGetValue(key, out var c)) invCounts[key] = c + 1;
                 else { invCounts[key] = 1; invOrder.Add(key); }
             }
@@ -5330,6 +5334,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.Append($"- {key.Name} (wcid={key.Wcid}");
                 if (key.Wielded != 0) sb.Append($", wielded@0x{key.Wielded:X}");
                 sb.Append(")");
+                sb.Append(key.Wield);
                 if (n > 1) sb.Append($" x{n}");
                 sb.AppendLine();
                 if (key.ShortDesc.Length > 0)
@@ -8398,6 +8403,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                $"which is NOT one of your trained skills — an UNTRAINED weapon skill lands far fewer " +
                $"hits; a weapon governed by a skill you HAVE trained is in your bag: " +
                $"{trainedBagWeapon.Name} ({bagSkill}). Wield it to hit far more often.";
+    }
+
+    // Compact, decision-relevant WIELD annotation for an inventory row, derived
+    // PURELY from the item's own wire facts: for a WEAPON, its governing-skill name
+    // (GoverningSkill, decoded from the weenie's PropertyInt.WeaponSkill) checked
+    // against the bot's OWN trained-skill names. Live (cp027-validate.log): a melee
+    // char burned >50% of one run's LLM budget re-Wielding missile weapons it has no
+    // skill for, because the inventory listed no weapon skill so the model guessed.
+    // Surfacing the wire fact lets the LLM stop choosing a Wield the server will not
+    // actuate / a weapon it cannot use well. Scoped to weapons only (GoverningSkill
+    // != null) to stay sparse: the vast majority of bag items are never wield
+    // candidates, so blanket-tagging them would only bloat this trim-first section.
+    // No game knowledge (no item/skill list, no priority, no target choice): returns
+    // an empty string for an already-wielded item or any non-weapon.
+    internal static string WieldAnnotation(
+        InventoryItemProjection item, HashSet<string>? trainedSkillNames)
+    {
+        // Already wielded — the `wielded@` marker already conveys the state.
+        if (item.WieldedAt is uint w && w != 0) return "";
+        // A weapon carries a governing skill; surface it + whether it is trained (an
+        // untrained weapon skill lands far fewer hits — the same mechanical fact the
+        // weapon-skill swap advisory and the SPEND XP rule already state).
+        if (item.GoverningSkill is string gs && gs.Length > 0)
+        {
+            // Judge trained-vs-untrained ONLY when the trained-skill list is KNOWN
+            // and non-empty. A null/empty set means skills have not loaded yet (per
+            // WorldStateProjection) — surface the skill name but make NO trained
+            // claim, so a weapon is never falsely branded UNTRAINED in that window
+            // (mirrors WeaponSkillSwapAdvisory, which makes no claim when unknown).
+            if (trainedSkillNames is not { Count: > 0 }) return $" [weapon skill {gs}]";
+            return trainedSkillNames.Contains(gs)
+                ? $" [weapon skill {gs}: trained]"
+                : $" [weapon skill {gs}: UNTRAINED — far fewer hits]";
+        }
+        return "";
     }
 
     // Append the decision-critical, COMPACT self facts — attributes, raisable
