@@ -8777,6 +8777,232 @@ public class LlmGoalPolicyTests
             currentLevel: 20, lethalRetestableWhenOutleveled: true));
     }
 
+    // ---- OnlyBeatenMonstersInView (beaten-kind STALEMATE egress gate) ----
+    // When EVERY attackable monster in view is a LETHAL-beaten kind, the bot is
+    // parked among targets the veto will always drop; the general stuck-loop
+    // egress can't fire (a beaten kind still counts as a monster-in-view), so the
+    // LLM is re-asked every decision and re-picks the same vetoed Attack. This
+    // gate lets the veto path Explore OUT instead. Matches the veto's LETHAL-only
+    // definition so a re-attemptable SURVIVED kind, a winnable kind, or a live
+    // hostile in view all DEFER the egress.
+
+    private static CombatHistoryEntry Winnable(string name, uint wcid)
+        => new(name, wcid, Kills: 4, Deaths: 0, NearDeaths: 0, Fights: 4,
+            LastOutcome: "kill", Ineffective: 0);
+
+    private static VisibleObjectProjection Mob(
+        uint guid, string name, uint wcid, bool hostile = false, bool corpse = false)
+        => new()
+        {
+            Guid = guid, Name = name, Wcid = wcid, Distance = 6f,
+            IsMonster = true, ObservedHostile = hostile, IsCorpse = corpse,
+        };
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_SingleLethalBeatenPassive_True()
+    {
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u));
+        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_AllLethalBeaten_True()
+    {
+        var hist = new[]
+        {
+            LethalBeaten("Drudge Skulker", 7u)[0],
+            LethalBeaten("Mosswart", 8u)[0],
+        };
+        var world = BuildWorldBeaten(hist, selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u),
+            Mob(MobGuid + 1, "Mosswart", 8u));
+        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_WinnableAlsoInView_False()
+    {
+        // A winnable (not-beaten) monster in view means there IS something to
+        // engage — do not wander off. Pins the over-fire guard.
+        var hist = new[] { LethalBeaten("Drudge Skulker", 7u)[0], Winnable("Rabbit", 9u) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u),
+            Mob(MobGuid + 1, "Rabbit", 9u));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_SurvivedKindInView_False()
+    {
+        // A merely SURVIVED (non-lethal: no deaths) beaten kind in view is one
+        // the bot MAY still re-attempt (the veto honors that, per the deadlock
+        // fix), so it must DEFER the egress — the bot should not leave a kind it
+        // is allowed to keep trying.
+        var hist = new[]
+        {
+            LethalBeaten("Drudge Skulker", 7u)[0],
+            new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0, NearDeaths: 2,
+                Fights: 2, LastOutcome: "near-death", Ineffective: 0),
+        };
+        var world = BuildWorldBeaten(hist, selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u),
+            Mob(MobGuid + 1, "Mosswart", 8u));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_HostileInView_False()
+    {
+        // A live hostile (even a beaten kind) is a threat the Motor's flee/defend
+        // reflexes own — never wander away from it.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u, hostile: true));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_NoMonsterInView_False()
+    {
+        // Nothing in view -> the general stuck-loop egress / fallback owns it.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_OutleveledLethalKind_False()
+    {
+        // Once the bot out-levels the death, the kind is no longer beaten (it may
+        // win now) -> defer the egress and let it engage.
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
+            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 5) };
+        var world = BuildWorldBeaten(hist, selfLevel: 20,
+            Mob(MobGuid, "Drudge Skulker", 7u));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_CorpseOnly_False()
+    {
+        // A corpse is not an attackable monster -> no stalemate.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u, corpse: true));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    // ---- IsLethalBeatenKind (shared verdict for the veto + the egress gate) ----
+    // Single source of truth so IsOptionalAttackOnBeatenKind and
+    // OnlyBeatenMonstersInView can never disagree about which kinds count.
+
+    [Fact]
+    public void IsLethalBeatenKind_RecordedDeathNotOutleveled_True()
+    {
+        var hist = LethalBeaten("Drudge Skulker", 7u);
+        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 11));
+    }
+
+    [Fact]
+    public void IsLethalBeatenKind_SurvivedNoDeath_False()
+    {
+        // No death recorded -> not LETHAL-beaten (the deadlock-fix boundary): the
+        // bot may re-attempt it.
+        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
+            NearDeaths: 3, Fights: 3, LastOutcome: "near-death", Ineffective: 0) };
+        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 8u, "Mosswart", currentLevel: 11));
+    }
+
+    [Fact]
+    public void IsLethalBeatenKind_OutleveledDeath_False()
+    {
+        // Once the bot out-levels the death the kind is re-testable -> not beaten.
+        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
+            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 5) };
+        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 20));
+    }
+
+    [Fact]
+    public void IsLethalBeatenKind_NoRecord_False()
+    {
+        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(
+            new[] { Winnable("Rabbit", 9u) }, wcid: 7u, "Drudge Skulker", currentLevel: 11));
+    }
+
+    [Fact]
+    public async Task ProposeGoal_BeatenKindStalemate_SubstitutesExploreEgress()
+    {
+        // End-to-end: the LLM orders Attack on a lethal-beaten kind that is the
+        // only thing in view. The veto drops it AND, because every monster in
+        // view is beaten, the bot Explores OUT instead of re-deferring to the
+        // fallback (which would leave it parked to re-pick the vetoed Attack).
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Attack\",\"target\":{\"name\":\"Drudge Skulker\"},\"rationale\":\"x\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u));
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.Equal("override:beaten-kind-egress", goal.Source);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_BeatenKindVeto_WinnableInView_DoesNotEgress()
+    {
+        // End-to-end mutation guard: the same vetoed Attack, but a WINNABLE
+        // monster is also in view. The egress must NOT fire — there is something
+        // the bot can win against — so the veto DEFERS to the fallback (which
+        // owns engaging the winnable kind). We assert the returned goal came from
+        // the fallback path, NOT the egress: if the OnlyBeatenMonstersInView gate
+        // were dropped, the bot would wrongly Explore away via the egress.
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Attack\",\"target\":{\"name\":\"Drudge Skulker\"},\"rationale\":\"x\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var hist = new[] { LethalBeaten("Drudge Skulker", 7u)[0], Winnable("Rabbit", 9u) };
+        var world = BuildWorldBeaten(hist, selfLevel: 11,
+            Mob(MobGuid, "Drudge Skulker", 7u),
+            Mob(MobGuid + 1, "Rabbit", 9u));
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.NotEqual("override:beaten-kind-egress", goal!.Source);
+        // The veto deferred to the fallback (the gate's contract) rather than
+        // substituting the egress — proving the defer, not merely "not egress".
+        Assert.StartsWith("fallback:", goal.Source);
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
