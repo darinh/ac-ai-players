@@ -2662,25 +2662,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "interaction");
         }
 
-        // Unreachable-Attack repeat loop-break (2026-06-05): cp-2272 cut the
+        // Unreachable-target repeat loop-break (2026-06-05): cp-2272 cut the
         // motor's no-lock fast-fail from 30s to 6s, which ~5x's the rate at
-        // which a weak model can re-emit the SAME Attack on a monster that has
-        // wandered OUT of PVS (no live snapshot, no explored sighting route,
-        // no frontier → motor emits a terminal GoalFailed "selector resolved
-        // to no live object"). Each re-emit just re-fails instantly and wakes
-        // another no-current-goal LLM call — burning quota. Drop the repeat
-        // and defer to the fallback (a real Explore that MOVES the bot) once
-        // the motor has failed to reach this exact target twice. Skipped the
-        // moment the target re-enters PVS (let the real engagement proceed)
-        // and self-expiring as the failures age out of the event window.
+        // which a weak model can re-emit the SAME world-target goal on an
+        // object/creature that has left the world (an Attack on a monster that
+        // wandered OUT of PVS, or a Pickup on a corpse/item that was looted or
+        // despawned) — no live snapshot, no explored sighting route, no frontier
+        // → motor emits a terminal GoalFailed "selector resolved to no live
+        // object". Each re-emit just re-fails instantly and wakes another
+        // no-current-goal LLM call — burning quota. Drop the repeat and defer to
+        // the fallback (a real Explore that MOVES the bot) once the motor has
+        // failed to reach this exact target twice. Skipped the moment the target
+        // re-enters PVS (let the real engagement proceed) and self-expiring as
+        // the failures age out of the event window.
         if (IsUnreachableTargetRepeat(goal, world, events))
         {
             Console.WriteLine(
-                $"[llm-dedup] dropping LLM Attack target={goal.Target}" +
+                $"[llm-dedup] dropping LLM {goal.Kind} target={goal.Target}" +
                 " — target repeatedly unreachable (out of PVS, no route); deferring to fallback.");
             _training?.RecordParseError(decisionId,
-                "dropped-by-dedup: repeatedly-unreachable out-of-PVS Attack target");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "unreachable Attack");
+                "dropped-by-dedup: repeatedly-unreachable out-of-PVS target");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, $"unreachable {goal.Kind}");
         }
 
         // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
@@ -2925,16 +2927,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         ": selector resolved to no live object";
 
     /// <summary>
-    /// True iff an LLM <see cref="GoalKind.Attack"/> is re-proposing a target
-    /// the motor has REPEATEDLY (≥ <c>UnreachableRepeatThreshold</c>) failed
-    /// to reach with a terminal "selector resolved to no live object"
-    /// GoalFailed — i.e. the named monster is out of PVS, the bot has no
-    /// explored sighting route to it, and frontier exploration found nothing.
-    /// Re-emitting it just re-fails instantly (cp-2272's 6s no-lock fast-fail)
-    /// and wakes another no-current-goal LLM call, burning per-day quota.
+    /// True iff an LLM goal is re-proposing a target the motor has REPEATEDLY
+    /// (≥ <c>UnreachableRepeatThreshold</c>) failed to reach with a terminal
+    /// "selector resolved to no live object" GoalFailed — i.e. the named target
+    /// is out of PVS, the bot has no explored sighting route to it, and frontier
+    /// exploration found nothing. Re-emitting it just re-fails instantly
+    /// (cp-2272's 6s no-lock fast-fail) and wakes another no-current-goal LLM
+    /// call, burning per-day quota.
+    ///
+    /// Scoped to the world-target verbs that name an object/creature which can
+    /// VANISH from the world (an <see cref="GoalKind.Attack"/> creature that
+    /// wandered off, or a <see cref="GoalKind.Pickup"/> corpse/item that was
+    /// looted or despawned). NPC-directed verbs (Talk/Give) have their own
+    /// dedicated loop guards and are deliberately not covered here.
     ///
     /// Pure, no policy state: the implicit cooldown is the recent-event
-    /// window — once the failures age out the Attack flows again (and the
+    /// window — once the failures age out the goal flows again (and the
     /// motor's cp-2271 sighting-route path gets another try). Skipped the
     /// instant the target re-enters PVS (<see cref="VisibleMatchesSelector"/>)
     /// so a real engagement is never suppressed. Correlates by the failed
@@ -2944,7 +2952,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsUnreachableTargetRepeat(
         Goal goal, WorldStateProjection world, EventStream events)
     {
-        if (goal.Kind != GoalKind.Attack) return false;
+        if (goal.Kind is not (GoalKind.Attack or GoalKind.Pickup)) return false;
         var target = goal.Target;
         var targetName = target?.Name;
         if (target is null || string.IsNullOrWhiteSpace(targetName)) return false;
