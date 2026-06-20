@@ -2699,6 +2699,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, $"unreachable {goal.Kind}");
         }
 
+        // Low-health Attack-defer loop-break (reduce-llm-call-volume): when the bot's
+        // health is below the re-engage threshold the Motor REFUSES to walk an Attack
+        // into melee, failing the goal "combat deferred: self-health too low to
+        // re-engage — recover before attacking". A weak model re-emits Attack every
+        // cycle anyway (live cp039-validate: 30 such deferrals in one low-health
+        // stretch), each waking a no-current-goal LLM call the Motor defers again —
+        // burning quota while the bot should be RECOVERING. After the Motor has
+        // deferred an Attack for low health repeatedly, substitute an Explore egress
+        // so the bot LEAVES the fight and lets health regen instead of re-emitting an
+        // Attack it is too weak to land. Fires EVEN with a monster in view (unlike the
+        // stuck/talk/use egresses) — the whole point is the bot is too weak to engage
+        // the visible monster; the Motor's own low-health disengage/flee reflexes own
+        // safety, and the untargeted-Explore visible fallback now excludes attackable
+        // monsters while combat-suppressed (HandshakeDriver) so the recover-egress
+        // cannot lock a monster as its Explore landmark and walk back into danger.
+        // Self-limiting: as the bot moves away its health recovers and normal
+        // combat resumes. Own self-health failure history only; the LLM still chose
+        // WHAT to fight — this only defers it while recovering. No game knowledge.
+        if (goal.Kind == GoalKind.Attack && IsLowHealthDeferredAttackRepeat(events))
+        {
+            Console.WriteLine(
+                $"[llm-override] low-health egress: dropping LLM Attack target={goal.Target}" +
+                " — Motor repeatedly deferred it for low self-health; substituting Explore{anywhere} to recover.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-override: LLM Attack repeatedly deferred for low self-health (recover)");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:low-health-attack-egress",
+                "mechanical low-health egress: the Motor repeatedly refused this Attack because " +
+                "self-health is below the re-engage threshold; leaving the fight to recover instead " +
+                "of re-emitting an Attack too weak to land");
+        }
+
         // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
         // ledger shows it keeps LOSING to (the IsBeatenKind verdict the
         // autonomous picker and the COMBAT SAFETY prompt rule already apply). A
@@ -2952,6 +2984,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // dialogue, no hardcoded names/wcids/landblocks, no game knowledge.
     private const string InteractOutOfReachFailMarker =
         "interaction target out of reach";
+
+    // Marker substring of the Motor's low-self-health Attack-defer GoalFailed reason
+    // (HandshakeDriver: "{Kind}: combat deferred: self-health too low to re-engage —
+    // recover before attacking"). Distinct from the two unreachable-target signals
+    // above: the target is reachable, but the BOT is too weak to engage it.
+    private const string CombatDeferredLowHealthMarker =
+        "self-health too low to re-engage";
+
+    /// <summary>
+    /// True iff the Motor has REPEATEDLY (>= threshold) failed an Attack with the
+    /// low-self-health defer reason in the recent event window — the bot is below the
+    /// combat re-engage health threshold and a weak model keeps re-emitting Attack
+    /// that the Motor defers, burning a no-current-goal LLM call each cycle while the
+    /// bot should be recovering. The caller substitutes an Explore egress (leave the
+    /// fight, let health regen). Pure read of the bot's OWN GoalFailed history — no
+    /// target choice, no self-state threshold logic here (that lives in the Motor),
+    /// no game knowledge.
+    /// </summary>
+    internal static bool IsLowHealthDeferredAttackRepeat(EventStream events)
+    {
+        const int LookbackEvents = 30;
+        const int LowHealthDeferRepeatThreshold = 2;
+        var deferrals = 0;
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (ev.Kind != EventKind.GoalFailed) continue;
+            if (ev.Text is null ||
+                ev.Text.IndexOf(CombatDeferredLowHealthMarker, StringComparison.Ordinal) < 0)
+                continue;
+            if (++deferrals >= LowHealthDeferRepeatThreshold) return true;
+        }
+        return false;
+    }
 
     /// <summary>
     /// True iff an LLM goal is re-proposing a target the motor has REPEATEDLY
