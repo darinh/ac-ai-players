@@ -2007,9 +2007,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // ORIGINATES a combat commitment. We fire ONLY on the quiescent
         // post-kill path: currentGoal == null AND no decision-worthy change has
         // arrived since the last LLM look (FirstChainInterruptingKindSince — an
-        // inventory change, NPC dialog, zone change, readable text, or an action
+        // inventory change, NPC dialog, readable text, or an action
         // rejection incl. a fresh disengage all route to the LLM instead; a
-        // kill's own combat ServerMessage/feedback/damage do NOT, so the chain
+        // kill's own combat ServerMessage/feedback/damage do NOT (nor does a
+        // landblock crossing — see IsChainInterruptingKind), so the chain
         // is not made inert by its own kills). So a genuinely decision-worthy
         // event is never masked by one more autonomous Attack. If the stack top
         // is a kill-count commitment and a matching,
@@ -4147,9 +4148,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // chain (ChooseCombatChainTarget) mint another Attack toward an active
     // kill-count commitment. A NARROW allowlist of genuinely decision-worthy
     // changes: an item LEAVING inventory (give/use/sell — a deliberate act),
-    // NPC dialog, a zone change, readable popup/book text, and ANY action
-    // rejection (which INCLUDES the Motor's DisengageLowHealth refusal, so a
-    // fresh disengage stops the chain).
+    // NPC dialog, readable popup/book text, and ANY action rejection (which
+    // INCLUDES the Motor's DisengageLowHealth refusal, so a fresh disengage
+    // stops the chain).
     // It deliberately EXCLUDES the events a kill emits every time as ordinary
     // combat progress — ServerMessage ("you have slain ..."), CombatFeedback,
     // InboundDamageTaken — and SelfProgressChanged, so the chain is not made
@@ -4162,17 +4163,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // kill-count one, so it does NOT activate this chain (IsActiveKillCommitment
     // accepts only kill-count predicates) and is evaluated every tick — this
     // chain fires ONLY for pure kill-count grinds, where the loot is an
-    // incidental trophy. The LLM re-engages at the next bound (every
-    // MaxCombatChainAttacks mints, and on any genuine event above) and re-reads
-    // inventory then (as far as prompt fitting surfaces it). Combat SAFETY is
-    // owned by the Motor's dispatch self-preservation gate and the losing-fight
-    // disengage reflexes (not by this routing gate); the kill-count completion
-    // predicate + the MaxCombatChainAttacks cap also bound the chain. Pure
-    // wire-event-kind classification; no game-content knowledge.
+    // incidental trophy.
+    // It ALSO excludes LandblockChanged: crossing a cell boundary mid-grind is
+    // not itself decision-worthy here, because the visible-target filter in
+    // ChooseCombatChainTarget already yields to the LLM (no-matching-monster)
+    // when the committed kind is NOT present in the new area, while if the SAME
+    // committed kind IS visible there the grind simply continued across the
+    // boundary. Treating every crossing as an interrupt burned an LLM call every
+    // few kills with the committed kind still in view (observed live:
+    // gate:chain-interrupting-event:LandblockChanged). A genuine area change
+    // still re-engages the LLM at the next MaxCombatChainAttacks bound, and
+    // danger is owned by the disengage reflex (a non-excluded ActionRejected)
+    // independently of zone changes.
+    // The LLM re-engages at the next bound (every MaxCombatChainAttacks mints,
+    // and on any genuine event above) and re-reads inventory then (as far as
+    // prompt fitting surfaces it). Combat SAFETY is owned by the Motor's dispatch
+    // self-preservation gate and the losing-fight disengage reflexes (not by this
+    // routing gate); the kill-count completion predicate + the
+    // MaxCombatChainAttacks cap also bound the chain. Pure wire-event-kind
+    // classification; no game-content knowledge.
     internal static bool IsChainInterruptingKind(EventKind kind) =>
         kind is EventKind.InventoryItemRemoved
              or EventKind.NpcDialog
-             or EventKind.LandblockChanged
              or EventKind.PopupString
              or EventKind.BookText
              or EventKind.ActionRejected;
@@ -5041,7 +5053,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // name is copied from observed perception exactly like the
             // QUEST-DIALOG COMPILER copies a named target.
             if (monsterInView)
-                sb.AppendLine("- COMMIT A WINNING GRIND AS A KILL-COUNT INTENT: when you decide to keep `Attack`ing a monster KIND you are ALREADY winning against (its inline `[your record: ...]` or `combat history` shows `kills` and no fresh `deaths`/`ineffective`) and there is NO un-acted quest/server directive, PUSH an intent in the SAME response as your `Attack` — `kind`:\"hunt\", `target_name` the kind's name — and pick the completion that matches your aim: `{\"type\":\"kill_count_since_push_at_least\",\"count\":<a few>,\"name_contains\":\"<the kind's name>\"}` to commit to THAT kind (the bot then attacks only monsters whose name matches), OR `{\"type\":\"kill_count_total_at_least\",\"count\":<n>}` to count kills of ANY winnable kind toward a running session total (the bot attacks the nearest winnable monster of any kind). Set `deadline_seconds`. While that intent stays TOP the bot keeps `Attack`ing the nearest matching, in-view, not-`beaten` monster toward the count ON ITS OWN — you are NOT re-asked each kill, so you only re-decide when the count is met, the kind stops being winnable, a different decision-worthy event occurs (loot, dialog, a zone change, danger), or the deadline fires. Push this ONLY while you are winning — never for a kind whose record shows `deaths`/`ineffective` and no `kills`. A quest/server directive ALWAYS outranks a grind (compile it per the QUEST-DIALOG COMPILER rule first), and don't grind one spot forever — when a count completes, weigh moving on or seeking a kill-task.");
+                sb.AppendLine("- COMMIT A WINNING GRIND AS A KILL-COUNT INTENT: when you decide to keep `Attack`ing a monster KIND you are ALREADY winning against (its inline `[your record: ...]` or `combat history` shows `kills` and no fresh `deaths`/`ineffective`) and there is NO un-acted quest/server directive, PUSH an intent in the SAME response as your `Attack` — `kind`:\"hunt\", `target_name` the kind's name — and pick the completion that matches your aim: `{\"type\":\"kill_count_since_push_at_least\",\"count\":<a few>,\"name_contains\":\"<the kind's name>\"}` to commit to THAT kind (the bot then attacks only monsters whose name matches), OR `{\"type\":\"kill_count_total_at_least\",\"count\":<n>}` to count kills of ANY winnable kind toward a running session total (the bot attacks the nearest winnable monster of any kind). Set `deadline_seconds`. While that intent stays TOP the bot keeps `Attack`ing the nearest matching, in-view, not-`beaten` monster toward the count ON ITS OWN — you are NOT re-asked each kill, so you only re-decide when the count is met, the matching kind stops being winnable or leaves your view, a different decision-worthy event occurs (loot, dialog, danger), the bot re-checks on its own after a few autonomous attacks, or the deadline fires. Push this ONLY while you are winning — never for a kind whose record shows `deaths`/`ineffective` and no `kills`. A quest/server directive ALWAYS outranks a grind (compile it per the QUEST-DIALOG COMPILER rule first), and don't grind one spot forever — when a count completes, weigh moving on or seeking a kill-task.");
         }
         // The AUTONOMOUS PICKER rule only makes sense when the
         // `## Autonomous picker activity` section is present (same gate the

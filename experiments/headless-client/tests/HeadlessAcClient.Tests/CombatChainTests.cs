@@ -127,10 +127,22 @@ public class CombatChainTests
     {
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.InventoryItemRemoved));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.NpcDialog));
-        Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.LandblockChanged));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.PopupString));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.BookText));
         Assert.True(LlmGoalPolicy.IsChainInterruptingKind(EventKind.ActionRejected));
+    }
+
+    [Fact]
+    public void IsChainInterruptingKind_LandblockChanged_NotInterrupting()
+    {
+        // cp029: crossing a cell boundary mid-grind is not itself decision-worthy
+        // for the kill-count chain. ChooseCombatChainTarget's visible-target filter
+        // already yields (no-matching-monster) when the committed kind is absent in
+        // the new area; if the same kind is still visible the grind simply continued
+        // across the boundary. So LandblockChanged no longer preempts the chain —
+        // bounded by the MaxCombatChainAttacks cap + the 0xFFFB disengage (a
+        // non-excluded ActionRejected) which still interrupts on danger.
+        Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.LandblockChanged));
     }
 
     [Fact]
