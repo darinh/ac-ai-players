@@ -8393,16 +8393,19 @@ public class LlmGoalPolicyTests
         Visible = visible,
     };
 
-    private static void AppendNoLiveObjectFail(EventStream es, string targetName)
+    private static void AppendNoLiveObjectFail(EventStream es, string targetName, string kind = "Attack")
         => es.Append(new StreamEvent
         {
             Sequence = -1, Utc = DateTimeOffset.UtcNow,
             Kind = EventKind.GoalFailed, GoalId = Guid.NewGuid(),
-            Name = targetName, Text = $"Attack: selector resolved to no live object",
+            Name = targetName, Text = $"{kind}: selector resolved to no live object",
         });
 
     private static Goal AttackGoal(string name)
         => new() { Kind = GoalKind.Attack, Target = new Selector { Name = name } };
+
+    private static Goal PickupGoalNamed(string name)
+        => new() { Kind = GoalKind.Pickup, Target = new Selector { Name = name } };
 
     [Fact]
     public void IsUnreachableTargetRepeat_TwoFailsOutOfPvs_Suppresses()
@@ -8488,6 +8491,63 @@ public class LlmGoalPolicyTests
         var world = BuildWorldWithVisible();
         var goal = new Goal { Kind = GoalKind.Attack, Target = new Selector { Wcid = 7u } };
         Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(goal, world, es));
+    }
+
+    // ---- IsUnreachableTargetRepeat now also covers Pickup ----
+    // Live cp032-validate.log: the LLM re-emitted Pickup on a corpse that had
+    // despawned/been looted 39x (each resolves to MISS -> "selector resolved to
+    // no live object" -> falls through to picker -> re-prompt re-picks it),
+    // burning ~39 LLM calls. The guard was Attack-only; a vanished corpse is the
+    // same out-of-world repeat, so Pickup is now covered.
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_PickupTwoFailsOutOfView_Suppresses()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Chicken", kind: "Pickup");
+        AppendNoLiveObjectFail(es, "Corpse of Chicken", kind: "Pickup");
+        var world = BuildWorldWithVisible(); // corpse not in view
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Corpse of Chicken"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_PickupOneFail_AllowsRetry()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Chicken", kind: "Pickup");
+        var world = BuildWorldWithVisible();
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Corpse of Chicken"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_PickupTargetInView_NeverSuppresses()
+    {
+        // The corpse is back in view -> let the real Pickup resolve and fire.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Chicken", kind: "Pickup");
+        AppendNoLiveObjectFail(es, "Corpse of Chicken", kind: "Pickup");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Corpse of Chicken", Wcid = 7u,
+            Distance = 3f, IsCorpse = true,
+        });
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Corpse of Chicken"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_TalkKind_StillDoesNotFire()
+    {
+        // NPC-directed verbs (Talk/Give) keep their own dedicated loop guards and
+        // are deliberately NOT covered by this world-target repeat suppressor.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Samuel", kind: "Talk");
+        AppendNoLiveObjectFail(es, "Samuel", kind: "Talk");
+        var world = BuildWorldWithVisible();
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Samuel" } };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(talk, world, es));
     }
 
     [Fact]
