@@ -2593,7 +2593,13 @@ internal sealed class HandshakeDriver : IDisposable
                                             Utc = DateTimeOffset.UtcNow,
                                             Kind = EventKind.ActionRejected,
                                             Text = $"Attack rejected: {attackLabel}",
-                                            ErrorCode = atkDone.ErrorCode,
+                                            // Remap the ambiguous raw swing-loop
+                                            // cancel (0x0036, also emitted by
+                                            // inventory paths) to a Motor-reserved
+                                            // code so the combat chain can single
+                                            // out THIS cancel; semantic refusals
+                                            // pass through with their real code.
+                                            ErrorCode = CombatRetry.SurfacedRejectionCode(atkDone.ErrorCode),
                                             ErrorLabel = attackLabel,
                                         });
                                     }

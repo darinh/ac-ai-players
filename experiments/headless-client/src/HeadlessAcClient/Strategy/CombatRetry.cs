@@ -125,9 +125,37 @@ internal static class CombatRetry
     /// <summary>
     /// AttackDone(ActionCancelled) wire code (0x0036) — the server's
     /// auto-repeat swing loop dropped. See the file header for the loop
-    /// mechanics.
+    /// mechanics. NOTE: this raw code is NOT unique to combat — inventory
+    /// paths also emit WeenieError 0x36 (ActionCancelled) — so consumers that
+    /// must single out the COMBAT swing-loop cancel key on
+    /// <see cref="SurfacedSwingLoopCancelCode"/> instead (see
+    /// <see cref="SurfacedRejectionCode"/>).
     /// </summary>
     public const uint AttackDoneActionCancelled = 0x0036u;
+
+    /// <summary>
+    /// Motor-reserved ActionRejected code stamped on the SURFACED combat
+    /// swing-loop cancel event in place of the ambiguous raw wire code
+    /// <see cref="AttackDoneActionCancelled"/> (0x0036). Mirrors the
+    /// transport-failure reserved codes (0xFFFC-0xFFFE): real WeenieError
+    /// codes are far smaller, so this high reserved value is an unambiguous
+    /// discriminator that lets the combat chain recognise the swing-loop
+    /// cancel WITHOUT misclassifying a same-coded inventory ActionCancelled.
+    /// </summary>
+    public const uint SurfacedSwingLoopCancelCode = 0xFFFAu;
+
+    /// <summary>
+    /// The ErrorCode to stamp on a SURFACED AttackDone rejection StreamEvent.
+    /// The combat swing-loop cancel (raw <see cref="AttackDoneActionCancelled"/>)
+    /// is remapped to the Motor-reserved <see cref="SurfacedSwingLoopCancelCode"/>
+    /// so a combat-only consumer can recognise it unambiguously; every other
+    /// (semantic) AttackDone error passes through unchanged so the LLM still
+    /// sees the real refusal code. Pure wire-code remap; no game knowledge.
+    /// </summary>
+    public static uint SurfacedRejectionCode(uint rawAttackDoneErrorCode) =>
+        rawAttackDoneErrorCode == AttackDoneActionCancelled
+            ? SurfacedSwingLoopCancelCode
+            : rawAttackDoneErrorCode;
 
     /// <summary>
     /// Decide whether a non-zero <c>GameEventAttackDone</c> error should be

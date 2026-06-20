@@ -236,6 +236,25 @@ public class CombatRetryTests
         Assert.Equal(0x0036u, CombatRetry.AttackDoneActionCancelled);
     }
 
+    [Fact]
+    public void SurfacedRejectionCode_RemapsCancelToReserved_PassesOthersThrough()
+    {
+        // The swing-loop cancel (raw 0x0036) is remapped to the Motor-reserved
+        // surfaced code so a combat-only consumer can single it out; the reserved
+        // code must differ from the raw code and from the transport reserved
+        // range (0xFFFC-0xFFFE) and the disengage code (0xFFFB).
+        Assert.Equal(CombatRetry.SurfacedSwingLoopCancelCode,
+            CombatRetry.SurfacedRejectionCode(CombatRetry.AttackDoneActionCancelled));
+        Assert.NotEqual(CombatRetry.AttackDoneActionCancelled, CombatRetry.SurfacedSwingLoopCancelCode);
+        Assert.DoesNotContain(CombatRetry.SurfacedSwingLoopCancelCode,
+            new uint[] { 0xFFFBu, 0xFFFCu, 0xFFFDu, 0xFFFEu });
+        // Every other (semantic) AttackDone error passes through unchanged so the
+        // LLM still sees the real refusal code.
+        Assert.Equal(0x001Du, CombatRetry.SurfacedRejectionCode(0x001Du)); // YoureTooBusy
+        Assert.Equal(0x0010u, CombatRetry.SurfacedRejectionCode(0x0010u));
+        Assert.Equal(0x046Au, CombatRetry.SurfacedRejectionCode(0x046Au));
+    }
+
     // --- ShouldAbandonUnbeatable (early "cannot damage" abandon) ------------
     private const int MinEvaded = 12;
 

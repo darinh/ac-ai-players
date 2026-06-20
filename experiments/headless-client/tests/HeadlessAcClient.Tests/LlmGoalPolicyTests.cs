@@ -511,6 +511,54 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsChainInterruptingEvent_AttackLoopCancelActionRejected_DoesNotInterrupt()
+    {
+        // The SURFACED combat swing-loop cancel carries the Motor-reserved code
+        // (0xFFFA) — the Motor handles it itself (an immediate attack re-send),
+        // so while a kill-count decomposition is running it names no
+        // LLM-actionable problem and must NOT preempt the chain with a round-trip.
+        var e = new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = CombatRetry.SurfacedSwingLoopCancelCode, ErrorLabel = "ActionCancelled",
+        };
+        Assert.False(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_RawInventoryActionCancel_StillInterrupts()
+    {
+        // The RAW ActionCancelled wire code (0x0036) also rides on inventory
+        // ActionCancelled rejections (InventoryServerSaveFailed) — those are
+        // decision-worthy and must STILL interrupt. Only the surfaced COMBAT
+        // cancel (the Motor-reserved code) is benign, so a raw 0x0036 event must
+        // not be mistaken for it.
+        var e = new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = CombatRetry.AttackDoneActionCancelled, ErrorLabel = "ActionCancelled",
+            ItemGuid = 0x80000001u, Name = "some item",
+        };
+        Assert.NotEqual(CombatRetry.AttackDoneActionCancelled, CombatRetry.SurfacedSwingLoopCancelCode);
+        Assert.True(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_DangerDisengageActionRejected_StillInterrupts()
+    {
+        // The Motor's self-preservation disengage carries a reserved code that is
+        // neither a transport failure (0xFFFC-0xFFFE) nor the swing-loop cancel
+        // (0xFFFA), so it stays a decision-worthy interrupt. This is the safety
+        // guarantee cp025 established — it must survive the cancel-code exclusion.
+        var e = new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFBu, ErrorLabel = "DisengageLowHealth",
+        };
+        Assert.True(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
     public void FirstChainInterruptingKindSince_SkipsTransportFailureActionRejected()
     {
         // The transport-failure ActionRejected must NOT be reported as an
@@ -2900,6 +2948,32 @@ public class LlmGoalPolicyTests
         {
             Sequence = -1, Utc = DateTimeOffset.UtcNow,
             Kind = EventKind.PickerArrivedNoAction, ErrorCode = 0xFFFE,
+        }));
+    }
+
+    [Fact]
+    public void IsAttackLoopCancelRejection_MatchesOnlyTheReservedSurfacedCode()
+    {
+        StreamEvent Reject(uint code) => new()
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected, ErrorCode = code,
+        };
+        // The helper keys on the Motor-reserved SURFACED cancel code, NOT the
+        // raw wire code — the raw 0x0036 is ambiguous (inventory also emits it).
+        Assert.NotEqual(CombatRetry.AttackDoneActionCancelled, CombatRetry.SurfacedSwingLoopCancelCode);
+        Assert.True(LlmGoalPolicy.IsAttackLoopCancelRejection(Reject(CombatRetry.SurfacedSwingLoopCancelCode)));
+        // The RAW wire code (inventory ActionCancelled also carries it) is NOT matched.
+        Assert.False(LlmGoalPolicy.IsAttackLoopCancelRejection(Reject(0x0036))); // raw ActionCancelled
+        // Transport, disengage, semantic, and adjacent codes are NOT cancels.
+        Assert.False(LlmGoalPolicy.IsAttackLoopCancelRejection(Reject(0xFFFE))); // transport Unreachable
+        Assert.False(LlmGoalPolicy.IsAttackLoopCancelRejection(Reject(0xFFFB))); // self-preservation disengage
+        Assert.False(LlmGoalPolicy.IsAttackLoopCancelRejection(Reject(0x046A))); // semantic refusal
+        // Non-rejection kind is never a swing-loop cancel even carrying the code.
+        Assert.False(LlmGoalPolicy.IsAttackLoopCancelRejection(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction, ErrorCode = CombatRetry.SurfacedSwingLoopCancelCode,
         }));
     }
 

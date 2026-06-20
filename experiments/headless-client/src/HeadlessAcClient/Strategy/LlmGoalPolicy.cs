@@ -2838,6 +2838,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         ev.ErrorCode is 0xFFFCu or 0xFFFDu or 0xFFFEu;
 
     /// <summary>
+    /// True iff the ActionRejected is the SURFACED combat swing-loop cancel —
+    /// it carries the Motor-reserved code
+    /// <see cref="CombatRetry.SurfacedSwingLoopCancelCode"/> (0xFFFA) stamped by
+    /// the AttackDone surfacing path (HandshakeDriver) in place of the raw wire
+    /// code 0x0036. The Motor handles this signal itself — it immediately
+    /// re-sends the bare attack to restart the loop (the fast-retry arm in
+    /// HandshakeDriver) — so it names no problem the LLM can act on; it is the
+    /// routine teardown of one swing iteration, not a semantic refusal. The
+    /// reserved code is REQUIRED for correctness: the raw 0x0036 also rides on
+    /// inventory ActionCancelled rejections, which ARE decision-worthy and must
+    /// still interrupt — keying on the raw code would conflate them. A genuine
+    /// action refusal (out-of-range, cannot-attack, skill-too-low, …) carries
+    /// its own code, and the Motor's self-preservation disengage carries its
+    /// own reserved code, so neither is matched here. Pure wire-code
+    /// classification reusing the named combat constant; no game knowledge.
+    /// </summary>
+    internal static bool IsAttackLoopCancelRejection(StreamEvent ev) =>
+        ev.Kind == EventKind.ActionRejected &&
+        ev.ErrorCode == CombatRetry.SurfacedSwingLoopCancelCode;
+
+    /// <summary>
     /// The exact suffix of the GoalFailed reason text the motor emits when a
     /// goal's selector resolved to no live world object AND no sighting route
     /// AND no frontier (the terminal "give up, re-deliberate" branch in
@@ -4156,22 +4177,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.BookText
              or EventKind.ActionRejected;
 
-    // Event-level chain-interrupt test (cp025): the kind is chain-interrupting
-    // AND, for an ActionRejected, it is NOT a benign TRANSPORT failure — the
-    // Motor's own "could not reach / resolve the target" outcome (reserved codes
-    // 0xFFFC-0xFFFE via IsTransportFailureRejection). Such a failure is the
-    // Motor's own routing/resolution result (the target stopped resolving), not a
-    // decision-worthy external change, so the autonomous decomposition should
-    // continue to its next matching target instead of forcing an LLM round-trip
-    // (live cp024-validate.log: a transport-coded ActionRejected closed the gate
-    // and burned a per-target LLM call). The higher-severity rejections this gate
-    // exists to catch — the Motor's self-preservation disengage (a NON-transport
-    // reserved code) and semantic action refusals — are not transport failures,
-    // so they still interrupt. Pure reserved-code classification reusing the
-    // existing transport-failure predicate; no game knowledge.
+    // Event-level chain-interrupt test: the kind is chain-interrupting AND,
+    // for an ActionRejected, it is NOT a benign motor-side outcome the
+    // autonomous decomposition can ignore. Two such outcomes are excluded:
+    //   * a TRANSPORT failure (cp025) — the Motor's own "could not reach /
+    //     resolve the target" result (reserved codes 0xFFFC-0xFFFE via
+    //     IsTransportFailureRejection); the target stopped resolving, so the
+    //     decomposition advances to its next matching target; and
+    //   * an auto-repeat swing-loop-dropped signal (the SURFACED combat cancel,
+    //     Motor-reserved code via IsAttackLoopCancelRejection) — the Motor
+    //     immediately re-sends the attack to restart the loop, so re-deliberating
+    //     names nothing the LLM can act on (live cp025-validate.log: this signal,
+    //     surfaced as an ActionRejected, closed the gate and burned a per-cancel
+    //     LLM round-trip every few swings of a kill-count grind). The reserved
+    //     code keeps this distinct from a same-named inventory ActionCancelled
+    //     (raw 0x0036), which is decision-worthy and still interrupts.
+    // Neither is a decision-worthy external change, so neither forces an LLM
+    // round-trip. The higher-severity rejections this gate exists to catch —
+    // the Motor's self-preservation disengage (a NON-transport reserved code)
+    // and semantic action refusals (their own codes) — match neither benign
+    // predicate, so they still interrupt. The rejection event is still
+    // surfaced to the LLM regardless; this only governs whether it preempts
+    // the autonomous chain. Pure wire-code classification; no game knowledge.
     internal static bool IsChainInterruptingEvent(StreamEvent e) =>
         IsChainInterruptingKind(e.Kind)
-        && !(e.Kind == EventKind.ActionRejected && IsTransportFailureRejection(e));
+        && !(e.Kind == EventKind.ActionRejected
+             && (IsTransportFailureRejection(e) || IsAttackLoopCancelRejection(e)));
 
     // The FIRST chain-interrupting event newer than `floorSeq` (newest-first
     // scan), or null when none — and its EventKind names the interrupter so the
