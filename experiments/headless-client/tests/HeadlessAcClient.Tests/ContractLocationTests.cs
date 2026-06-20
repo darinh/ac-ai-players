@@ -181,6 +181,20 @@ public class ContractLocationTests
         return es;
     }
 
+    private static EventStream WithExploreGoals(string targetName, int times, DateTimeOffset at)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < times; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1,
+                Utc = at,
+                Kind = EventKind.GoalEmitted,
+                Text = $"Explore target=name=\"{targetName}\" item= source=llm:test",
+            });
+        return es;
+    }
+
     private static WorldStateProjection WorldWithContracts(params ContractProjection[] contracts) => new()
     {
         Self = new SelfProjection
@@ -213,8 +227,57 @@ public class ContractLocationTests
             "## Contracts");
 
         Assert.Contains("DONE (stage 3, complete)", cap);
-        Assert.Contains("Talked Pathwarden Thorolf 4x", cap);
+        Assert.Contains("gone to Pathwarden Thorolf 4x (Talk/Explore)", cap);
         Assert.Contains("no separate hand-in", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3RepeatedExplorePursuit_SurfacesDoneNoHandIn()
+    {
+        // cp031: a stage-3 contract whose objective is a LOCATE/REACH task is
+        // pursued via navigate-only Explore (not Talk), so the Talk-only hand-in
+        // count never reached the threshold and the bot roved between two done
+        // contracts forever (live cp029/cp030). Explore-pursuits toward the turn-in
+        // NPC since stage-3 now count too — at a HIGHER threshold (3) than Talk (2),
+        // since the first Explore is ordinary travel-to-reach, not an attempt.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 807u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithExploreGoals("Buckminster", 3, since), null),
+            "## Contracts");
+
+        Assert.Contains("DONE (stage 3, complete)", cap);
+        Assert.Contains("gone to Buckminster 3x (Talk/Explore)", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3_TwoExploresZeroTalk_DoesNotFire()
+    {
+        // cp031 safety (gpt-5.4 review): ordinary travel to a far turn-in NPC can
+        // take a couple of Explore goals BEFORE the first hand-in Talk. Two
+        // Explores with zero Talk must NOT prematurely declare a turn-in contract
+        // "finished" — the Explore threshold is 3 (1 travel + 2 redundant
+        // re-navigations), above ordinary travel, so the contract keeps its real
+        // hand-in attempt.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 809u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), WithExploreGoals("Pathwarden Thorolf", 2, since), null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
     }
 
     [Fact]
@@ -237,6 +300,36 @@ public class ContractLocationTests
 
         Assert.DoesNotContain("DONE (stage 3, complete)", cap);
         Assert.Contains("turn-in NPC: Pathwarden Thorolf", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3_OneTalkPlusOneExplore_DoesNotFire()
+    {
+        // cp031 safety: the gate fires on the Talk threshold (2) OR the (higher)
+        // Explore threshold (3) independently, NOT on their SUM — a single real
+        // hand-in Talk plus a single navigate-toward Explore (1+1) reaches NEITHER
+        // threshold, so a contract that genuinely clears on a final hand-in keeps
+        // its one real attempt. Otherwise a turn-in contract would be declared done
+        // after just one Talk (plus the Explore to reach the NPC).
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 808u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = since, Kind = EventKind.GoalEmitted,
+          Text = "Explore target=name=\"Pathwarden Thorolf\" item= source=llm:test" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = since, Kind = EventKind.GoalEmitted,
+          Text = "Talk target=name=\"Pathwarden Thorolf\" item= source=llm:test" });
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), es, null),
+            "## Contracts");
+
+        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
     }
 
     [Fact]
@@ -303,7 +396,7 @@ public class ContractLocationTests
             "## Contracts");
 
         Assert.Contains("DONE (stage 3, complete)", cap);
-        Assert.Contains($"Talked {oddName} 3x", cap);
+        Assert.Contains($"gone to {oddName} 3x (Talk/Explore)", cap);
     }
 
     [Fact]
