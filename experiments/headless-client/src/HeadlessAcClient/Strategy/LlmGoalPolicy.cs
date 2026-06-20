@@ -4707,6 +4707,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // the per-contract decision inputs change).
     private string? _lastContractStage3Diag;
 
+    // Post-stage-3 pursuit thresholds for the "DONE (stage 3)" recognition (the
+    // ## Contracts note + its diagnostic, kept in sync). A Talk is a discrete
+    // hand-in ATTEMPT, so 2 of them while STILL stage-3 means done. An Explore is
+    // NAVIGATION: the FIRST is legitimate travel-to-reach (not an attempt), so the
+    // equivalent "stuck/roving a done contract" signal needs 1 travel + 2 redundant
+    // re-navigations = 3 — high enough that ordinary travel to a far turn-in NPC
+    // (1-2 Explores) before the first hand-in Talk does NOT trip it.
+    private const int StageDoneTalkThreshold = 2;
+    private const int StageDoneExploreThreshold = 3;
+
     // Diagnostic (cp024 pattern, behavior-preserving): the "DONE (stage 3)" note
     // in ## Contracts fires ONLY after >=2 Talk hand-ins to a UNIQUE turn-in NPC
     // since stage-3 — so it never fires for a stage-3 contract pursued via Explore
@@ -4741,7 +4751,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 if (npcStart is not null)
                     exploreStart = CountRecentExploreGoalsToName(events, npcStart, s3);
             }
-            var doneNoteFires = npcEnd is not null && c.Stage3SinceUtc is not null && uniqEnd && talkEnd >= 2;
+            var doneNoteFires = npcEnd is not null && c.Stage3SinceUtc is not null && uniqEnd
+                && (talkEnd >= StageDoneTalkThreshold || exploreEnd >= StageDoneExploreThreshold);
             line.Append(
                 $"id={c.ContractId} end=\"{npcEnd ?? "-"}\" start=\"{npcStart ?? "-"}\" " +
                 $"obj=\"{Truncate(objective ?? "-", 50)}\" " +
@@ -6594,27 +6605,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 }
 
                 // A stage-3 contract is already complete. If the bot has ALREADY
-                // Talked its turn-in NPC repeatedly SINCE the contract became
-                // stage 3 and it is STILL stage 3, that contract has no separate
-                // hand-in (its reward is the issuer's to grant on its own terms)
-                // — surface that mechanical fact + the bot's OWN post-completion
-                // attempt count so the LLM stops re-attempting a turn-in that has
-                // had no effect. Only when the turn-in NPC is UNIQUE among tracked
-                // contracts (a shared turn-in NPC makes per-contract attribution
-                // ambiguous). A structural read of the bot's goal history scoped
-                // to the done window (no server text, no game knowledge); the LLM
-                // still decides what to do next.
+                // PURSUED its turn-in NPC repeatedly SINCE the contract became
+                // stage 3 — by Talking it to hand in OR Exploring toward it (a
+                // "locate/reach" objective is pursued via navigate-only Explore,
+                // NOT Talk) — and it is STILL stage 3, that contract has no
+                // separate hand-in (its reward is the issuer's to grant on its own
+                // terms) — surface that mechanical fact + the bot's OWN
+                // post-completion attempt count so the LLM stops re-attempting a
+                // turn-in/locate that has had no effect. Only when the turn-in NPC
+                // is UNIQUE among tracked contracts (a shared turn-in NPC makes
+                // per-contract attribution ambiguous). cp030 diagnostic: a done,
+                // Explore-pursued contract (npcEnd set, unique, stage-3) stalled
+                // because this count was Talk-only — counting Explore-toward-npcEnd
+                // too lets the note fire and breaks the roving-Explore loop between
+                // two done contracts. Structural read of the bot's goal history
+                // scoped to the done window (no server text, no game knowledge);
+                // the LLM still decides what to do next.
                 if (c.Stage == 3u && npcEnd is not null && c.Stage3SinceUtc is { } since3
                     && world.Contracts.Count(o =>
                         string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1)
                 {
-                    var handInTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
-                    if (handInTries >= 2)
+                    var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
+                    var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
+                    // Fire on the Talk threshold OR the (higher) Explore threshold
+                    // independently, NOT on the sum. A locate/reach objective is
+                    // pursued ONLY via navigate-only Explore (0 Talk), which the
+                    // old Talk-only count missed; but the FIRST Explore is ordinary
+                    // travel-to-reach, so the Explore threshold is higher than the
+                    // Talk one (see StageDoneExploreThreshold) — ordinary travel to
+                    // a far turn-in NPC before the first hand-in Talk must NOT be
+                    // mistaken for a done, roved contract.
+                    if (talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold)
                         entry.AppendLine(
-                            $"      DONE (stage 3, complete): you have already Talked " +
-                            $"{npcEnd} {handInTries}x and this contract is STILL stage 3 — it " +
-                            $"has no separate hand-in, so further turn-in Talks to {npcEnd} for " +
-                            $"it will not change anything. Treat it as finished and spend your " +
+                            $"      DONE (stage 3, complete): you have already gone to " +
+                            $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
+                            $"contract completed and it is STILL stage 3 — it has no separate " +
+                            $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
+                            $"will not change anything. Treat it as finished and spend your " +
                             $"turn on other progress (accept or complete another task).");
                 }
 
