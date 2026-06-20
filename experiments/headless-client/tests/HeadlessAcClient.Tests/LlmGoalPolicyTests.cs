@@ -467,6 +467,64 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsChainInterruptingEvent_TransportFailureActionRejected_DoesNotInterrupt()
+    {
+        // cp025: a transport-failure rejection (the Motor could not reach/resolve
+        // the target — it stopped resolving) is a benign routing outcome; the
+        // decomposition should advance to its next matching target, not force an
+        // LLM call.
+        var e = new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable",
+        };
+        Assert.False(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_SemanticActionRejected_StillInterrupts()
+    {
+        // A semantic (non-transport) rejection — a real action refusal or a
+        // self-preservation disengage — IS decision-worthy and still interrupts.
+        var e = new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046Au, ErrorLabel = "TradeAiDoesntWant",
+        };
+        Assert.True(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_NpcDialog_StillInterrupts()
+    {
+        var e = new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hi" };
+        Assert.True(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void IsChainInterruptingEvent_NonInterruptingKind_DoesNotInterrupt()
+    {
+        var e = new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "you have slain a foe" };
+        Assert.False(LlmGoalPolicy.IsChainInterruptingEvent(e));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_SkipsTransportFailureActionRejected()
+    {
+        // The transport-failure ActionRejected must NOT be reported as an
+        // interrupter (so the chain keeps minting through it).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable",
+        });
+        Assert.Null(LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
     public void StreamEvent_HeardSpeech_ToString_RendersSpeakerAndLine()
     {
         var e = new StreamEvent
