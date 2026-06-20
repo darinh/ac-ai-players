@@ -645,6 +645,29 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_FindKillTaskRule_AssertsDirectedNpcCheckOutranksGrinding()
+    {
+        // The decision the rule governs: an un-talked NPC AND a grindable
+        // monster both in view, no active contract. The rule must assert that
+        // checking the un-talked npc OUTRANKS open monster-grinding for XP, so
+        // the bot pursues NPCs / the way forward before farming XP (live: both
+        // models grind-loop the tutorial monsters past the un-talked skip-NPC).
+        var npc = CivilianNpc(0x90000001u) with { Distance = 4f };
+        var monster = new VisibleObjectProjection
+        {
+            Guid = 0x91000001u, Name = "Mite", Wcid = 7u, ItemType = 0x10u,
+            Distance = 5f, IsCreature = true, IsMonster = true, IsAttackable = true,
+        };
+        var world = BuildVisibleWorld(new[] { npc, monster });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: new HashSet<uint>());
+
+        Assert.Contains("OUTRANKS open monster-grinding for XP", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {
         // A single not-yet-talked NPC that is the nearest object is already in
