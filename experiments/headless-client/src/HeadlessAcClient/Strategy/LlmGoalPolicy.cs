@@ -1658,6 +1658,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // criterion-2 stall is precisely characterizable. Logs only on change.
         EmitContractStage3Diagnostic(world, events);
 
+        // Every-tick reset of the contract-source diagnostic throttle (its EMISSION
+        // runs later at the prompt-build point with the refreshed talked-set). This
+        // must run before any early return so a finished-batch state that toggles
+        // during an in-flight/backoff span still re-logs when it reappears.
+        ResetContractBatchSourceDiagThrottle(world);
+
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
         {
@@ -2183,6 +2189,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 ? (ue.UseCounts.Count, ue.DistinctChurnLatched)
                 : null;
         RecordTalkedNpcs(events);
+        // Behavior-preserving diagnostic (cp030 pattern): when the bot holds a
+        // FINISHED contract batch, surface whether a contract SOURCE is actionable
+        // in view (so a non-engage is the LLM ignoring it) or not (the source is
+        // out of view with no navigate-back signal). Emitted AFTER RecordTalkedNpcs
+        // and right before BuildUserPrompt so it reads the SAME refreshed talked-set
+        // the FIND-A-KILL-TASK-SOURCE rule uses. Console-only; logs on change;
+        // resets when the finished-batch state is absent.
+        EmitContractBatchSourceDiagnostic(world);
         var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
@@ -4843,6 +4857,77 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (key == _lastContractStage3Diag) return;
         _lastContractStage3Diag = key;
         Console.WriteLine("[contract-stage3] " + key.TrimEnd(' ', '|'));
+    }
+
+    private string? _lastContractBatchSourceDiag;
+
+    // Diagnostic (cp030 pattern, behavior-preserving): when the bot holds a
+    // FINISHED contract batch (every tracked contract stage-3), the FIND-A-
+    // KILL-TASK-SOURCE rule can only nudge re-engaging a source that is CURRENTLY
+    // in `Visible nearby` (its untalked-npc / open-panel-vendor gate). Live
+    // cp033-validate: the bot held a done batch while the issuing source sat out
+    // of view (1 PVS create, 0 engage) and kept grinding open-world monsters.
+    // Log, throttled, whether a source IS actionable in view (the rule fires, so
+    // any non-engage is the LLM ignoring it) or NOT (a known source is out of
+    // view and the bot has no navigate-back signal), plus the nearest visible
+    // npc, so the follow-up fix targets the real cause. Instance-scoped throttle
+    // (like the cp030 stage-3 diagnostic). The EMISSION runs at the prompt-build
+    // decision point right after RecordTalkedNpcs, so it reads the SAME refreshed
+    // talked-set the FIND-A-KILL-TASK-SOURCE rule uses; the THROTTLE RESET runs
+    // separately EVERY tick (ResetContractBatchSourceDiagThrottle, before any
+    // early return), so a later reappearance of the same state logs again even if
+    // the batch toggled during an in-flight/backoff span. Reads own contract
+    // projection + own perception + own talked-set only; no decision, no game
+    // knowledge.
+    private static bool HeldBatchAllDone(WorldStateProjection world)
+        => world.Contracts.Count > 0 && world.Contracts.All(c => c.Stage == 3u);
+
+    // Every-tick throttle reset (runs before ProposeGoalCore's early returns):
+    // clear the dedupe key whenever the finished-batch state is absent, so a
+    // later return to the SAME state is not suppressed as a duplicate. Decoupled
+    // from the emission (which needs the refreshed talked-set, only available at
+    // the prompt-build point). Field-only; no prompt/decision effect.
+    private void ResetContractBatchSourceDiagThrottle(WorldStateProjection world)
+    {
+        if (!HeldBatchAllDone(world))
+            _lastContractBatchSourceDiag = null;
+    }
+
+    private void EmitContractBatchSourceDiagnostic(WorldStateProjection world)
+    {
+        // Not applicable when no finished batch is held; the every-tick reset
+        // above owns clearing the throttle, so just skip emission here.
+        if (!HeldBatchAllDone(world)) return;
+        var vendorInView = world.Visible.Any(v => v.IsVendor);
+        var untalkedNpcInView =
+            CountUntalkedNpcsInView(world, _talkedNpcGuids, _talkedNpcNames, excludeVendors: true) > 0;
+        var key = BuildContractSourceDiagKey(world, untalkedNpcInView, vendorInView);
+        if (key == _lastContractBatchSourceDiag) return;
+        _lastContractBatchSourceDiag = key;
+        Console.WriteLine("[contract-source] " + key);
+    }
+
+    // Pure key builder for the contract-batch-source diagnostic (extracted for
+    // deterministic unit testing). The nearest non-monster, non-corpse creature
+    // is the "is a task-giver near?" proxy. `ruleFires` mirrors the FIND-A-
+    // KILL-TASK-SOURCE gate (an open-panel-less vendor OR an un-talked npc in
+    // view). Own perception + own contract projection + own vendor-panel state
+    // only; no decision, no game knowledge.
+    internal static string BuildContractSourceDiagKey(
+        WorldStateProjection world, bool untalkedNpcInView, bool vendorInView)
+    {
+        var ruleFires = (vendorInView && world.Vendor is null) || untalkedNpcInView;
+        var nearestNpc = world.Visible
+            .Where(v => v.IsCreature && !v.IsMonster && !v.IsCorpse)
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        var npcDesc = nearestNpc is null
+            ? "none"
+            : $"\"{OneLine(nearestNpc.Name) ?? "-"}\"@{(nearestNpc.Distance is { } d ? d.ToString("F1") : "?")}";
+        return
+            $"doneBatch={world.Contracts.Count} untalkedNpcInView={untalkedNpcInView} " +
+            $"vendorInView={vendorInView} vendorPanelOpen={world.Vendor is not null} " +
+            $"ruleFires={ruleFires} nearestNpc={npcDesc}";
     }
 
     // cp-2402: cheap pre-pass for the BLOCKED-targets rule's relevance gate.
