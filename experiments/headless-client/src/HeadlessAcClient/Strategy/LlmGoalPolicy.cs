@@ -2731,6 +2731,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "of re-emitting an Attack too weak to land");
         }
 
+        // Wield no-weapon loop-break (reduce-llm-call-volume): the Motor's direct
+        // Wield dispatch FAILS with "no equippable inventory weapon" when an LLM
+        // Wield selector resolves to nothing the wield path can equip into a weapon
+        // slot. A model can re-emit such a Wield every cycle, burning a
+        // no-current-goal LLM call each time with no equip and no progress. After
+        // repeated such rejections, AND only while the bag holds NO un-wielded item
+        // that could actually be wielded into a weapon slot, drop the Wield and defer
+        // to the fallback (which MOVES the bot) instead of re-emitting an
+        // un-equippable Wield. The inventory gate keeps a legitimate swap to a
+        // just-acquired weapon flowing: the LLM Wield path can dequip the blocker,
+        // but the mechanical fallback deliberately will not, so dropping the Wield
+        // while a real weapon is in the bag would strand it. Self-limiting: once an
+        // equippable weapon is held (or the failures age out of the window) Wield
+        // flows again. Own Wield-failure history + own equip-slot bits only; no item
+        // preference, no game knowledge.
+        if (goal.Kind == GoalKind.Wield
+            && IsWieldNoWeaponRepeat(events)
+            && !HasEquippableInventoryWeapon(world))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Wield item={goal.Item}" +
+                " — Motor repeatedly found no equippable inventory weapon and the bag holds none; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: repeated Wield with no equippable inventory weapon");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield no-weapon");
+        }
+
         // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
         // ledger shows it keeps LOSING to (the IsBeatenKind verdict the
         // autonomous picker and the COMBAT SAFETY prompt rule already apply). A
@@ -3014,6 +3041,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 ev.Text.IndexOf(CombatDeferredLowHealthMarker, StringComparison.Ordinal) < 0)
                 continue;
             if (++deferrals >= LowHealthDeferRepeatThreshold) return true;
+        }
+        return false;
+    }
+
+    // Marker substring of the Motor's Wield-dispatch failure reason
+    // (HandshakeDriver emits "{Kind}: wield: no equippable inventory weapon")
+    // raised when an LLM Wield selector resolves to nothing the wield path can
+    // equip into a weapon slot.
+    private const string WieldNoWeaponFailMarker =
+        "wield: no equippable inventory weapon";
+
+    /// <summary>
+    /// True iff the Motor has REPEATEDLY (>= threshold) rejected a Wield with the
+    /// "no equippable inventory weapon" reason in the recent event window — a model
+    /// keeps re-emitting a Wield the wield path cannot satisfy, burning a
+    /// no-current-goal LLM call each cycle with no equip and no progress. The caller
+    /// pairs this with <see cref="HasEquippableInventoryWeapon"/> and, only when
+    /// nothing equippable is held, drops the Wield and defers to the fallback. Pure
+    /// read of the bot's OWN GoalFailed history — no item preference, no game
+    /// knowledge.
+    /// </summary>
+    internal static bool IsWieldNoWeaponRepeat(EventStream events)
+    {
+        const int LookbackEvents = 30;
+        const int WieldNoWeaponRepeatThreshold = 2;
+        var rejects = 0;
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (ev.Kind != EventKind.GoalFailed) continue;
+            if (ev.Text is null ||
+                ev.Text.IndexOf(WieldNoWeaponFailMarker, StringComparison.Ordinal) < 0)
+                continue;
+            if (++rejects >= WieldNoWeaponRepeatThreshold) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// True if the bag holds an un-wielded item the wield path could equip into a
+    /// primary-weapon slot — its ValidLocations intersects
+    /// <see cref="WeaponSwap.MainWeaponSlotMask"/> (the melee/missile/held/two-handed
+    /// slots). Pure equip-slot-bit projection: the dedicated ammo slot and the
+    /// armor/jewelry slots are NOT weapon slots, so a bag holding only those (or only
+    /// an already-wielded weapon) reads as "no weapon". Mirrors the Motor's own
+    /// arm-from-inventory test; no item preference, no game knowledge. The Wield
+    /// loop-break is withheld whenever this is true, so a legitimate swap to a
+    /// just-acquired weapon (which the LLM Wield path can actuate but the mechanical
+    /// fallback will not) is never dropped.
+    /// </summary>
+    internal static bool HasEquippableInventoryWeapon(WorldStateProjection world)
+    {
+        var inventory = world.Inventory;
+        if (inventory is null) return false;
+        foreach (var it in inventory)
+        {
+            if (it.WieldedAt is uint w && w != 0) continue;
+            if (it.ValidLocations is uint vl && (vl & WeaponSwap.MainWeaponSlotMask) != 0)
+                return true;
         }
         return false;
     }
