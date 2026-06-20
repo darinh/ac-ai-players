@@ -2951,9 +2951,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     ///
     /// Scoped to the world-target verbs that name an object/creature which can
     /// VANISH from the world (an <see cref="GoalKind.Attack"/> creature that
-    /// wandered off, or a <see cref="GoalKind.Pickup"/> corpse/item that was
-    /// looted or despawned). NPC-directed verbs (Talk/Give) have their own
-    /// dedicated loop guards and are deliberately not covered here.
+    /// wandered off, a <see cref="GoalKind.Pickup"/> corpse/item that was looted
+    /// or despawned, or a <see cref="GoalKind.Use"/> on a world object — a corpse
+    /// to loot, a chest, a door — that despawned/was removed). NPC-directed verbs
+    /// (Talk/Give) have their own dedicated loop guards and are deliberately not
+    /// covered here. Complements the world-object Use-churn guards
+    /// (<see cref="IsStationaryWorldUseRepeat"/>/<see cref="IsLandblockWorldUseChurn"/>),
+    /// which count Use EMISSIONS within a landblock: this one fires on the SPECIFIC
+    /// terminal "no live object" FAILURE (the target is gone), keyed on the failed
+    /// name, after 2 fails, and is NOT landblock-scoped — so it catches a vanished
+    /// Use target faster and across a landblock boundary.
     ///
     /// Pure, no policy state: the implicit cooldown is the recent-event
     /// window — once the failures age out the goal flows again (and the
@@ -2966,7 +2973,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsUnreachableTargetRepeat(
         Goal goal, WorldStateProjection world, EventStream events)
     {
-        if (goal.Kind is not (GoalKind.Attack or GoalKind.Pickup)) return false;
+        if (goal.Kind is not (GoalKind.Attack or GoalKind.Pickup or GoalKind.Use)) return false;
+        // A two-object Use (Use an inventory ITEM on/with a target — a key on a
+        // door, a reagent, etc.) fails with the SAME "no live object" text when the
+        // ITEM does not resolve, not because the world TARGET vanished — and the
+        // GoalFailed event carries only the target name, so we cannot tell them
+        // apart after the fact. The in-view short-circuit also cannot clear it when
+        // the target is self. So scope the Use coverage to a BARE world-object Use
+        // (no item) — exactly the vanished corpse/chest/door case this catches.
+        // Consequence (acknowledged, not a regression — Use was uncovered before
+        // this): a two-object Use whose WORLD TARGET genuinely vanished is also
+        // exempt here, and the world-object Use-churn guards likewise skip
+        // item-Uses, so that rarer case stays uncaught by name alone. Catching it
+        // safely would need the failure event to distinguish an item-miss from a
+        // target-miss — a separate change, deliberately out of scope.
+        if (goal.Kind is GoalKind.Use && goal.Item is { IsEmpty: false }) return false;
         var target = goal.Target;
         var targetName = target?.Name;
         if (target is null || string.IsNullOrWhiteSpace(targetName)) return false;
