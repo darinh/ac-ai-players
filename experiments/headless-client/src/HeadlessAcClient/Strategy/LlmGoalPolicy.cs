@@ -5502,7 +5502,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
         sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
-        if (WeaponSkillSwapAdvisory(world) is string crSkillAdvisory)
+        if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string crSkillAdvisory)
             sb.AppendLine($"- {crSkillAdvisory}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
             sb.AppendLine(crHealthLine);
@@ -7332,6 +7332,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
 
+        // ── ## Recently refused items (protected-tail) ──
+        // The action-side dedup (IsGoalRecentlyRejected) DROPS a re-emit of a goal
+        // the server semantically refused, but a weak model keeps re-SELECTING the
+        // same item every decision because nothing in the prompt tells it the
+        // action was refused. Live (cp021-validate.log): ~50 Wield emissions of the
+        // SAME both-hands weapon in one run (a swap whose dequip the server would
+        // not actuate), every one dropped, while real progress stalled. Surface the
+        // refused items by name so the LLM stops re-emitting the same goal and does
+        // something else. Reuses the SAME server-refusal set the self-arm
+        // suggestions + the weapon-skill advisory filter on (recentlyServerRefused,
+        // computed once above): transport (could-not-walk) failures are excluded
+        // there, so a ground item the bot walk-timed-out toward is not mislabeled.
+        // Reads the bot's OWN rejection bookkeeping; the guid is from the wire, the
+        // name from the item projection — no game knowledge, no priority. Usually
+        // empty, so it costs zero prompt budget unless the bot is looping a refusal.
+        if (recentlyServerRefusedGuids.Count > 0)
+        {
+            var refusedRows = world.Inventory
+                .Where(i => recentlyServerRefusedGuids.Contains(i.Guid) && !string.IsNullOrWhiteSpace(i.Name))
+                .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+            if (refusedRows.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("## Recently refused items (the server would not actuate a recent action on these)");
+                foreach (var it in refusedRows)
+                    sb.AppendLine(
+                        $"- {OneLine(it.Name)} (wcid={it.Wcid}): the server REFUSED a recent action on " +
+                        "this item (e.g. it could not be equipped/swapped right now). Re-selecting it with " +
+                        "the SAME goal (`Wield`/`Use`/`Give`) is unlikely to work right now — prefer keeping " +
+                        "your current gear or a DIFFERENT item/action; you can revisit it later if the " +
+                        "situation changes.");
+            }
+        }
+
         // ── ## Self core capsule (protected-tail cut-proof) ──
         // The full `## Self` section renders in the BODY just after the ~19KB
         // RULES preamble. When a dense scene inflates the prompt past the
@@ -7371,7 +7407,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
             sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded)}");
-            if (WeaponSkillSwapAdvisory(world) is string capSkillAdvisory)
+            if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string capSkillAdvisory)
                 sb.AppendLine($"- {capSkillAdvisory}");
             // The `tapped out` hunt-discovery fact (combat-ready + farmed this
             // area past the dwell threshold with +0 levels) renders in the body
@@ -8274,7 +8310,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// names no specific weapon/skill and makes no choice — the LLM decides
     /// whether to swap.
     /// </summary>
-    internal static string? WeaponSkillSwapAdvisory(WorldStateProjection world)
+    internal static string? WeaponSkillSwapAdvisory(
+        WorldStateProjection world, HashSet<uint>? refusedGuids = null)
     {
         var trained = world.Self.TrainedSkills;
         if (trained is null || trained.Count == 0) return null;
@@ -8288,10 +8325,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (wielded?.GoverningSkill is not string wieldedSkill) return null;
         if (IsTrained(wieldedSkill)) return null; // already on a trained-skill weapon
 
+        // Skip a trained bag weapon the server recently REFUSED to equip: telling
+        // the bot to "Wield it" while `## Recently refused items` says the equip
+        // was refused would be a same-prompt contradiction (and it would just be
+        // dropped). Mirrors the self-arm suggestion filter (recentlyServerRefused).
         var trainedBagWeapon = world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint bw || bw == 0) &&
             i.ItemType is uint it && (it & ItemTypeMasks.MeleeWeapon) != 0 &&
-            IsTrained(i.GoverningSkill));
+            IsTrained(i.GoverningSkill) &&
+            (refusedGuids is null || !refusedGuids.Contains(i.Guid)));
         if (trainedBagWeapon?.GoverningSkill is not string bagSkill) return null;
 
         return $"weapon skill MISMATCH: your wielded {wielded.Name} uses the {wieldedSkill} skill, " +
