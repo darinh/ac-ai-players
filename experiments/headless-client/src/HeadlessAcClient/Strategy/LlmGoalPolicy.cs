@@ -1625,6 +1625,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         UpdateDeathRecencyTracking(world.Self.NumDeaths, nowUtc);
         UpdateGoalProgressTracking(world, currentGoal, nowUtc);
 
+        // Behavior-preserving diagnostic (cp024 pattern): surface why the stage-3
+        // contract "DONE" note does or does not fire, so the roving-Explore
+        // criterion-2 stall is precisely characterizable. Logs only on change.
+        EmitContractStage3Diagnostic(world, events);
+
         // 1) Poll an in-flight call first — if it finished, consume it.
         if (_inflight is not null && _inflight.IsCompleted)
         {
@@ -4668,6 +4673,92 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
+    }
+
+    // Mirror of CountRecentTalkGoalsToName for Explore goals — counts the bot's
+    // OWN recent Explore goals aimed at a given NAME emitted at/after `since`,
+    // reading the same DEDICATED durable goal-emission window (so re-Explores
+    // spread across minutes are not evicted by perception traffic). A stage-3
+    // contract whose objective is a "locate/reach" task is pursued via Explore
+    // (navigate-only), NOT Talk, so the turn-in hand-in count misses it; this is
+    // the Explore-pursuit equivalent. Purely structural read of the bot's own
+    // goal-emission history; no server text, no game knowledge.
+    internal static int CountRecentExploreGoalsToName(EventStream events, string name, DateTimeOffset since)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return 0;
+        var n = 0;
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text)))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Explore", StringComparison.Ordinal)) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            if (string.Equals(nm.Groups[1].Value, name, StringComparison.OrdinalIgnoreCase)) n++;
+        }
+        return n;
+    }
+
+    // Throttle key for the stage-3 contract DONE-note diagnostic (log only when
+    // the per-contract decision inputs change).
+    private string? _lastContractStage3Diag;
+
+    // Diagnostic (cp024 pattern, behavior-preserving): the "DONE (stage 3)" note
+    // in ## Contracts fires ONLY after >=2 Talk hand-ins to a UNIQUE turn-in NPC
+    // since stage-3 — so it never fires for a stage-3 contract pursued via Explore
+    // (a "locate/reach" objective) or one sharing a turn-in NPC, letting the bot
+    // rove between such already-done contracts (live cp029-validate.log: an
+    // Explore ping-pong between two stage-3 contract NPCs, broker present, 0 Buy).
+    // Surface, throttled, the exact inputs to that decision (per stage-3 contract:
+    // its end/start NPC, turn-in uniqueness, stage-3 timestamp presence, and the
+    // bot's OWN Talk/Explore pursuit counts since stage-3) so the follow-up
+    // behavior broadening is precise. Reads only the bot's own contract projection
+    // + goal-emission history; no server text, no game knowledge, no decision.
+    private void EmitContractStage3Diagnostic(WorldStateProjection world, EventStream events)
+    {
+        if (world.Contracts is not { Count: > 0 } contracts) return;
+        var line = new StringBuilder();
+        foreach (var c in contracts)
+        {
+            if (c.Stage != 3u) continue;
+            var npcEnd = OneLine(c.NpcEnd);
+            var npcStart = OneLine(c.NpcStart);
+            var objective = OneLine(c.Description);
+            var uniqEnd = npcEnd is not null && contracts.Count(o =>
+                string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1;
+            int talkEnd = -1, exploreEnd = -1, exploreStart = -1;
+            if (c.Stage3SinceUtc is { } s3)
+            {
+                if (npcEnd is not null)
+                {
+                    talkEnd = CountRecentTalkGoalsToName(events, npcEnd, s3);
+                    exploreEnd = CountRecentExploreGoalsToName(events, npcEnd, s3);
+                }
+                if (npcStart is not null)
+                    exploreStart = CountRecentExploreGoalsToName(events, npcStart, s3);
+            }
+            var doneNoteFires = npcEnd is not null && c.Stage3SinceUtc is not null && uniqEnd && talkEnd >= 2;
+            line.Append(
+                $"id={c.ContractId} end=\"{npcEnd ?? "-"}\" start=\"{npcStart ?? "-"}\" " +
+                $"obj=\"{Truncate(objective ?? "-", 50)}\" " +
+                $"uniqEnd={uniqEnd} since3={(c.Stage3SinceUtc is not null)} " +
+                $"talkEnd={talkEnd} expEnd={exploreEnd} expStart={exploreStart} doneNote={doneNoteFires} | ");
+        }
+        if (line.Length == 0)
+        {
+            // No stage-3 contracts this tick — clear the throttle so a later
+            // reappearance in the SAME state is not suppressed as a duplicate.
+            _lastContractStage3Diag = null;
+            return;
+        }
+        var key = line.ToString();
+        if (key == _lastContractStage3Diag) return;
+        _lastContractStage3Diag = key;
+        Console.WriteLine("[contract-stage3] " + key.TrimEnd(' ', '|'));
     }
 
     // cp-2402: cheap pre-pass for the BLOCKED-targets rule's relevance gate.
