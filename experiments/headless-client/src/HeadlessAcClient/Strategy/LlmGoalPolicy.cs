@@ -4811,6 +4811,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return n;
     }
 
+    // Count the bot's OWN recent Talk OR Use goals aimed at a given NAME emitted
+    // at/after `since` (same dedicated durable goal-emission window as the Talk /
+    // Explore counters). Used to BOUND the refresh-a-finished-batch nudge: a source
+    // is re-engaged via Talk (a dialog task-giver) or Use (a vendor), so both verbs
+    // count as one re-engage attempt. Two-object Uses (Use a door WITH a key) carry
+    // a different target name and so do not match the source. Purely a structural
+    // read of the bot's own goal history; no server text, no game knowledge.
+    internal static int CountRecentEngageGoalsToName(EventStream events, string name, DateTimeOffset since)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return 0;
+        var n = 0;
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text)))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!(txt.StartsWith("Talk", StringComparison.Ordinal)
+                || txt.StartsWith("Use", StringComparison.Ordinal))) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            if (string.Equals(nm.Groups[1].Value, name, StringComparison.OrdinalIgnoreCase)) n++;
+        }
+        return n;
+    }
+
     // Throttle key for the stage-3 contract DONE-note diagnostic (log only when
     // the per-contract decision inputs change).
     private string? _lastContractStage3Diag;
@@ -4824,6 +4852,71 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // (1-2 Explores) before the first hand-in Talk does NOT trip it.
     private const int StageDoneTalkThreshold = 2;
     private const int StageDoneExploreThreshold = 3;
+
+    // Max times the refresh-a-finished-batch nudge re-engages the SAME source
+    // before treating it as tapped. The source is re-engaged for a NEW batch, NOT a
+    // hand-in; if the batch is still all-done after this many re-engages, re-engaging
+    // again is futile (a tapped source, or a refresh mechanic the bot cannot drive),
+    // so the nudge self-limits and the bot moves on. Two attempts mirrors the
+    // stage-3 hand-in threshold — enough to actuate, low enough to avoid a loop.
+    private const int BatchRefreshAttemptThreshold = 2;
+
+    // The NAMES of any done-batch issuing/turn-in NPCs (a done contract's
+    // NpcStart/NpcEnd) currently in view as a creature/vendor. Shared by the
+    // unbounded "a contract source IS in view" check (DoneBatchIssuerInView) and the
+    // bounded refresh nudge (DoneBatchSourceInViewToRefresh). Yields only when every
+    // tracked contract is DONE (a finished batch). Own contract projection + own
+    // perception; no hardcoded source name, no object-type priority.
+    private static IEnumerable<string> VisibleDoneBatchSourceNames(WorldStateProjection world)
+    {
+        if (world.Contracts.Count == 0 || !world.Contracts.All(c => c.Stage == 3u))
+            yield break;
+        foreach (var c in world.Contracts)
+            foreach (var srcName in new[] { OneLine(c.NpcStart), OneLine(c.NpcEnd) })
+                if (!string.IsNullOrWhiteSpace(srcName)
+                    && world.Visible.Any(v =>
+                        (v.IsCreature || v.IsVendor)
+                        && string.Equals(OneLine(v.Name), srcName, StringComparison.OrdinalIgnoreCase)))
+                    yield return srcName!;
+    }
+
+    // A done batch's issuing/turn-in source is currently in view (UNBOUNDED — true
+    // even after the refresh bound is spent, because a tapped source is still a
+    // source physically in view). Used so the RETURN-TO-A-CONTRACT-SOURCE
+    // travel-back nudge does NOT also fire ("no source in view") while such a source
+    // stands right here — that source IS in view, so engage/skip it, do not travel
+    // away to find one.
+    internal static bool DoneBatchIssuerInView(WorldStateProjection world) =>
+        VisibleDoneBatchSourceNames(world).Any();
+
+    // The already-engaged-source case FIND-A-KILL-TASK-SOURCE's un-talked/unbrowsed
+    // gate MISSES: the bot holds a FINISHED batch (every tracked contract stage-3),
+    // and the npc/vendor that ISSUED it (a done contract's start/turn-in NPC NAME) is
+    // in view, but it has already been talked/browsed — so FIND will not re-nudge it
+    // even though re-engaging it is how a fresh batch is obtained. Recognize that
+    // source by name-matching a done contract's NpcStart/NpcEnd against a visible
+    // creature/vendor, BOUNDED by the bot's own recent re-engage count since the
+    // batch completed (so a tapped source is not re-engaged forever). Own contract
+    // projection + own perception + own goal history; no hardcoded source name, no
+    // object-type priority, no source-side decision to engage.
+    internal static bool DoneBatchSourceInViewToRefresh(WorldStateProjection world, EventStream events)
+    {
+        // When the batch BECAME all-done = the latest per-contract stage-3 time;
+        // count re-engages only since then (earlier hand-ins do not count).
+        DateTimeOffset? since = null;
+        foreach (var c in world.Contracts)
+            if (c.Stage3SinceUtc is { } s && (since is null || s > since))
+                since = s;
+        foreach (var srcName in VisibleDoneBatchSourceNames(world))
+        {
+            var attempts = since is { } sinceUtc
+                ? CountRecentEngageGoalsToName(events, srcName, sinceUtc)
+                : 0;
+            if (attempts < BatchRefreshAttemptThreshold)
+                return true;
+        }
+        return false;
+    }
 
     // Diagnostic (cp024 pattern, behavior-preserving): the "DONE (stage 3)" note
     // in ## Contracts fires ONLY after >=2 Talk hand-ins to a UNIQUE turn-in NPC
@@ -5403,10 +5496,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.Contracts.Count == 0 || world.Contracts.All(c => c.Stage == 3u);
         var heldBatchAllDone =
             world.Contracts.Count > 0 && world.Contracts.All(c => c.Stage == 3u);
-        if (((vendorInView && world.Vendor is null) || untalkedNpcInView)
+        // Recognize the already-engaged source that issued a now-finished batch (a
+        // known broker in view that can hand out a FRESH batch) — the case FIND's
+        // un-talked/unbrowsed disjuncts miss. Bounded; see DoneBatchSourceInViewToRefresh.
+        var doneBatchSourceToRefresh = DoneBatchSourceInViewToRefresh(world, events);
+        if (((vendorInView && world.Vendor is null) || untalkedNpcInView || doneBatchSourceToRefresh)
             && noActionableContract
             && (monsterInView || heldBatchAllDone))
-        sb.AppendLine("- FIND A KILL-TASK SOURCE (vendor or task-giver npc): a `vendor`-tagged object OR a dialog `npc` in `Visible nearby` may offer task contracts — a kill-task you accept, complete, and turn in for a reward. You CANNOT see what a `vendor` offers until you `Use` it to reveal its wares in `## Vendor offerings`; a task-giver looks like any other `npc` — you only learn it offers a task by `Talk`ing it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` OR an un-talked `npc` is in view, it is worth ONE `Use{target: name=\"<vendor>\"}` on a vendor (or ONE `Talk{target: name=\"<npc>\"}` on an un-talked npc) to check for a task — DIRECTED progression that OUTRANKS open monster-grinding for XP. So with NO actionable tracked contract, `Talk` each un-talked `npc` in view ONCE (an npc whose quoted `role`/title is shown — e.g. a faction role — is especially likely to give a quest, directions, or the way forward) BEFORE grinding monsters for XP: open grinding is the FALLBACK once every nearby un-talked `npc` has been Talked and no directive remains. Checking is not itself quest progress, and you still decide whether anything offered is worth pursuing (a `HOSTILE` attacker on you, low `health`, or an explicit server/quest directive still takes priority over an optional npc check). Talk each un-talked npc only ONCE — re-talking an already-talked npc is not progress.");
+        sb.AppendLine("- FIND A KILL-TASK SOURCE (vendor or task-giver npc): a `vendor`-tagged object OR a dialog `npc` in `Visible nearby` may offer task contracts — a kill-task you accept, complete, and turn in for a reward. You CANNOT see what a `vendor` offers until you `Use` it to reveal its wares in `## Vendor offerings`; a task-giver looks like any other `npc` — you only learn it offers a task by `Talk`ing it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` OR an un-talked `npc` is in view, it is worth ONE `Use{target: name=\"<vendor>\"}` on a vendor (or ONE `Talk{target: name=\"<npc>\"}` on an un-talked npc) to check for a task — DIRECTED progression that OUTRANKS open monster-grinding for XP. So with NO actionable tracked contract, `Talk` each un-talked `npc` in view ONCE (an npc whose quoted `role`/title is shown — e.g. a faction role — is especially likely to give a quest, directions, or the way forward) BEFORE grinding monsters for XP: open grinding is the FALLBACK once every nearby un-talked `npc` has been Talked and no directive remains. Checking is not itself quest progress, and you still decide whether anything offered is worth pursuing (a `HOSTILE` attacker on you, low `health`, or an explicit server/quest directive still takes priority over an optional npc check). Talk each un-talked npc only ONCE — re-talking an already-talked npc is not progress. ONE EXCEPTION — REFRESH A FINISHED BATCH: when every tracked contract is DONE (stage 3, a finished batch) and the `npc`/`vendor` your batch CAME FROM is in view (its `start NPC`/`turn-in NPC` shown in `## Contracts` matches a `Visible nearby` name), re-engaging THAT specific source — `Use` it if it is a `vendor`, `Talk` it if it is a dialog `npc` — to request a FRESH batch IS progress, EVEN though you have engaged it before: a finished batch has earned its reward and lets you take new work. This is NOT re-handing-in the settled contracts (those need no further hand-in) — it is asking for a NEW batch to keep earning, which OUTRANKS grinding monsters. If re-engaging that source brings no new contract after a try or two, it is tapped — move on and hunt/explore.");
         // RETURN-TO-A-CONTRACT-SOURCE nudge (cp035): the FIND-A-KILL-TASK-SOURCE
         // rule above only fires when a source is IN VIEW. Live cp034-diag: holding
         // a FINISHED batch, the bot drifted into open country with NO npc/source in
@@ -5419,7 +5516,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // never a re-Talk of a settled turn-in NPC; the LLM decides, and safety /
         // an active directive still outrank. Raw contract dat facts + own
         // perception; no object-type priority, no source-side decision to pursue.
-        var noContractSourceInView = !vendorInView && !untalkedNpcInView;
+        // A done-batch issuer standing in view (even already-talked, and even after
+        // its refresh bound is spent) is a contract source PHYSICALLY in view — so it
+        // must count as "source in view" here, or this travel-back nudge would fire
+        // "NO contract source is in Visible nearby" and "do NOT re-Talk the turn-in
+        // NPC" at the SAME time FIND-A-KILL-TASK-SOURCE's REFRESH exception nudges
+        // re-engaging that very NPC (a direct contradiction for a broker whose issuer
+        // == turn-in NPC). Use the UNBOUNDED issuer-in-view check (not the bounded
+        // refresh predicate) so RETURN stays off whenever the source is present.
+        var noContractSourceInView =
+            !vendorInView && !untalkedNpcInView && !DoneBatchIssuerInView(world);
         // A bearing is only RENDERED in ## Contracts (and thus copyable into an
         // Explore `direction` via the contracts travel instruction) when the bot's
         // OWN position is known AND a contract carries a dat location. Gate on the
