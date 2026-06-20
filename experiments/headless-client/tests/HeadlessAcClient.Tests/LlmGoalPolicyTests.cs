@@ -12793,13 +12793,27 @@ public class LlmGoalPolicyTests
         // Tempo (reduce-llm-call-volume): live evidence (cp2352-livefire) showed the
         // LLM dribbling an XP hoard out in many tiny RaiseAttribute decisions — 10
         // confirmed raises + 2 timeouts to drain ~1188 XP, 12 of 28 LLM calls that
-        // run, each a multi-second deliberation cycle. The rule never stated the
-        // amount's valid RANGE, so the LLM may have assumed small increments. State
-        // the neutral mechanics fact: amount can be up to the full unspent balance in
-        // a single raise. Granularity stays the model's judgment (no prescription).
+        // run, each a multi-second deliberation cycle. cp2352 stated the amount RANGE
+        // permissively (you CAN spend it all) but left granularity to the model "with
+        // no prescription" — and cp026-validate.log shows that did NOT work: the LLM
+        // dribbled the SAME skill in 10-point raises again (12 of 29 LLM calls,
+        // unspent 130->30->20->10). So this rule now DIRECTS a substantial chunk per
+        // raise (escalation justified by the repeat). The range fact is retained.
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
         Assert.Contains("up to your full unspent balance", prompt);
-        Assert.Contains("invest your entire unspent total in a single action", prompt);
+        // The escalated anti-dribble directive (a substantial chunk per raise, not the
+        // same small amount across turns) — the behavior change of this slice.
+        Assert.Contains("commit a SUBSTANTIAL chunk", prompt);
+        Assert.Contains("NOT the same small amount", prompt);
+        // Reconciliation (cp027 review, claude-sonnet-4.6): make the granularity
+        // directive explicitly ORTHOGONAL to the rule's allocation/spread guidance,
+        // so "up to your full unspent balance in one raise" is not misread as license
+        // to dump the whole hoard into one target — the temporal bridge (spread by
+        // choosing a DIFFERENT target next turn, not by dribbling the SAME one) lives
+        // in the rule text, not just the commit message, and covers skills (not only
+        // the attribute-worded spread clause).
+        Assert.Contains("governs raise SIZE, not WHICH target", prompt);
+        Assert.Contains("you may raise a DIFFERENT target next time", prompt);
     }
 
     [Fact]
