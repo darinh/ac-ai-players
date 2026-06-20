@@ -8407,6 +8407,9 @@ public class LlmGoalPolicyTests
     private static Goal PickupGoalNamed(string name)
         => new() { Kind = GoalKind.Pickup, Target = new Selector { Name = name } };
 
+    private static Goal UseGoalNamed(string name)
+        => new() { Kind = GoalKind.Use, Target = new Selector { Name = name } };
+
     [Fact]
     public void IsUnreachableTargetRepeat_TwoFailsOutOfPvs_Suppresses()
     {
@@ -8535,6 +8538,65 @@ public class LlmGoalPolicyTests
         });
         Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
             PickupGoalNamed("Corpse of Chicken"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_UseTwoFailsOutOfView_Suppresses()
+    {
+        // cp036: a Use on a world object that VANISHED (a corpse looted+despawned)
+        // is the same out-of-world repeat as a Pickup-MISS. Two "no live object"
+        // Use fails with the target out of view -> suppress and defer.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Mite Snippet", kind: "Use");
+        AppendNoLiveObjectFail(es, "Corpse of Mite Snippet", kind: "Use");
+        var world = BuildWorldWithVisible(); // corpse not in view
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            UseGoalNamed("Corpse of Mite Snippet"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_UseOneFail_AllowsRetry()
+    {
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Mite Snippet", kind: "Use");
+        var world = BuildWorldWithVisible();
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            UseGoalNamed("Corpse of Mite Snippet"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_UseTargetInView_NeverSuppresses()
+    {
+        // The object is back in view -> let the real Use resolve and fire.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Corpse of Mite Snippet", kind: "Use");
+        AppendNoLiveObjectFail(es, "Corpse of Mite Snippet", kind: "Use");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        {
+            Guid = MobGuid, Name = "Corpse of Mite Snippet", Wcid = 7u,
+            Distance = 3f, IsCorpse = true,
+        });
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            UseGoalNamed("Corpse of Mite Snippet"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_TwoObjectUseWithItem_DoesNotFire()
+    {
+        // A two-object Use (Use an inventory ITEM on/with a target) can fail with
+        // the same "no live object" text when the ITEM does not resolve -> that is
+        // NOT a vanished world target. An item-carrying Use is exempt.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Wooden Door", kind: "Use");
+        AppendNoLiveObjectFail(es, "Wooden Door", kind: "Use");
+        var world = BuildWorldWithVisible(); // door not in view
+        var use = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Wooden Door" },
+            Item = new Selector { Name = "Brass Key" },
+        };
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(use, world, es));
     }
 
     [Fact]
