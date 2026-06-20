@@ -2100,7 +2100,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 CombatChainEnabled,
                 _combatChainCount,
                 MaxCombatChainAttacks,
-                out var chainSkipReason);
+                out var chainSkipReason,
+                combatCapable: IsCombatCapable(world.Inventory));
             if (chainTarget is not null)
             {
                 _combatChainCount++;
@@ -8978,10 +8979,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         bool enabled,
         int chainCount,
         int maxChain,
-        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits)
+        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
+        bool combatCapable = true)
         => ChooseCombatChainTarget(
             top, visible, history, selfLevel, enabled, chainCount, maxChain,
-            out _, perceptionRadius);
+            out _, perceptionRadius, combatCapable);
 
     /// <summary>
     /// Overload that also reports WHY no target was minted (diagnostic only — the
@@ -9000,11 +9002,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int chainCount,
         int maxChain,
         out string? skipReason,
-        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits)
+        float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
+        bool combatCapable = true)
     {
         skipReason = null;
         if (!enabled) { skipReason = "chain-disabled"; return null; }
         if (chainCount >= maxChain) { skipReason = "budget-exhausted"; return null; } // periodic forced LLM re-check
+        // Do not mint an autonomous Attack while the bot cannot deal damage through
+        // the melee/missile attack chain (no wielded melee weapon, and no wielded
+        // missile weapon with ammo loaded). Without this the chain keeps decomposing
+        // a stale kill-count commitment into doomed swings at a monster it cannot
+        // hurt — the server cancels every attack — until the per-target NO-PROGRESS
+        // watchdog and the maxChain re-check drain it. Yielding here routes control
+        // to the LLM, which sees the UNARMED combat-readiness line and arms or does
+        // non-combat progress. Pure wire-state gate; the LLM still chose WHAT to do.
+        if (!combatCapable) { skipReason = "not-combat-capable"; return null; }
         if (visible is null || visible.Count == 0) { skipReason = "no-visible"; return null; }
         if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) { skipReason = "no-active-commitment"; return null; }
 
@@ -9030,6 +9042,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .FirstOrDefault();
         if (target is null) skipReason = "no-matching-monster";
         return target;
+    }
+
+    /// <summary>
+    /// True if the bot can deal damage through the melee/missile attack chain: a
+    /// wielded melee weapon, OR a wielded missile weapon WITH ammo loaded in the
+    /// ammo slot. Mirrors the combat-effective test the SELF-ARM prompt rule and
+    /// cp042's affordance gate use — an empty missile weapon (no loaded ammo)
+    /// cannot fire and is NOT combat-capable. Pure wire-state (WieldedAt + typed
+    /// ItemType / ammo-slot masks); no game knowledge.
+    /// </summary>
+    internal static bool IsCombatCapable(IReadOnlyList<InventoryItemProjection>? inventory)
+    {
+        if (inventory is null) return false;
+        var meleeWielded = false;
+        var missileWielded = false;
+        var ammoLoaded = false;
+        foreach (var i in inventory)
+        {
+            // A weapon counts only when wielded in a MAIN-WEAPON slot. Loaded ammo
+            // sits in the ammo slot (outside WeaponSwap.MainWeaponSlotMask) and can
+            // carry a weapon ItemType bit, so the slot mask — not WieldedAt != 0 —
+            // is what distinguishes a wielded launcher from loaded ammo (mirrors
+            // WeaponSwap.IsWieldedWeapon).
+            if (i.WieldedAt is uint w && (w & WeaponSwap.MainWeaponSlotMask) != 0 && i.ItemType is uint it)
+            {
+                if ((it & ItemTypeMasks.MeleeWeapon) != 0) meleeWielded = true;
+                if ((it & ItemTypeMasks.MissileWeapon) != 0) missileWielded = true;
+            }
+            if (i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot) ammoLoaded = true;
+        }
+        return meleeWielded || (missileWielded && ammoLoaded);
     }
 
 
