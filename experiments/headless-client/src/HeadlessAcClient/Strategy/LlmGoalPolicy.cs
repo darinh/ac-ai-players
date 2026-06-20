@@ -4156,18 +4156,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.BookText
              or EventKind.ActionRejected;
 
-    // The FIRST chain-interrupting event-kind newer than `floorSeq` (newest-first
-    // scan), or null when none. Lets the no-mint diagnostic NAME the specific
-    // interrupter (the cp2925 diagnostic pattern) so the combat-chain tempo gap —
-    // `gate:chain-interrupting-event` with no obvious cause in the log — becomes
-    // characterizable: the next run shows WHICH event-kind starves the chain.
-    // Pure event-kind classification; no game knowledge.
+    // Event-level chain-interrupt test (cp025): the kind is chain-interrupting
+    // AND, for an ActionRejected, it is NOT a benign TRANSPORT failure — the
+    // Motor's own "could not reach / resolve the target" outcome (reserved codes
+    // 0xFFFC-0xFFFE via IsTransportFailureRejection). Such a failure is the
+    // Motor's own routing/resolution result (the target stopped resolving), not a
+    // decision-worthy external change, so the autonomous decomposition should
+    // continue to its next matching target instead of forcing an LLM round-trip
+    // (live cp024-validate.log: a transport-coded ActionRejected closed the gate
+    // and burned a per-target LLM call). The higher-severity rejections this gate
+    // exists to catch — the Motor's self-preservation disengage (a NON-transport
+    // reserved code) and semantic action refusals — are not transport failures,
+    // so they still interrupt. Pure reserved-code classification reusing the
+    // existing transport-failure predicate; no game knowledge.
+    internal static bool IsChainInterruptingEvent(StreamEvent e) =>
+        IsChainInterruptingKind(e.Kind)
+        && !(e.Kind == EventKind.ActionRejected && IsTransportFailureRejection(e));
+
+    // The FIRST chain-interrupting event newer than `floorSeq` (newest-first
+    // scan), or null when none — and its EventKind names the interrupter so the
+    // no-mint diagnostic (the cp2925 pattern) stays characterizable. Pure
+    // event-kind classification; no game knowledge.
     internal static EventKind? FirstChainInterruptingKindSince(EventStream events, long floorSeq)
     {
         foreach (var e in events.Recent())
         {
             if (e.Sequence < floorSeq) break;
-            if (IsChainInterruptingKind(e.Kind)) return e.Kind;
+            if (IsChainInterruptingEvent(e)) return e.Kind;
         }
         return null;
     }
