@@ -267,4 +267,67 @@ public class VendorBrowseNudgeTests
         Assert.DoesNotContain(NudgeMarker,
             Prompt(World(vendorVisible: false, monsterVisible: true)));
     }
+
+    // ---- BuildContractSourceDiagKey (cp034 diagnostic, behavior-preserving) ----
+    // The key records, for a finished batch, whether a contract SOURCE is
+    // actionable in view (ruleFires) and the nearest task-giver proxy npc.
+
+    [Fact]
+    public void DiagKey_NpcInView_RuleFires_ReportsNearestNpc()
+    {
+        var w = World(vendorVisible: false, npcVisible: true,
+            contractStages: new uint[] { 3u, 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: true, vendorInView: false);
+        Assert.Contains("doneBatch=2", key);
+        Assert.Contains("ruleFires=True", key);
+        Assert.Contains("nearestNpc=\"Townsperson\"@9.0", key);
+    }
+
+    [Fact]
+    public void DiagKey_NoSourceInView_RuleDoesNotFire_NearestNone()
+    {
+        var w = World(vendorVisible: false, npcVisible: false,
+            contractStages: new uint[] { 3u, 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: false, vendorInView: false);
+        Assert.Contains("ruleFires=False", key);
+        Assert.Contains("nearestNpc=none", key);
+    }
+
+    [Fact]
+    public void DiagKey_VendorPanelOpen_RuleDoesNotFire()
+    {
+        // An OPEN vendor panel means the wares are already shown -> the vendor arm
+        // (`vendorInView && Vendor is null`) is false, so the rule does not fire.
+        var w = World(vendorVisible: true, vendorPanelOpen: true,
+            contractStages: new uint[] { 3u, 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: false, vendorInView: true);
+        Assert.Contains("vendorPanelOpen=True", key);
+        Assert.Contains("ruleFires=False", key);
+    }
+
+    [Fact]
+    public void DiagKey_VendorPanelClosed_RuleFires()
+    {
+        var w = World(vendorVisible: true, vendorPanelOpen: false,
+            contractStages: new uint[] { 3u, 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: false, vendorInView: true);
+        Assert.Contains("vendorPanelOpen=False", key);
+        Assert.Contains("ruleFires=True", key);
+    }
+
+    [Fact]
+    public void DiagKey_NearestNpcProxy_ExcludesMonsters()
+    {
+        // A monster (8f) is closer than the npc (9f); the task-giver proxy must
+        // skip the monster and report the npc.
+        var w = World(vendorVisible: false, npcVisible: true, monsterVisible: true,
+            contractStages: new uint[] { 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: true, vendorInView: false);
+        Assert.Contains("nearestNpc=\"Townsperson\"@9.0", key);
+    }
 }
