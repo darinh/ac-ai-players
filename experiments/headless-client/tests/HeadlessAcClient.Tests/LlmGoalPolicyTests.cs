@@ -419,6 +419,54 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FirstChainInterruptingKindSince_ReturnsTheInterruptingKind()
+    {
+        // Diagnostic (cp2925 pattern): name the specific event-kind that starves
+        // the combat chain so a gate:chain-interrupting-event no-mint is traceable.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hi" });
+        Assert.Equal(EventKind.NpcDialog, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_NullForNonInterruptingEvent()
+    {
+        // A kill's own ServerMessage ("you have slain ...") is ordinary combat
+        // progress, NOT a chain interrupter — must return null.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "you have slain a foe" });
+        Assert.Null(LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_RespectsFloor()
+    {
+        // An interrupting event BELOW the floor (already considered at the last
+        // LLM look) must not be re-counted as new.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "old" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "noise" });
+        Assert.Null(LlmGoalPolicy.FirstChainInterruptingKindSince(es, floor));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_ReturnsNewestInterruptingKind()
+    {
+        // Newest-first: the most recent interrupter is reported.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "earlier" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.LandblockChanged });
+        Assert.Equal(EventKind.LandblockChanged, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
     public void StreamEvent_HeardSpeech_ToString_RendersSpeakerAndLine()
     {
         var e = new StreamEvent

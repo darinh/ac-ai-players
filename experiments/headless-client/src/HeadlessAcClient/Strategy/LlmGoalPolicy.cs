@@ -2006,7 +2006,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // kill-count commitment ("kill N [of X]") into the next Attack; it never
         // ORIGINATES a combat commitment. We fire ONLY on the quiescent
         // post-kill path: currentGoal == null AND no decision-worthy change has
-        // arrived since the last LLM look (!HasNewChainInterruptingEvent — an
+        // arrived since the last LLM look (FirstChainInterruptingKindSince — an
         // inventory change, NPC dialog, zone change, readable text, or an action
         // rejection incl. a fresh disengage all route to the LLM instead; a
         // kill's own combat ServerMessage/feedback/damage do NOT, so the chain
@@ -2047,7 +2047,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // target, so ChooseCombatChainTarget returns null and control falls
         // through to the LLM, which still weighs the discovery.
         var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out _);
-        var chainInterrupting = HasNewChainInterruptingEvent(events);
+        var chainInterruptingKind = FirstChainInterruptingKindSince(events, _lastEventConsideredSequence);
+        var chainInterrupting = chainInterruptingKind is not null;
         string? chainNoMintReason = null;
         if (currentGoal is null && !chainInterrupting)
         {
@@ -2112,7 +2113,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // gates (see above), so they are not reasons here.
             chainNoMintReason =
                 currentGoal is not null ? "gate:sticky-goal-redrive"
-                : "gate:chain-interrupting-event";
+                : $"gate:chain-interrupting-event:{chainInterruptingKind}";
         }
         if (chainNoMintReason is not null && chainNoMintReason != _lastChainNoMintReason)
         {
@@ -4155,10 +4156,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.BookText
              or EventKind.ActionRejected;
 
-    private bool HasNewChainInterruptingEvent(EventStream events) =>
-        events.Recent()
-            .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
-            .Any(e => IsChainInterruptingKind(e.Kind));
+    // The FIRST chain-interrupting event-kind newer than `floorSeq` (newest-first
+    // scan), or null when none. Lets the no-mint diagnostic NAME the specific
+    // interrupter (the cp2925 diagnostic pattern) so the combat-chain tempo gap —
+    // `gate:chain-interrupting-event` with no obvious cause in the log — becomes
+    // characterizable: the next run shows WHICH event-kind starves the chain.
+    // Pure event-kind classification; no game knowledge.
+    internal static EventKind? FirstChainInterruptingKindSince(EventStream events, long floorSeq)
+    {
+        foreach (var e in events.Recent())
+        {
+            if (e.Sequence < floorSeq) break;
+            if (IsChainInterruptingKind(e.Kind)) return e.Kind;
+        }
+        return null;
+    }
 
     // Untargeted-Explore discriminator (call-volume reduction): true iff the
     // goal is an Explore whose target is the schema "anywhere" sentinel — it
