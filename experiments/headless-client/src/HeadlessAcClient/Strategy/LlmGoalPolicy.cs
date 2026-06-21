@@ -5663,7 +5663,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var selfArmCombatEffective =
             selfArmMeleeWielded || selfArmThrownWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
         if (!selfArmCombatEffective)
-        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` you can afford, `Buy` it by its exact name and then `Wield` it — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` or a `[missile weapon/ammo]` you can afford, `Buy` it by its exact name — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. After buying it lands in your inventory: a thrown weapon then shows as a `throwable weapon` to Wield (arming you directly, no ammo needed); a launcher and its ammo arm you only as a PAIR — BOTH must be in your bag before the `missile launcher + compatible ammo` hint appears. So if you bought a launcher (or ammo) and see no arming hint, you are missing the matching piece: buy THAT (or a thrown weapon) instead — do NOT re-buy the same item expecting a hint. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
@@ -7518,11 +7518,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 var entry = new StringBuilder();
                 var name = OneLine(offer.Name) ?? "(unnamed)";
-                // Tag a wieldable weapon (melee/missile ItemType bit) so an UNARMED
-                // bot can identify a buyable weapon to arm itself. Pure wire-bit
-                // projection; no priority, the LLM still decides whether to buy.
-                var weaponTag = (offer.ItemType & ItemTypeMasks.MeleeWeapon) != 0
-                    ? " [weapon]" : "";
+                // Tag a buyable arm so an UNARMED bot can identify one to buy: a MELEE
+                // weapon (directly wieldable) or a MISSILE-bit offer. A missile-bit
+                // offer cannot be told apart at the offer level (it has no slot/ammo
+                // data) — it may be a thrown weapon, a launcher, or ammo — but ALL are
+                // arming inputs: once BOUGHT into the bag, the existing self-arm
+                // affordances classify it (a thrown weapon surfaces as "throwable
+                // weapon"; a launcher+compatible-ammo as a ranged loadout). So tag it
+                // generically so the bot knows it is worth buying to arm. Pure wire-bit
+                // (ItemType) projection; no priority, the LLM still decides whether to buy.
+                var weaponTag =
+                    (offer.ItemType & ItemTypeMasks.MeleeWeapon) != 0 ? " [weapon]"
+                    : (offer.ItemType & ItemTypeMasks.MissileWeapon) != 0 ? " [missile weapon/ammo]"
+                    : "";
                 if (offer.Value is uint val)
                 {
                     // Mirror Vendor.GetSellCost: max(1, ceil((float)rate*value -

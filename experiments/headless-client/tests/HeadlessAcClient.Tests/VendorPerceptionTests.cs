@@ -381,10 +381,12 @@ public class VendorPerceptionTests
     [Fact]
     public void Vendor_Capsule_TagsWeaponOfferings()
     {
-        // cp048: a MELEE weapon offer (melee ItemType bit) is tagged [weapon] so an
-        // UNARMED bot can buy one to arm itself. A missile-bit offer is NOT tagged
-        // (it cannot be told apart from ammo at the offer level, which carries no
-        // slot data), and a non-weapon offer (armor) is not tagged.
+        // cp048/cp057: a MELEE weapon offer is tagged [weapon] and a MISSILE-bit
+        // offer is tagged [missile weapon/ammo] so an UNARMED bot can buy one to arm
+        // itself. A missile-bit offer cannot be told apart (thrown weapon / launcher
+        // / ammo) at the offer level, but ALL are arming inputs the bag self-arm
+        // affordances classify once bought — so it is surfaced generically. A
+        // non-weapon offer (armor) is not tagged.
         var vendor = new VendorProjection
         {
             VendorGuid = VendorGuid,
@@ -402,10 +404,12 @@ public class VendorPerceptionTests
             "## Vendor offerings");
 
         Assert.Contains("Practice Sword [weapon]:", cap);
-        // Missile-bit offers are NOT tagged (ammo shares that bit; offers lack slot data).
-        Assert.DoesNotContain("Throwing Dart [weapon]", cap);
+        // cp057: a missile-bit offer IS now tagged (generically) as an arming input.
+        Assert.Contains("Throwing Dart [missile weapon/ammo]:", cap);
+        Assert.DoesNotContain("Throwing Dart [weapon]", cap);   // not the melee tag
         Assert.Contains("Leather Cap:", cap);
         Assert.DoesNotContain("Leather Cap [weapon]", cap);
+        Assert.DoesNotContain("Leather Cap [missile weapon/ammo]", cap);
     }
 
     [Fact]
