@@ -2257,9 +2257,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var dwellMinStr = dwellEntry is DateTimeOffset de
             ? Math.Max(0.0, (nowUtc - de).TotalMinutes).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)
             : "n/a";
+        var sentSections = PromptSectionHeaders(userPrompt);
         Console.WriteLine(
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
-            $"prompt-bytes={userPrompt.Length} dwell-min={dwellMinStr} model={_client.Model}");
+            $"prompt-bytes={userPrompt.Length} dwell-min={dwellMinStr} model={_client.Model} " +
+            $"sections={sentSections.Count}[{string.Join("|", sentSections)}]");
         _tempo.RecordLlmCall();
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
@@ -8835,6 +8837,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         "## Visible nearby",
         "## Inventory",
     };
+
+    // Diagnostic helper: the top-level `## ` section header names present in a
+    // prompt, in order. The built prompt is chronically larger than the request-byte
+    // ceiling, so the fitter trims the body's trailing sections; logging the SURVIVING
+    // sections of the SENT prompt lets the operator see at a glance which sections
+    // actually reached the model on a given call (vs were truncated out). A
+    // protected-tail capsule re-surfaces a section under a header carrying a long
+    // "... re-surfaced because ...)" note, sometimes with descriptive pre-text (e.g.
+    // "Held items (you are carrying these — re-surfaced because ...)"); for ANY header
+    // whose parenthetical contains "re-surfaced", that whole parenthetical is compacted
+    // to a short "(re-surfaced)" tag while the base name is kept, so the capsule shows
+    // as a DISTINCT, identifiable entry from its body section (the operator can see a
+    // capsule survived even when its body section was trimmed). Ordinary headers that
+    // legitimately contain parentheses (e.g. "Recently sighted (out of view)") do NOT
+    // contain "re-surfaced" and are left intact. Pure string scan; no game knowledge,
+    // no behavior change, no parsing of section CONTENT.
+    internal static IReadOnlyList<string> PromptSectionHeaders(string prompt)
+    {
+        var headers = new List<string>();
+        if (string.IsNullOrEmpty(prompt)) return headers;
+        foreach (var rawLine in prompt.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            if (!line.StartsWith("## ", StringComparison.Ordinal)) continue;
+            var name = line.Substring(3).Trim();
+            var rs = name.IndexOf(" (", StringComparison.Ordinal);
+            if (rs > 0 && name.Contains("re-surfaced", StringComparison.Ordinal))
+                name = name.Substring(0, rs) + " (re-surfaced)";
+            headers.Add(name);
+        }
+        return headers;
+    }
 
     internal static string FitPromptToCeiling(string prompt, int ceiling = HardUserPromptCeilingChars)
     {
