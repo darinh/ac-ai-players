@@ -5691,7 +5691,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // combat guidance in the common zero-unspent-XP case. No game knowledge:
         // a render gate on an observed fact, the LLM still decides.
         if (world.Self.AvailableExperience is long spendableXp && spendableXp > 0)
-        sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (the target MUST be a skill NAME from the `trained skills` list in `## Self` — NEVER a weapon ITEM's name such as the weapon you wield; if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill` at all, raise an attribute instead — the server rejects anything else). A positive `amount` is REQUIRED: invest in FEWER, LARGER raises. When you choose to invest in a target, commit a SUBSTANTIAL chunk — up to your full unspent balance — in that ONE raise, NOT the same small amount (e.g. 10) repeated across many turns, because EACH raise costs a full decision turn you need for combat and quests. This governs raise SIZE, not WHICH target: keep choosing the target by the bottleneck evidence below, and you may raise a DIFFERENT target next time. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength PRIMARILY drives DAMAGE — how HARD your swings hit, on a swing that already LANDS — and is NOT your main accuracy lever, while COORDINATION and the TRAINED WEAPON SKILL you fight with are your PRIMARY ACCURACY levers (how OFTEN your swings LAND), the trained weapon skill being the biggest (often bigger than the coordination attribute), raised via `RaiseSkill` using a name from `trained skills` in `## Self`; quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH. Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` (your swings keep MISSING), the limit is ACCURACY — PRIORITIZE coordination and your trained weapon skill (your accuracy levers) over strength, whose main effect is damage; if your swings LAND but deal 0/low `damage`, the limit is strength; if you fight with spells, raise magic attributes/skills. E.g. raise coordination (and your trained weapon skill) when melee swings MISS/evade; raise strength when swings LAND but barely hurt; raise endurance/health when low max HP is killing you. These are NOT co-equal defaults you pick by current HP: if you SURVIVE your fights but still cannot kill — your swings keep missing or barely hurt, racking up `ineffective`/`near-death` outcomes (NOT `deaths`) with no `kills` — the binding limit is OFFENSE, not max HP, and adding more endurance/health only lets you LOSE the same unwinnable fights more slowly. Raise coordination AND your trained weapon skill via `RaiseSkill` (the MAIN driver of whether your swings LAND) when your swings MISS, and strength when they LAND but barely hurt — so do not pour XP only into attributes and leave the weapon skill you fight with neglected — until you can kill the weak monsters you meet. (But if instead you are DYING fast — taking `deaths`, dropping in a hit or two — then max HP survivability IS the limit, or the monsters here are simply too strong and you should Explore to a weaker area.)");
+        sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (the target MUST be a skill NAME from the `trained skills` list in `## Self` — NEVER a weapon ITEM's name such as the weapon you wield; if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill` at all, raise an attribute instead — the server rejects anything else). A positive `amount` is REQUIRED: invest in FEWER, LARGER raises. When you choose to invest in a target, commit a SUBSTANTIAL chunk — up to your full unspent balance — in that ONE raise, NOT the same small amount (e.g. 10) repeated across many turns, because EACH raise costs a full decision turn you need for combat and quests. This governs raise SIZE, not WHICH target: keep choosing the target by the bottleneck evidence below, and you may raise a DIFFERENT target next time. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength PRIMARILY drives DAMAGE — how HARD your swings hit, on a swing that already LANDS — and is NOT your main accuracy lever, while COORDINATION and the TRAINED WEAPON SKILL you fight with are your PRIMARY ACCURACY levers (how OFTEN your swings LAND), the trained weapon skill being the biggest (often bigger than the coordination attribute), raised via `RaiseSkill` using a name from `trained skills` in `## Self`; quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH. Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` (your swings keep MISSING), the limit is ACCURACY — PRIORITIZE coordination and your trained weapon skill (your accuracy levers; the weapon skill only when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) over strength, whose main effect is damage; if your swings LAND but deal 0/low `damage`, the limit is strength; if you fight with spells, raise magic attributes/skills. E.g. raise coordination (and your trained weapon skill) when melee swings MISS/evade; raise strength when swings LAND but barely hurt; raise endurance/health when low max HP is killing you. These are NOT co-equal defaults you pick by current HP: if you SURVIVE your fights but still cannot kill — your swings keep missing or barely hurt, racking up `ineffective`/`near-death` outcomes (NOT `deaths`) with no `kills` — the binding limit is OFFENSE, not max HP, and adding more endurance/health only lets you LOSE the same unwinnable fights more slowly. Raise coordination (and your trained weapon skill via `RaiseSkill` ONLY when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) when your swings MISS, and strength when they LAND but barely hurt — so do not pour XP only into attributes and leave the weapon skill you fight with neglected — until you can kill the weak monsters you meet. (But if instead you are DYING fast — taking `deaths`, dropping in a hit or two — then max HP survivability IS the limit, or the monsters here are simply too strong and you should Explore to a weaker area.)");
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
         // cp-2369: the COMBAT SAFETY & PACE rule (~2KB, the single largest
         // bullet) is ENTIRELY about an in-progress or imminent fight — every
@@ -5705,7 +5705,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // through a flee where the foe scrolled out of view). A render gate on
         // an observed fact; the LLM still decides; no game knowledge.
         if (monsterInView || world.CurrentFight is not null)
-        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `recent inbound damage` line shows hits you have TAKEN and total damage in the last few seconds — if it climbs while your absolute `health` is low you are losing: disengage (`Explore`) or `Recall` rather than fight to 0 HP. The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `current fight` line also shows the `target health now N%` and, once the fight has run, `(was M% when this fight began)`: if AFTER MANY swings the target's health is still barely below its fight-start value AND you are taking `recent inbound damage` or your own `health` is low or falling, the exchange is going AGAINST you even though some swings land — DISENGAGE (`Explore`) and pick a weaker `monster`. Early in a fight a small health drop is NORMAL, so judge from a SUSTAINED run of swings, not the first few; and if the target's health is steadily DROPPING toward 0 while your health holds, a SLOW fight is still winnable — KEEP attacking until it dies (slow is fine, losing is not). The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths`/`ineffective` (you fought it but could not kill it — it out-defends you) and no `kills` (it has beaten you — pick a different, weaker monster or Explore on; but if you SURVIVE these fights (racking up `ineffective`/`near-death`, NOT `deaths`) yet have NO `kills` against ANY recent kind, a weaker target will not help — the limit is your OWN offense (out-DEFENDED — your swings keep missing), so SPEND XP on coordination and your trained weapon skill instead). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
+        sb.AppendLine("- COMBAT SAFETY & PACE: fight roughly one `monster` at a time — if several cluster or more than one is `HOSTILE`, back off and pull them singly (the `monsters in view` line counts them: `H actively HOSTILE` of 2+ means you are SWARMED — break away with `Explore`). Danger signals you have: your `deaths` count and, when shown, `health` in `## Self` (monster levels are NOT given — judge from OUTCOMES, not numbers). The `health` line shows BOTH a percentage AND absolute HP (e.g. `100% (1/1 HP, rising)`) — trust the ABSOLUTE HP: a handful of HP is lethal even at a high %, and `rising` means you are still regenerating BELOW full strength, so finish recovering before STARTING an OPTIONAL fight (a `HOSTILE` attacker still takes priority). The `recent inbound damage` line shows hits you have TAKEN and total damage in the last few seconds — if it climbs while your absolute `health` is low you are losing: disengage (`Explore`) or `Recall` rather than fight to 0 HP. The `current fight` line in `Combat readiness` shows swings `landed` vs `evaded`: many `evaded` with 0 `landed` (0 damage dealt) means that target out-defends you and you CANNOT win — DISENGAGE now (emit `Explore` to break away) and try a different, weaker, or more distant `monster`. The `current fight` line also shows the `target health now N%` and, once the fight has run, `(was M% when this fight began)`: if AFTER MANY swings the target's health is still barely below its fight-start value AND you are taking `recent inbound damage` or your own `health` is low or falling, the exchange is going AGAINST you even though some swings land — DISENGAGE (`Explore`) and pick a weaker `monster`. Early in a fight a small health drop is NORMAL, so judge from a SUSTAINED run of swings, not the first few; and if the target's health is steadily DROPPING toward 0 while your health holds, a SLOW fight is still winnable — KEEP attacking until it dies (slow is fine, losing is not). The `combat history` lines in `Combat readiness` are your own past outcomes per monster KIND this session — and each `monster` row in `Visible nearby` now carries its own `[your record: ...]` inline — before engaging a visible monster, read its inline record (or match its name in `combat history`): prefer a KIND you have `kills` against; AVOID a KIND with `deaths`/`near-deaths`/`ineffective` (you fought it but could not kill it — it out-defends you) and no `kills` (it has beaten you — pick a different, weaker monster or Explore on; but if you SURVIVE these fights (racking up `ineffective`/`near-death`, NOT `deaths`) yet have NO `kills` against ANY recent kind, a weaker target will not help — the limit is your OWN offense (out-DEFENDED — your swings keep missing), so SPEND XP on coordination (and your trained weapon skill ONLY if it governs your wielded weapon — see the `wielded-weapon accuracy` note) instead). Likewise if `deaths` rises or `health` is low, disengage and AVOID re-attacking the same KIND of monster that just defeated you. Explicit server/quest directives and looting fresh corpses outrank optional combat; don't grind one spot forever.");
         // The corpse-looting rule only applies when a corpse is actually in
         // view (the `corpse` tag is rendered from the same IsCorpse projection
         // flag). With no corpse visible the rule references a target that isn't
@@ -6522,6 +6522,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
         if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string crSkillAdvisory)
             sb.AppendLine($"- {crSkillAdvisory}");
+        if (WieldedWeaponUntrainedAccuracyNote(world) is string crUntrainedNote)
+            sb.AppendLine($"- {crUntrainedNote}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
             sb.AppendLine(crHealthLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
@@ -7380,7 +7382,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (endcapHasSwings)
             {
                 var hasTrainedSkill = world.Self.TrainedSkills is { Count: > 0 };
-                var accuracyLevers = hasTrainedSkill
+                // "Raise your trained WEAPON SKILL" only improves accuracy when the
+                // WIELDED weapon is governed by a skill you have trained. The bot can
+                // wield a weapon whose skill it has NOT trained (e.g. a thrown weapon
+                // when its only trained weapon skill has no matching weapon); raising a
+                // DIFFERENT trained skill does nothing for that weapon, so the lever
+                // there is coordination. The `wielded-weapon accuracy` note (above)
+                // carries the detail; here we just name the right lever. "" = a weapon
+                // is wielded but its skill is unknown (still not a confirmed trained
+                // skill); null = the wielded skill IS trained or no weapon is wielded.
+                var endcapUntrainedWieldedSkill = WieldedWeaponUntrainedSkillName(world);
+                var accuracyLevers = endcapUntrainedWieldedSkill is string
+                    ? "coordination (your WIELDED weapon's skill is NOT one of your `trained skills`, so `RaiseSkill` on a trained skill will NOT improve THIS weapon's hit rate — see the `wielded-weapon accuracy` note)"
+                    : hasTrainedSkill
                     ? "your trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill` using a name from your `trained skills` in `## Self`) and coordination"
                     : "coordination (`## Self` lists no `trained skills`, so `RaiseSkill` is unavailable here — raise the attribute)";
                 var hurtLever = "strength";
@@ -8401,6 +8415,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
             if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string capSkillAdvisory)
                 sb.AppendLine($"- {capSkillAdvisory}");
+            if (WieldedWeaponUntrainedAccuracyNote(world) is string capUntrainedNote)
+                sb.AppendLine($"- {capUntrainedNote}");
             // The `tapped out` hunt-discovery fact (combat-ready + farmed this
             // area past the dwell threshold with +0 levels) renders in the body
             // `## Combat readiness` and is dropped by the same hard-cut — leaving
@@ -9518,6 +9534,56 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                $"which is NOT one of your trained skills — an UNTRAINED weapon skill lands far fewer " +
                $"hits; a weapon governed by a skill you HAVE trained is in your bag: " +
                $"{trainedBagWeapon.Name} ({bagSkill}). Wield it to hit far more often.";
+    }
+
+    /// <summary>
+    /// When the bot's WIELDED main-weapon is governed by a skill it has NOT
+    /// trained, returns a signal for the SPEND-XP accuracy advice: the skill's
+    /// NAME when the governing skill is KNOWN-and-untrained, or "" (empty) when a
+    /// weapon IS wielded but its governing skill is UNKNOWN (null) — in BOTH cases
+    /// raising a trained weapon skill cannot be confirmed to help THIS weapon, so
+    /// the accuracy lever is coordination. Returns null when the wielded weapon's
+    /// skill IS trained, no main-weapon is wielded, or the trained-skill list is
+    /// unknown. Considers BOTH melee and missile main-weapons (a thrown weapon is a
+    /// missile weapon). Pure projection: decoded weenie GoverningSkill compared
+    /// against the bot's OWN trained skills; names no specific weapon/skill and
+    /// makes no choice — the LLM decides what to raise.
+    /// </summary>
+    internal static string? WieldedWeaponUntrainedSkillName(WorldStateProjection world)
+    {
+        var trained = world.Self.TrainedSkills;
+        if (trained is null || trained.Count == 0) return null;
+        var wielded = world.Inventory.FirstOrDefault(i =>
+            i.WieldedAt is uint w && (w & WeaponSwap.MainWeaponSlotMask) != 0 &&
+            i.ItemType is uint it &&
+            ((it & ItemTypeMasks.MeleeWeapon) != 0 || (it & ItemTypeMasks.MissileWeapon) != 0));
+        if (wielded is null) return null;             // no main-weapon wielded
+        var gs = wielded.GoverningSkill;
+        if (string.IsNullOrEmpty(gs)) return "";      // wielded, but skill UNKNOWN
+        return trained.Any(t => string.Equals(t.Name, gs, StringComparison.OrdinalIgnoreCase))
+            ? null                                    // wielded skill IS trained
+            : gs;                                     // wielded skill KNOWN-untrained
+    }
+
+    /// <summary>
+    /// Combat-readiness advisory FACT, rendered whenever the bot is WIELDING a
+    /// weapon governed by a skill it has NOT trained (or whose skill is unknown):
+    /// raising a TRAINED weapon skill does nothing for THIS weapon, so it corrects
+    /// the general SPEND-XP / COMBAT-SAFETY "raise your trained weapon skill"
+    /// accuracy advice for the current weapon and points at coordination. Unlike
+    /// the endcap mapping it is NOT swing-gated, so it covers the pre-combat case
+    /// and the dense-scene body cut (it is re-surfaced in the protected tail).
+    /// Returns null when the wielded weapon's skill is trained, no weapon is
+    /// wielded, or the trained-skill list is unknown. Pure projection; the LLM
+    /// still decides what to raise.
+    /// </summary>
+    internal static string? WieldedWeaponUntrainedAccuracyNote(WorldStateProjection world)
+    {
+        if (WieldedWeaponUntrainedSkillName(world) is not string s) return null;
+        var which = s.Length > 0 ? $"its skill ({s})" : "its skill";
+        return $"wielded-weapon accuracy: {which} is NOT one of your `trained skills`, so raising a " +
+               "TRAINED weapon skill will NOT improve THIS weapon's hit rate — raise COORDINATION for " +
+               "accuracy (or arm a weapon governed by a skill you HAVE trained for a real upgrade).";
     }
 
     // Compact, decision-relevant WIELD annotation for an inventory row, derived

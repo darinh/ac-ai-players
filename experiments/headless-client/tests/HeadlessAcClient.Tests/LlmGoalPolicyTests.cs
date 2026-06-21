@@ -2565,8 +2565,9 @@ public class LlmGoalPolicyTests
         // Coordination + trained weapon skill are the ACCURACY (LAND) levers.
         Assert.Contains("are your PRIMARY ACCURACY levers (how OFTEN your swings LAND)", prompt);
 
-        // The evade/miss symptom prioritizes accuracy levers OVER strength.
-        Assert.Contains("the limit is ACCURACY \u2014 PRIORITIZE coordination and your trained weapon skill (your accuracy levers) over strength", prompt);
+        // The evade/miss symptom prioritizes accuracy levers OVER strength (the
+        // weapon-skill lever is qualified to the wielded weapon — cp056).
+        Assert.Contains("the limit is ACCURACY \u2014 PRIORITIZE coordination and your trained weapon skill (your accuracy levers; the weapon skill only when it governs your WIELDED weapon \u2014 see the `wielded-weapon accuracy` note) over strength", prompt);
 
         // A landed-but-low-damage swing still maps to strength (no over-correction).
         Assert.Contains("if your swings LAND but deal 0/low `damage`, the limit is strength", prompt);
@@ -6959,6 +6960,118 @@ public class LlmGoalPolicyTests
         // Already wielding a weapon whose skill is trained → no swap advisory.
         var world = BuildWeaponSkillWorld("TwoHandedCombat", "TwoHandedCombat", "TwoHandedCombat");
         Assert.Null(LlmGoalPolicy.WeaponSkillSwapAdvisory(world));
+    }
+
+    private static WorldStateProjection BuildUntrainedWieldedWorld(
+        string? trained, string? wieldedSkill, uint? wieldedSlot, uint itemType) =>
+        new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+                TrainedSkills = trained is null ? null : new[]
+                { new SelfSkillProjection { Name = trained, Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Wielded", Wcid = 1u, ItemType = itemType, WieldedAt = wieldedSlot, GoverningSkill = wieldedSkill },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_WieldedMissileUntrained_ReturnsSkill()
+    {
+        // cp056: a wielded THROWN/missile weapon (slot 0x400000) governed by
+        // MissileWeapons while the bot trained only TwoHandedCombat -> the wielded
+        // weapon's skill is untrained, so the helper surfaces it.
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", 0x400000u, 0x100u);
+        Assert.Equal("MissileWeapons", LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_WieldedTrainedSkill_ReturnsNull()
+    {
+        // Wielded weapon's skill IS trained -> no misallocation, return null.
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "TwoHandedCombat", 0x2000000u, 0x1u);
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_UnknownGoverningSkill_ReturnsEmpty()
+    {
+        // gpt-5.4/claude review: a weapon IS wielded but its governing skill is
+        // unknown (null, e.g. a vessel with no projected skill) -> "" signals
+        // "wielded, skill not a confirmed trained skill" so the advice still steers
+        // to coordination (NOT the trained-weapon-skill lever).
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", null, 0x400000u, 0x100u);
+        Assert.Equal("", LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_WieldedMeleeUntrained_ReturnsSkill()
+    {
+        // claude review: a wielded MELEE weapon (slot 0x100000) governed by an
+        // untrained melee skill is surfaced too (the helper is not missile-only).
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "FinesseWeapons", 0x100000u, 0x1u);
+        Assert.Equal("FinesseWeapons", LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_UntrainedWielded_NamesSkillAndSteersCoordination()
+    {
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", 0x400000u, 0x100u);
+        var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(world);
+        Assert.NotNull(note);
+        Assert.Contains("its skill (MissileWeapons)", note);
+        Assert.Contains("raise COORDINATION", note);
+        Assert.Contains("will NOT improve THIS weapon's hit rate", note);
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_UnknownSkill_GenericCoordination()
+    {
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", null, 0x400000u, 0x100u);
+        var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(world);
+        Assert.NotNull(note);
+        Assert.DoesNotContain("(", note.Substring(0, note.IndexOf("is NOT", System.StringComparison.Ordinal))); // no "(skill)" when unknown
+        Assert.Contains("raise COORDINATION", note);
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_TrainedOrNoWeapon_Null()
+    {
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
+            BuildUntrainedWieldedWorld("TwoHandedCombat", "TwoHandedCombat", 0x2000000u, 0x1u)));
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
+            BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", null, 0x100u)));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_NoTrainedSkills_ReturnsNull()
+    {
+        // No trained-skill list -> make no claim (RaiseSkill is unavailable anyway).
+        var world = BuildUntrainedWieldedWorld(null, "MissileWeapons", 0x400000u, 0x100u);
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_NoWeaponWielded_ReturnsNull()
+    {
+        // Item present but un-wielded (WieldedAt null) -> no wielded weapon to judge.
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", null, 0x100u);
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedSkillName_AmmoSlotMissileBit_ReturnsNull()
+    {
+        // Loaded ammo (ammo slot 0x800000) carries the MissileWeapon bit but is NOT
+        // a main-weapon occupant, so it is not judged as the wielded weapon.
+        var world = BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", 0x800000u, 0x100u);
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedSkillName(world));
     }
 
     [Fact]
@@ -14257,6 +14370,81 @@ public class LlmGoalPolicyTests
 
         var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
         Assert.Contains("trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill`", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_CoordinationWhenWieldedSkillUntrained()
+    {
+        // cp056: the bot wields a thrown/missile weapon governed by an UNTRAINED
+        // skill (MissileWeapons) while trained only in TwoHandedCombat. Raising
+        // TwoHandedCombat does nothing for the wielded weapon, so the accuracy
+        // mapping must point at COORDINATION and NOT tell the bot to raise its
+        // (irrelevant) trained weapon skill.
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, GoverningSkill = "MissileWeapons" },
+            },
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        // The endcap accuracy mapping points at coordination, NOT the trained skill.
+        Assert.Contains("your WIELDED weapon's skill is NOT one of your `trained skills`", cap);
+        Assert.DoesNotContain("trained WEAPON SKILL (the main accuracy lever", cap);
+        // The always-on Combat-readiness note names the untrained wielded skill and
+        // steers to coordination (it survives in the protected tail too).
+        Assert.Contains("wielded-weapon accuracy: its skill (MissileWeapons) is NOT one of your `trained skills`", prompt);
+        Assert.Contains("raise COORDINATION", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UntrainedWieldedWeapon_CombatSafetyRuleQualified_NoBareTrainedSkillSpend()
+    {
+        // claude review: with a monster in view the COMBAT SAFETY rule co-renders.
+        // It must NOT bare-assert "SPEND XP on coordination and your trained weapon
+        // skill" — that competes with the untrained-weapon note. The rule is now
+        // qualified, and the `wielded-weapon accuracy` note explicitly overrides for
+        // the current weapon.
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, GoverningSkill = "MissileWeapons" },
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false },
+            },
+            CumulativeSwingsLanded = 2,
+            CumulativeSwingsEvaded = 5,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        // COMBAT SAFETY renders (monster in view) but is now qualified, not bare.
+        Assert.Contains("COMBAT SAFETY", prompt);
+        Assert.DoesNotContain("SPEND XP on coordination and your trained weapon skill instead", prompt);
+        // The SPEND XP rule's directive doom-loop clause is also qualified (no bare
+        // "Raise coordination AND your trained weapon skill" — claude review).
+        Assert.DoesNotContain("Raise coordination AND your trained weapon skill", prompt);
+        Assert.Contains("ONLY if it governs your wielded weapon", prompt);
+        // The override note is present so the LLM has the disambiguating fact.
+        Assert.Contains("wielded-weapon accuracy: its skill (MissileWeapons)", prompt);
     }
 
     [Fact]
