@@ -10041,6 +10041,75 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsWieldOfUnusableLauncher_ItemTypeMaskSelectsMelee_NotDropped()
+    {
+        // Divergence guard: a selector with name_contains + item_type_mask that the
+        // executor resolves to a MELEE weapon must NOT be dropped just because an
+        // ammoless launcher shares the name fragment. InventoryMatchesSelector must
+        // honor item_type_mask exactly like SelectorResolver, so the guard resolves the
+        // same item the Motor would wield (the melee weapon), not the launcher.
+        var launcher = new InventoryItemProjection
+        {
+            Guid = 0xB001u, Name = "Staff Sling", Wcid = 0x9001u,
+            ItemType = ItemTypeMasks.MissileWeapon,
+            ValidLocations = WeaponSwap.MainWeaponSlotMask, WieldedAt = null, AmmoType = 7,
+        };
+        var melee = new InventoryItemProjection
+        {
+            Guid = 0xB002u, Name = "Quarterstaff", Wcid = 0x9002u,
+            ItemType = ItemTypeMasks.MeleeWeapon,
+            ValidLocations = 0x00100000u, WieldedAt = null,
+        };
+        var world = BuildInventoryWorld(new[] { launcher, melee });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { NameContains = "staff", ItemTypeMask = ItemTypeMasks.MeleeWeapon },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_ShortDescContainsMatchesLauncher_True()
+    {
+        // Divergence guard: the executor resolves short_desc_contains; the guard must
+        // too, else it MISSES an ammoless launcher selected by short_desc and the loop
+        // survives.
+        var launcher = new InventoryItemProjection
+        {
+            Guid = 0xB003u, Name = "Trainer", Wcid = 0x9003u,
+            ItemType = ItemTypeMasks.MissileWeapon,
+            ValidLocations = WeaponSwap.MainWeaponSlotMask, WieldedAt = null, AmmoType = 7,
+            ShortDesc = "a sturdy training bow",
+        };
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { ShortDescContains = "training bow" },
+        };
+        Assert.True(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_ItemUnresolved_FallsBackToTargetLauncher_True()
+    {
+        // Divergence guard: the executor wields Item, falling back to Target ONLY when
+        // Item resolves to NO owned item. The guard must mirror that, else a
+        // Wield{item:miss, target:launcher} still re-wields the useless launcher and the
+        // dequip/re-wield loop survives.
+        var launcher = BagLauncher(0xB004u, 7, "Ammoless Bow");
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = "NoSuchItem" },
+            Target = new Selector { Name = "Ammoless Bow" },
+        };
+        Assert.True(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
     public void IsWieldOfUnusableLauncher_LauncherWithCompatibleBagAmmo_False()
     {
         // Launcher + compatible ammo both in bag: a valid arming path; must NOT drop.

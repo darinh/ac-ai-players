@@ -1631,7 +1631,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var hasIdentity = sel.Guid is not null
             || !string.IsNullOrEmpty(sel.Name)
             || !string.IsNullOrEmpty(sel.NameContains)
-            || sel.Wcid is not null;
+            || sel.Wcid is not null
+            || sel.ItemTypeMask is not null
+            || !string.IsNullOrEmpty(sel.ShortDescContains);
         if (!hasIdentity) return false;
         if (sel.Guid is uint g && i.Guid != g) return false;
         if (!string.IsNullOrEmpty(sel.Name)
@@ -1641,6 +1643,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && !i.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase))
             return false;
         if (sel.Wcid is uint w && i.Wcid != w) return false;
+        // Mirror SelectorResolver.MatchesItemTypeMask / MatchesShortDescContains so the
+        // useless-launcher guard resolves a Wield selector EXACTLY like the Motor's wield
+        // executor — otherwise an item_type_mask or short_desc_contains selector matches
+        // a different item here than the executor would actually wield (the guard could
+        // drop a legitimate Wield or miss the useless launcher).
+        if (sel.ItemTypeMask is uint m && !(i.ItemType is uint it && (it & m) != 0)) return false;
+        if (!string.IsNullOrEmpty(sel.ShortDescContains)
+            && !(i.ShortDesc is not null
+                 && i.ShortDesc.Contains(sel.ShortDescContains, StringComparison.OrdinalIgnoreCase)))
+            return false;
         return true;
     }
 
@@ -9675,26 +9687,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsWieldOfUnusableLauncher(Goal goal, WorldStateProjection world)
     {
         if (goal.Kind != GoalKind.Wield) return false;
-        // Resolve the item selector: Wield carries its subject in Item; fall back
-        // to Target if Item is absent, for robustness against older LLM schema.
-        var sel = goal.Item is { IsEmpty: false } s ? s : goal.Target;
-        if (sel is null || sel.IsEmpty) return false;
-        // Find a bag launcher matching the selector. Conditions:
-        //   - un-wielded (WieldedAt null or 0)
-        //   - ItemType has the MissileWeapon bit
-        //   - AmmoType is non-null (a thrown weapon has null AmmoType and IS usable)
-        //   - matches the Wield selector
-        var launcher = world.Inventory.FirstOrDefault(i =>
-            (i.WieldedAt is not uint w || w == 0) &&
-            i.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0 &&
-            i.AmmoType is not null &&
-            InventoryMatchesSelector(sel, i));
-        if (launcher is null) return false;
-        // Useless iff the bag holds NO loadable ammo for this launcher.
+        // Resolve the item the Motor would actually wield, mirroring the executor's
+        // item->target fallback (HandshakeDriver wield dispatch: itemSnap ?? targetSnap):
+        // try the Item selector first and fall back to Target ONLY when Item resolves to
+        // no owned item. Resolving over ALL bag items (not just launchers) — and via the
+        // full InventoryMatchesSelector — keeps this in lock-step with the executor, so
+        // the guard fires exactly when the wield would (re-)equip the useless launcher.
+        var wielded = ResolveBagWieldItem(goal.Item, world)
+                   ?? ResolveBagWieldItem(goal.Target, world);
+        if (wielded is null) return false;
+        // Useless iff a missile LAUNCHER (MissileWeapon bit + a non-null AmmoType — a
+        // THROWN weapon has null AmmoType and is usable) with NO loadable bag ammo.
+        if (!(wielded.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0)
+            || wielded.AmmoType is null)
+            return false;
         var bagAmmoItems = world.Inventory
             .Where(i => i.WieldedAt is not uint bw || bw == 0)
             .Select(i => (i.ValidLocations, i.AmmoType));
-        return !HasLoadableBagAmmoForLauncher(bagAmmoItems, launcher.AmmoType);
+        return !HasLoadableBagAmmoForLauncher(bagAmmoItems, wielded.AmmoType);
+    }
+
+    // First un-wielded (bag) inventory item matching the selector via the full
+    // InventoryMatchesSelector, or null when the selector is empty/unset or resolves to
+    // nothing. Mirrors the Motor's wield-candidate resolution over the bot's own bag.
+    private static InventoryItemProjection? ResolveBagWieldItem(Selector? sel, WorldStateProjection world)
+    {
+        if (sel is null || sel.IsEmpty) return null;
+        return world.Inventory.FirstOrDefault(i =>
+            (i.WieldedAt is not uint w || w == 0) && InventoryMatchesSelector(sel, i));
     }
 
     /// <summary>
