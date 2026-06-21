@@ -6436,6 +6436,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         !recentlyServerRefusedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
+        // A missile LAUNCHER in the bag (un-wielded, equippable into a main-weapon
+        // slot) paired with COMPATIBLE ammo ALSO in the bag — the ranged equivalent
+        // of bagWeapon. Surfaced ONLY when unarmed AND the WIELDED missile weapon (if
+        // any) has no loadable bag ammo (bagAmmo is null): the live failure mode is a
+        // bot wielding an empty/incompatible missile weapon (no ammo it can load for
+        // THAT launcher) while a DIFFERENT launcher it owns — whose ammo it ALSO owns
+        // — sits un-surfaced in the bag, leaving the bot with no arming path at all
+        // (bagWeapon/groundWeapon are melee-only). Reuses AmmoTypeCompatible (cp044).
+        // Skips server-refused items like the other self-arm suggestions, so a launcher
+        // or ammo the server will not actuate (e.g. an unmet skill requirement) is not
+        // re-suggested every cycle. Pure typed/wire affordance (ItemType MissileWeapon
+        // bit + ValidLocations main-weapon / ammo slots + AmmoType compatibility); no
+        // names/wcids, no game knowledge.
+        (InventoryItemProjection Launcher, InventoryItemProjection Ammo)? bagLauncherAmmo = null;
+        if (!armed && bagAmmo is null)
+        {
+            foreach (var launcher in world.Inventory.Where(i =>
+                (i.WieldedAt is not uint lw || lw == 0) &&
+                i.ValidLocations is uint lvl && (lvl & WeaponSwap.MainWeaponSlotMask) != 0 &&
+                i.ItemType is uint lit && (lit & ItemTypeMasks.MissileWeapon) != 0 &&
+                // A real LAUNCHER (bow/crossbow/atlatl) declares its AmmoType on the
+                // wire; a THROWN weapon (self-contained, the projectile itself) omits
+                // it (null). Without this, a null-AmmoType thrown weapon would match
+                // ANY ammo (AmmoTypeCompatible treats a null launcher AmmoType as
+                // compatible with everything), producing a doomed "wield thrown weapon
+                // + wield unrelated ammo" loadout whose load step the server refuses.
+                i.AmmoType is not null &&
+                !recentlyServerRefusedGuids.Contains(i.Guid)))
+            {
+                var compatAmmo = world.Inventory.FirstOrDefault(a =>
+                    (a.WieldedAt is not uint aw2 || aw2 == 0) &&
+                    a.ValidLocations is uint avl && (avl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
+                    AmmoTypeCompatible(launcher.AmmoType, a.AmmoType) &&
+                    !recentlyServerRefusedGuids.Contains(a.Guid));
+                if (compatAmmo is not null) { bagLauncherAmmo = (launcher, compatAmmo); break; }
+            }
+        }
         var nearestMonster = world.Visible
             .Where(v => v.IsMonster)
             .OrderBy(v => v.Distance ?? float.MaxValue)
@@ -6475,6 +6512,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         if (bagAmmo is not null)
             sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
+        if (bagLauncherAmmo is { } bla1)
+            sb.AppendLine(
+                "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
+                $" then Wield the ammo to load): {bla1.Launcher.Name} + {bla1.Ammo.Name}");
         if (nearestMonster is not null)
         {
             var dStr = nearestMonster.Distance is float dm ? $" d={dm:F1}" : "";
@@ -8321,6 +8362,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             if (bagAmmo is not null)
                 sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
+            if (bagLauncherAmmo is { } bla2)
+                sb.AppendLine(
+                    "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
+                    $" then Wield the ammo to load): {bla2.Launcher.Name} + {bla2.Ammo.Name}");
         }
 
         // ── ## Beaten kinds capsule (protected-tail cut-proof) ──

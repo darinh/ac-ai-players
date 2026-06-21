@@ -4975,6 +4975,31 @@ public class LlmGoalPolicyTests
         Assert.Contains("Wield it to load): Arrows", capsuleText);
     }
 
+    [Fact]
+    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_ShowsBagLauncherAmmoLoadout()
+    {
+        // cp052 (gpt-5.4 review): the bag-launcher + compatible-ammo arming loadout
+        // must ALSO render in the protected-tail re-surfaced ## Combat readiness
+        // capsule, not only the body — so it survives the dense-scene body hard-cut.
+        // Guards the SECOND render site against drift from the body one.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 2 },
+            new InventoryItemProjection
+            { Guid = 0x2u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = 1 },
+            new InventoryItemProjection
+            { Guid = 0x3u, Name = "Lead Pea", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 1 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        int capsule = p.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        Assert.True(capsule > 0);
+        var capsuleText = p.Substring(capsule);
+        Assert.Contains(
+            "missile launcher + compatible ammo in your inventory (Wield the launcher, then Wield the ammo to load): Royal Atlatl + Lead Pea",
+            capsuleText);
+    }
+
     private static WorldStateProjection BuildTappedOutWorld(int level)
     {
         var inv = new[]
@@ -7412,6 +7437,133 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("missile ammo: EMPTY (wield ammo to fire)", prompt);
         Assert.Contains("missile ammo in your inventory (Wield it to load): Royal Dart", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagLauncherWithCompatibleAmmo_SurfacesArmingLoadout()
+    {
+        // cp052: the bot wields an empty/incompatible missile weapon (a thrown
+        // weapon with no loadable ammo for THAT launcher) while a DIFFERENT launcher
+        // it owns — whose ammo it ALSO owns — sits un-surfaced in the bag. The
+        // melee-only bag/ground affordances miss it, leaving NO arming path. Surface
+        // "wield the bag launcher, then load its bag ammo".
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                // Wielded thrown missile weapon, no compatible bag ammo (AmmoType 2).
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 2 },
+                // Un-wielded bag LAUNCHER (AmmoType 1), equippable into a main-weapon slot.
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = 1 },
+                // Un-wielded bag ammo COMPATIBLE with the launcher (AmmoType 1).
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Lead Pea", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 1 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains(
+            "missile launcher + compatible ammo in your inventory (Wield the launcher, then Wield the ammo to load): Royal Atlatl + Lead Pea",
+            prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_WieldedLauncherLoadable_DoesNotSurfaceBagLauncherLoadout()
+    {
+        // When the WIELDED launcher itself has compatible bag ammo (bagAmmo not
+        // null), the existing "Wield it to load" affordance handles it — the
+        // bag-launcher swap loadout must NOT also fire (no redundant weapon swap).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 1 },
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Lead Pea", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 1 },
+                // A second bag launcher with its own compatible ammo would also qualify,
+                // but the wielded launcher is loadable, so neither loadout should show.
+                new InventoryItemProjection
+                { Guid = 0x444u, Name = "Spare Bow", Wcid = 301u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = 1 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo in your inventory (Wield it to load): Lead Pea", prompt);
+        Assert.DoesNotContain("missile launcher + compatible ammo in your inventory", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagLauncherNoCompatibleAmmo_DoesNotSurfaceLoadout()
+    {
+        // A bag launcher with NO compatible ammo (the bag holds only mismatched
+        // ammo) gives no usable ranged loadout — the affordance must not fire.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 2 },
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = 1 },
+                // Bag ammo whose AmmoType (3) matches NEITHER launcher.
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Wrong Bolt", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 3 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("missile launcher + compatible ammo in your inventory", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagThrownWeaponNullAmmoType_DoesNotSurfaceLoadout()
+    {
+        // claude review: a THROWN weapon (ItemType MissileWeapon, equippable into the
+        // weapon slot, but NO AmmoType — self-contained) must NOT be mis-selected as a
+        // launcher and paired with unrelated ammo. AmmoTypeCompatible treats a null
+        // launcher AmmoType as matching anything, so without the `AmmoType is not null`
+        // launcher guard the thrown weapon would pair with the bag arrow and surface a
+        // doomed "wield knife + wield arrow" loadout.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x111u, Name = "Tankard", Wcid = 168u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 2 },
+                // Un-wielded bag THROWN weapon: MissileWeapon + weapon slot, but NO AmmoType.
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Throwing Knife", Wcid = 999u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = null },
+                // Bag ammo that would be WRONGLY paired with the knife if it counted as a launcher.
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Arrow", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = 1 },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("missile launcher + compatible ammo in your inventory", prompt);
     }
 
     [Fact]
