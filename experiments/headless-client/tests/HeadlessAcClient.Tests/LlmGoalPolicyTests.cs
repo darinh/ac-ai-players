@@ -7137,8 +7137,60 @@ public class LlmGoalPolicyTests
     {
         Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
             BuildUntrainedWieldedWorld("TwoHandedCombat", "TwoHandedCombat", 0x2000000u, 0x1u)));
+        // No weapon WIELDED, but the bag item is a missile weapon with AmmoType null
+        // (a thrown weapon — its own projectile, usable), so HasNoUsableWeaponAnywhere
+        // is false and the Case-2 unarmed note stays suppressed (the bot can wield it).
         Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
             BuildUntrainedWieldedWorld("TwoHandedCombat", "MissileWeapons", null, 0x100u)));
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_StuckUnarmed_SteersCoordination()
+    {
+        // cp063: nothing wielded + only an ammoless bag launcher (no loadable ammo) =
+        // genuinely fighting unarmed (the cp060-dequipped state). The note steers the
+        // bot at coordination for fist accuracy, NOT the wielded-weapon variant.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x222u, Name = "Bag Launcher", Wcid = 2u, ItemType = 0x100u,
+                WieldedAt = null, AmmoType = (ushort)0x1, ValidLocations = 0x400000u,
+            },
+        });
+        var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(world);
+        Assert.NotNull(note);
+        Assert.Contains("unarmed accuracy", note);
+        Assert.Contains("raise COORDINATION", note);
+        Assert.DoesNotContain("wielded-weapon accuracy", note);
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_EmptyInventory_SteersCoordination()
+    {
+        // Totally weaponless (empty inventory) -> Case 2 fires.
+        var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
+            BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()));
+        Assert.NotNull(note);
+        Assert.Contains("unarmed accuracy", note);
+        Assert.Contains("raise COORDINATION", note);
+    }
+
+    [Fact]
+    public void WieldedWeaponUntrainedAccuracyNote_UnarmedButUsableBagWeapon_Null()
+    {
+        // No weapon wielded BUT a usable melee weapon sits in the bag -> the bot
+        // should WIELD it (owned by the how-to-arm affordances), so the unarmed
+        // accuracy note must NOT fire and contradict that.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x333u, Name = "Bag Sword", Wcid = 3u, ItemType = 0x1u,
+                WieldedAt = null, ValidLocations = 0x2000000u,
+            },
+        });
+        Assert.Null(LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(world));
     }
 
     [Fact]

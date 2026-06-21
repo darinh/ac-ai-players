@@ -9874,6 +9874,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
+    /// The bot's currently-wielded main-weapon (a melee or missile weapon in a
+    /// main-weapon slot), or null when NO main-weapon is wielded (the bot is
+    /// fighting unarmed). Pure projection over the inventory wire facts; shared so
+    /// the wielded-vs-unarmed accuracy branch is judged from one predicate.
+    /// </summary>
+    internal static InventoryItemProjection? WieldedMainWeapon(WorldStateProjection world) =>
+        world.Inventory.FirstOrDefault(i =>
+            i.WieldedAt is uint w && (w & WeaponSwap.MainWeaponSlotMask) != 0 &&
+            i.ItemType is uint it &&
+            ((it & ItemTypeMasks.MeleeWeapon) != 0 || (it & ItemTypeMasks.MissileWeapon) != 0));
+
+    /// <summary>
     /// When the bot's WIELDED main-weapon is governed by a skill it has NOT
     /// trained, returns a signal for the SPEND-XP accuracy advice: the skill's
     /// NAME when the governing skill is KNOWN-and-untrained, or "" (empty) when a
@@ -9890,10 +9902,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         var trained = world.Self.TrainedSkills;
         if (trained is null || trained.Count == 0) return null;
-        var wielded = world.Inventory.FirstOrDefault(i =>
-            i.WieldedAt is uint w && (w & WeaponSwap.MainWeaponSlotMask) != 0 &&
-            i.ItemType is uint it &&
-            ((it & ItemTypeMasks.MeleeWeapon) != 0 || (it & ItemTypeMasks.MissileWeapon) != 0));
+        var wielded = WieldedMainWeapon(world);
         if (wielded is null) return null;             // no main-weapon wielded
         var gs = wielded.GoverningSkill;
         if (string.IsNullOrEmpty(gs)) return "";      // wielded, but skill UNKNOWN
@@ -9903,24 +9912,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
-    /// Combat-readiness advisory FACT, rendered whenever the bot is WIELDING a
-    /// weapon governed by a skill it has NOT trained (or whose skill is unknown):
-    /// raising a TRAINED weapon skill does nothing for THIS weapon, so it corrects
-    /// the general SPEND-XP / COMBAT-SAFETY "raise your trained weapon skill"
-    /// accuracy advice for the current weapon and points at coordination. Unlike
-    /// the endcap mapping it is NOT swing-gated, so it covers the pre-combat case
-    /// and the dense-scene body cut (it is re-surfaced in the protected tail).
-    /// Returns null when the wielded weapon's skill is trained, no weapon is
-    /// wielded, or the trained-skill list is unknown. Pure projection; the LLM
-    /// still decides what to raise.
+    /// Combat-readiness accuracy advisory FACT. TWO cases, both pointing the bot at
+    /// COORDINATION as the accuracy lever (the wielded note's proven phrasing):
+    /// (1) the bot is WIELDING a weapon governed by a skill it has NOT trained (or
+    /// whose skill is unknown) — raising a TRAINED weapon skill does nothing for THIS
+    /// weapon; (2) the bot has NO main-weapon wielded AND no usable weapon available
+    /// anywhere (the stuck-unarmed state) — its swings are fists, which no weapon
+    /// skill governs, so coordination is the lever. Not swing-gated, so it covers the
+    /// pre-combat case and the dense-scene body cut (re-surfaced in the protected
+    /// tail). Returns null when neither case applies: a main-weapon IS wielded but
+    /// its skill is TRAINED (or, for Case 1 only, the trained-skill list is unknown,
+    /// which suppresses the wielded note), OR no weapon is wielded but a usable
+    /// weapon IS available to wield/buy (so it never contradicts a "wield/buy the
+    /// available weapon" affordance). Pure projection; the LLM still decides what to
+    /// raise.
     /// </summary>
     internal static string? WieldedWeaponUntrainedAccuracyNote(WorldStateProjection world)
     {
-        if (WieldedWeaponUntrainedSkillName(world) is not string s) return null;
-        var which = s.Length > 0 ? $"its skill ({s})" : "its skill";
-        return $"wielded-weapon accuracy: {which} is NOT one of your `trained skills`, so raising a " +
-               "TRAINED weapon skill will NOT improve THIS weapon's hit rate — raise COORDINATION for " +
-               "accuracy (or arm a weapon governed by a skill you HAVE trained for a real upgrade).";
+        if (WieldedWeaponUntrainedSkillName(world) is string s)
+        {
+            var which = s.Length > 0 ? $"its skill ({s})" : "its skill";
+            return $"wielded-weapon accuracy: {which} is NOT one of your `trained skills`, so raising a " +
+                   "TRAINED weapon skill will NOT improve THIS weapon's hit rate — raise COORDINATION for " +
+                   "accuracy (or arm a weapon governed by a skill you HAVE trained for a real upgrade).";
+        }
+        // Case 2: genuinely fighting unarmed (no main-weapon wielded AND no usable
+        // weapon anywhere — the cp060/cp061/cp062 stuck state). Unarmed swing accuracy
+        // has no weapon skill behind it, so coordination is the lever; surface it so a
+        // weaponless bot raises coordination to land fist hits. Gated tight on
+        // HasNoUsableWeaponAnywhere so it never fires when a weapon is available to
+        // wield/buy (that path is owned by the how-to-arm affordances).
+        if (WieldedMainWeapon(world) is null && HasNoUsableWeaponAnywhere(world))
+            return "unarmed accuracy: with no weapon wielded your swings are unarmed (fists) — " +
+                   "raise COORDINATION for accuracy (or obtain a weapon governed by a skill you HAVE " +
+                   "trained for a real upgrade).";
+        return null;
     }
 
     // Compact, decision-relevant WIELD annotation for an inventory row, derived
