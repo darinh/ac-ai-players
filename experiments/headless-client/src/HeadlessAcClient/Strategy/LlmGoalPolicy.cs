@@ -6510,6 +6510,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Where(v => v.IsMonster)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
+        // cp058: the nearest in-view VENDOR whose panel is NOT yet open, offered
+        // below as the LAST-RESORT arming path — surfaced ONLY when the bot is
+        // UNARMED and has NO in-bag / on-ground weapon, ammo, or launcher loadout to
+        // arm with. A vendor may sell a weapon or ammo to BUY (its wares are unknown
+        // until its panel is opened). Skips a server-refused vendor. Pure wire-flag
+        // (IsVendor) projection; the LLM still decides whether to Use/Buy.
+        var armVendor = armed ? null : world.Visible
+            .Where(v => v.IsVendor && !recentlyServerRefusedGuids.Contains(v.Guid))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
         var observedHostile = world.Visible.FirstOrDefault(v => !v.IsCorpse && v.ObservedHostile);
         // Threat counts for the cluster signal. A live combat threat is any
         // non-corpse monster OR anything actively attacking you (ObservedHostile
@@ -6553,6 +6563,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
                 $" then Wield the ammo to load): {bla1.Launcher.Name} + {bla1.Ammo.Name}");
+        if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
+            bagAmmo is null && bagLauncherAmmo is null &&
+            world.Vendor is null && armVendor is not null)
+        {
+            var avd = armVendor.Distance is float avDist ? $" d={avDist:F1}" : "";
+            sb.AppendLine(
+                "- vendor nearby (you have NO weapon to Wield/Pickup — `Use` it ONCE to browse its " +
+                "`Vendor offerings`, then `Buy` a `[weapon]`/`[missile weapon/ammo]` to arm; if nothing there " +
+                $"is affordable it cannot arm you now — `Explore` to a different vendor/arm source rather than re-Using it): {armVendor.Name}{avd}");
+        }
         if (nearestMonster is not null)
         {
             var dStr = nearestMonster.Distance is float dm ? $" d={dm:F1}" : "";
@@ -8458,6 +8478,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
                     $" then Wield the ammo to load): {bla2.Launcher.Name} + {bla2.Ammo.Name}");
+            if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
+                bagAmmo is null && bagLauncherAmmo is null &&
+                world.Vendor is null && armVendor is not null)
+            {
+                var avd2 = armVendor.Distance is float ad2 ? $" d={ad2:F1}" : "";
+                sb.AppendLine(
+                    "- vendor nearby (you have NO weapon to Wield/Pickup — `Use` it ONCE to browse its " +
+                    "`Vendor offerings`, then `Buy` a `[weapon]`/`[missile weapon/ammo]` to arm; if nothing there " +
+                    $"is affordable it cannot arm you now — `Explore` to a different vendor/arm source rather than re-Using it): {armVendor.Name}{avd2}");
+            }
         }
 
         // ── ## Beaten kinds capsule (protected-tail cut-proof) ──
