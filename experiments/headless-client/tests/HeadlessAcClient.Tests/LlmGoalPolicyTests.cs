@@ -18983,6 +18983,75 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void PromptSectionHeaders_ExtractsTopLevelHeadersInOrder()
+    {
+        var p = "PREAMBLE\n## Visible nearby\n- a\n## Combat readiness\n- ready\n### not a top header\n## Inventory\n- item\n";
+        var headers = LlmGoalPolicy.PromptSectionHeaders(p);
+        Assert.Equal(new[] { "Visible nearby", "Combat readiness", "Inventory" }, headers);
+    }
+
+    [Fact]
+    public void PromptSectionHeaders_CompactsResurfacedTagKeepingBaseName()
+    {
+        // Real production capsule headers (verbatim from BuildUserPrompt) — the long
+        // "... re-surfaced because ...)" note is compacted to a short "(re-surfaced)"
+        // tag, including the two forms with descriptive pre-text before "re-surfaced".
+        var p =
+            "## Persistent objectives (re-surfaced because the full `## Intent stack` above can be trimmed to fit; revision=1, depth=1/8)\n- x\n" +
+            "## Held items (you are carrying these — re-surfaced because `## Inventory` above can be trimmed to fit the prompt)\n- sword\n" +
+            "## Self (core state — re-surfaced because `## Self` above can be trimmed to fit the prompt)\n- attr\n" +
+            "## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)\n- ready\n" +
+            "## Location (re-surfaced because `## Location & recency` above can be trimmed to fit the prompt)\n- here\n";
+        Assert.Equal(
+            new[]
+            {
+                "Persistent objectives (re-surfaced)",
+                "Held items (re-surfaced)",
+                "Self (re-surfaced)",
+                "Combat readiness (re-surfaced)",
+                "Location (re-surfaced)",
+            },
+            LlmGoalPolicy.PromptSectionHeaders(p));
+    }
+
+    [Fact]
+    public void PromptSectionHeaders_ResurfacedCapsuleKeepsItsOwnBaseName()
+    {
+        // Some capsules deliberately re-surface under a NARROWER name than their body
+        // section (e.g. "## Held items" re-surfaces "## Inventory"); the diagnostic
+        // keeps the capsule's OWN base name + tag (it does not — and cannot — map it
+        // back to the body section name). Uses the EXACT production header string.
+        var p = "## Held items (you are carrying these — re-surfaced because `## Inventory` above can be trimmed to fit the prompt)\n- sword\n";
+        Assert.Equal(new[] { "Held items (re-surfaced)" }, LlmGoalPolicy.PromptSectionHeaders(p));
+    }
+
+    [Fact]
+    public void PromptSectionHeaders_KeepsOrdinaryParenthesizedHeaders()
+    {
+        // Ordinary section names that legitimately contain parentheses must NOT be
+        // touched — only a header whose parenthetical contains "re-surfaced" is compacted.
+        var p = "## Recently sighted (out of view)\n- a\n## System messages (recent — status text)\n- m\n";
+        Assert.Equal(
+            new[] { "Recently sighted (out of view)", "System messages (recent — status text)" },
+            LlmGoalPolicy.PromptSectionHeaders(p));
+    }
+
+    [Fact]
+    public void PromptSectionHeaders_EmptyOrNull_ReturnsEmpty()
+    {
+        Assert.Empty(LlmGoalPolicy.PromptSectionHeaders(""));
+        Assert.Empty(LlmGoalPolicy.PromptSectionHeaders(null!));
+        Assert.Empty(LlmGoalPolicy.PromptSectionHeaders("no headers here\n- just rows\n"));
+    }
+
+    [Fact]
+    public void PromptSectionHeaders_HandlesCrlfLineEndings()
+    {
+        var p = "PREAMBLE\r\n## Self\r\n- attributes\r\n## Contracts\r\n- one\r\n";
+        Assert.Equal(new[] { "Self", "Contracts" }, LlmGoalPolicy.PromptSectionHeaders(p));
+    }
+
+    [Fact]
     public void FitPromptToCeiling_OverageExceedsVisible_CascadesThroughSightingsAndEvents()
     {
         // Regression for the rubber-duck blocking issue: when the overage is
