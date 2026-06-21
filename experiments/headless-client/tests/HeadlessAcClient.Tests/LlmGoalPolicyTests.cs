@@ -15147,6 +15147,11 @@ public class LlmGoalPolicyTests
                     { Name = "two handed combat", Advancement = "trained", RaisedRanks = 0 },
                 },
             },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Trained Weapon", Wcid = 5u, ItemType = 0x1u, WieldedAt = 0x2000000u, GoverningSkill = "two handed combat" },
+            },
             CumulativeSwingsLanded = 4,
             CumulativeSwingsEvaded = 7,
         };
@@ -15161,12 +15166,19 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_NamesWeaponSkill_WhenTrained()
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_NamesWeaponSkill_WhenTrainedWeaponWielded()
     {
-        // gpt-5.4 fix: when `## Self` DOES list a trained skill, the weapon skill
-        // is the main accuracy lever and RaiseSkill is valid -> the mapping says so.
+        // gpt-5.4 fix + cp064: when the bot WIELDS a weapon governed by a trained
+        // skill, that weapon skill is the main accuracy lever and RaiseSkill is valid
+        // -> the mapping names it. (cp064: the weapon must be WIELDED — a trained skill
+        // with NO weapon wielded is the unarmed case, which points at coordination.)
         var world = BuildWorldWithTrainedSkill() with
         {
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Trained Weapon", Wcid = 5u, ItemType = 0x1u, WieldedAt = 0x2000000u, GoverningSkill = "two handed combat" },
+            },
             CumulativeSwingsLanded = 4,
             CumulativeSwingsEvaded = 7,
         };
@@ -15209,6 +15221,59 @@ public class LlmGoalPolicyTests
         // steers to coordination (it survives in the protected tail too).
         Assert.Contains("wielded-weapon accuracy: its skill (MissileWeapons) is NOT one of your `trained skills`", prompt);
         Assert.Contains("raise COORDINATION", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_CoordinationWhenStuckUnarmed()
+    {
+        // cp064: the bot is fighting UNARMED (no weapon wielded, none usable anywhere)
+        // while trained only in TwoHandedCombat. Raising TwoHandedCombat does nothing
+        // for fist accuracy, so the SPEND-XP accuracy mapping must point at COORDINATION
+        // and NOT name the (irrelevant) trained weapon skill as "the main accuracy lever".
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.Contains("you have NO weapon wielded — your swings are unarmed/fists", cap);
+        Assert.DoesNotContain("trained WEAPON SKILL (the main accuracy lever", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_WeaponSkill_WhenUnarmedButBagWeaponAvailable()
+    {
+        // cp064 gate: no weapon WIELDED but a usable melee weapon sits in the bag ->
+        // the bot should WIELD it (its trained skill then applies), so the mapping must
+        // NOT switch to the unarmed-coordination branch; it keeps naming the weapon skill.
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Bag Sword", Wcid = 3u, ItemType = 0x1u, WieldedAt = null, ValidLocations = 0x2000000u },
+            },
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.DoesNotContain("your swings are unarmed/fists", cap);
+        Assert.Contains("trained WEAPON SKILL (the main accuracy lever", cap);
     }
 
     [Fact]
