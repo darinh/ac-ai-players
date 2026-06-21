@@ -7877,6 +7877,67 @@ public class LlmGoalPolicyTests
         }));
     }
 
+    // ── CanUnarmedMelee tests ──────────────────────────────────────────────
+
+    [Fact]
+    public void CanUnarmedMelee_NullInventory_True()
+    {
+        Assert.True(LlmGoalPolicy.CanUnarmedMelee(null));
+    }
+
+    [Fact]
+    public void CanUnarmedMelee_EmptyInventory_True()
+    {
+        Assert.True(LlmGoalPolicy.CanUnarmedMelee(
+            System.Array.Empty<InventoryItemProjection>()));
+    }
+
+    [Fact]
+    public void CanUnarmedMelee_WieldedMeleeWeapon_False()
+    {
+        // A wielded melee weapon is a main-weapon-slot weapon → CanUnarmedMelee=false
+        // (but IsCombatCapable=true; this case is HasUsableWeapon not UnarmedMeleeOnly).
+        Assert.False(LlmGoalPolicy.CanUnarmedMelee(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u },
+        }));
+    }
+
+    [Fact]
+    public void CanUnarmedMelee_WieldedLauncherNoAmmo_False()
+    {
+        // A launcher in the main-weapon slot forces Missile combat mode, blocking
+        // unarmed melee. CanUnarmedMelee=false (LauncherNeedsDequip state).
+        Assert.False(LlmGoalPolicy.CanUnarmedMelee(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Launcher", Wcid = 5u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 7 },
+        }));
+    }
+
+    [Fact]
+    public void CanUnarmedMelee_UnwieldedWeaponInBag_True()
+    {
+        // A weapon in the bag (WieldedAt=null or 0) does not affect CanUnarmedMelee.
+        Assert.True(LlmGoalPolicy.CanUnarmedMelee(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = null },
+        }));
+    }
+
+    [Fact]
+    public void CanUnarmedMelee_NonWeaponItemWielded_True()
+    {
+        // Clothing / armor / cloak worn (WieldedAt != 0 but ItemType has no weapon bit).
+        Assert.True(LlmGoalPolicy.CanUnarmedMelee(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Hat", Wcid = 99u, ItemType = 0x2u /* Armor */, WieldedAt = 0x020000u },
+        }));
+    }
+
     [Fact]
     public void IsOptionalAttackWhileNotCombatCapable_ThrownWeaponWielded_DoesNotFire()
     {
@@ -10055,14 +10116,15 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsOptionalAttackWhileNotCombatCapable_UnarmedNoHostile_Drops()
+    public void IsOptionalAttackWhileNotCombatCapable_TrulyUnarmed_AllowsUnarmedMelee()
     {
-        // No usable weapon (empty inventory) + no live hostile -> a doomed optional
-        // Attack must be dropped.
+        // No weapon at all (empty inventory) — the server allows a fist attack (unarmed
+        // melee), so the Attack must NOT be dropped. CanUnarmedMelee is true when no
+        // weapon is wielded in any main-weapon slot.
         var world = BuildInventoryWorld(
             System.Array.Empty<InventoryItemProjection>(),
             new[] { new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false } });
-        Assert.True(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
     }
 
     [Fact]
@@ -10088,11 +10150,12 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsOptionalAttackWhileNotCombatCapable_PassiveTargetWhileOtherHostileInView_Drops()
+    public void IsOptionalAttackWhileNotCombatCapable_TrulyUnarmedPassiveTargetOtherHostile_AllowsUnarmedMelee()
     {
-        // Unarmed: the LLM names a PASSIVE target, but a DIFFERENT hostile is in view.
-        // The named (passive) attack is still doomed — the self-defense exemption is
-        // TARGET-SPECIFIC, not "any hostile in view" — so it must be dropped.
+        // Truly unarmed (empty inventory): the LLM names a passive target, and a
+        // different hostile is in view. Since no weapon blocks Melee combat mode,
+        // unarmed melee is viable for ANY target — the Attack must NOT be dropped.
+        // (The self-defense exemption path is not needed here; CanUnarmedMelee fires.)
         var world = BuildInventoryWorld(
             System.Array.Empty<InventoryItemProjection>(),
             new[]
@@ -10100,7 +10163,50 @@ public class LlmGoalPolicyTests
                 new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false },
                 new VisibleObjectProjection { Guid = 0x8003u, Name = "Wasp", Wcid = 9002u, Distance = 3f, IsMonster = true, ObservedHostile = true },
             });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_LauncherNeedsDequip_Drops()
+    {
+        // A missile launcher (with AmmoType set) is wielded with no ammo loaded.
+        // This is the LauncherNeedsDequip state: CanUnarmedMelee is false (the
+        // launcher forces Missile combat mode, blocking unarmed Melee) and
+        // IsCombatCapable is false (no ammo) → doomed optional swing → drop.
+        // The Motor will dequip the launcher so unarmed melee becomes available.
+        var world = BuildInventoryWorld(
+            new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = 0xA001u, Name = "Launcher", Wcid = 500u,
+                    ItemType = 0x100u,      // MissileWeapon
+                    WieldedAt = 0x400000u,  // MissileWeapon slot (in MainWeaponSlotMask)
+                    AmmoType = 7,           // non-null → real launcher, not thrown
+                },
+            },
+            new[] { new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false } });
         Assert.True(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_LauncherNeedsDequipNamedHostile_ExemptSelfDefense()
+    {
+        // Same LauncherNeedsDequip state, but the Attack's named target is ITSELF
+        // the live hostile → self-defense exemption, Attack is NOT dropped.
+        var world = BuildInventoryWorld(
+            new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = 0xA001u, Name = "Launcher", Wcid = 500u,
+                    ItemType = 0x100u,
+                    WieldedAt = 0x400000u,
+                    AmmoType = 7,
+                },
+            },
+            new[] { new VisibleObjectProjection { Guid = 0x8002u, Name = "Wasp", Wcid = 9002u, Distance = 3f, IsMonster = true, ObservedHostile = true } });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Wasp"), world));
     }
 
     [Fact]
