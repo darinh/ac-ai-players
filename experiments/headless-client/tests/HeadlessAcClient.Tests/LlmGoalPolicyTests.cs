@@ -1035,6 +1035,93 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
     }
 
+    private static EventStream ExploreEmissions(string name, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Explore target=name=\"{name}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_ReturnsNameForRepeatedNoVisibleMatch()
+    {
+        // cp067: 3 recent Explore emissions to a name with NO matching visible object
+        // -> the looped name (a reached area, not a walk-to object). The capsule cues
+        // the LLM; it does NOT drop the goal.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Sparring Golem", 5f)); // some object, NOT the name
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        Assert.Equal("Central Courtyard", LlmGoalPolicy.RepeatedUnresolvedExploreName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_NullWhenNameMatchesVisibleObject()
+    {
+        // A visible object DOES match the name -> cp021 / cp022 / normal nav handles it.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 5f));
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedExploreName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_NullBelowThreshold()
+    {
+        // Only 2 recent emissions -> below the repeat threshold (no loop cue yet).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedExploreName(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_NullForOldEmissionsOutsideWindow()
+    {
+        // 3 emissions but all OLDER than `since` -> not a RECENT loop, not counted.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now.AddMinutes(-10));
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedExploreName(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_IgnoresUntargetedAnywhere()
+    {
+        // An "anywhere" Explore is a Motor-owned traversal, never a looped target.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("anywhere", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedExploreName(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_RendersForRepeatedUnresolvedExplore()
+    {
+        // The cue surfaces in the prompt (a protected-tail capsule), naming the looped
+        // target, when the bot has repeatedly Explored a name with no visible match.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.Contains("Central Courtyard", prompt);
+        Assert.Contains("CANNOT interact with a PLACE", prompt);
+        // The cue must NOT contradict a legitimate not-yet-reached distant target:
+        // it explicitly allows continuing to Explore toward a distant place.
+        Assert.Contains("keep `Explore`-ing toward it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_OmittedWhenNoLoop()
+    {
+        // No repeated unresolved Explore -> no capsule (a single Explore is normal nav).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 1, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Explore loop (unresolved target)", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {

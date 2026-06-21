@@ -2560,6 +2560,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+
         // Settled stage-3 turn-in Explore no-op (cp051): once the cp050 Talk guard
         // suppresses re-Talking a settled turn-in NPC, a model fixated on that NPC
         // re-routes to Explore (navigate-to) the SAME settled NPC. Exploring toward a
@@ -4849,7 +4850,56 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
-    // break-sticky-on-self-interact: true iff the Motor emitted a
+    // cp067 repeated-Explore-to-unresolved-name window + threshold.
+    private static readonly TimeSpan RepeatedUnresolvedExploreWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnresolvedExploreThreshold = 3;
+
+    // cp067: the NAME the bot has Explored toward >= threshold times within the recent
+    // window that resolves to NO visible object (a reached area / unresolved name), or
+    // null when no such loop is forming. Explore is navigate-only; an Explore toward a
+    // name with NO matching visible object walks to wherever the name last resolved (a
+    // remembered/area location) and ARRIVES, clearing the goal and waking a fresh
+    // no-current-goal LLM call that re-emits the SAME Explore — a call storm in place
+    // (live: an area/location name re-Explored many times back-to-back, the Motor
+    // reporting arrival although the name is not a visible object). cp022
+    // IsExploreToReachedTarget only covers a target that IS a visible reached object;
+    // this surfaces the no-visible-match (area/location-name) case to the LLM as an
+    // informational CUE (the `## Explore loop` capsule) — NOT a hard drop, so a
+    // legitimate TRAVEL-BACK toward a not-yet-visible distant target (the cp035/cp037/
+    // cp051 return-to-source paths) is never overridden; the LLM still decides. Keyed
+    // purely on the bot's OWN goal-emission history + perception. Untargeted ("anywhere")
+    // and `name_contains`/`wcid`/coord Explores (no `name` token) are ignored. No game
+    // knowledge, no priority, no source-side target choice.
+    internal static string? RepeatedUnresolvedExploreName(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (events is null) return null;
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in events.RecentGoalEmissions().Where(e => !string.IsNullOrEmpty(e.Text)))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Explore", StringComparison.Ordinal)) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            var name = nm.Groups[1].Value;
+            if (string.IsNullOrWhiteSpace(name)
+                || string.Equals(name, "anywhere", StringComparison.OrdinalIgnoreCase)) continue;
+            counts[name] = counts.TryGetValue(name, out var c) ? c + 1 : 1;
+        }
+        foreach (var kv in counts.OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < RepeatedUnresolvedExploreThreshold) break;
+            if (world?.Visible is not null
+                && world.Visible.Any(v => string.Equals(v.Name, kv.Key, StringComparison.OrdinalIgnoreCase)))
+                continue; // a matching visible object exists — cp022 / normal nav handles it
+            return kv.Key;
+        }
+        return null;
+    }
     // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
     // last LLM look whose identity is selector-compatible with the spatial
     // goal's Target. Used to stop the sticky-objective gate from free-re-driving
@@ -8404,6 +8454,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "flavor, or its task is already done), pursue DIFFERENT progress instead (another " +
                 "un-talked npc, a vendor/contract source, or a fresh objective) — do NOT keep " +
                 "`Explore`-ing a target you have already reached.");
+        }
+
+        // ── ## Explore loop (unresolved target) — cp067 protected-tail cue ──
+        // The cp021 capsule above covers an Explore toward a target that IS a visible
+        // reached object. A DISTINCT loop (live: an area/location name re-Explored many
+        // times back-to-back with repeated arrivals) is the bot re-emitting Explore
+        // toward a NAME that matches NO visible object — `Explore` navigates to where
+        // the name last resolved, ARRIVES, clears the goal, and a fresh no-current-goal
+        // LLM call re-emits the SAME Explore: a call storm in place that cp022/cp021
+        // never catch (no visible match). Surface it as an informational CUE keyed on
+        // the bot's OWN repeated emissions + perception — NOT a hard drop, so a
+        // legitimate travel-back toward a not-yet-visible target is never overridden;
+        // the LLM still decides. No game knowledge (the looped name is the bot's own
+        // emitted goal text, echoed back), no priority, no source-side target choice.
+        if (RepeatedUnresolvedExploreName(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedExploreWindow) is string loopedExploreName
+            && OneLine(loopedExploreName) is string loopedExploreDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Explore loop (unresolved target)");
+            sb.AppendLine(
+                $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently but NO " +
+                $"object named `{loopedExploreDisplay}` is visible here. If `{loopedExploreDisplay}` is a " +
+                "DISTANT place you have NOT reached yet, keep `Explore`-ing toward it — that is normal " +
+                "travel (your `landblock`/position should be changing as you go). But if it is an area you " +
+                "have ALREADY reached (you keep ARRIVING with nothing here to act on, and your position is " +
+                "NOT changing), re-`Explore`-ing makes no progress: `Explore` only WALKS/discovers and " +
+                "CANNOT interact with a PLACE. In that case, to ADVANCE, interact with a VISIBLE object — a " +
+                "portal/NPC/door/sign in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`) — or pursue a " +
+                $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
         }
 
         // ── ## System messages (protected-tail durable status capsule) ──
