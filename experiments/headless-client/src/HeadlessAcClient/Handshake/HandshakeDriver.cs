@@ -4066,6 +4066,45 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
+                // A THROWN missile weapon is CONSUMED when thrown: the server
+                // deletes it, sends "out of ammunition", and drops the bot to
+                // NonCombat. With the weapon gone, the Phase 7f.2 loop-keeper
+                // below would re-send TargetedMissileAttack every cycle and the
+                // server cancels each one (weapon == null → AttackDone
+                // ActionCancelled) — mid-fight that is a tight loop that spins
+                // until the monster kills the bot (observed live: bot threw its
+                // only thrown weapon, then fast-retried a weaponless missile
+                // attack to death). Detect the missing missile weapon and DROP
+                // the combat lock NOW so the next decision re-arms (wield the
+                // next thrown weapon) or flees — the same teardown the
+                // target-removed handler does, just keyed on the bot's own
+                // wielded loadout instead of the target. Mechanical motor
+                // bookkeeping (wielded-weapon existence); no game knowledge.
+                if (combatTargetGuid is uint mwGoneCtg &&
+                    combatAttackMode == AttackMode.Missile &&
+                    !CombatWeaponSelection.HasWieldedMissileWeapon(
+                        worldState.Objects.Values
+                            .Where(s => s.WielderGuid is uint wg && wg == chosenCharacterGuid)
+                            .Select(s => (s.ItemType, Wielded: true))))
+                {
+                    Console.WriteLine(
+                        $"[combat] missile weapon gone (thrown weapon consumed) — clearing " +
+                        $"combat lock 0x{mwGoneCtg:X8}; next decision re-arms or flees.");
+                    // The target is still ALIVE — only our weapon is gone — so it must
+                    // stay re-engageable: suppress the Phase 6g post-reset visited-add
+                    // (which would otherwise blacklist the monster for the session once
+                    // combatTargetGuid is null), mirroring the other soft lock-clears.
+                    suppressVisitedAddOnReset = true;
+                    combatTargetGuid = null;
+                    combatStartedAt = null;
+                    lastCombatAttackAt = null;
+                    lastDamageAt = null;
+                    lastObservedTargetHealthFraction = null;
+                    lastObservedTargetHealthAt = null;
+                    combatFastRetryRequested = false;
+                    ClearCombatFightStats();
+                }
+
                 // Phase 7f.2 — RE-ENGAGE safety net. With AutoRepeatAttacks
                 // enabled (sent once at Phase 7f.0 after LoginComplete), AC1's
                 // melee is a server-side loop: one TargetedMeleeAttack starts
