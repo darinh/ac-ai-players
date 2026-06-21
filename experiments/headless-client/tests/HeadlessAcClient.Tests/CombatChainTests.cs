@@ -353,16 +353,22 @@ public class CombatChainTests
         {
             new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = meleeType, WieldedAt = meleeSlot },
         }));
-        // A wielded missile weapon WITH ammo loaded -> capable.
+        // A wielded missile LAUNCHER (declares an AmmoType) WITH ammo loaded -> capable.
         Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
         {
-            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot },
-            new InventoryItemProjection { Guid = 0x3u, Name = "Ammo", Wcid = 3u, ItemType = missileType, WieldedAt = ammoSlot },
+            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot, AmmoType = 1 },
+            new InventoryItemProjection { Guid = 0x3u, Name = "Ammo", Wcid = 3u, ItemType = missileType, WieldedAt = ammoSlot, AmmoType = 1 },
         }));
-        // A wielded missile weapon with NO ammo loaded -> NOT capable.
+        // A wielded missile LAUNCHER (declares an AmmoType) with NO ammo loaded -> NOT capable.
         Assert.False(LlmGoalPolicy.IsCombatCapable(new[]
         {
-            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot },
+            new InventoryItemProjection { Guid = 0x2u, Name = "Launcher", Wcid = 2u, ItemType = missileType, WieldedAt = missileSlot, AmmoType = 1 },
+        }));
+        // A wielded THROWN weapon (missile bit, main slot, NO AmmoType — it is its own
+        // projectile) -> capable WITHOUT any loaded ammo.
+        Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection { Guid = 0x4u, Name = "Throwable", Wcid = 4u, ItemType = missileType, WieldedAt = missileSlot, AmmoType = null },
         }));
         // Loaded ammo WITHOUT a launcher -> NOT capable. Ammo sits in the ammo slot
         // (outside the main-weapon slots) and can carry the MissileWeapon ItemType
