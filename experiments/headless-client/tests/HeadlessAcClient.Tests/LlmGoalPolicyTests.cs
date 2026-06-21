@@ -7544,6 +7544,10 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("missile ammo: EMPTY, no loadable ammo - UNARMED (cannot fire)", prompt);
         Assert.DoesNotContain("wield ammo to fire", prompt);
+        // cp060: the ammoless-launcher state must surface the unarmed-melee
+        // fallback so the LLM knows it can still engage (the Motor dequips the
+        // useless launcher); otherwise the bot wanders thinking it cannot fight.
+        Assert.Contains("unarmed melee with fists is available", prompt);
     }
 
     [Fact]
@@ -7588,6 +7592,27 @@ public class LlmGoalPolicyTests
         Assert.True(LlmGoalPolicy.AmmoTypeCompatible(null, 5));
         Assert.True(LlmGoalPolicy.AmmoTypeCompatible(5, 5));
         Assert.False(LlmGoalPolicy.AmmoTypeCompatible(5, 7));
+    }
+
+    [Fact]
+    public void HasLoadableBagAmmoForLauncher_TrueOnlyForCompatibleAmmoSlotItem()
+    {
+        const uint AmmoSlot = ItemTypeMasks.MissileAmmoSlot;
+        // Ammo-slot item with a matching AmmoType → loadable.
+        Assert.True(LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+            new (uint?, ushort?)[] { (AmmoSlot, (ushort?)4) }, 4));
+        // Null AmmoType on either side is not rejected (mirrors AmmoTypeCompatible).
+        Assert.True(LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+            new (uint?, ushort?)[] { (AmmoSlot, (ushort?)null) }, 4));
+        // Incompatible AmmoType → not loadable.
+        Assert.False(LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+            new (uint?, ushort?)[] { (AmmoSlot, (ushort?)7) }, 4));
+        // Item without the missile-ammo SLOT ValidLocation bit → not ammo.
+        Assert.False(LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+            new (uint?, ushort?)[] { ((uint?)0x400000u, (ushort?)4) }, 4));
+        // Empty bag → not loadable (the Motor may dequip the useless launcher).
+        Assert.False(LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+            System.Array.Empty<(uint?, ushort?)>(), 4));
     }
 
     [Fact]

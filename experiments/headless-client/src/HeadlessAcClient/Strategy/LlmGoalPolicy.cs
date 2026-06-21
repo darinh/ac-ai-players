@@ -9560,7 +9560,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 ? "loaded"
                 : hasLoadableAmmo
                     ? "EMPTY (wield ammo to fire)"
-                    : "EMPTY, no loadable ammo - UNARMED (cannot fire)";
+                    : "EMPTY, no loadable ammo - UNARMED (cannot fire); unarmed melee with fists is available - obtain a weapon or ammo to improve effectiveness";
             return $"missile weapon wielded; missile ammo: {ammoState}";
         }
         // No weapon at all — the server allows a melee attack without any weapon
@@ -9576,6 +9576,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Pure wire-value comparison; no names/wcids, no game knowledge.
     internal static bool AmmoTypeCompatible(ushort? launcherAmmoType, ushort? ammoType)
         => launcherAmmoType is not ushort lt || ammoType is not ushort at || lt == at;
+
+    /// <summary>
+    /// True when at least one of the bot's OWN bag items is loadable ammo for a
+    /// wielded launcher: an item whose ValidLocations carries the missile-ammo
+    /// SLOT bit (<see cref="ItemTypeMasks.MissileAmmoSlot"/>) and whose AmmoType is
+    /// <see cref="AmmoTypeCompatible"/> with the launcher's. Mirrors the body's
+    /// `bagAmmo` detection so the Motor's autonomous launcher-dequip never fires
+    /// while the bot could instead LOAD ammo and keep the (more effective)
+    /// launcher. Caller passes already-ownership-filtered bag items. Pure
+    /// wire-value projection; no names/wcids, no game knowledge.
+    /// </summary>
+    internal static bool HasLoadableBagAmmoForLauncher(
+        IEnumerable<(uint? ValidLocations, ushort? AmmoType)> ownedBagItems,
+        ushort? launcherAmmoType)
+        => ownedBagItems.Any(a =>
+            a.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
+            AmmoTypeCompatible(launcherAmmoType, a.AmmoType));
 
     /// <summary>
     /// Advisory FACT for `## Combat readiness` when the bot is wielding a melee

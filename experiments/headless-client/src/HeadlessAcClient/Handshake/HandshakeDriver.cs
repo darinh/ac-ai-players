@@ -4180,7 +4180,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 s.ObjectDescriptionFlags ?? 0u,
                                 s.WeenieFlags ?? 0u));
 
-                        if (ldMonsterVisible)
+                        // Do NOT dequip while the bot could instead LOAD ammo for
+                        // this launcher (a loaded launcher is more effective than
+                        // fists) — mirror the body's bagAmmo detection over the
+                        // bot's OWN bag items so the autonomous dequip never races
+                        // ahead of the cp052 wield-ammo path.
+                        var ldLauncherAmmoType = worldState.Objects.Values
+                            .FirstOrDefault(s => s.Guid == launcherToRemove)?.AmmoType;
+                        var ldOwnedBagAmmo = worldState.Objects.Values
+                            .Where(s => s.ContainerGuid is uint scg && scg == chosenCharacterGuid)
+                            .Select(s => (s.ValidLocations, s.AmmoType));
+                        var ldHasLoadableBagAmmo = LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
+                            ldOwnedBagAmmo, ldLauncherAmmoType);
+
+                        if (ldMonsterVisible && !ldHasLoadableBagAmmo)
                         {
                             pendingLauncherDequipGuid   = launcherToRemove;
                             pendingLauncherDequipSentAt = DateTime.UtcNow;
