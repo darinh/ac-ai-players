@@ -7505,13 +7505,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // wield a weapon whose skill it has NOT trained (e.g. a thrown weapon
                 // when its only trained weapon skill has no matching weapon); raising a
                 // DIFFERENT trained skill does nothing for that weapon, so the lever
-                // there is coordination. The `wielded-weapon accuracy` note (above)
-                // carries the detail; here we just name the right lever. "" = a weapon
-                // is wielded but its skill is unknown (still not a confirmed trained
-                // skill); null = the wielded skill IS trained or no weapon is wielded.
+                // there is coordination. Likewise when the bot is fighting unarmed with
+                // NO weapon to wield or buy anywhere AND it has a trained weapon skill
+                // (which would otherwise mislead): a trained WEAPON SKILL governs a
+                // wielded weapon it does not have, so it cannot improve fist accuracy —
+                // the lever is coordination (see the `unarmed accuracy` note). Gated on
+                // HasNoUsableWeaponAnywhere so that if a usable weapon IS in the bag the
+                // advice stays "raise your trained weapon skill" (the bot should wield
+                // that weapon, and its skill then applies); and on hasTrainedSkill so the
+                // no-trained-skills branch below still owns the no-skill case. The
+                // `wielded-weapon accuracy` note (above) carries the wielded detail; here
+                // we just name the right lever. "" = a weapon is wielded but its skill is
+                // unknown (still not a confirmed trained skill); null = the wielded skill
+                // IS trained or no weapon is wielded.
                 var endcapUntrainedWieldedSkill = WieldedWeaponUntrainedSkillName(world);
+                var endcapStuckUnarmed = WieldedMainWeapon(world) is null && HasNoUsableWeaponAnywhere(world);
                 var accuracyLevers = endcapUntrainedWieldedSkill is string
                     ? "coordination (your WIELDED weapon's skill is NOT one of your `trained skills`, so `RaiseSkill` on a trained skill will NOT improve THIS weapon's hit rate — see the `wielded-weapon accuracy` note)"
+                    : endcapStuckUnarmed && hasTrainedSkill
+                    ? "coordination (you have NO weapon wielded — your swings are unarmed/fists, which a trained WEAPON SKILL does NOT govern, so `RaiseSkill` on your trained weapon skill will NOT improve fist accuracy — see the `unarmed accuracy` note; or obtain a weapon governed by a skill you HAVE trained for a real upgrade)"
                     : hasTrainedSkill
                     ? "your trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill` using a name from your `trained skills` in `## Self`) and coordination"
                     : "coordination (`## Self` lists no `trained skills`, so `RaiseSkill` is unavailable here — raise the attribute)";
