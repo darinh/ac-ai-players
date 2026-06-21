@@ -2188,6 +2188,12 @@ internal sealed class HandshakeDriver : IDisposable
                                 // without tripping CheckWeaponCollision. Send
                                 // the deferred GetAndWieldItem now (decoupled
                                 // from goal state, mirroring PHASE6L).
+                                // Capture swap-membership BEFORE the Remove below so
+                                // the cp060 latch check further down is not vacuous
+                                // (it must NOT clear the standalone-dequip latch on a
+                                // SWAP-path dequip ack for the same guid).
+                                var wasSwapDequipAck =
+                                    pendingWieldAfterDequip.ContainsKey(putAck.ItemGuid);
                                 if (pendingWieldAfterDequip.TryGetValue(putAck.ItemGuid, out var swap))
                                 {
                                     pendingWieldAfterDequip.Remove(putAck.ItemGuid);
@@ -2283,7 +2289,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // chain dispatches TargetedMeleeAttack (fists).
                                 if (pendingLauncherDequipGuid is uint ldguid &&
                                     ldguid == putAck.ItemGuid &&
-                                    !pendingWieldAfterDequip.ContainsKey(putAck.ItemGuid))
+                                    !wasSwapDequipAck)
                                 {
                                     pendingLauncherDequipGuid  = null;
                                     pendingLauncherDequipSentAt = null;
@@ -4148,15 +4154,29 @@ internal sealed class HandshakeDriver : IDisposable
                 // lets SelectAttackMode → Melee (no weapon) → TargetedMeleeAttack
                 // (fists, which the server ALLOWS with no weapon in hand).
                 //
-                // Gate: LauncherNeedsDequip state AND LLM has an active kill
-                // commitment (mirrors cp047's internal gate) AND at least one
-                // monster is in view. This restricts the mechanical dequip to
-                // ticks where combat is genuinely on the agenda.
+                // Gate: LauncherNeedsDequip state AND combat is on the agenda
+                // (an active kill-count commitment OR an active combat-target lock —
+                // see the inline note below) AND at least one monster is in view AND
+                // no loadable bag ammo. This restricts the mechanical dequip to
+                // ticks where the LLM has chosen combat.
                 //
                 // Anti-spam: one in-flight dequip at a time; stale latches time
                 // out after 10 s (mirrors pendingWieldAfterDequip's StartedUtc
                 // timeout pattern) to recover from a lost ack.
-                if (CombatCommitment.IsActiveKillCommitment(intentStack.Top, out _))
+                // Combat is on the agenda when EITHER the LLM committed to a
+                // kill-count grind (IsActiveKillCommitment) OR the Motor is already
+                // locked onto a combat target (combatTargetGuid) — e.g. a
+                // self-defense Attack the cp049 exemption kept, or any in-progress
+                // engagement. Both are LLM-chosen combat; the dequip only makes the
+                // chosen engagement executable (a launcher with no ammo cannot fire
+                // and blocks unarmed melee). Gating on EITHER ensures self-defense
+                // and active combat reach unarmed melee, not only kill-count grinds.
+                // (Known gap: a bare optional Attack on a PASSIVE monster with no
+                // commitment and no lock is dropped by cp049 and does not trigger
+                // the dequip — the LLM is steered to commit a grind instead; see
+                // the unarmed-melee readiness note.)
+                if (CombatCommitment.IsActiveKillCommitment(intentStack.Top, out _) ||
+                    combatTargetGuid is not null)
                 {
                     var ldWieldedItems = worldState.Objects.Values
                         .Where(s => s.WielderGuid is uint wg && wg == chosenCharacterGuid)
