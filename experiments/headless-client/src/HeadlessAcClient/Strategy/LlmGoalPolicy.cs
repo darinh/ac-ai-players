@@ -7155,6 +7155,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "sets a new persistent objective if you want one. Your strategic call.");
         }
 
+        // ── ## Settled turn-in (decision-proximate salience) ─────────────────
+        // Live (cp053-observe): a turn-in intent whose target NPC is a SETTLED
+        // stage-3 turn-in (the contract is DONE/pending-repeat with no hand-in — the
+        // SAME recognition the `## Contracts` "DONE (stage 3)" note and the cp050
+        // Motor Talk-drop share, via IsSettledStage3TurnInNpc) stays `Active` as the
+        // TOP objective, so a weak model re-emits a Talk to that NPC every cycle. The
+        // Motor drops each (cp050), but the LLM keeps burning a decision on the doomed
+        // turn-in. The QUEST-DIALOG COMPILER rule already says to MARK_TOP_BLOCKED such
+        // an intent, but that fact is buried far up the prompt; re-surface it in the
+        // decision-proximate tail (the same salience pattern as `## Unspent XP`) so
+        // the model resolves the dead objective and spends the turn on other progress.
+        // Restricted to the TOP frame (like `## Unseen objective target` below):
+        // MARK_TOP_BLOCKED acts on the TOP by identity, so nudging it while a settled
+        // turn-in sits as an ANCESTOR would block the wrong (top) frame. Own intent
+        // state + own contract stage + own goal history; no game knowledge, no
+        // recommendation beyond the mechanical "this objective is settled".
+        if (stack?.Top is { Status: IntentLifecycle.Active } settledTop
+            && !string.IsNullOrEmpty(settledTop.TargetName)
+            && IsSettledStage3TurnInNpc(world, events, settledTop.TargetName)
+            && OneLine(settledTop.TargetName) is string settledObjectiveNpc)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Settled turn-in");
+            sb.AppendLine(
+                $"- your TOP `Active` objective targets \"{settledObjectiveNpc}\", whose contract is " +
+                "already DONE (stage 3) with no separate hand-in (see `## Contracts`). Re-Talking it " +
+                "changes nothing. MARK_TOP_BLOCKED that turn-in intent (a durable marker) and spend the " +
+                "turn on OTHER directed progress — re-attempting a settled turn-in is fixation, not " +
+                "progress. Raw fact from your own stack + contract stage; your strategic call.");
+        }
+
         // ── ## Unseen objective target (end-of-prompt salience capsule) ──────
         // Complements `## No active objective`: here there IS an Active top
         // intent, but its named target has NEVER entered the world model since

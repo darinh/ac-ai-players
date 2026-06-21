@@ -16740,6 +16740,99 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SettledTurnInCapsule_NudgesBlockWhenActiveIntentTargetsSettledNpc()
+    {
+        // cp053: an Active turn-in intent targeting a SETTLED stage-3 turn-in NPC
+        // (done contract, no hand-in, pursued past threshold) drives the LLM to
+        // re-Talk it every cycle. Re-surface the "MARK_TOP_BLOCKED it" rule in the
+        // decision-proximate tail so the model resolves the dead objective.
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 2, since);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "return-to-giver", TargetName = SettledTurnInNpc,
+            Rationale = "turn in the completed contract",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+        Assert.Contains("## Settled turn-in", prompt);
+        var cap = prompt.Substring(prompt.IndexOf("## Settled turn-in", StringComparison.Ordinal));
+        Assert.Contains(SettledTurnInNpc, cap);
+        Assert.Contains("MARK_TOP_BLOCKED", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenIntentAlreadyBlocked()
+    {
+        // Already handled: a Blocked turn-in intent for the settled NPC needs no
+        // nudge — the capsule must not fire (otherwise it would loop the advice).
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 2, since);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "return-to-giver", TargetName = SettledTurnInNpc,
+            Status = IntentLifecycle.Blocked,
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+        Assert.DoesNotContain("## Settled turn-in", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenTargetNotSettled()
+    {
+        // The target's contract is stage-3 but the bot has made only ONE
+        // post-completion attempt (below the done threshold), so it is NOT yet a
+        // settled turn-in — the nudge must not fire and preempt a legitimate hand-in.
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 1, since);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "return-to-giver", TargetName = SettledTurnInNpc,
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+        Assert.DoesNotContain("## Settled turn-in", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenSettledIntentIsAncestorNotTop()
+    {
+        // gpt-5.4 + claude review: MARK_TOP_BLOCKED acts on the TOP frame by identity,
+        // so the nudge must fire ONLY when the settled turn-in IS the TOP. A settled
+        // return-to-giver sitting as an ANCESTOR under an unrelated Active TOP must NOT
+        // trigger it — else the LLM, following the advice, would block the wrong (top)
+        // frame and silently destroy the live objective while the settled one persists.
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 2, since);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "return-to-giver", TargetName = SettledTurnInNpc,
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        stack.TryPush(new Intent
+        {
+            Id = "i-002", Kind = "hunt", TargetName = "Rat",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+        Assert.DoesNotContain("## Settled turn-in", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_ProtectedPersistentObjectivesCapsule_SurvivesBodyHardCut()
     {
         var world = BuildExitTokenWorld();
