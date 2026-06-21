@@ -38,6 +38,13 @@ internal sealed record SightedRecallProjection
     /// <summary>Wire-derived coarse kind (Mob / NPC / …).</summary>
     public required EntityKind Kind { get; init; }
 
+    /// <summary>
+    /// True when the remembered NPC carried the vendor wire bit (sells goods).
+    /// Lets the recall row mark a vendor so an UNARMED bot can choose to return
+    /// and buy. Pure perception; the bot assigns no priority.
+    /// </summary>
+    public bool IsVendor { get; init; }
+
     /// <summary>Landblock the entity was last seen in (high 16 bits of its cell).</summary>
     public required uint Landblock { get; init; }
 

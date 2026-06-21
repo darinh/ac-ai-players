@@ -856,7 +856,8 @@ internal sealed class NavGraph : IDisposable
     /// Does NOT touch the per-tick walked chain.
     /// </summary>
     public Guid RecordSightedLocation(uint cellId, Vector3 position, uint? wcid, string name,
-                                       EntityKind kind, Guid? observerNodeId, DateTimeOffset utc)
+                                       EntityKind kind, Guid? observerNodeId, DateTimeOffset utc,
+                                       bool isVendor = false)
     {
         if (cellId == 0)
             throw new ArgumentException("cellId must be non-zero", nameof(cellId));
@@ -890,6 +891,14 @@ internal sealed class NavGraph : IDisposable
                 near.SightingCount++;
                 if (observerNodeId is Guid obs && obs != Guid.Empty) near.ObserverNodeId = obs;
                 if (kind != EntityKind.Unknown) near.Kind = kind;
+                // Vendor bit is sticky once observed — a later sighting whose
+                // wire flags momentarily lack it must not un-mark the memory.
+                // Promote only when the incoming name matches the stored record:
+                // sightings merge by wcid (a class id, not an instance id), so a
+                // different-named object sharing a wcid within the merge radius
+                // must not stamp its vendor-ness onto this remembered identity.
+                if (isVendor && string.Equals(near.Name, name, StringComparison.OrdinalIgnoreCase))
+                    near.IsVendor = true;
                 // Throttle re-persistence of an unchanged re-sighting, same
                 // as node dedup — the receive loop sees the same object far
                 // faster than it meaningfully moves.
@@ -919,6 +928,7 @@ internal sealed class NavGraph : IDisposable
                 FirstSeenUtc = utc,
             };
             loc.Kind = kind;
+            loc.IsVendor = isVendor;
             loc.ObserverNodeId = (observerNodeId is Guid o && o != Guid.Empty) ? observerNodeId : null;
             loc.LastSeenUtc = utc;
             loc.SightingCount = 1;
@@ -1661,11 +1671,12 @@ internal sealed class NavGraph : IDisposable
                                                float WorldX, float WorldY, float? CoordNS, float? CoordEW,
                                                uint? Wcid, string Name, EntityKind Kind, Guid? ObserverNodeId,
                                                DateTimeOffset FirstSeenUtc, DateTimeOffset LastSeenUtc,
-                                               int SightingCount)
+                                               int SightingCount, bool IsVendor = false)
     {
         public static SightedLocationDto From(SightedLocation s) => new(s.Id, s.CellId, s.Landblock,
             Vec3Dto.From(s.Position), s.WorldX, s.WorldY, s.CoordNS, s.CoordEW,
-            s.Wcid, s.Name, s.Kind, s.ObserverNodeId, s.FirstSeenUtc, s.LastSeenUtc, s.SightingCount);
+            s.Wcid, s.Name, s.Kind, s.ObserverNodeId, s.FirstSeenUtc, s.LastSeenUtc, s.SightingCount,
+            s.IsVendor);
         public SightedLocation To()
         {
             var s = new SightedLocation
@@ -1675,6 +1686,7 @@ internal sealed class NavGraph : IDisposable
                 Wcid = Wcid, Name = Name, FirstSeenUtc = FirstSeenUtc,
             };
             s.Kind = Kind;
+            s.IsVendor = IsVendor;
             s.ObserverNodeId = ObserverNodeId;
             s.LastSeenUtc = LastSeenUtc;
             s.SightingCount = SightingCount;
@@ -1798,6 +1810,10 @@ internal sealed class SightedLocation
     public uint? Wcid { get; init; }
     public required string Name { get; init; }
     public EntityKind Kind { get; set; } = EntityKind.Unknown;
+    // Vendor wire bit (ObjectDescriptionFlag.Vendor) observed at sighting
+    // time; sticky once seen. Lets the recall projection mark a remembered
+    // vendor. Pure wire bit — assigns no priority.
+    public bool IsVendor { get; set; }
     // Nearest visited node from which the entity was seen, when known.
     public Guid? ObserverNodeId { get; set; }
     public required DateTimeOffset FirstSeenUtc { get; init; }

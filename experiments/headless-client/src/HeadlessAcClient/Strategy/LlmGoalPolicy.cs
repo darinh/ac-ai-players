@@ -9814,8 +9814,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             "## Recently sighted NPCs (out of view)",
             "NPCs you have seen that are NOT currently in view, from your own memory. " +
             "Not recommendations — the bot assigns no priority. To return to one (for " +
-            "example to Talk it and check whether it offers a task), target it by name " +
-            "or Explore toward its bearing; the bot will navigate to where it was last seen.");
+            "example to Talk it and check whether it offers a task, or — if a row is " +
+            "marked 'vendor' and you have no weapon to wield or buy in view — to buy " +
+            "arms there), target it by name or Explore toward its bearing; the bot will " +
+            "navigate to where it was last seen.");
         RenderBlock(
             EntityKind.Portal,
             "## Recently sighted portals (out of view)",
@@ -9852,7 +9854,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             EntityKind.Portal => "portal",
             _ => "monster",
         };
-        return $"- {s.Name} (kind={kindLabel}, {age}, {where}{lb})";
+        var vendorTag = s.IsVendor ? ", vendor (sells goods)" : "";
+        return $"- {s.Name} (kind={kindLabel}{vendorTag}, {age}, {where}{lb})";
     }
 
     // 8-point compass bearing from a world-space (dx,dy) delta. +Y is

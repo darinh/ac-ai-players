@@ -260,4 +260,70 @@ public sealed class SightedLocationTests : IDisposable
         var g2 = NewGraph();
         Assert.Equal(1, g2.SightedCount);
     }
+
+    [Fact]
+    public void RecordSightedLocation_marks_vendor_when_flagged()
+    {
+        // The vendor wire bit observed at sighting time is stored on the
+        // remembered location so the recall projection can surface it.
+        var g = NewGraph();
+        g.RecordSightedLocation(IndoorCell, new Vector3(5, 0, 5), 10u, "Shopkeeper",
+            EntityKind.NPC, null, _t0, isVendor: true);
+        Assert.True(g.SnapshotSighted().Single().IsVendor);
+    }
+
+    [Fact]
+    public void RecordSightedLocation_defaults_non_vendor()
+    {
+        // The default is non-vendor — a plain sighting must not be marked.
+        var g = NewGraph();
+        g.RecordSightedLocation(IndoorCell, new Vector3(5, 0, 5), 11u, "Wanderer",
+            EntityKind.NPC, null, _t0);
+        Assert.False(g.SnapshotSighted().Single().IsVendor);
+    }
+
+    [Fact]
+    public void RecordSightedLocation_vendor_flag_is_sticky_across_resight()
+    {
+        // Once seen as a vendor, a later re-sighting whose wire flags
+        // momentarily lack the bit must NOT un-mark the memory.
+        var g = NewGraph();
+        g.RecordSightedLocation(IndoorCell, new Vector3(5, 0, 5), 12u, "Shopkeeper",
+            EntityKind.NPC, null, _t0, isVendor: true);
+        g.RecordSightedLocation(IndoorCell, new Vector3(5.5f, 0, 5), 12u, "Shopkeeper",
+            EntityKind.NPC, null, _t0.AddSeconds(1), isVendor: false); // same entity
+        var loc = g.SnapshotSighted().Single();
+        Assert.Equal(2, loc.SightingCount);
+        Assert.True(loc.IsVendor);
+    }
+
+    [Fact]
+    public void RecordSightedLocation_vendor_promotion_requires_name_match()
+    {
+        // Defensive guard: sightings merge by wcid (a class/template id, not a
+        // unique instance id). A later sighting of a DIFFERENT-named object that
+        // shares the wcid within the merge radius must NOT stamp its vendor-ness
+        // onto the stored (differently-named) remembered identity.
+        var g = NewGraph();
+        g.RecordSightedLocation(IndoorCell, new Vector3(5, 0, 5), 20u, "Plain NPC",
+            EntityKind.NPC, null, _t0, isVendor: false);
+        g.RecordSightedLocation(IndoorCell, new Vector3(5.5f, 0, 5), 20u, "Vendor NPC",
+            EntityKind.NPC, null, _t0.AddSeconds(1), isVendor: true); // merges by wcid
+        var loc = g.SnapshotSighted().Single();
+        Assert.Equal(2, loc.SightingCount);   // confirms they merged
+        Assert.False(loc.IsVendor);           // vendor-ness did NOT bleed across names
+    }
+
+    [Fact]
+    public void Sighted_vendor_flag_round_trips_through_persistence()
+    {
+        // The vendor mark must survive the journal write/reload round-trip
+        // (SightedLocationDto), else a reconnect loses it.
+        var g1 = NewGraph();
+        g1.RecordSightedLocation(IndoorCell, new Vector3(3, 0, 3), 13u, "Shopkeeper",
+            EntityKind.NPC, null, _t0, isVendor: true);
+        g1.Dispose();
+        var g2 = NewGraph();
+        Assert.True(g2.SnapshotSighted().Single().IsVendor);
+    }
 }

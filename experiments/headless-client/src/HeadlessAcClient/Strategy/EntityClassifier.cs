@@ -65,4 +65,14 @@ internal static class EntityClassifier
         if (!isCreature) return EntityKind.Unknown;
         return IsMonster(itemType, descFlags, weenieFlags) ? EntityKind.Mob : EntityKind.NPC;
     }
+
+    /// <summary>
+    /// Wire-derived vendor flag for sighting memory: the
+    /// <see cref="ObjectDescriptionFlag.Vendor"/> bit, decoded the same way as
+    /// <see cref="WorldStateProjection"/>'s live <c>IsVendor</c>. Lets the
+    /// out-of-view recall mark a remembered vendor so the LLM can choose to
+    /// return and buy. A decoded bit, not a priority.
+    /// </summary>
+    public static bool IsVendorSighting(uint descFlags)
+        => (descFlags & (uint)ObjectDescriptionFlag.Vendor) != 0;
 }
