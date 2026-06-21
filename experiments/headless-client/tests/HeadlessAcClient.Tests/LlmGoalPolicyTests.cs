@@ -1449,6 +1449,102 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public async Task LlmGoalPolicy_DropsTalkToSettledStage3TurnInNpc()
+    {
+        // cp050 behavioral guard test (gpt-5.4 review): the ProposeGoal Talk guard
+        // must DROP an LLM Talk aimed at a SETTLED stage-3 turn-in NPC (the contract
+        // is done/pending-repeat with no hand-in and already pursued past threshold)
+        // and defer to the escape/fallback — not re-emit the doomed Talk. Proves the
+        // guard WIRING, which the predicate-only tests do not (a `&& false` mutation
+        // of the guard condition leaves those green).
+        var policy = SettledTurnInPolicy(SettledTurnInNpc, out _);
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 2, since);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.False(goal!.Kind == GoalKind.Talk && goal.Target?.Name == SettledTurnInNpc,
+            "a re-Talk to a settled stage-3 turn-in NPC must be dropped");
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_KeepsTalkToStage3TurnIn_BeforeThreshold()
+    {
+        // cp050 control: a SINGLE post-completion hand-in attempt is preserved — the
+        // guard fires only PAST the done threshold (2 Talks), so a contract that
+        // really clears on a final Talk keeps its one real attempt. Differs from the
+        // drop test ONLY in the Talk count, isolating the guard's threshold.
+        var policy = SettledTurnInPolicy(SettledTurnInNpc, out _);
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3World(SettledTurnInNpc, since);
+        var events = WithTalkHistory(SettledTurnInNpc, 1, since);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal(SettledTurnInNpc, goal.Target?.Name);
+    }
+
+    private const string SettledTurnInNpc = "Pathwarden Thorolf";
+
+    private static LlmGoalPolicy SettledTurnInPolicy(string npc, out List<string> requestBodies)
+    {
+        var bodies = new List<string>();
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Talk\",\"target\":{\"name\":\"" + npc + "\"},\"rationale\":\"turn in\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        requestBodies = bodies;
+        return new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+    }
+
+    private static WorldStateProjection BuildSettledStage3World(string turnInNpc, DateTimeOffset stage3Since) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u, CellId = 0xA9B40001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = Array.Empty<VisibleObjectProjection>(),
+        Contracts = new[]
+        {
+            new ContractProjection
+            {
+                ContractId = 950u, Stage = 3u, Name = "Find the Pathwarden",
+                NpcEnd = turnInNpc, Stage3SinceUtc = stage3Since,
+            },
+        },
+    };
+
+    private static EventStream WithTalkHistory(string npcName, int times, DateTimeOffset at)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < times; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = at, Kind = EventKind.GoalEmitted,
+                Text = $"Talk target=name=\"{npcName}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_429_TripsBackoff_NoFurtherHttpCallsWithinWindow()
     {
         // Slice T — once we see HTTP 429 the policy must NOT issue

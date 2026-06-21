@@ -417,4 +417,172 @@ public class ContractLocationTests
 
         Assert.DoesNotContain("DONE (stage 3, complete)", cap);
     }
+
+    // ---- cp050: Motor settled-stage-3-turn-in Talk backstop ----
+    // The prompt already SURFACES a settled stage-3 turn-in ("DONE (stage 3)"); these
+    // cover the MECHANICAL backstop (IsSettledStage3TurnInNpc) that DROPS a further
+    // Talk to such an NPC when a weak model ignores the note, sharing the exact
+    // recognition (IsSettledStage3TurnIn) with the render so the two never drift.
+
+    [Fact]
+    public void SettledStage3TurnInNpc_PastThreshold_Suppresses()
+    {
+        // A stage-3 (done) contract's turn-in NPC Talked past the post-completion
+        // threshold (2) is a settled turn-in with no hand-in — drop a further Talk.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 900u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 2, since),
+            "Pathwarden Thorolf"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_SingleAttempt_DoesNotSuppress()
+    {
+        // One legitimate post-completion hand-in attempt is preserved — a contract
+        // that really clears on a final Talk gets its one real attempt.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 901u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 1, since),
+            "Pathwarden Thorolf"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_RovingTwoSettledNpcs_BothSuppressed()
+    {
+        // The exact observed loop: two stage-3 contracts whose turn-in NPCs the bot
+        // ROVES between, each Talked past the threshold. The stationary/novelty Talk
+        // guards MISS this (movement + fresh flavor dialog reset them); this contract-
+        // stage backstop is position- AND novelty-independent, so BOTH settled NPCs
+        // are suppressed.
+        var since = DateTimeOffset.UtcNow;
+        var pathwarden = new ContractProjection
+        {
+            ContractId = 902u, Stage = 3u, Name = "Find the Pathwarden",
+            NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
+        };
+        var barkeeper = new ContractProjection
+        {
+            ContractId = 903u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = since,
+        };
+        var es = new EventStream();
+        foreach (var n in new[] { "Pathwarden Thorolf", "Buckminster", "Pathwarden Thorolf", "Buckminster" })
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = since, Kind = EventKind.GoalEmitted,
+                Text = $"Talk target=name=\"{n}\" item= source=llm:test",
+            });
+        var world = WorldWithContracts(pathwarden, barkeeper);
+        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, es, "Pathwarden Thorolf"));
+        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, es, "Buckminster"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_NpcWithLiveBusiness_NotSuppressed()
+    {
+        // An NPC that is ALSO the start/turn-in of a NON-terminal contract has live
+        // business (e.g. a fresh batch just obtained from this same source), so its
+        // Talk must NOT be suppressed even though it settled an earlier contract.
+        var since = DateTimeOffset.UtcNow;
+        var settled = new ContractProjection
+        {
+            ContractId = 904u, Stage = 3u, Name = "Old", NpcEnd = "Broker", Stage3SinceUtc = since,
+        };
+        var fresh = new ContractProjection
+        {
+            ContractId = 905u, Stage = 1u, Name = "New", NpcStart = "Broker",
+        };
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
+            WorldWithContracts(settled, fresh), WithTalkGoals("Broker", 5, since), "Broker"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_InProgressContract_NotSuppressed()
+    {
+        // A stage-2 (in-progress) contract is never settled — Talking its NPC is
+        // legitimate progress, never suppressed regardless of Talk count.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 906u, Stage = 2u, Name = "Hunt", NpcEnd = "Sergeant",
+        };
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
+            WorldWithContracts(contract), WithTalkGoals("Sergeant", 5, since), "Sergeant"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_SharedTurnInNpc_NotRecognized()
+    {
+        // Mirror of the render's shared-turn-in ambiguity guard at the predicate
+        // level: two stage-3 contracts sharing one turn-in NPC make per-contract
+        // attribution ambiguous, so neither is recognized as a settled turn-in.
+        var since = DateTimeOffset.UtcNow;
+        var a = new ContractProjection
+        {
+            ContractId = 907u, Stage = 3u, Name = "A", NpcEnd = "Hub Giver", Stage3SinceUtc = since,
+        };
+        var b = new ContractProjection
+        {
+            ContractId = 908u, Stage = 3u, Name = "B", NpcEnd = "Hub Giver", Stage3SinceUtc = since,
+        };
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
+            WorldWithContracts(a, b), WithTalkGoals("Hub Giver", 5, since), "Hub Giver"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_SequentialBatchSettlement_NoTalkLeak()
+    {
+        // claude review: an NPC that is the turn-in (NpcEnd) of one contract AND the
+        // task-giver (NpcStart) of ANOTHER must not have the Talks it received while
+        // the SECOND contract was still live business leak into the first's settled
+        // count once the second also settles. The backstop's count window starts at
+        // the NPC's FULLY-SETTLED time (max Stage3SinceUtc over the NPC's contracts),
+        // not the earlier per-contract time, so those pre-full-settle Talks are
+        // excluded and a legitimate batch-refresh Talk is not wrongly suppressed.
+        var t0 = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var t1 = DateTimeOffset.UtcNow;
+        var a = new ContractProjection
+        {
+            ContractId = 909u, Stage = 3u, Name = "Locate", NpcEnd = "Broker", Stage3SinceUtc = t0,
+        };
+        var b = new ContractProjection
+        {
+            ContractId = 910u, Stage = 3u, Name = "Kill", NpcStart = "Broker", NpcEnd = "Sergeant",
+            Stage3SinceUtc = t1,
+        };
+        // Two Talks to Broker made WHILE b was still live business (between t0 and t1).
+        var es = WithTalkGoals("Broker", 2, t0.AddMinutes(1));
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(WorldWithContracts(a, b), es, "Broker"));
+    }
+
+    [Fact]
+    public void SettledStage3TurnInNpc_SequentialBatchSettlement_SuppressesAfterFullSettle()
+    {
+        // The companion to the no-leak case: once the NPC is FULLY settled (its last
+        // contract done at t1), re-Talks made AFTER t1 past the threshold ARE the
+        // fixation the backstop suppresses.
+        var t0 = DateTimeOffset.UtcNow.AddMinutes(-5);
+        var t1 = DateTimeOffset.UtcNow.AddMinutes(-2);
+        var a = new ContractProjection
+        {
+            ContractId = 911u, Stage = 3u, Name = "Locate", NpcEnd = "Broker", Stage3SinceUtc = t0,
+        };
+        var b = new ContractProjection
+        {
+            ContractId = 912u, Stage = 3u, Name = "Kill", NpcStart = "Broker", NpcEnd = "Sergeant",
+            Stage3SinceUtc = t1,
+        };
+        var es = WithTalkGoals("Broker", 2, t1.AddMinutes(1)); // 2 Talks AFTER full settle
+        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(WorldWithContracts(a, b), es, "Broker"));
+    }
 }
