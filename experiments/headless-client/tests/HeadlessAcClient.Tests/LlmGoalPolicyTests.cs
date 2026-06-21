@@ -8218,11 +8218,13 @@ public class LlmGoalPolicyTests
 
     private static SightedRecallProjection Sighting(
         string name, uint? wcid, EntityKind kind, double ageSeconds,
-        uint landblock = 0xA9B3u, float worldX = 0f, float worldY = 100f)
+        uint landblock = 0xA9B3u, float worldX = 0f, float worldY = 100f,
+        bool isVendor = false)
         => new SightedRecallProjection
         {
             Name = name, Wcid = wcid, Kind = kind, Landblock = landblock,
             WorldX = worldX, WorldY = worldY, AgeSeconds = ageSeconds,
+            IsVendor = isVendor,
         };
 
     private static string BuildPromptWithRecall(
@@ -8328,6 +8330,52 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("Monsters you have seen", prompt); // monster block absent
         Assert.Contains("## Recently sighted NPCs (out of view)", prompt);
         Assert.Contains("Town Crier (kind=npc, last seen 20s ago, approx N ~50m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_NpcVendor_MarksVendorTag()
+    {
+        // A remembered NPC carrying the vendor wire bit surfaces marked
+        // "vendor (sells goods)" so the LLM can choose to return and buy when
+        // it has no weapon in view. Pure perception — the bot assigns no
+        // priority; the LLM owns the decision.
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Shopkeeper", 5050u, EntityKind.NPC, ageSeconds: 30,
+                worldX: selfGX, worldY: selfGY + 50f, isVendor: true));
+        Assert.Contains("## Recently sighted NPCs (out of view)", prompt);
+        Assert.Contains("Shopkeeper (kind=npc, vendor (sells goods), last seen 30s ago, approx N ~50m)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_NonVendorNpc_OmitsVendorTag()
+    {
+        // The vendor mark is gated on the wire bit — a plain dialog NPC must
+        // NOT be tagged a vendor (no false "buy here" affordance).
+        const float selfGX = 0xA9 * AcCoords.BlockLength;
+        const float selfGY = 0xB3 * AcCoords.BlockLength;
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Town Crier", 1234u, EntityKind.NPC, ageSeconds: 30,
+                worldX: selfGX, worldY: selfGY + 50f, isVendor: false));
+        Assert.Contains("Town Crier (kind=npc, last seen 30s ago, approx N ~50m)", prompt);
+        Assert.DoesNotContain("vendor (sells goods)", prompt);
+    }
+
+    [Fact]
+    public void RecentSightings_NpcBlock_DescribesVendorArmAffordance()
+    {
+        // The NPC recall block description ties the vendor mark to arming: an
+        // UNARMED bot with no weapon to wield/buy in view may return to a
+        // remembered vendor to buy. Phrased as a parallel "for example",
+        // consistent with the existing task example — not a priority.
+        var world = RecallSelfWorld();
+        var prompt = BuildPromptWithRecall(world,
+            Sighting("Shopkeeper", 5050u, EntityKind.NPC, ageSeconds: 30, isVendor: true));
+        Assert.Contains("marked 'vendor'", prompt);
+        Assert.Contains("buy", prompt);
     }
 
     [Fact]

@@ -1883,6 +1883,11 @@ internal sealed class HandshakeDriver : IDisposable
                                     oc.Weenie.ItemType,
                                     (uint)oc.Weenie.DescriptionFlags,
                                     (uint)oc.Weenie.Flags);
+                                // Vendor wire bit captured alongside the kind so a
+                                // remembered vendor can be marked in recall. Pure wire
+                                // projection — assigns no priority.
+                                var sightedIsVendor = EntityClassifier.IsVendorSighting(
+                                    (uint)oc.Weenie.DescriptionFlags);
 
                                 // Decide which sighting memories to write
                                 // based purely on landblock distance — see
@@ -1933,7 +1938,8 @@ internal sealed class HandshakeDriver : IDisposable
                                         sightingDecision.AnchorObserverNode
                                             ? lastVisitNodeId
                                             : (Guid?)null,
-                                        DateTimeOffset.UtcNow);
+                                        DateTimeOffset.UtcNow,
+                                        sightedIsVendor);
                             }
                             break;
                         case GameEventMessage ge:
@@ -7316,6 +7322,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 Name       = s.Name,
                                 Wcid       = s.Wcid,
                                 Kind       = s.Kind,
+                                IsVendor   = s.IsVendor,
                                 Landblock  = s.Landblock,
                                 WorldX     = s.WorldX,
                                 WorldY     = s.WorldY,
