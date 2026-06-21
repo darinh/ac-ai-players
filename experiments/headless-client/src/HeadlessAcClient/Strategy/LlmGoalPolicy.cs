@@ -1620,6 +1620,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
+    // Selector match for inventory items — mirrors VisibleMatchesSelector above
+    // but operates on an InventoryItemProjection. Used by the useless-launcher
+    // Wield drop guard to confirm a Wield selector resolves to a specific bag
+    // item before testing whether that item is loadable. Requires at least one
+    // identity field (Guid/Name/NameContains/Wcid) so an empty selector never
+    // matches-all. Pure wire-value comparison; no names/wcids in source.
+    private static bool InventoryMatchesSelector(Selector sel, InventoryItemProjection i)
+    {
+        var hasIdentity = sel.Guid is not null
+            || !string.IsNullOrEmpty(sel.Name)
+            || !string.IsNullOrEmpty(sel.NameContains)
+            || sel.Wcid is not null
+            || sel.ItemTypeMask is not null
+            || !string.IsNullOrEmpty(sel.ShortDescContains);
+        if (!hasIdentity) return false;
+        if (sel.Guid is uint g && i.Guid != g) return false;
+        if (!string.IsNullOrEmpty(sel.Name)
+            && !string.Equals(i.Name, sel.Name, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrEmpty(sel.NameContains)
+            && !i.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (sel.Wcid is uint w && i.Wcid != w) return false;
+        // Mirror SelectorResolver.MatchesItemTypeMask / MatchesShortDescContains so the
+        // useless-launcher guard resolves a Wield selector EXACTLY like the Motor's wield
+        // executor — otherwise an item_type_mask or short_desc_contains selector matches
+        // a different item here than the executor would actually wield (the guard could
+        // drop a legitimate Wield or miss the useless launcher).
+        if (sel.ItemTypeMask is uint m && !(i.ItemType is uint it && (it & m) != 0)) return false;
+        if (!string.IsNullOrEmpty(sel.ShortDescContains)
+            && !(i.ShortDesc is not null
+                 && i.ShortDesc.Contains(sel.ShortDescContains, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        return true;
+    }
+
     // Pure "hunt tapped out" perception signal. Returns a raw self-progress
     // fact string to surface to the LLM when the bot, combat-ready, has
     // dwelled in its current landblock past the threshold WITHOUT gaining a
@@ -2852,6 +2888,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: repeated Wield with no equippable inventory weapon");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield no-weapon");
+        }
+
+        // Useless-launcher Wield drop (cp061): a bag missile LAUNCHER with no
+        // loadable ammo cannot fire and cp060 will dequip it immediately after
+        // wield — producing an infinite LLM-wield / Motor-dequip ping-pong that
+        // prevents the bot from ever fighting unarmed. Drop the Wield and defer
+        // to the fallback so cp047 autonomous combat runs unarmed instead.
+        // Self-limiting: once the bot acquires loadable ammo the guard returns
+        // false and the normal Wield path resumes. Thrown weapons (AmmoType null)
+        // are their own projectile and are NEVER dropped. Pure loadout arithmetic
+        // (ItemType + AmmoType + ValidLocations); no game knowledge.
+        if (IsWieldOfUnusableLauncher(goal, world))
+        {
+            Console.WriteLine(
+                $"[llm-override] useless-launcher wield drop: item={goal.Item ?? goal.Target}" +
+                " — bag launcher has no loadable ammo and would be immediately re-dequipped by cp060; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-override: Wield of an ammoless launcher with no loadable ammo");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield useless launcher");
         }
 
         // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
@@ -6565,6 +6620,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
                 $" then Wield the ammo to load): {bla1.Launcher.Name} + {bla1.Ammo.Name}");
+        // Ammoless-bag-launcher note (cp061): when unarmed and a bag launcher
+        // has no compatible ammo, the LLM tends to re-wield it believing that
+        // will arm the bot — it won't (launcher fires nothing, cp060 dequips it
+        // immediately). Surface a plain fact so the LLM understands: fight
+        // unarmed (unarmed melee is available) or obtain ammo first. No names
+        // in source — the item name comes from the projection at runtime. Pure
+        // typed-affordance projection; the LLM still decides.
+        if (!armed)
+        {
+            var bagAmmoForCheck = world.Inventory
+                .Where(a => a.WieldedAt is not uint abw || abw == 0)
+                .Select(a => (a.ValidLocations, a.AmmoType))
+                .ToList();
+            var uselessBagLauncher = world.Inventory.FirstOrDefault(i =>
+                (i.WieldedAt is not uint ulw || ulw == 0) &&
+                i.ItemType is uint ulit && (ulit & ItemTypeMasks.MissileWeapon) != 0 &&
+                i.AmmoType is not null &&
+                !HasLoadableBagAmmoForLauncher(bagAmmoForCheck, i.AmmoType));
+            if (uselessBagLauncher is not null)
+                sb.AppendLine(
+                    $"- NOTE: you have a missile launcher in your bag ({uselessBagLauncher.Name})" +
+                    " but NO compatible ammo — a launcher without ammo CANNOT fire; wielding it" +
+                    " does NOT arm you and will be immediately un-wielded." +
+                    " Fight unarmed (unarmed melee is always available) or find ammo first.");
+        }
         if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
             bagAmmo is null && bagLauncherAmmo is null &&
             world.Vendor is null && armVendor is not null)
@@ -9593,6 +9673,132 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         => ownedBagItems.Any(a =>
             a.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
             AmmoTypeCompatible(launcherAmmoType, a.AmmoType));
+
+    // True when the bot has NO usable weapon anywhere: nothing combat-capable wielded
+    // (IsCombatCapable) and nothing in the bag it could wield to attack — no melee
+    // weapon, no thrown weapon (missile bit + null AmmoType), and no launcher with
+    // compatible loadable bag ammo. In this state dropping a Wield can never lose a
+    // usable weapon. Pure wire-state/loadout arithmetic; no game knowledge.
+    private static bool HasNoUsableWeaponAnywhere(WorldStateProjection world)
+    {
+        if (IsCombatCapable(world.Inventory)) return false; // a usable weapon is wielded
+        foreach (var i in world.Inventory)
+        {
+            if (i.WieldedAt is uint w && w != 0) continue; // wielded handled by IsCombatCapable
+            if (i.ItemType is not uint it) continue;
+            if ((it & ItemTypeMasks.MeleeWeapon) != 0) return false; // bag melee weapon
+            if ((it & ItemTypeMasks.MissileWeapon) != 0)
+            {
+                if (i.AmmoType is null) return false; // bag thrown weapon (its own projectile)
+                var bagAmmo = world.Inventory
+                    .Where(a => (a.WieldedAt is not uint aw || aw == 0)
+                                && a.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0
+                                && AmmoTypeCompatible(i.AmmoType, a.AmmoType))
+                    .Select(a => (a.ValidLocations, a.AmmoType));
+                if (HasLoadableBagAmmoForLauncher(bagAmmo, i.AmmoType)) return false; // launcher+ammo
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// True when a Wield goal targets a bag missile LAUNCHER that has no
+    /// loadable ammo in the bag — so wielding it would be immediately
+    /// reversed by the Motor's cp060 dequip, producing an infinite
+    /// dequip/re-wield loop. A THROWN weapon (AmmoType null) is its own
+    /// projectile and returns false. A launcher WITH compatible bag ammo
+    /// returns false (the bot should wield it). Non-Wield goals always
+    /// return false. Pure wire-state projection; no names/wcids, no
+    /// game knowledge — the check is fully mechanical loadout arithmetic.
+    /// </summary>
+    internal static bool IsWieldOfUnusableLauncher(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Wield) return false;
+        // Provable-harmlessness gate: only intervene when the bot has NO usable weapon
+        // anywhere (nothing combat-capable wielded, and no bag melee/thrown weapon or
+        // launcher+compatible-ammo it could wield). In that genuinely-weaponless state —
+        // the cp060 unarmed loop — dropping a Wield can never lose a usable weapon, so
+        // the loop-break is harmless REGARDLESS of how the Motor resolves the selector
+        // (over stale/off-screen objects the Strategy projection cannot see). When a
+        // usable weapon IS available, the guard defers entirely and the prompt note +
+        // self-arm affordances steer the LLM to that weapon instead.
+        if (!HasNoUsableWeaponAnywhere(world)) return false;
+        // The Motor's wield executor resolves goal.Item first and falls back to goal.Target
+        // ONLY when Item resolves to no owned item (HandshakeDriver: itemSnap ?? targetSnap,
+        // each filtered to ContainerGuid==self). The Strategy projection cannot reproduce
+        // the executor's full-object-set resolution order, so this guard acts only on an
+        // UNAMBIGUOUS single owned bag match and DEFERS on any ambiguity (>1 bag match, or a
+        // visible world object the selector could also resolve) — it never drops a Wield the
+        // Motor might resolve to a different object. An ambiguous Item does NOT fall through
+        // to Target: the executor would still wield one of the Item matches, so retargeting
+        // here would be wrong.
+        var (item, itemAmbiguous) = ResolveBagWieldCandidate(goal.Item, world);
+        if (itemAmbiguous) return false;
+        var wielded = item;
+        if (wielded is null)
+        {
+            var (target, targetAmbiguous) = ResolveBagWieldCandidate(goal.Target, world);
+            if (targetAmbiguous) return false;
+            wielded = target;
+        }
+        if (wielded is null) return false;
+        // Useless iff a missile LAUNCHER (MissileWeapon bit + a non-null AmmoType — a
+        // THROWN weapon has null AmmoType and is usable) with NO loadable bag ammo.
+        if (!(wielded.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0)
+            || wielded.AmmoType is null)
+            return false;
+        var bagAmmoItems = world.Inventory
+            .Where(i => i.WieldedAt is not uint bw || bw == 0)
+            .Select(i => (i.ValidLocations, i.AmmoType));
+        return !HasLoadableBagAmmoForLauncher(bagAmmoItems, wielded.AmmoType);
+    }
+
+    // Resolves a wield selector against the bot's own un-wielded bag, returning the single
+    // match (or null) plus an Ambiguous flag. Ambiguous = the selector matches >1 bag item
+    // OR a visible world object the executor's full-object resolver could also pick — in
+    // both cases the projection cannot decide which item the Motor wields, so the guard
+    // must defer. The visible check (VisibleCouldMatchWieldSelector) mirrors the resolver's
+    // evaluable fields (guid/name/name_contains/wcid/item_type_mask). short_desc_contains is
+    // not projected on visible objects; an all-short_desc selector is matched on the bag via
+    // InventoryMatchesSelector, and a same-name visible collision is caught by the name
+    // check (AC item names correlate with item type, so a same-name/different-type visible
+    // object — the only residual short_desc ambiguity — is not realizable).
+    private static (InventoryItemProjection? Item, bool Ambiguous) ResolveBagWieldCandidate(
+        Selector? sel, WorldStateProjection world)
+    {
+        if (sel is null || sel.IsEmpty) return (null, false);
+        if (world.Visible.Any(v => VisibleCouldMatchWieldSelector(sel, v))) return (null, true);
+        var bagMatches = world.Inventory
+            .Where(i => (i.WieldedAt is not uint w || w == 0) && InventoryMatchesSelector(sel, i))
+            .Take(2)
+            .ToList();
+        if (bagMatches.Count > 1) return (null, true);
+        return (bagMatches.Count == 1 ? bagMatches[0] : null, false);
+    }
+
+    // Visible-object counterpart of InventoryMatchesSelector for the wield ambiguity check:
+    // honors the SelectorResolver fields evaluable on a VisibleObjectProjection
+    // (guid/name/name_contains/wcid/item_type_mask). Requires at least one such field so a
+    // bare/short_desc-only selector never matches-all here.
+    private static bool VisibleCouldMatchWieldSelector(Selector sel, VisibleObjectProjection v)
+    {
+        var hasIdentity = sel.Guid is not null
+            || !string.IsNullOrEmpty(sel.Name)
+            || !string.IsNullOrEmpty(sel.NameContains)
+            || sel.Wcid is not null
+            || sel.ItemTypeMask is not null;
+        if (!hasIdentity) return false;
+        if (sel.Guid is uint g && v.Guid != g) return false;
+        if (!string.IsNullOrEmpty(sel.Name)
+            && !string.Equals(v.Name, sel.Name, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrEmpty(sel.NameContains)
+            && (v.Name is null || !v.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        if (sel.Wcid is uint w && !(v.Wcid is uint vw && vw == w)) return false;
+        if (sel.ItemTypeMask is uint m && !(v.ItemType is uint it && (it & m) != 0)) return false;
+        return true;
+    }
 
     /// <summary>
     /// Advisory FACT for `## Combat readiness` when the bot is wielding a melee
