@@ -8486,6 +8486,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
         }
 
+        // ── ## Un-equipped gear (protected-tail equip cue) ──
+        // The bot may LOOT or be GIVEN wearable equipment (armor/clothing/
+        // jewelry) and never put it on, leaving it carrying protection that
+        // does nothing in the pack. Surface the carried-but-unworn pieces and
+        // cue a Wield; the LLM decides whether/when to equip. No game knowledge
+        // — pure typed slot-bit wire state (see HeldUnequippedWearables).
+        // Drop a piece the server recently REFUSED to equip (e.g. a wear
+        // requirement not met): re-surfacing it would contradict the later
+        // `## Recently refused items` capsule and loop the LLM on a Wield the
+        // server will only refuse again. Mirrors every self-arm affordance.
+        var heldWearables = HeldUnequippedWearables(world.Inventory)
+            .Where(i => !recentlyServerRefusedGuids.Contains(i.Guid))
+            .ToList();
+        if (heldWearables.Count > 0)
+        {
+            var distinctWearableNames = heldWearables
+                .Select(it => OneLine(it.Name))
+                .Where(n => n is not null)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var wearableNames = distinctWearableNames.Take(4).ToList();
+            if (wearableNames.Count > 0)
+            {
+                var sample = string.Join(", ", wearableNames.Select(n => $"`{n}`"));
+                // "and more" only when DISTINCT names exceed the four shown — not
+                // when duplicate-named copies collapsed under Distinct (else the
+                // LLM hunts for named pieces that do not exist).
+                var more = distinctWearableNames.Count > wearableNames.Count ? ", and more" : "";
+                sb.AppendLine();
+                sb.AppendLine("## Un-equipped gear");
+                sb.AppendLine(
+                    $"- you are CARRYING wearable equipment you have NOT put on: {sample}{more}. " +
+                    "Worn gear protects you (or grants its benefit); the SAME item sitting in your " +
+                    "pack does NOTHING. To put a piece on, `Wield` it (target that item by name) and " +
+                    "the server seats it in its wear slot. Equip your carried gear so you are " +
+                    "protected — especially before or during a fight.");
+            }
+        }
+
         // ── ## System messages (protected-tail durable status capsule) ──
         // Low-volume, high-value SYSTEM status lines the server sends are easily
         // evicted from the perception-dominated event ring within seconds, so the
@@ -9726,6 +9765,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
         return true;
+    }
+
+    /// <summary>
+    /// Returns the bot's carried-but-UN-EQUIPPED wearable equipment: inventory
+    /// items that declare a valid wear slot (<c>ValidLocations != 0</c>) yet are
+    /// not currently worn (<c>WieldedAt</c> null/0), EXCLUDING primary weapons
+    /// (the weapon affordances own those), the off-hand slot (the weapon/
+    /// two-hand interaction is handled elsewhere), and ammunition. What remains
+    /// is wearable gear that confers its benefit only while worn and does
+    /// nothing sitting in the pack — the LLM is cued to <c>Wield</c> it.
+    ///
+    /// Pure wire-state (typed <c>ValidLocations</c>/<c>WieldedAt</c> slot bits);
+    /// no game knowledge. The result preserves inventory order and is bounded
+    /// only by the caller.
+    /// </summary>
+    internal static IReadOnlyList<InventoryItemProjection> HeldUnequippedWearables(
+        IReadOnlyList<InventoryItemProjection>? inventory)
+    {
+        if (inventory is null || inventory.Count == 0)
+            return Array.Empty<InventoryItemProjection>();
+        var result = new List<InventoryItemProjection>();
+        foreach (var i in inventory)
+        {
+            if (i.WieldedAt is uint w && w != 0) continue;            // already worn/equipped
+            if (i.ValidLocations is not uint vl || vl == 0) continue; // not equippable anywhere
+            if ((vl & WeaponSwap.MainWeaponSlotMask) != 0) continue;  // primary weapon → weapon affordances
+            if ((vl & WeaponSwap.ShieldSlotMask) != 0) continue;      // off-hand → weapon/two-hand path
+            if ((vl & ItemTypeMasks.MissileAmmoSlot) != 0) continue;  // ammunition
+            result.Add(i);
+        }
+        return result;
     }
 
 
