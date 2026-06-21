@@ -10026,6 +10026,86 @@ public class LlmGoalPolicyTests
         };
 
     [Fact]
+    public void BuildUserPrompt_WeaponlessWithMonsterInView_RendersFightNowSteer()
+    {
+        // cp062: a weaponless bot (only a useless ammoless launcher, no arm path) with a
+        // monster in view is directed to ATTACK unarmed, not to keep wielding the empty
+        // launcher.
+        var launcher = BagLauncher(0xA0A0u, 7, "Ammoless Bow");
+        var world = BuildInventoryWorld(new[] { launcher }, new[]
+        {
+            new VisibleObjectProjection
+            { Guid = 0xC0A0u, Name = "TestMob", Wcid = 0x9100u, Distance = 5f, IsMonster = true },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WeaponlessNoMonsterInView_NoFightNowSteer()
+    {
+        // No monster in view -> no FIGHT NOW directive (nothing to attack).
+        var launcher = BagLauncher(0xA0A1u, 7, "Ammoless Bow");
+        var world = BuildInventoryWorld(new[] { launcher });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ArmedWithMonsterInView_NoFightNowSteer()
+    {
+        // Armed (a usable thrown weapon in a bag is an arm path; or wielded) -> the steer
+        // is for the genuinely weaponless state only. Here a wielded melee weapon makes
+        // the bot armed, so no FIGHT NOW directive.
+        var melee = new InventoryItemProjection
+        {
+            Guid = 0xA0A2u, Name = "TestSword", Wcid = 0x8005u,
+            ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0x00100000u,
+            WieldedAt = 0x00100000u, // wielded -> armed
+        };
+        var world = BuildInventoryWorld(new[] { melee }, new[]
+        {
+            new VisibleObjectProjection
+            { Guid = 0xC0A2u, Name = "TestMob", Wcid = 0x9100u, Distance = 5f, IsMonster = true },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WeaponlessMonsterButBagWeapon_NoFightNowSteer()
+    {
+        // An arm path EXISTS (a bag melee weapon) -> the steer must NOT fire even though
+        // nothing is wielded and a monster is in view (the bot should wield the weapon).
+        var launcher = BagLauncher(0xA0A3u, 7, "Ammoless Bow");
+        var bagMelee = BagMeleeWeapon(0xA0A4u);
+        var world = BuildInventoryWorld(new[] { launcher, bagMelee }, new[]
+        {
+            new VisibleObjectProjection
+            { Guid = 0xC0A3u, Name = "TestMob", Wcid = 0x9100u, Distance = 5f, IsMonster = true },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WeaponlessMonsterButVendorInView_NoFightNowSteer()
+    {
+        // A vendor arm path is in view -> the steer (which says "no weapon to buy here")
+        // must NOT fire; the vendor-arm hint handles this state instead.
+        var launcher = BagLauncher(0xA0A5u, 7, "Ammoless Bow");
+        var world = BuildInventoryWorld(new[] { launcher }, new[]
+        {
+            new VisibleObjectProjection
+            { Guid = 0xC0A5u, Name = "TestMob", Wcid = 0x9100u, Distance = 5f, IsMonster = true },
+            new VisibleObjectProjection
+            { Guid = 0xC0A6u, Name = "TestVendor", Wcid = 0x9200u, Distance = 8f, IsVendor = true },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
     public void IsWieldOfUnusableLauncher_AmmolessLauncherNoAmmoInBag_True()
     {
         // Core true-case: launcher in bag, AmmoType set, NO matching ammo in bag.
