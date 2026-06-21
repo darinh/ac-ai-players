@@ -2521,6 +2521,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
+        // Settled stage-3 turn-in Explore no-op (cp051): once the cp050 Talk guard
+        // suppresses re-Talking a settled turn-in NPC, a model fixated on that NPC
+        // re-routes to Explore (navigate-to) the SAME settled NPC. Exploring toward a
+        // settled stage-3 turn-in NPC that is ALREADY IN VIEW is a no-op: the contract
+        // is done (nothing to hand in there) and the NPC is right here in the
+        // populated area, so walking to it changes nothing — a fresh contract source
+        // is reachable from here instead. Drop it and defer to the fallback. The
+        // IN-VIEW gate is the safety: when the settled NPC is NOT in view the Explore
+        // is left alone, so a legitimate TRAVEL-BACK toward a source area
+        // (RETURN-TO-A-CONTRACT-SOURCE) is never suppressed. The reached-Explore guard
+        // above only catches the WITHIN-REACH subset; this catches a settled NPC that
+        // is visible but farther (the bot having wandered off and now navigating back
+        // to it). The settled-NPC recognition is keyed on the RESOLVED visible
+        // object's name (NOT the raw selector text), so a `name_contains`- or
+        // `wcid`-only Explore selector — which carries no `name` — is still matched
+        // via its in-view object. Same settled-turn-in recognition as the cp050 Talk
+        // guard (which already counts Explore pursuits toward its threshold) + own
+        // perception; no game knowledge.
+        if (goal.Kind == GoalKind.Explore
+            && goal.Target is { } settledExploreTarget
+            && world.Visible.Any(v => VisibleMatchesSelector(settledExploreTarget, v)
+                && IsSettledStage3TurnInNpc(world, events, v.Name)))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Explore target={goal.Target}" +
+                " — navigating to a settled stage-3 turn-in NPC already in view is a no-op;" +
+                " deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: Explore toward a settled stage-3 turn-in NPC in view");
+            return _fallback.ProposeGoal(world, events, currentGoal);
+        }
+
         // Inventory-USE dedup (2026-05-30): if the LLM emitted Use
         // against an inventory item we've already USE'd in the
         // recent event window, drop it. Motivating spike
