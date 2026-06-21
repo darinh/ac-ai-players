@@ -6645,6 +6645,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     " does NOT arm you and will be immediately un-wielded." +
                     " Fight unarmed (unarmed melee is always available) or find ammo first.");
         }
+        // cp062 — commit-to-unarmed-combat. When the bot has NO weapon to wield or buy
+        // here AND a monster is in view, the weak model tends to keep emitting `Wield`
+        // for the empty launcher (dropped every time by the loop-break) instead of
+        // fighting. Unarmed melee (fists) is always available, so direct the LLM to
+        // ATTACK the visible monster NOW rather than re-attempting a useless wield.
+        // Surfaces the action affordance; the LLM still chooses the target and still
+        // weighs the COMBAT SAFETY rule (a doomed/beaten engagement is vetoed
+        // downstream). No specific monster, no priority — no game knowledge.
+        if (!armed && monstersInView > 0 && armVendor is null &&
+            bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
+            bagAmmo is null && bagLauncherAmmo is null)
+            sb.AppendLine(
+                "- FIGHT NOW: you have NO weapon to wield or buy here, but a monster is in" +
+                " view and unarmed melee (fists) is ALWAYS available — emit `Attack` on a" +
+                " visible monster to fight it. Do NOT emit `Wield` (no usable weapon exists;" +
+                " an empty launcher cannot fire and is immediately un-wielded) — wielding wastes the turn.");
         if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
             bagAmmo is null && bagLauncherAmmo is null &&
             world.Vendor is null && armVendor is not null)
@@ -8560,6 +8576,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
                     $" then Wield the ammo to load): {bla2.Launcher.Name} + {bla2.Ammo.Name}");
+            // cp062 — re-surface the FIGHT NOW directive in the protected tail (same gate
+            // as the body): the body ## Combat readiness is dropped by the dense-scene
+            // hard-cut, and `monstersInView > 0` is exactly the condition that triggers
+            // that cut — so without this the weaponless-with-monster steer is lost in the
+            // very scene it targets.
+            if (!armed && monstersInView > 0 && armVendor is null &&
+                bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
+                bagAmmo is null && bagLauncherAmmo is null)
+                sb.AppendLine(
+                    "- FIGHT NOW: you have NO weapon to wield or buy here, but a monster is in" +
+                    " view and unarmed melee (fists) is ALWAYS available — emit `Attack` on a" +
+                    " visible monster to fight it. Do NOT emit `Wield` (no usable weapon exists;" +
+                    " an empty launcher cannot fire and is immediately un-wielded) — wielding wastes the turn.");
             if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
                 bagAmmo is null && bagLauncherAmmo is null &&
                 world.Vendor is null && armVendor is not null)
