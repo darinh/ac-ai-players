@@ -9980,6 +9980,242 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
     }
 
+    // ---- IsWieldOfUnusableLauncher (cp061): Wield of a bag missile launcher
+    //      with no loadable ammo is dropped; the cp060 Motor dequip fires
+    //      immediately after wield, causing an infinite LLM-wield/Motor-dequip
+    //      loop. Thrown weapons (AmmoType null) must be UNAFFECTED. ----
+
+    // Shared fixture items — no real AC proper nouns; names are test-only literals.
+    private static InventoryItemProjection BagLauncher(uint guid, ushort ammoType, string name = "TestBow")
+        => new InventoryItemProjection
+        {
+            Guid = guid, Name = name, Wcid = 0x8001u,
+            ItemType = ItemTypeMasks.MissileWeapon,  // 0x100
+            ValidLocations = WeaponSwap.MainWeaponSlotMask,
+            WieldedAt = null,
+            AmmoType = ammoType,
+        };
+
+    private static InventoryItemProjection CompatibleBagAmmo(uint guid, ushort ammoType)
+        => new InventoryItemProjection
+        {
+            Guid = guid, Name = "TestAmmo", Wcid = 0x8002u,
+            ItemType = 0x100u,
+            ValidLocations = ItemTypeMasks.MissileAmmoSlot,  // 0x00800000
+            WieldedAt = null,
+            AmmoType = ammoType,
+        };
+
+    private static InventoryItemProjection BagThrownWeapon(uint guid)
+        => new InventoryItemProjection
+        {
+            Guid = guid, Name = "TestThrown", Wcid = 0x8003u,
+            ItemType = ItemTypeMasks.MissileWeapon,
+            ValidLocations = WeaponSwap.MainWeaponSlotMask,
+            WieldedAt = null,
+            AmmoType = null,   // thrown weapon — IS its own projectile
+        };
+
+    private static InventoryItemProjection BagMeleeWeapon(uint guid)
+        => new InventoryItemProjection
+        {
+            Guid = guid, Name = "TestMelee", Wcid = 0x8004u,
+            ItemType = ItemTypeMasks.MeleeWeapon,
+            ValidLocations = 0x00100000u,
+            WieldedAt = null,
+        };
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_AmmolessLauncherNoAmmoInBag_True()
+    {
+        // Core true-case: launcher in bag, AmmoType set, NO matching ammo in bag.
+        const ushort launcherAmmoType = 7;
+        var launcher = BagLauncher(0xA001u, launcherAmmoType);
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = launcher.Name },
+        };
+        Assert.True(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_LauncherWithCompatibleBagAmmo_False()
+    {
+        // Launcher + compatible ammo both in bag: a valid arming path; must NOT drop.
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA002u, ammoType);
+        var ammo = CompatibleBagAmmo(0xA003u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher, ammo });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = launcher.Name },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_ThrownWeaponNoAmmo_False()
+    {
+        // A thrown weapon (AmmoType null) is self-contained; must never be dropped
+        // regardless of ammo state — it IS usable without separate ammo.
+        var thrown = BagThrownWeapon(0xA004u);
+        var world = BuildInventoryWorld(new[] { thrown });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = thrown.Name },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_MeleeWeaponInBag_False()
+    {
+        // A melee weapon has no AmmoType; guard must not affect it.
+        var melee = BagMeleeWeapon(0xA005u);
+        var world = BuildInventoryWorld(new[] { melee });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = melee.Name },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_NonWieldGoal_False()
+    {
+        // Guard must be a no-op for non-Wield goal kinds (Attack, Use, etc.).
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA006u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = launcher.Name },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_SelectorDoesNotMatchLauncher_False()
+    {
+        // The Wield selector names a DIFFERENT item; the bag launcher should not
+        // be matched and the guard must not fire.
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA007u, ammoType, "ActualLauncher");
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = "CompletelyDifferentItem" },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_EmptySelector_False()
+    {
+        // An empty selector must never match-all; guard must return false.
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA008u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { /* empty */ },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_TargetFallback_True()
+    {
+        // Some older LLM responses place the item in Target rather than Item;
+        // the guard must fall back to goal.Target when goal.Item is null/empty.
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA009u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Target = new Selector { Name = launcher.Name },
+            // Item intentionally null (omitted)
+        };
+        Assert.True(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    // Mutation-check tests: verify the guard breaks when key predicates are
+    // inverted. These are positive-case assertions designed so that removing
+    // one specific clause from IsWieldOfUnusableLauncher would cause them to fail.
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_MutationCheck_AmmoTypeNotNull_ThrownNotDropped()
+    {
+        // If the `i.AmmoType is not null` clause were removed, a thrown weapon
+        // (AmmoType null) with no ammo would incorrectly read as "useless".
+        // This test would then fail with True instead of False, catching the mutation.
+        var thrown = BagThrownWeapon(0xA010u);
+        var world = BuildInventoryWorld(new[] { thrown });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = thrown.Name },
+        };
+        // Must remain False — thrown weapon is always usable.
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_MutationCheck_LoadableAmmoNegation_NotDroppedWhenAmmoPresent()
+    {
+        // If the `!HasLoadableBagAmmoForLauncher(...)` negation were removed (or
+        // flipped), a launcher WITH ammo would be wrongly dropped. This test
+        // verifies the guard returns FALSE when compatible ammo IS present.
+        const ushort ammoType = 12;
+        var launcher = BagLauncher(0xA011u, ammoType);
+        var ammo = CompatibleBagAmmo(0xA012u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher, ammo });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = launcher.Name },
+        };
+        // Must be False — this launcher is usable.
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    // Prompt note test — when UNARMED and bag holds a launcher with no loadable
+    // ammo, the combat-readiness section must surface the warning note so the
+    // LLM does not re-wield the useless launcher.
+    [Fact]
+    public void BuildUserPrompt_UselessBagLauncher_RendersAmmolessNote()
+    {
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA020u, ammoType, "BagLauncherFixture");
+        var world = BuildInventoryWorld(new[] { launcher });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        // Anchor on text that is unique to the cp061 note and not in the standing SELF-ARM rule.
+        Assert.Contains("launcher in your bag", prompt);
+        Assert.Contains("will be immediately un-wielded", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_BagLauncherWithAmmo_NoAmmolessNote()
+    {
+        // When the bag launcher HAS compatible ammo, the warning note must NOT appear
+        // (the bot should wield it, not be told not to).
+        const ushort ammoType = 7;
+        var launcher = BagLauncher(0xA021u, ammoType, "BagLauncherFixture");
+        var ammo = CompatibleBagAmmo(0xA022u, ammoType);
+        var world = BuildInventoryWorld(new[] { launcher, ammo });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("will be immediately un-wielded", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_VisibleDoor_RendersClosedState()
     {
