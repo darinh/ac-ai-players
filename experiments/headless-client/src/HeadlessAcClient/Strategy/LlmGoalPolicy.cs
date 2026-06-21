@@ -2101,7 +2101,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 _combatChainCount,
                 MaxCombatChainAttacks,
                 out var chainSkipReason,
-                combatCapable: IsCombatCapable(world.Inventory));
+                combatCapable: IsCombatCapable(world.Inventory),
+                canUnarmedMelee: CanUnarmedMelee(world.Inventory));
             if (chainTarget is not null)
             {
                 _combatChainCount++;
@@ -3375,21 +3376,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// True iff an LLM <see cref="GoalKind.Attack"/> should be dropped because the
     /// bot cannot land a hit — it is NOT combat-capable (no wielded melee weapon,
     /// and no wielded missile weapon WITH ammo; see <see cref="IsCombatCapable"/>)
-    /// — AND there is no live HOSTILE in view to defend against. An unarmed attack
-    /// is a doomed swing the server cancels for 0 damage; a model can still pick an
-    /// OPTIONAL Attack on a passive winnable-looking kind despite the UNARMED
-    /// combat-readiness line. SELF-DEFENSE is exempt: a HOSTILE actively engaging
-    /// the bot keeps its Attack (the SELF-ARM rule's "a HOSTILE attacker still takes
-    /// priority — defend or flee even while unarmed"). Pure wire-state — wielded
-    /// weapon/ammo slot bits + the ObservedHostile threat bit; the LLM still chose
-    /// WHAT to fight, this only declines a doomed OPTIONAL engagement. No game
-    /// knowledge. The caller drops the goal and defers to EscapeOrFallback (self-arm
-    /// / explore / non-combat progress).
+    /// AND cannot melee-unarmed (see <see cref="CanUnarmedMelee"/>) AND there is no
+    /// live HOSTILE in view to defend against. An unarmed-with-blocked-melee attack
+    /// is a doomed swing the server cancels (e.g. launcher forces Missile mode with
+    /// no ammo); a truly unarmed bot (no weapon at all) CAN land fist hits and is
+    /// NOT dropped here. SELF-DEFENSE is exempt: a HOSTILE actively engaging the bot
+    /// keeps its Attack. Pure wire-state — wielded weapon/ammo slot bits + the
+    /// ObservedHostile threat bit; the LLM still chose WHAT to fight, this only
+    /// declines a genuinely doomed engagement. No game knowledge.
     /// </summary>
     internal static bool IsOptionalAttackWhileNotCombatCapable(Goal goal, WorldStateProjection world)
     {
         if (goal.Kind != GoalKind.Attack) return false;
+        // Usable weapon → not blocked.
         if (IsCombatCapable(world.Inventory)) return false;
+        // No weapon in main-weapon slot → unarmed melee is viable right now.
+        if (CanUnarmedMelee(world.Inventory)) return false;
         // Self-defense exempt: keep the Attack ONLY when its NAMED target is itself a
         // live HOSTILE (the bot is fighting back the thing engaging it). A check for
         // ANY hostile in view would be too broad — the Motor attacks the named
@@ -9343,18 +9345,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int chainCount,
         int maxChain,
         float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
-        bool combatCapable = true)
+        bool combatCapable = true,
+        bool canUnarmedMelee = false)
         => ChooseCombatChainTarget(
             top, visible, history, selfLevel, enabled, chainCount, maxChain,
-            out _, perceptionRadius, combatCapable);
+            out _, perceptionRadius, combatCapable, canUnarmedMelee);
 
     /// <summary>
     /// Overload that also reports WHY no target was minted (diagnostic only — the
     /// returned target is identical). <paramref name="skipReason"/> is null when a
     /// target is returned, else a stable tag (chain-disabled / budget-exhausted /
-    /// no-visible / no-active-commitment / no-matching-monster) so the
-    /// chain-never-fires tempo gap is observable in the log. Pure classification;
-    /// no behavior change, no game knowledge.
+    /// no-visible / no-active-commitment / not-combat-capable / no-matching-monster)
+    /// so the chain-never-fires tempo gap is observable in the log. Pure
+    /// classification; no behavior change, no game knowledge.
     /// </summary>
     internal static VisibleObjectProjection? ChooseCombatChainTarget(
         Intent.Intent? top,
@@ -9366,20 +9369,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int maxChain,
         out string? skipReason,
         float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
-        bool combatCapable = true)
+        bool combatCapable = true,
+        bool canUnarmedMelee = false)
     {
         skipReason = null;
         if (!enabled) { skipReason = "chain-disabled"; return null; }
         if (chainCount >= maxChain) { skipReason = "budget-exhausted"; return null; } // periodic forced LLM re-check
-        // Do not mint an autonomous Attack while the bot cannot deal damage through
-        // the melee/missile attack chain (no wielded melee weapon, and no wielded
-        // missile weapon with ammo loaded). Without this the chain keeps decomposing
-        // a stale kill-count commitment into doomed swings at a monster it cannot
-        // hurt — the server cancels every attack — until the per-target NO-PROGRESS
-        // watchdog and the maxChain re-check drain it. Yielding here routes control
-        // to the LLM, which sees the UNARMED combat-readiness line and arms or does
-        // non-combat progress. Pure wire-state gate; the LLM still chose WHAT to do.
-        if (!combatCapable) { skipReason = "not-combat-capable"; return null; }
+        // Do not mint an autonomous Attack while the bot cannot land a hit. The bot
+        // is attack-viable when it has a usable weapon (combatCapable) OR when no
+        // weapon is wielded at all (canUnarmedMelee — the server handles an unarmed
+        // melee strike via the normal melee action). Without this gate, the chain
+        // keeps decomposing a stale kill-count commitment into doomed swings the
+        // server cancels — until the per-target NO-PROGRESS watchdog and the maxChain
+        // re-check drain it. Yielding routes control to the LLM, which sees the
+        // UNARMED combat-readiness line and arms or does non-combat progress.
+        // Pure wire-state gate; the LLM still chose WHAT to do.
+        if (!combatCapable && !canUnarmedMelee) { skipReason = "not-combat-capable"; return null; }
         if (visible is null || visible.Count == 0) { skipReason = "no-visible"; return null; }
         if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) { skipReason = "no-active-commitment"; return null; }
 
@@ -9449,6 +9454,45 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return meleeWielded || thrownWielded || (launcherWielded && ammoLoaded);
     }
 
+    /// <summary>
+    /// True when NO weapon is wielded in a main-weapon slot — no melee weapon,
+    /// no missile weapon (launcher or thrown) in the main-weapon slot. The server
+    /// allows a melee attack with no equipped weapon (uses the unarmed skill, fists),
+    /// so the bot can fight right now via the normal Melee attack path. This is the
+    /// <see cref="WeaponReadiness.UnarmedMeleeOnly"/> state.
+    ///
+    /// <para>This is intentionally DISTINCT from <see cref="IsCombatCapable"/>:
+    /// <c>IsCombatCapable</c> is true only when the bot has a <em>usable</em> weapon
+    /// (melee, thrown, or launcher+ammo). <c>CanUnarmedMelee</c> is true only when
+    /// NO weapon is wielded at all — no launcher is blocking Melee combat mode. The
+    /// separation keeps the arming-affordance system intact: <c>IsCombatCapable ==
+    /// false</c> still fires the SELF-ARM affordances (the LLM is told to seek a
+    /// weapon) while combat is allowed to proceed unarmed.</para>
+    ///
+    /// Pure wire-state (WieldedAt + typed ItemType / slot masks); no game knowledge.
+    /// </summary>
+    internal static bool CanUnarmedMelee(IReadOnlyList<InventoryItemProjection>? inventory)
+    {
+        if (inventory is null) return true; // null = no info = assume no weapon blocking
+        foreach (var i in inventory)
+        {
+            // Any weapon wielded in a main-weapon slot blocks unarmed melee:
+            // a melee weapon means we already have IsCombatCapable=true (not this path);
+            // a missile weapon in the main-weapon slot (launcher or thrown) forces
+            // Missile combat mode — the server sends melee attacks as Missile opcodes
+            // until the mode is changed, so the motor would need to dequip first.
+            if (i.WieldedAt is uint w &&
+                (w & WeaponSwap.MainWeaponSlotMask) != 0 &&
+                i.ItemType is uint it &&
+                ((it & ItemTypeMasks.MeleeWeapon) != 0 ||
+                 (it & ItemTypeMasks.MissileWeapon) != 0))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
 
     /// <summary>
     /// Renders the inline raw-record annotation for a visible monster (or
@@ -9516,10 +9560,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 ? "loaded"
                 : hasLoadableAmmo
                     ? "EMPTY (wield ammo to fire)"
-                    : "EMPTY, no loadable ammo - UNARMED (cannot fire)";
+                    : "EMPTY, no loadable ammo - UNARMED (cannot fire); unarmed melee with fists is available - obtain a weapon or ammo to improve effectiveness";
             return $"missile weapon wielded; missile ammo: {ammoState}";
         }
-        return "NONE wielded - UNARMED";
+        // No weapon at all — the server allows a melee attack without any weapon
+        // (unarmed skill). The bot can fight right now but should still seek a weapon
+        // to improve effectiveness; the SELF-ARM affordances below name what to wield.
+        return "NONE wielded - UNARMED (unarmed melee available; obtain a weapon to improve effectiveness)";
     }
 
     // Mirror the server's launcher/ammo precondition: a missile launcher and its
@@ -9529,6 +9576,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Pure wire-value comparison; no names/wcids, no game knowledge.
     internal static bool AmmoTypeCompatible(ushort? launcherAmmoType, ushort? ammoType)
         => launcherAmmoType is not ushort lt || ammoType is not ushort at || lt == at;
+
+    /// <summary>
+    /// True when at least one of the bot's OWN bag items is loadable ammo for a
+    /// wielded launcher: an item whose ValidLocations carries the missile-ammo
+    /// SLOT bit (<see cref="ItemTypeMasks.MissileAmmoSlot"/>) and whose AmmoType is
+    /// <see cref="AmmoTypeCompatible"/> with the launcher's. Mirrors the body's
+    /// `bagAmmo` detection so the Motor's autonomous launcher-dequip never fires
+    /// while the bot could instead LOAD ammo and keep the (more effective)
+    /// launcher. Caller passes already-ownership-filtered bag items. Pure
+    /// wire-value projection; no names/wcids, no game knowledge.
+    /// </summary>
+    internal static bool HasLoadableBagAmmoForLauncher(
+        IEnumerable<(uint? ValidLocations, ushort? AmmoType)> ownedBagItems,
+        ushort? launcherAmmoType)
+        => ownedBagItems.Any(a =>
+            a.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
+            AmmoTypeCompatible(launcherAmmoType, a.AmmoType));
 
     /// <summary>
     /// Advisory FACT for `## Combat readiness` when the bot is wielding a melee
