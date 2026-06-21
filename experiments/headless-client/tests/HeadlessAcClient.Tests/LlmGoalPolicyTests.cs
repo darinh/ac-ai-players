@@ -9207,7 +9207,20 @@ public class LlmGoalPolicyTests
         params VisibleObjectProjection[] visible)
     {
         var w = BuildWorldWithVisible(visible);
-        return w with { CombatHistoryFull = fullHistory, Self = w.Self with { Level = selfLevel } };
+        return w with
+        {
+            CombatHistoryFull = fullHistory,
+            Self = w.Self with { Level = selfLevel },
+            // The beaten-kind veto is about an ARMED bot that keeps losing to a
+            // specific kind, so the bot must be combat-capable (a wielded melee
+            // weapon) — else the cp049 unarmed-Attack drop would preempt the
+            // beaten-kind path. An unarmed bot has no kind-specific beaten problem.
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0xBEEFu, Name = "Beaten-Test Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u },
+            },
+        };
     }
 
     private static CombatHistoryEntry[] LethalBeaten(string name, uint wcid)
@@ -9278,6 +9291,63 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Drudge Skulker" } },
             world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_UnarmedNoHostile_Drops()
+    {
+        // No usable weapon (empty inventory) + no live hostile -> a doomed optional
+        // Attack must be dropped.
+        var world = BuildInventoryWorld(
+            System.Array.Empty<InventoryItemProjection>(),
+            new[] { new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false } });
+        Assert.True(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_CombatCapable_DoesNotFire()
+    {
+        // A wielded melee weapon makes the bot combat-capable -> the Attack stands.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u },
+        });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_HostileInView_ExemptSelfDefense()
+    {
+        // Unarmed, but a HOSTILE is actively engaging -> self-defense exempt, keep
+        // the Attack (defend or flee).
+        var world = BuildInventoryWorld(
+            System.Array.Empty<InventoryItemProjection>(),
+            new[] { new VisibleObjectProjection { Guid = 0x8002u, Name = "Wasp", Wcid = 9002u, Distance = 3f, IsMonster = true, ObservedHostile = true } });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Wasp"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_PassiveTargetWhileOtherHostileInView_Drops()
+    {
+        // Unarmed: the LLM names a PASSIVE target, but a DIFFERENT hostile is in view.
+        // The named (passive) attack is still doomed — the self-defense exemption is
+        // TARGET-SPECIFIC, not "any hostile in view" — so it must be dropped.
+        var world = BuildInventoryWorld(
+            System.Array.Empty<InventoryItemProjection>(),
+            new[]
+            {
+                new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false },
+                new VisibleObjectProjection { Guid = 0x8003u, Name = "Wasp", Wcid = 9002u, Distance = 3f, IsMonster = true, ObservedHostile = true },
+            });
+        Assert.True(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_NonAttackKind_DoesNotFire()
+    {
+        var world = BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>());
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Chicken" } }, world));
     }
 
     [Fact]

@@ -2732,6 +2732,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "of re-emitting an Attack too weak to land");
         }
 
+        // Unarmed-Attack drop (reduce-llm-call-volume): an LLM Attack while the bot
+        // is NOT combat-capable (no wielded melee weapon, and no wielded missile
+        // weapon WITH ammo) is a doomed swing — the server cancels every attack and
+        // 0 damage lands. A model may still pick an OPTIONAL Attack on a passive
+        // winnable-looking kind despite the UNARMED combat-readiness line. Drop it
+        // and defer to the fallback (self-arm / explore / non-combat progress) so the
+        // bot stops burning cycles on attacks it cannot land. SELF-DEFENSE exempt: if
+        // the Attack's NAMED target is itself a live HOSTILE (the bot is fighting back
+        // the thing engaging it), KEEP the Attack so it can defend or flee (the
+        // SELF-ARM rule's "a HOSTILE attacker still takes priority — defend or flee
+        // even while unarmed"). A DIFFERENT hostile being in view does NOT exempt a
+        // swing at a passive named target — the fallback will re-aim at the real
+        // hostile. Own wire-state only — the wielded-weapon slot bits (IsCombatCapable)
+        // + the ObservedHostile threat bit; the LLM still chose WHAT to fight, this
+        // only declines a doomed OPTIONAL engagement. No game knowledge.
+        if (IsOptionalAttackWhileNotCombatCapable(goal, world))
+        {
+            // Distinguish the two drop states for an accurate log + training label:
+            // (a) no live hostile in view at all; (b) a hostile IS in view but it is
+            // not the Attack's named target (so the swing is still misdirected).
+            var hostileElsewhere = world.Visible.Any(v => !v.IsCorpse && v.ObservedHostile);
+            var threatNote = hostileElsewhere
+                ? "named target is not an active hostile (a different hostile is in view)"
+                : "no hostile is engaging";
+            Console.WriteLine(
+                $"[llm-override] unarmed-attack drop: dropping LLM Attack target={goal.Target}" +
+                $" — bot is not combat-capable (no usable weapon) and {threatNote}; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                $"dropped-by-override: LLM Attack while not combat-capable (no usable weapon; {threatNote})");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "unarmed-attack");
+        }
+
         // Wield no-weapon loop-break (reduce-llm-call-volume): the Motor's direct
         // Wield dispatch FAILS with "no equippable inventory weapon" when an LLM
         // Wield selector resolves to nothing the wield path can equip into a weapon
@@ -3275,6 +3307,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (OnlyBeatenMonstersInView) can never disagree about which kinds count.
         return IsLethalBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
             world.Self.Level);
+    }
+
+    /// <summary>
+    /// True iff an LLM <see cref="GoalKind.Attack"/> should be dropped because the
+    /// bot cannot land a hit — it is NOT combat-capable (no wielded melee weapon,
+    /// and no wielded missile weapon WITH ammo; see <see cref="IsCombatCapable"/>)
+    /// — AND there is no live HOSTILE in view to defend against. An unarmed attack
+    /// is a doomed swing the server cancels for 0 damage; a model can still pick an
+    /// OPTIONAL Attack on a passive winnable-looking kind despite the UNARMED
+    /// combat-readiness line. SELF-DEFENSE is exempt: a HOSTILE actively engaging
+    /// the bot keeps its Attack (the SELF-ARM rule's "a HOSTILE attacker still takes
+    /// priority — defend or flee even while unarmed"). Pure wire-state — wielded
+    /// weapon/ammo slot bits + the ObservedHostile threat bit; the LLM still chose
+    /// WHAT to fight, this only declines a doomed OPTIONAL engagement. No game
+    /// knowledge. The caller drops the goal and defers to EscapeOrFallback (self-arm
+    /// / explore / non-combat progress).
+    /// </summary>
+    internal static bool IsOptionalAttackWhileNotCombatCapable(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Attack) return false;
+        if (IsCombatCapable(world.Inventory)) return false;
+        // Self-defense exempt: keep the Attack ONLY when its NAMED target is itself a
+        // live HOSTILE (the bot is fighting back the thing engaging it). A check for
+        // ANY hostile in view would be too broad — the Motor attacks the named
+        // selector, NOT the hostile, so an Attack on a PASSIVE target while a
+        // different hostile is elsewhere is still a doomed optional swing and must be
+        // dropped. Mirrors IsOptionalAttackOnBeatenKind's target-specific exemption.
+        if (goal.Target is { } t &&
+            world.Visible.Any(v => !v.IsCorpse && v.ObservedHostile && VisibleMatchesSelector(t, v)))
+            return false;
+        return true;
     }
 
     // The DECISION-path definition of a LETHAL-beaten kind: the bot's own
