@@ -19505,4 +19505,226 @@ public class LlmGoalPolicyTests
         var goal = new Goal { Kind = GoalKind.Wield, Target = new Selector { Name = "TargetWeapon" } };
         Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(goal, events));
     }
+
+    // ── cp068: equip held armor (HeldUnequippedWearables + ## Un-equipped gear cue) ──
+    // Wire-slot constants used by the wearable detector (no game knowledge):
+    private const uint Cp068WearSlotBit = 0x1u;           // an armor/clothing wear slot
+    private const uint Cp068MeleeWeaponSlotBit = 0x00100000u; // a MainWeaponSlotMask member
+    private const uint Cp068OffHandSlotBit = 0x00200000u; // WeaponSwap.ShieldSlotMask
+    private const uint Cp068AmmoSlotBit = 0x00800000u;    // ItemTypeMasks.MissileAmmoSlot
+
+    [Fact]
+    public void HeldUnequippedWearables_ReturnsCarriedUnwornArmor()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+        };
+        var result = LlmGoalPolicy.HeldUnequippedWearables(inv);
+        Assert.Single(result);
+        Assert.Equal("Cap", result[0].Name);
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_SkipsAlreadyWornArmor()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = Cp068WearSlotBit },
+        };
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(inv));
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_SkipsPrimaryWeapon()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Blade", Wcid = 100u, ValidLocations = Cp068MeleeWeaponSlotBit, WieldedAt = null },
+        };
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(inv));
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_SkipsOffHandShieldSlot()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Buckler", Wcid = 100u, ValidLocations = Cp068OffHandSlotBit, WieldedAt = null },
+        };
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(inv));
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_SkipsAmmunition()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Pea", Wcid = 100u, ValidLocations = Cp068AmmoSlotBit, WieldedAt = null, AmmoType = (ushort)1 },
+        };
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(inv));
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_SkipsNonEquippableItem()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection { Guid = 0x10u, Name = "Apple", Wcid = 100u, ValidLocations = null, WieldedAt = null },
+            new InventoryItemProjection { Guid = 0x11u, Name = "Coin", Wcid = 101u, ValidLocations = 0u, WieldedAt = null },
+        };
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(inv));
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_NullInventory_ReturnsEmpty()
+    {
+        Assert.Empty(LlmGoalPolicy.HeldUnequippedWearables(null));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_RendersCueNamingThePiece()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Sturdy Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Un-equipped gear", prompt);
+        Assert.Contains("Sturdy Cap", prompt);
+        Assert.Contains("`Wield`", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_AbsentWhenArmorAlreadyWorn()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Sturdy Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = Cp068WearSlotBit },
+        };
+        var world = BuildInventoryWorld(inv);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.DoesNotContain("## Un-equipped gear", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_AbsentWhenOnlyWeaponCarried()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Blade", Wcid = 100u, ItemType = 0x1u, ValidLocations = Cp068MeleeWeaponSlotBit, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.DoesNotContain("## Un-equipped gear", prompt);
+    }
+
+    [Fact]
+    public void HeldUnequippedWearables_TreatsWieldedAtZeroAsNotEquipped()
+    {
+        // Convention (mirrors the weapon helpers): equipped ⟺ WieldedAt is a
+        // non-zero slot bitmask; WieldedAt null OR 0 ⟹ not worn ⟹ surfaced.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = 0u },
+        };
+        var result = LlmGoalPolicy.HeldUnequippedWearables(inv);
+        Assert.Single(result);
+        Assert.Equal("Cap", result[0].Name);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_AbsentWhenThePieceWasRecentlyRefused()
+    {
+        // Consensus gauntlet fix: do NOT urge a Wield of a piece the server just
+        // refused — that contradicts `## Recently refused items` and loops the LLM.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x4002u, Name = "Sturdy Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x4002u, ErrorCode = 0x046Au, ErrorLabel = "InventoryServerSaveFailed",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.DoesNotContain("## Un-equipped gear", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_OmitsRefusedPieceButShowsOthers()
+    {
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x4002u, Name = "Refused Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+            new InventoryItemProjection
+            { Guid = 0x4003u, Name = "Good Vest", Wcid = 101u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x4002u, ErrorCode = 0x046Au, ErrorLabel = "InventoryServerSaveFailed",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+
+        Assert.Contains("## Un-equipped gear", prompt);
+        var capsule = Cp068SectionText(prompt, "## Un-equipped gear");
+        Assert.Contains("Good Vest", capsule);
+        Assert.DoesNotContain("Refused Cap", capsule);
+    }
+
+    // Returns just the named "## ..." section's text (header to the next "## ").
+    private static string Cp068SectionText(string prompt, string header)
+    {
+        var start = prompt.IndexOf(header, StringComparison.Ordinal);
+        if (start < 0) return string.Empty;
+        var rest = prompt.IndexOf("\n## ", start + header.Length, StringComparison.Ordinal);
+        return rest < 0 ? prompt.Substring(start) : prompt.Substring(start, rest - start);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnequippedGear_NoFalseAndMoreWhenDuplicateNamesCollapse()
+    {
+        // Two carried copies share a name; Distinct collapses to one, Take(4) never
+        // fires, so the cue must NOT claim "and more" (no unnamed pieces exist).
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x10u, Name = "Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+            new InventoryItemProjection
+            { Guid = 0x11u, Name = "Cap", Wcid = 100u, ValidLocations = Cp068WearSlotBit, WieldedAt = null },
+        };
+        var world = BuildInventoryWorld(inv);
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var capsule = Cp068SectionText(prompt, "## Un-equipped gear");
+
+        Assert.Contains("`Cap`", capsule);
+        Assert.DoesNotContain("and more", capsule);
+    }
 }
