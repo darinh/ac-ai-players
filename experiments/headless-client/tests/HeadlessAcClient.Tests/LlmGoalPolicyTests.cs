@@ -4844,6 +4844,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SelfArmRule_VendorBuy_HonestPairRequirement_NoOverPromise()
+    {
+        // cp057 review (gpt-5.4 + claude): the post-buy vendor guidance must NOT
+        // over-promise that the bag hints WILL arm you after buying any missile
+        // item — a launcher arms you only PAIRED with compatible ammo, so an
+        // unconditional promise risks a re-buy loop. The rule states the pair
+        // requirement and that a missing-piece buy must not be re-bought.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u, AmmoType = 1 },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        Assert.Contains("a launcher and its ammo arm you only as a PAIR", p);
+        Assert.Contains("do NOT re-buy the same item expecting a hint", p);
+        Assert.DoesNotContain("the self-arm hints above will tell you how to wield it", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SelfArmRule_OmittedWhenMissileWieldedWithAmmo()
     {
         // Wielded missile weapon + wielded ammo (WieldedAt == MissileAmmoSlot) is
