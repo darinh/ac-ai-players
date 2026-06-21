@@ -5448,14 +5448,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             i.WieldedAt is uint sw && sw != 0 &&
             i.ItemType is uint sit && (sit & ItemTypeMasks.MeleeWeapon) != 0);
         var selfArmMissileWielded = world.Inventory.Any(i =>
-            i.WieldedAt is uint smw && smw != 0 &&
+            // Require a MAIN-WEAPON slot, not just WieldedAt != 0: loaded ammo sits in
+            // the ammo slot and can carry the MissileWeapon ItemType bit, so the slot
+            // mask is what tells a wielded launcher from loaded ammo (mirrors
+            // IsCombatCapable / WeaponSwap.IsWieldedWeapon).
+            i.WieldedAt is uint smw && (smw & WeaponSwap.MainWeaponSlotMask) != 0 &&
             i.ItemType is uint smit && (smit & ItemTypeMasks.MissileWeapon) != 0);
         var selfArmAmmoLoaded = world.Inventory.Any(i =>
             i.WieldedAt is uint saw && saw == ItemTypeMasks.MissileAmmoSlot);
         var selfArmCombatEffective =
             selfArmMeleeWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
         if (!selfArmCombatEffective)
-        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If NO weapon/ammo is available anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` you can afford, `Buy` it by its exact name and then `Wield` it — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
@@ -6154,7 +6158,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Pure typed-affordance projection (ItemType MissileWeapon bit /
         // MissileAmmo SLOT bit), no names/wcids/landblocks.
         var wieldedMissileLauncher = world.Inventory.FirstOrDefault(i =>
-            i.WieldedAt is uint mw && mw != 0 &&
+            // Main-weapon slot only (see selfArmMissileWielded): loaded ammo carries
+            // the MissileWeapon ItemType bit but lives in the ammo slot, so WieldedAt
+            // != 0 alone would mis-count ammo as a wielded launcher.
+            i.WieldedAt is uint mw && (mw & WeaponSwap.MainWeaponSlotMask) != 0 &&
             i.ItemType is uint mit && (mit & ItemTypeMasks.MissileWeapon) != 0);
         var missileWeaponWielded = wieldedMissileLauncher is not null;
         var ammoLoaded = world.Inventory.Any(i =>
@@ -7194,6 +7201,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 var entry = new StringBuilder();
                 var name = OneLine(offer.Name) ?? "(unnamed)";
+                // Tag a wieldable weapon (melee/missile ItemType bit) so an UNARMED
+                // bot can identify a buyable weapon to arm itself. Pure wire-bit
+                // projection; no priority, the LLM still decides whether to buy.
+                var weaponTag = (offer.ItemType & ItemTypeMasks.MeleeWeapon) != 0
+                    ? " [weapon]" : "";
                 if (offer.Value is uint val)
                 {
                     // Mirror Vendor.GetSellCost: max(1, ceil((float)rate*value -
@@ -7206,11 +7218,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         : (float)vendor.BuyCostMultiplier;
                     var cost = Math.Max(1L,
                         (long)Math.Ceiling((double)(rate * val) - 0.1));
-                    entry.Append($"  - {name}: {cost} {vendorUnit} to buy (value {val})");
+                    entry.Append($"  - {name}{weaponTag}: {cost} {vendorUnit} to buy (value {val})");
                 }
                 else
                 {
-                    entry.Append($"  - {name}");
+                    entry.Append($"  - {name}{weaponTag}");
                 }
                 if (offer.StackSize > 1)
                     entry.Append($", sold in stacks of {offer.StackSize}");

@@ -4560,6 +4560,8 @@ public class LlmGoalPolicyTests
         var p = LlmGoalPolicy.BuildUserPrompt(
             BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()), new EventStream(), null);
         Assert.Contains("SELF-ARM before fighting", p);
+        // cp048: the rule directs an unarmed bot to buy a weapon from a vendor.
+        Assert.Contains("buying a weapon to arm yourself is DIRECTED progress", p);
     }
 
     [Fact]
@@ -4572,6 +4574,24 @@ public class LlmGoalPolicyTests
         };
         var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
         Assert.DoesNotContain("SELF-ARM before fighting", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SelfArmRule_PresentWhenOnlyAmmoLoaded_NoLauncher()
+    {
+        // cp048 review regression: loaded ammo carries the MissileWeapon ItemType
+        // bit but sits in the ammo slot (0x00800000) — it is NOT a wielded launcher,
+        // so the bot is still UNARMED. The missile-wielded check must require a
+        // main-weapon slot, else ammo-only would read as combat-effective and wrongly
+        // suppress the SELF-ARM rule.
+        var inv = new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Loose Ammo", Wcid = 1u, ItemType = 0x100u, WieldedAt = 0x00800000u },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
+        Assert.Contains("SELF-ARM before fighting", p);
+        Assert.DoesNotContain("missile weapon wielded", p);
     }
 
     [Fact]

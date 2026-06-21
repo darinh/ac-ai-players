@@ -379,6 +379,36 @@ public class VendorPerceptionTests
     }
 
     [Fact]
+    public void Vendor_Capsule_TagsWeaponOfferings()
+    {
+        // cp048: a MELEE weapon offer (melee ItemType bit) is tagged [weapon] so an
+        // UNARMED bot can buy one to arm itself. A missile-bit offer is NOT tagged
+        // (it cannot be told apart from ammo at the offer level, which carries no
+        // slot data), and a non-weapon offer (armor) is not tagged.
+        var vendor = new VendorProjection
+        {
+            VendorGuid = VendorGuid,
+            BuyCostMultiplier = 1.0f,
+            Offers = new[]
+            {
+                new VendorOfferProjection { Name = "Practice Sword", Value = 50u, StackSize = -1, ItemType = 0x1u },
+                new VendorOfferProjection { Name = "Throwing Dart", Value = 20u, StackSize = -1, ItemType = 0x100u },
+                new VendorOfferProjection { Name = "Leather Cap", Value = 10u, StackSize = -1, ItemType = 0x2u },
+            },
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(VendorProj(vendor), new EventStream(), null),
+            "## Vendor offerings");
+
+        Assert.Contains("Practice Sword [weapon]:", cap);
+        // Missile-bit offers are NOT tagged (ammo shares that bit; offers lack slot data).
+        Assert.DoesNotContain("Throwing Dart [weapon]", cap);
+        Assert.Contains("Leather Cap:", cap);
+        Assert.DoesNotContain("Leather Cap [weapon]", cap);
+    }
+
+    [Fact]
     public void Vendor_Capsule_NoValue_RendersNameOnly()
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(
