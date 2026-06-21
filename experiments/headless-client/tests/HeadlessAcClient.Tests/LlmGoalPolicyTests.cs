@@ -4836,7 +4836,7 @@ public class LlmGoalPolicyTests
         var inv = new[]
         {
             new InventoryItemProjection
-            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u, AmmoType = 1 },
         };
         var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
         Assert.Contains("SELF-ARM before fighting", p);
@@ -4850,7 +4850,7 @@ public class LlmGoalPolicyTests
         var inv = new[]
         {
             new InventoryItemProjection
-            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u, AmmoType = 1 },
             new InventoryItemProjection
             { Guid = 0x2u, Name = "Arrows", Wcid = 3u, ItemType = 0x800u, WieldedAt = 0x00800000u },
         };
@@ -4963,9 +4963,9 @@ public class LlmGoalPolicyTests
         var inv = new[]
         {
             new InventoryItemProjection
-            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u },
+            { Guid = 0x1u, Name = "Yumi", Wcid = 2u, ItemType = 0x100u, WieldedAt = 0x02000000u, AmmoType = 1 },
             new InventoryItemProjection
-            { Guid = 0x2u, Name = "Arrows", Wcid = 3u, ItemType = 0x800u, ValidLocations = 0x00800000u, WieldedAt = null },
+            { Guid = 0x2u, Name = "Arrows", Wcid = 3u, ItemType = 0x800u, ValidLocations = 0x00800000u, WieldedAt = null, AmmoType = 1 },
         };
         var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(inv), new EventStream(), null);
         int capsule = p.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
@@ -7211,7 +7211,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
                 new InventoryItemProjection
                 { Guid = 0x223u, Name = "Dart", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x800000u },
             },
@@ -7241,7 +7241,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
                 new InventoryItemProjection
                 { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null },
             },
@@ -7269,7 +7269,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
                 new InventoryItemProjection
                 { Guid = 0x224u, Name = "Practice Blade", Wcid = 400u, ItemType = 0x1u, ValidLocations = 0x100000u, WieldedAt = null },
             },
@@ -7296,7 +7296,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
                 new InventoryItemProjection
                 { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x800000u },
                 new InventoryItemProjection
@@ -7332,7 +7332,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
             },
             Visible = System.Array.Empty<VisibleObjectProjection>(),
         };
@@ -7356,7 +7356,7 @@ public class LlmGoalPolicyTests
             Inventory = new[]
             {
                 new InventoryItemProjection
-                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u },
+                { Guid = 0x222u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
                 new InventoryItemProjection
                 { Guid = 0x223u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null },
             },
@@ -7564,6 +7564,128 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.DoesNotContain("missile launcher + compatible ammo in your inventory", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_WieldedThrownWeapon_ReadsArmedNotUnarmed()
+    {
+        // cp054: a wielded THROWN weapon (ItemType MissileWeapon bit, in a main-weapon
+        // slot, NO AmmoType) is its own projectile — the server throws the weapon itself
+        // (Player_Missile.cs: `ammo = IsAmmoLauncher ? GetEquippedAmmo() : weapon`), so it
+        // is ARMED with no ammo needed. The readiness line must say so, NOT UNARMED, and
+        // no self-arm affordance should fire.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x111u, Name = "Throwing Dagger", Wcid = 999u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = 0x400000u, AmmoType = null },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("weapon: thrown weapon wielded (throws itself; no ammo needed)", prompt);
+        Assert.DoesNotContain("UNARMED",
+            prompt.Split('\n').First(l => l.Contains("- weapon:")));
+        Assert.DoesNotContain("throwable weapon in your inventory", prompt);
+        Assert.DoesNotContain("melee weapon in your inventory", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_WieldedLauncherNoAmmo_StaysUnarmed()
+    {
+        // Discriminator guard (mutation-proof): the SAME wielded missile weapon but WITH
+        // an AmmoType (a real launcher — bow/atlatl) and no loaded ammo stays UNARMED —
+        // a launcher needs ammo (the server cancels `IsAmmoLauncher && ammo == null`).
+        // Only a null-AmmoType (thrown) weapon is armed without ammo.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x111u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = 0x400000u, AmmoType = 4 },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("missile ammo: EMPTY, no loadable ammo - UNARMED (cannot fire)", prompt);
+        Assert.DoesNotContain("thrown weapon wielded", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagThrownWeapon_SurfacesThrowableArmHint()
+    {
+        // cp054: an UNARMED bot with a THROWN weapon in its bag (un-wielded, main-weapon
+        // slot, NO AmmoType) must be shown a Wield-to-arm path — bagWeapon/groundWeapon
+        // are melee-only and bagLauncherAmmo needs a launcher WITH ammo, so without this
+        // a bot whose only usable weapons are throwables sees no arming path.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x111u, Name = "Throwing Dagger", Wcid = 999u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = null },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): Throwing Dagger", prompt);
+    }
+
+    [Fact]
+    public void CombatReadiness_BagThrownWeapon_AmmoSlotOnly_NotMisSurfacedAsThrowable()
+    {
+        // Guard: a bag item carrying the MissileWeapon bit with a null AmmoType but whose
+        // ValidLocations is the AMMO slot only (not a main-weapon slot) is loaded-ammo-
+        // like, NOT a wieldable throwable — the main-weapon-slot ValidLocations gate must
+        // exclude it so it is not mis-surfaced as a throwable arming path.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x111u, Name = "Loose Pebble", Wcid = 998u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = null },
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("throwable weapon in your inventory (Wield it to arm —", prompt);
+    }
+
+    [Fact]
+    public void IsCombatCapable_WieldedThrownWeapon_True()
+    {
+        // cp054: a wielded thrown weapon (missile bit, main slot, null AmmoType) is
+        // combat-capable on its own.
+        Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Throwing Dagger", Wcid = 999u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = null },
+        }));
+    }
+
+    [Fact]
+    public void IsCombatCapable_WieldedLauncherNoAmmo_False()
+    {
+        // Guard: a wielded launcher (AmmoType set) with no loaded ammo is NOT capable.
+        Assert.False(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
+        }));
+    }
+
+    [Fact]
+    public void IsCombatCapable_WieldedLauncherWithAmmo_True()
+    {
+        // A wielded launcher WITH loaded ammo (ammo slot) is combat-capable.
+        Assert.True(LlmGoalPolicy.IsCombatCapable(new[]
+        {
+            new InventoryItemProjection
+            { Guid = 0x1u, Name = "Royal Atlatl", Wcid = 20640u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = 4 },
+            new InventoryItemProjection
+            { Guid = 0x2u, Name = "Royal Dart", Wcid = 300u, ItemType = 0x100u, WieldedAt = 0x800000u, AmmoType = 4 },
+        }));
+    }
+
+    [Fact]
+    public void IsOptionalAttackWhileNotCombatCapable_ThrownWeaponWielded_DoesNotFire()
+    {
+        // cp054 (the behavioral unblock): with a thrown weapon wielded the bot IS
+        // combat-capable, so an optional Attack on a passive monster must STAND (cp049
+        // no longer drops it) — the bot can throw the weapon for damage.
+        var world = BuildInventoryWorld(
+            new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x1u, Name = "Throwing Dagger", Wcid = 999u, ItemType = 0x100u, WieldedAt = 0x400000u, AmmoType = null },
+            },
+            new[] { new VisibleObjectProjection { Guid = 0x8001u, Name = "Chicken", Wcid = 9001u, Distance = 4f, IsMonster = true, ObservedHostile = false } });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackWhileNotCombatCapable(AttackGoal("Chicken"), world));
     }
 
     [Fact]

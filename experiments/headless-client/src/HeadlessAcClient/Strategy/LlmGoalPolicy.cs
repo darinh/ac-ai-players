@@ -5652,10 +5652,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             i.ItemType is uint smit && (smit & ItemTypeMasks.MissileWeapon) != 0);
         var selfArmAmmoLoaded = world.Inventory.Any(i =>
             i.WieldedAt is uint saw && saw == ItemTypeMasks.MissileAmmoSlot);
+        // A wielded THROWN weapon (missile weapon with no AmmoType — it is its own
+        // projectile, server Player_Missile.cs throws the weapon itself) is armed with
+        // no separate ammo, so it makes the bot combat-effective on its own. Mirrors
+        // IsCombatCapable / the body `wieldedThrownWeapon`.
+        var selfArmThrownWielded = world.Inventory.Any(i =>
+            i.WieldedAt is uint stw && (stw & WeaponSwap.MainWeaponSlotMask) != 0 &&
+            i.ItemType is uint stit && (stit & ItemTypeMasks.MissileWeapon) != 0 &&
+            i.AmmoType is null);
         var selfArmCombatEffective =
-            selfArmMeleeWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
+            selfArmMeleeWielded || selfArmThrownWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
         if (!selfArmCombatEffective)
-        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` you can afford, `Buy` it by its exact name and then `Wield` it — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` you can afford, `Buy` it by its exact name and then `Wield` it — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
         sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
@@ -6360,6 +6368,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             i.WieldedAt is uint mw && (mw & WeaponSwap.MainWeaponSlotMask) != 0 &&
             i.ItemType is uint mit && (mit & ItemTypeMasks.MissileWeapon) != 0);
         var missileWeaponWielded = wieldedMissileLauncher is not null;
+        // A wielded THROWN weapon is its own projectile: the server (Player_Missile.cs)
+        // uses `ammo = weapon.IsAmmoLauncher ? GetEquippedAmmo() : weapon`, so a missile
+        // weapon that is NOT a launcher throws ITSELF and needs no separate ammo. The
+        // wire discriminator (cp044/cp052): a real launcher declares an AmmoType; a thrown
+        // weapon omits it (null). So a wielded missile weapon with a null AmmoType is a
+        // thrown weapon — combat-capable on its own, NOT an empty launcher.
+        var wieldedThrownWeapon = wieldedMissileLauncher is { AmmoType: null };
         var ammoLoaded = world.Inventory.Any(i =>
             i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
         // Items the server SEMANTICALLY refused for the bot recently — used
@@ -6386,7 +6401,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Where(e => e.ItemGuid is uint && !IsTransportFailureRejection(e))
             .Select(e => e.ItemGuid!.Value)
             .ToHashSet();
-        var bagAmmo = (!missileWeaponWielded || ammoLoaded) ? null : world.Inventory.FirstOrDefault(i =>
+        var bagAmmo = (!missileWeaponWielded || wieldedThrownWeapon || ammoLoaded) ? null : world.Inventory.FirstOrDefault(i =>
             (i.WieldedAt is not uint baw || baw == 0) &&
             i.ValidLocations is uint vl && (vl & ItemTypeMasks.MissileAmmoSlot) != 0 &&
             AmmoTypeCompatible(wieldedMissileLauncher?.AmmoType, i.AmmoType) &&
@@ -6402,7 +6417,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // acquisition hints suppressed — the suppression left it looping on an
         // ammo wield it cannot complete. Pure wire-state (WieldedAt + typed
         // masks); the LLM still decides; no advice, no game knowledge.
-        var armed = meleeWeaponWielded || (missileWeaponWielded && ammoLoaded);
+        var armed = meleeWeaponWielded || wieldedThrownWeapon || (missileWeaponWielded && ammoLoaded);
         // Acquisition affordances surfaced ONLY when unarmed, so the LLM
         // can act on "arm yourself" instead of merely noting it is
         // unarmed (the live failure mode): an unwielded melee weapon
@@ -6436,6 +6451,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                         !recentlyServerRefusedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
+        // A THROWN weapon in the bag (un-wielded, equippable into a main-weapon slot,
+        // with NO AmmoType — it is its own projectile) is an arming path that needs no
+        // separate ammo: the server (Player_Missile.cs) throws the weapon ITSELF for
+        // damage when the wielded weapon is not a launcher (`ammo = weapon.IsAmmoLauncher
+        // ? GetEquippedAmmo() : weapon`). bagWeapon/groundWeapon are melee-only and
+        // bagLauncherAmmo requires a launcher WITH compatible ammo, so without this a bot
+        // whose only usable weapons are throwables (e.g. its launchers have no ammo) is
+        // shown no arming path at all and stays UNARMED. The main-weapon ValidLocations
+        // gate (not just the MissileWeapon bit) keeps loaded ammo — which carries the
+        // same bit but lives in the ammo slot — from being mis-surfaced as a throwable.
+        // Surfaced ONLY when unarmed; skips server-refused items like the other self-arm
+        // suggestions. Pure typed/wire affordance; the LLM decides; no game knowledge.
+        var bagThrownWeapon = armed ? null : world.Inventory.FirstOrDefault(i =>
+            (i.WieldedAt is not uint tw || tw == 0) &&
+            i.ValidLocations is uint tvl && (tvl & WeaponSwap.MainWeaponSlotMask) != 0 &&
+            i.ItemType is uint tit && (tit & ItemTypeMasks.MissileWeapon) != 0 &&
+            i.AmmoType is null &&
+            !recentlyServerRefusedGuids.Contains(i.Guid));
         // A missile LAUNCHER in the bag (un-wielded, equippable into a main-weapon
         // slot) paired with COMPATIBLE ammo ALSO in the bag — the ranged equivalent
         // of bagWeapon. Surfaced ONLY when unarmed AND the WIELDED missile weapon (if
@@ -6486,7 +6519,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var monstersInView = world.Visible.Count(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
-        sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null)}");
+        sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
         if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string crSkillAdvisory)
             sb.AppendLine($"- {crSkillAdvisory}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
@@ -6505,6 +6538,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- {tappedOutFact}");
         if (bagWeapon is not null)
             sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
+        if (bagThrownWeapon is not null)
+            sb.AppendLine($"- throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): {bagThrownWeapon.Name}");
         if (groundWeapon is not null)
         {
             var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
@@ -8363,7 +8398,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
-            sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null)}");
+            sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
             if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string capSkillAdvisory)
                 sb.AppendLine($"- {capSkillAdvisory}");
             // The `tapped out` hunt-discovery fact (combat-ready + farmed this
@@ -8386,6 +8421,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // missile-empty bot was told ammo is EMPTY but never which to wield.
             if (bagWeapon is not null)
                 sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
+            if (bagThrownWeapon is not null)
+                sb.AppendLine($"- throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): {bagThrownWeapon.Name}");
             if (groundWeapon is not null)
             {
                 var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
@@ -9328,7 +9365,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         if (inventory is null) return false;
         var meleeWielded = false;
-        var missileWielded = false;
+        var thrownWielded = false;
+        var launcherWielded = false;
         var ammoLoaded = false;
         foreach (var i in inventory)
         {
@@ -9340,11 +9378,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (i.WieldedAt is uint w && (w & WeaponSwap.MainWeaponSlotMask) != 0 && i.ItemType is uint it)
             {
                 if ((it & ItemTypeMasks.MeleeWeapon) != 0) meleeWielded = true;
-                if ((it & ItemTypeMasks.MissileWeapon) != 0) missileWielded = true;
+                if ((it & ItemTypeMasks.MissileWeapon) != 0)
+                {
+                    // A THROWN weapon (no AmmoType — it is its own projectile, server
+                    // Player_Missile.cs: `ammo = weapon.IsAmmoLauncher ? GetEquippedAmmo()
+                    // : weapon`) fires with NO separate ammo, so a wielded thrown weapon
+                    // is combat-capable on its own. A LAUNCHER (bow/crossbow/atlatl, with
+                    // an AmmoType) needs loaded ammo (the server cancels a launcher attack
+                    // when `IsAmmoLauncher && ammo == null`).
+                    if (i.AmmoType is null) thrownWielded = true;
+                    else launcherWielded = true;
+                }
             }
             if (i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot) ammoLoaded = true;
         }
-        return meleeWielded || (missileWielded && ammoLoaded);
+        return meleeWielded || thrownWielded || (launcherWielded && ammoLoaded);
     }
 
 
@@ -9393,19 +9441,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // diverge. Mechanical wire-state rendering (what is wielded + whether the
     // missile weapon has ammo loaded); no advice, priority, or game knowledge.
     // `hasLoadableAmmo` says whether the bag holds ammo the wield path could load;
-    // when a missile weapon is empty it decides whether to point at that ammo or
-    // state plainly that none is loadable. An empty missile weapon with no loadable
-    // ammo cannot fire, so it carries the same UNARMED marker as no weapon at all —
-    // the combat rules gate on that marker to stop pushing a doomed Attack and steer
-    // the bot to arm or do non-combat progress instead.
+    // when a missile LAUNCHER is empty it decides whether to point at that ammo or
+    // state plainly that none is loadable. `thrownWeapon` says the wielded missile
+    // weapon is its own projectile (no AmmoType — server Player_Missile.cs throws the
+    // weapon itself), so it is ARMED with no ammo needed. A launcher (has AmmoType)
+    // with no loadable ammo cannot fire, so it carries the same UNARMED marker as no
+    // weapon at all — the combat rules gate on that marker to stop pushing a doomed
+    // Attack and steer the bot to arm or do non-combat progress instead.
     private static string WeaponReadinessLine(
         bool meleeWeaponWielded, bool missileWeaponWielded, bool ammoLoaded,
-        bool hasLoadableAmmo)
+        bool hasLoadableAmmo, bool thrownWeapon)
     {
         if (meleeWeaponWielded)
             return "melee weapon wielded";
         if (missileWeaponWielded)
         {
+            if (thrownWeapon)
+                return "thrown weapon wielded (throws itself; no ammo needed)";
             var ammoState = ammoLoaded
                 ? "loaded"
                 : hasLoadableAmmo
