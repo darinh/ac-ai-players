@@ -4878,6 +4878,79 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("SELF-ARM before fighting", p);
     }
 
+    private const string VendorArmHintMarker = "vendor nearby (you have NO weapon to Wield/Pickup";
+
+    private static VisibleObjectProjection ArmHintVendor() => new VisibleObjectProjection
+    { Guid = 0x9001u, Name = "Merchant", Wcid = 1387u, Distance = 12f, IsVendor = true };
+
+    [Fact]
+    public void SelfArm_UnarmedNoArmSource_VendorInView_SurfacesVendorArmHint()
+    {
+        // cp058: UNARMED with NO bag/ground weapon, ammo, or launcher loadout, but a
+        // vendor in view (panel not open) -> surface the vendor as the last-resort
+        // arming path (Use it, browse offerings, Buy a weapon/ammo).
+        var world = BuildInventoryWorld(
+            System.Array.Empty<InventoryItemProjection>(), new[] { ArmHintVendor() });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains(VendorArmHintMarker, p);
+        Assert.Contains("Merchant", p);
+        // cp058 review (claude): a "tapped" escape clause prevents sustained
+        // contradictory pressure vs LOOP-BREAK if the vendor has no affordable arm.
+        Assert.Contains("rather than re-Using it", p);
+    }
+
+    [Fact]
+    public void SelfArm_UnarmedWithBagThrownWeapon_SuppressesVendorArmHint()
+    {
+        // A bag THROWN weapon (cp054) is a closer arm source -> vendor hint suppressed.
+        var world = BuildInventoryWorld(
+            new[] { new InventoryItemProjection { Guid = 0x1u, Name = "Throwing Dagger", Wcid = 9u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = null } },
+            new[] { ArmHintVendor() });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain(VendorArmHintMarker, p);
+    }
+
+    [Fact]
+    public void SelfArm_UnarmedWithBagWeapon_SuppressesVendorArmHint()
+    {
+        // A bag melee weapon is the closer arm source -> the vendor hint is
+        // suppressed (Wield the bag weapon instead of walking to a vendor).
+        var world = BuildInventoryWorld(
+            new[] { new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = 0x1u, ValidLocations = 0x100000u, WieldedAt = null } },
+            new[] { ArmHintVendor() });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain(VendorArmHintMarker, p);
+    }
+
+    [Fact]
+    public void SelfArm_ArmedWithVendorInView_NoVendorArmHint()
+    {
+        // Armed (wielded melee weapon) -> not unarmed -> no vendor arm hint.
+        var world = BuildInventoryWorld(
+            new[] { new InventoryItemProjection { Guid = 0x1u, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u } },
+            new[] { ArmHintVendor() });
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain(VendorArmHintMarker, p);
+    }
+
+    [Fact]
+    public void SelfArm_UnarmedVendorPanelOpen_NoVendorArmHint()
+    {
+        // The vendor panel is already OPEN (world.Vendor set) -> ## Vendor offerings
+        // already shows the wares, so the "Use it to browse" nudge is suppressed.
+        var world = BuildInventoryWorld(
+            System.Array.Empty<InventoryItemProjection>(), new[] { ArmHintVendor() }) with
+        {
+            Vendor = new VendorProjection
+            {
+                VendorGuid = 0x9001u, BuyCostMultiplier = 1.0f,
+                Offers = new[] { new VendorOfferProjection { Name = "Bread", Value = 5u, StackSize = -1, ItemType = 0x20u } },
+            },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain(VendorArmHintMarker, p);
+    }
+
     [Fact]
     public void FitPromptToCeiling_TrimsInventoryBeforeGuillotiningFixedSections()
     {
