@@ -1544,6 +1544,144 @@ public class LlmGoalPolicyTests
         return es;
     }
 
+    private static EventStream WithExploreHistory(string targetName, int times, DateTimeOffset at)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < times; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = at, Kind = EventKind.GoalEmitted,
+                Text = $"Explore target=name=\"{targetName}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    private static LlmGoalPolicy SettledTurnInExplorePolicy(string npc)
+    {
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Explore\",\"target\":{\"name\":\"" + npc + "\"},\"rationale\":\"go back\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        return new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+    }
+
+    // A settled stage-3 turn-in world whose turn-in NPC is optionally VISIBLE far
+    // off (Distance 30u, well beyond ReachedExploreTargetDistanceUnits=5u, so the
+    // reached-Explore guard does NOT fire — isolating the cp051 in-view guard).
+    private static WorldStateProjection BuildSettledStage3WorldVisible(
+        string turnInNpc, DateTimeOffset stage3Since, bool npcInView) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u, CellId = 0xA9B40001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = npcInView
+            ? new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = 0x70000001u, Name = turnInNpc, Wcid = 33596u, Distance = 30f, IsCreature = true,
+                },
+            }
+            : Array.Empty<VisibleObjectProjection>(),
+        Contracts = new[]
+        {
+            new ContractProjection
+            {
+                ContractId = 950u, Stage = 3u, Name = "Find the Pathwarden",
+                NpcEnd = turnInNpc, Stage3SinceUtc = stage3Since,
+            },
+        },
+    };
+
+    [Fact]
+    public async Task LlmGoalPolicy_DropsExploreToSettledTurnInNpcInView()
+    {
+        // cp051: once cp050 suppresses re-Talking a settled turn-in NPC, the model
+        // re-routes to Explore (navigate-to) the SAME settled NPC. Exploring toward a
+        // settled turn-in NPC ALREADY IN VIEW (but farther than the reached threshold,
+        // so the reached-Explore guard does not catch it) is a no-op and must be
+        // dropped.
+        var policy = SettledTurnInExplorePolicy(SettledTurnInNpc);
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3WorldVisible(SettledTurnInNpc, since, npcInView: true);
+        var events = WithExploreHistory(SettledTurnInNpc, 3, since); // settled via Explore threshold
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.False(goal!.Kind == GoalKind.Explore && goal.Target?.Name == SettledTurnInNpc,
+            "an Explore to a settled stage-3 turn-in NPC in view must be dropped");
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_KeepsExploreToSettledTurnInNpc_NotInView()
+    {
+        // cp051 safety: when the settled turn-in NPC is NOT in view, the Explore is a
+        // legitimate TRAVEL-BACK toward a source area and must be preserved — the
+        // in-view gate is what distinguishes a no-op from real navigation. Differs
+        // from the drop test ONLY in whether the NPC is visible.
+        var policy = SettledTurnInExplorePolicy(SettledTurnInNpc);
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3WorldVisible(SettledTurnInNpc, since, npcInView: false);
+        var events = WithExploreHistory(SettledTurnInNpc, 3, since);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.Equal(SettledTurnInNpc, goal.Target?.Name);
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_DropsExploreToSettledTurnInNpc_NameContainsSelector()
+    {
+        // cp051 (gpt-5.4 review): an Explore selector can be `name_contains`-only,
+        // carrying no `name`. The guard recognizes the settled NPC from the matched
+        // VISIBLE object's name, so a partial-name Explore toward a settled turn-in
+        // NPC in view is still dropped (it would slip through if the recognition keyed
+        // on the raw selector text).
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Explore\",\"target\":{\"name_contains\":\"Thorolf\"},\"rationale\":\"go back\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var since = DateTimeOffset.UtcNow;
+        var world = BuildSettledStage3WorldVisible(SettledTurnInNpc, since, npcInView: true);
+        var events = WithExploreHistory(SettledTurnInNpc, 3, since);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.False(goal!.Kind == GoalKind.Explore && goal.Target?.NameContains == "Thorolf",
+            "a name_contains Explore to a settled stage-3 turn-in NPC in view must be dropped");
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_429_TripsBackoff_NoFurtherHttpCallsWithinWindow()
     {
