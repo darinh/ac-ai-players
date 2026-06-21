@@ -63,4 +63,37 @@ public class CombatWeaponSelectionTests
         Assert.Equal(2u, CombatWeaponSelection.CombatModeValue(AttackMode.Melee));
         Assert.Equal(4u, CombatWeaponSelection.CombatModeValue(AttackMode.Missile));
     }
+
+    [Fact]
+    public void HasWieldedMissileWeapon_WieldedMissile_True()
+    {
+        var items = new (uint?, bool)[] { (Missile, true) };
+        Assert.True(CombatWeaponSelection.HasWieldedMissileWeapon(items));
+    }
+
+    [Fact]
+    public void HasWieldedMissileWeapon_NoMissile_False()
+    {
+        // The consume case: the thrown weapon is gone, only a melee weapon (or
+        // nothing) remains wielded → no missile weapon to sustain a throw.
+        var items = new (uint?, bool)[] { (Melee, true) };
+        Assert.False(CombatWeaponSelection.HasWieldedMissileWeapon(items));
+        Assert.False(CombatWeaponSelection.HasWieldedMissileWeapon(System.Array.Empty<(uint?, bool)>()));
+    }
+
+    [Fact]
+    public void HasWieldedMissileWeapon_UnwieldedMissile_False()
+    {
+        // A missile weapon still in the bag (un-wielded) cannot sustain an
+        // in-flight missile attack.
+        var items = new (uint?, bool)[] { (Missile, false) };
+        Assert.False(CombatWeaponSelection.HasWieldedMissileWeapon(items));
+    }
+
+    [Fact]
+    public void HasWieldedMissileWeapon_NullItemType_Ignored()
+    {
+        var items = new (uint?, bool)[] { ((uint?)null, true) };
+        Assert.False(CombatWeaponSelection.HasWieldedMissileWeapon(items));
+    }
 }
