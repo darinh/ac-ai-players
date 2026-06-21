@@ -238,4 +238,58 @@ public class CombatWeaponSelectionTests
         Assert.Equal(WeaponReadiness.LauncherNeedsDequip, state);
         Assert.Equal(0x100Au, guid);
     }
+
+    // ── Part 3 dequip-then-melee chain tests ──────────────────────────────
+
+    [Fact]
+    public void Classify_LauncherOnly_LauncherNeedsDequip_GuidReturned()
+    {
+        // The exact Motor trigger condition: a launcher wielded with no ammo
+        // anywhere. The classifier must return LauncherNeedsDequip and expose
+        // the launcher GUID so the motor knows what to dequip.
+        var launcherGuid = 0xABC1u;
+        var items = new WeaponStateItem[]
+        {
+            new(launcherGuid, ItemType: Missile, WieldedAt: MissileSlot, AmmoType: 12),
+        };
+        var (state, guid) = CombatWeaponSelection.ClassifyWeaponState(items);
+        Assert.Equal(WeaponReadiness.LauncherNeedsDequip, state);
+        Assert.Equal(launcherGuid, guid);
+    }
+
+    [Fact]
+    public void Classify_AfterDequip_OnlyBagItemsRemain_UnarmedMeleeOnly()
+    {
+        // After the Motor sends PutItemInContainer for the launcher, the
+        // server removes the item from the wielded location. The next world-
+        // state snapshot has only bag items left → UnarmedMeleeOnly, which
+        // enables CanUnarmedMelee and unblocks the TargetedMeleeAttack path.
+        var items = new WeaponStateItem[]
+        {
+            // The launcher is now in the bag (WieldedAt null).
+            new(0xABC1u, ItemType: Missile, WieldedAt: null, AmmoType: 12),
+            // Some ammo still in the bag.
+            new(0xABC2u, ItemType: Missile, WieldedAt: null, AmmoType: 12),
+        };
+        var (state, guid) = CombatWeaponSelection.ClassifyWeaponState(items);
+        Assert.Equal(WeaponReadiness.UnarmedMeleeOnly, state);
+        Assert.Null(guid);
+    }
+
+    [Fact]
+    public void Classify_DequipDoesNotAffectOtherWieldedNonWeaponItems()
+    {
+        // Armor / clothing worn (WieldedAt != 0 but not a main-weapon slot)
+        // must not prevent UnarmedMeleeOnly after the launcher is dequipped.
+        var items = new WeaponStateItem[]
+        {
+            // Armor on the character (not in a main-weapon slot).
+            new(0x2001u, ItemType: 0x2u /* Armor */, WieldedAt: 0x020000u, AmmoType: null),
+            // Launcher now in bag.
+            new(0xABC1u, ItemType: Missile,           WieldedAt: null,      AmmoType: 12),
+        };
+        var (state, guid) = CombatWeaponSelection.ClassifyWeaponState(items);
+        Assert.Equal(WeaponReadiness.UnarmedMeleeOnly, state);
+        Assert.Null(guid);
+    }
 }

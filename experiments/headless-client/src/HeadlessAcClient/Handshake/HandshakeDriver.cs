@@ -500,6 +500,17 @@ internal sealed class HandshakeDriver : IDisposable
         // the wield item (target). The LLM still chose WHICH weapon; source
         // only inserts the mechanical dequip the server requires.
         var                  pendingWieldAfterDequip = new Dictionary<uint, (uint TargetGuid, uint TargetSlot, DateTime StartedUtc)>();
+        // cp060 Part 3 — standalone dequip of an objectively-useless ammoless
+        // launcher. When a launcher is wielded with no ammo (LauncherNeedsDequip
+        // state) AND the LLM has an active kill commitment + a monster is in view,
+        // the Motor sends a PutItemInContainer for the launcher so the bot reaches
+        // UnarmedMeleeOnly and CanUnarmedMelee enables the combat chain.
+        // This guid is set when the dequip is in-flight; cleared when the put-ack
+        // arrives (see the InventoryPutObjInContainer ack handler below). A simple
+        // staleness timeout (10s, mirrors pendingWieldAfterDequip) prevents a lost
+        // ack from permanently blocking re-dispatch.
+        uint?                pendingLauncherDequipGuid = null;
+        DateTime?            pendingLauncherDequipSentAt = null;
         // Phase 6n — anti-starvation: after an item is successfully
         // wielded, mark its weenie-class as "satisfied" so we stop
         // chasing duplicate quest-reward copies. Also count successful
@@ -2262,6 +2273,23 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
                                         $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
                                     }
+                                }
+                                // cp060 Part 3 — standalone launcher dequip ack.
+                                // When the put-ack guid matches the in-flight
+                                // launcher dequip (not the swap path above), clear
+                                // the latch so the item is no longer considered
+                                // "dequip in-flight". On the next Motor tick the
+                                // weapon state is UnarmedMeleeOnly and the combat
+                                // chain dispatches TargetedMeleeAttack (fists).
+                                if (pendingLauncherDequipGuid is uint ldguid &&
+                                    ldguid == putAck.ItemGuid &&
+                                    !pendingWieldAfterDequip.ContainsKey(putAck.ItemGuid))
+                                {
+                                    pendingLauncherDequipGuid  = null;
+                                    pendingLauncherDequipSentAt = null;
+                                    Console.WriteLine(
+                                        $"[motor] cp060 launcher dequip ack 0x{putAck.ItemGuid:X8} — " +
+                                        "launcher removed; unarmed melee path now unblocked.");
                                 }
                             }
                             // M1.6 — PopupString is the canonical
@@ -4109,6 +4137,82 @@ internal sealed class HandshakeDriver : IDisposable
                     lastObservedTargetHealthAt = null;
                     combatFastRetryRequested = false;
                     ClearCombatFightStats();
+                }
+
+                // cp060 Part 3 — standalone dequip of a provably-useless ammoless
+                // launcher so the bot can reach UnarmedMeleeOnly and fist-attack.
+                //
+                // A wielded launcher with no loaded ammo forces Missile combat
+                // mode, and Player_Missile.cs cancels any attack without ammo —
+                // the launcher is mechanically useless right now. Dequipping it
+                // lets SelectAttackMode → Melee (no weapon) → TargetedMeleeAttack
+                // (fists, which the server ALLOWS with no weapon in hand).
+                //
+                // Gate: LauncherNeedsDequip state AND LLM has an active kill
+                // commitment (mirrors cp047's internal gate) AND at least one
+                // monster is in view. This restricts the mechanical dequip to
+                // ticks where combat is genuinely on the agenda.
+                //
+                // Anti-spam: one in-flight dequip at a time; stale latches time
+                // out after 10 s (mirrors pendingWieldAfterDequip's StartedUtc
+                // timeout pattern) to recover from a lost ack.
+                if (CombatCommitment.IsActiveKillCommitment(intentStack.Top, out _))
+                {
+                    var ldWieldedItems = worldState.Objects.Values
+                        .Where(s => s.WielderGuid is uint wg && wg == chosenCharacterGuid)
+                        .Select(s => new WeaponStateItem(
+                            s.Guid, s.ItemType, s.CurrentWieldedLocation, s.AmmoType));
+                    var (ldState, ldGuid) = CombatWeaponSelection.ClassifyWeaponState(ldWieldedItems);
+
+                    if (ldState == WeaponReadiness.LauncherNeedsDequip &&
+                        ldGuid is uint launcherToRemove &&
+                        (pendingLauncherDequipGuid is null ||
+                         (pendingLauncherDequipSentAt is DateTime ldSentAt &&
+                          (DateTime.UtcNow - ldSentAt).TotalSeconds > 10.0)))
+                    {
+                        // Require at least one monster in the current world state
+                        // (all worldState objects are already within perception
+                        // range — no extra distance filter needed).
+                        var ldMonsterVisible = worldState.Objects.Values.Any(s =>
+                            s.WielderGuid is null &&
+                            EntityClassifier.IsMonster(
+                                s.ItemType ?? 0u,
+                                s.ObjectDescriptionFlags ?? 0u,
+                                s.WeenieFlags ?? 0u));
+
+                        if (ldMonsterVisible)
+                        {
+                            pendingLauncherDequipGuid   = launcherToRemove;
+                            pendingLauncherDequipSentAt = DateTime.UtcNow;
+
+                            var ldPktSeq  = nextOutboundPacketSequence++;
+                            var ldFragSeq = nextOutboundFragmentSequence++;
+                            var ldBuf     = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                            var ldLen     = GameActionPutItemInContainerMessage.Pack(
+                                ldBuf,
+                                itemGuid:      launcherToRemove,
+                                containerGuid: chosenCharacterGuid,
+                                placement:     0);
+                            var ldPkt = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                ldPkt.AddAckSequence(lastReceivedSeq);
+                            ldPkt.AddBlobFragment(
+                                fragSequence: ldFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: ldBuf.AsSpan(0, ldLen));
+                            var ldSentLen = ldPkt.Pack(sendBuf, myClientId,
+                                                       sequence: ldPktSeq, iteration: 1,
+                                                       encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(
+                                new ArraySegment<byte>(sendBuf, 0, ldSentLen),
+                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[motor] cp060 dequip useless launcher 0x{launcherToRemove:X8} " +
+                                "(no ammo, no other weapon, kill-intent active, monster in view) " +
+                                $"pktSeq={ldPktSeq} fragSeq={ldFragSeq} totalBytes={ldSentLen}");
+                        }
+                    }
                 }
 
                 // Phase 7f.2 — RE-ENGAGE safety net. With AutoRepeatAttacks
