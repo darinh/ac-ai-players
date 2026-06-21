@@ -10110,6 +10110,102 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsWieldOfUnusableLauncher_SelectorAlsoMatchesVisibleObject_NotDropped()
+    {
+        // The executor resolves the wield subject NEAREST over ALL world objects, then
+        // discards a non-bag match as non-wieldable (no wield happens). A bag item has
+        // no world position, so a VISIBLE world object outranks it — a selector matching
+        // both resolves to the visible object and equips nothing. The guard must mirror
+        // that and NOT drop the Wield (else it acts on a false premise).
+        var launcher = BagLauncher(0xA050u, 7, "Shortbow");
+        var visible = new VisibleObjectProjection
+        {
+            Guid = 0xC050u, Name = "Shortbow", Wcid = 0x9050u, Distance = 5f,
+        };
+        var world = BuildInventoryWorld(new[] { launcher }, new[] { visible });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = "Shortbow" },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_AmbiguousMultipleBagMatches_NotDropped()
+    {
+        // When a selector matches MORE THAN ONE owned bag item, the executor's
+        // first-match-over-all-objects resolution is not decidable from the projection,
+        // so the guard defers (does not drop) rather than guess which item is wielded.
+        var l1 = BagLauncher(0xA060u, 7, "Practice Bow");
+        var l2 = BagLauncher(0xA061u, 7, "Practice Crossbow");
+        var world = BuildInventoryWorld(new[] { l1, l2 });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { NameContains = "Practice" },  // matches both launchers
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_ItemTypeMaskMatchesVisibleObject_NotDropped()
+    {
+        // The executor applies item_type_mask to VISIBLE world objects too; if a visible
+        // object matches, the executor may resolve it (and wield nothing). The ambiguity
+        // check must honor item_type_mask, so the guard defers rather than drop the Wield.
+        var launcher = BagLauncher(0xA070u, 7, "Bow");
+        var visible = new VisibleObjectProjection
+        {
+            Guid = 0xC070u, Name = "Some Bow", Wcid = 0x9070u, Distance = 5f,
+            ItemType = ItemTypeMasks.MissileWeapon,
+        };
+        var world = BuildInventoryWorld(new[] { launcher }, new[] { visible });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { ItemTypeMask = ItemTypeMasks.MissileWeapon },
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_AmbiguousItem_DoesNotFallBackToTarget()
+    {
+        // An AMBIGUOUS goal.Item (matches >1 bag item) must DEFER — the executor would
+        // still wield one of the Item matches, so the guard must NOT retarget to
+        // goal.Target (even though Target alone would resolve the useless launcher).
+        var l1 = BagLauncher(0xA080u, 7, "Long Bow");
+        var l2 = BagLauncher(0xA081u, 7, "Short Bow");
+        var world = BuildInventoryWorld(new[] { l1, l2 });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { NameContains = "Bow" },     // matches BOTH -> ambiguous
+            Target = new Selector { Name = "Short Bow" },     // would resolve l2 alone
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
+    public void IsWieldOfUnusableLauncher_UsableWeaponAlsoInBag_NotDropped()
+    {
+        // Provable-harmlessness gate: when the bot has a USABLE weapon available (here a
+        // bag thrown weapon), dropping a Wield could lose it, so the guard does NOT fire
+        // even when the wield explicitly names the useless launcher — it only intervenes
+        // in the genuinely weaponless cp060 loop state.
+        var launcher = BagLauncher(0xA090u, 7, "Ammoless Bow");
+        var thrown = BagThrownWeapon(0xA091u);
+        var world = BuildInventoryWorld(new[] { launcher, thrown });
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Item = new Selector { Name = "Ammoless Bow" },  // explicitly the launcher
+        };
+        Assert.False(LlmGoalPolicy.IsWieldOfUnusableLauncher(goal, world));
+    }
+
+    [Fact]
     public void IsWieldOfUnusableLauncher_LauncherWithCompatibleBagAmmo_False()
     {
         // Launcher + compatible ammo both in bag: a valid arming path; must NOT drop.
