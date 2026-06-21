@@ -2581,6 +2581,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, WorldUseLoopKind);
         }
 
+        // Settled stage-3 turn-in loop-break (cp050): a Talk re-emitted at the
+        // turn-in NPC of a contract already DONE (wire ContractStage 3,
+        // done/pending-repeat) past the post-completion attempt threshold is the
+        // fixation the `## Contracts` "DONE (stage 3)" note describes — such a
+        // contract has no separate hand-in (its reward is the issuer's to grant on
+        // its own terms), so re-Talking its settled turn-in NPC can never change the
+        // stage. The per-NPC / multi-NPC / roving Talk guards MISS this when the bot
+        // ROVES between two such turn-in NPCs (movement resets the stationary guards)
+        // and each NPC re-greets with fresh flavor text (dialog-novelty resets the
+        // churn guards). This guard is position- AND novelty-independent: it fires
+        // purely on the contract's wire stage + the bot's OWN post-stage-3 pursuit
+        // count (the SAME recognition that renders the prompt note, shared via
+        // IsSettledStage3TurnIn), so a model that ignores the note cannot keep
+        // marching back. It allows the legitimate attempts (one hand-in + a batch
+        // refresh) BEFORE the threshold, and stands down entirely if that NPC also
+        // has LIVE business (it starts/turns-in any non-done contract — e.g. a fresh
+        // batch just obtained from this same source). Own contract stage + own goal
+        // history; no NPC/quest names, no game knowledge.
+        if (goal.Kind == GoalKind.Talk
+            && IsSettledStage3TurnInNpc(world, events, goal.Target?.Name))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — settled stage-3 contract turn-in NPC re-Talked past the done threshold;" +
+                " no separate hand-in, deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: settled stage-3 contract turn-in re-Talk");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
+
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
         // stationary NPC with no movement and no inventory change is an
         // exhausted conversation (the server just re-greets) — drop it and
@@ -5128,6 +5158,77 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // so the nudge self-limits and the bot moves on. Two attempts mirrors the
     // stage-3 hand-in threshold — enough to actuate, low enough to avoid a loop.
     private const int BatchRefreshAttemptThreshold = 2;
+
+    // Per-contract recognition of a SETTLED stage-3 turn-in (cp050): the contract
+    // is DONE (wire ContractStage 3, done/pending-repeat), recorded WHEN it became
+    // done, its turn-in NPC is UNIQUE among tracked contracts (a shared turn-in NPC
+    // makes per-contract attribution ambiguous), and the bot has already pursued
+    // that turn-in NPC past the post-stage-3 attempt threshold (Talk hand-in OR
+    // Explore locate) with no stage change. Such a contract has no separate hand-in.
+    // Yields the per-NPC attempt counts for the caller's message. Pure mechanical
+    // read: wire ContractStage + the bot's OWN goal-emission history; no game
+    // knowledge. SHARED by the `## Contracts` "DONE (stage 3)" note and the Motor's
+    // settled-turn-in Talk backstop so the recognition never drifts between them.
+    //
+    // `sinceOverride` lets a caller widen the attempt-count window's start past the
+    // contract's own Stage3SinceUtc. The render leaves it null (its "you have gone N
+    // times since THIS contract completed" message is per-contract). The Motor
+    // backstop passes the NPC's FULLY-SETTLED time (the max Stage3SinceUtc across
+    // every contract that NPC starts/turns-in) so Talks the bot made for a SIBLING
+    // contract of the SAME NPC while THAT one was still live business do not leak in
+    // as this contract's fixation once the sibling also settles.
+    internal static bool IsSettledStage3TurnIn(
+        WorldStateProjection world, EventStream events, ContractProjection c,
+        out int talkTries, out int exploreTries, DateTimeOffset? sinceOverride = null)
+    {
+        talkTries = 0;
+        exploreTries = 0;
+        if (c.Stage != 3u) return false;
+        var npcEnd = OneLine(c.NpcEnd);
+        if (npcEnd is null) return false;
+        if (c.Stage3SinceUtc is not { } since3) return false;
+        if (world.Contracts.Count(o =>
+                string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) != 1)
+            return false;
+        var since = sinceOverride is { } ov && ov > since3 ? ov : since3;
+        talkTries = CountRecentTalkGoalsToName(events, npcEnd, since);
+        exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since);
+        return talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold;
+    }
+
+    // Name-keyed wrapper for the Motor's settled-turn-in Talk backstop: is
+    // `npcName` the settled stage-3 turn-in NPC (per IsSettledStage3TurnIn) of some
+    // tracked contract, with NO remaining live business? An NPC that also starts or
+    // turns in any NON-terminal (stage != 3) tracked contract is EXCLUDED — the bot
+    // may legitimately Talk it to accept or progress that contract (e.g. a fresh
+    // batch just obtained from this same source), so only a purely settled NPC
+    // qualifies for suppression. The attempt-count window starts at the NPC's
+    // FULLY-SETTLED time — the latest Stage3SinceUtc among ALL contracts it
+    // starts/turns-in — so a re-Talk only counts as fixation once the NPC has no
+    // live business left (Talks made while a sibling contract of the same NPC was
+    // still live do not leak in). Own contract stage + own goal history; no game
+    // knowledge.
+    internal static bool IsSettledStage3TurnInNpc(
+        WorldStateProjection world, EventStream events, string? npcName)
+    {
+        var name = OneLine(npcName);
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        bool Involves(ContractProjection o) =>
+            string.Equals(OneLine(o.NpcStart), name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
+        if (world.Contracts.Any(o => o.Stage != 3u && Involves(o)))
+            return false;
+        DateTimeOffset? fullySettledSince = null;
+        foreach (var o in world.Contracts)
+            if (Involves(o) && o.Stage3SinceUtc is { } s
+                && (fullySettledSince is not { } cur || s > cur))
+                fullySettledSince = s;
+        foreach (var c in world.Contracts)
+            if (string.Equals(OneLine(c.NpcEnd), name, StringComparison.OrdinalIgnoreCase)
+                && IsSettledStage3TurnIn(world, events, c, out _, out _, fullySettledSince))
+                return true;
+        return false;
+    }
 
     // The NAMES of any done-batch issuing/turn-in NPCs (a done contract's
     // NpcStart/NpcEnd) currently in view as a creature/vendor. Shared by the
@@ -8596,33 +8697,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             hasBearing = true;
         }
         // A stage-3 contract is already complete. If the bot has ALREADY PURSUED its
-        // turn-in NPC repeatedly SINCE the contract became stage 3 — by Talking it to
-        // hand in OR Exploring toward it (a "locate/reach" objective is pursued via
-        // navigate-only Explore, NOT Talk) — and it is STILL stage 3, that contract
-        // has no separate hand-in (its reward is the issuer's to grant on its own
-        // terms) — surface that mechanical fact + the bot's OWN post-completion
-        // attempt count so the LLM stops re-attempting a turn-in/locate that has had
-        // no effect. Only when the turn-in NPC is UNIQUE among tracked contracts (a
-        // shared turn-in NPC makes per-contract attribution ambiguous).
-        if (c.Stage == 3u && npcEnd is not null && c.Stage3SinceUtc is { } since3
-            && world.Contracts.Count(o =>
-                string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) == 1)
-        {
-            var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
-            var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
-            // Fire on the Talk threshold OR the (higher) Explore threshold
-            // independently, NOT on the sum — a locate/reach objective is pursued
-            // ONLY via navigate-only Explore (0 Talk), but the FIRST Explore is
-            // ordinary travel-to-reach, so the Explore threshold is the higher one.
-            if (talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold)
-                entry.AppendLine(
-                    $"      DONE (stage 3, complete): you have already gone to " +
-                    $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
-                    $"contract completed and it is STILL stage 3 — it has no separate " +
-                    $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
-                    $"will not change anything. Treat it as finished and spend your " +
-                    $"turn on other progress (accept or complete another task).");
-        }
+        // turn-in NPC past the post-completion attempt threshold (Talk hand-in OR
+        // navigate-only Explore locate) and it is STILL stage 3, that contract has no
+        // separate hand-in (its reward is the issuer's to grant on its own terms) —
+        // surface that mechanical fact + the bot's OWN attempt count so the LLM stops
+        // re-attempting a turn-in/locate that has had no effect. The recognition lives
+        // in IsSettledStage3TurnIn, SHARED with the Motor's settled-turn-in Talk
+        // backstop so the prompt note and the drop can never drift.
+        if (IsSettledStage3TurnIn(world, events, c, out var talkTries, out var exploreTries))
+            entry.AppendLine(
+                $"      DONE (stage 3, complete): you have already gone to " +
+                $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
+                $"contract completed and it is STILL stage 3 — it has no separate " +
+                $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
+                $"will not change anything. Treat it as finished and spend your " +
+                $"turn on other progress (accept or complete another task).");
         return entry;
     }
 
