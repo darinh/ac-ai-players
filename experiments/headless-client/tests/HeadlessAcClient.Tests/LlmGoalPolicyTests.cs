@@ -17683,6 +17683,8 @@ public class LlmGoalPolicyTests
         // tapped-out bot attacks visible monsters even mid-directive (cp071)
         Assert.Contains("TAPPED-OUT EXCEPTION", p);
         Assert.Contains("monster", p);
+        // proven-low-value grind: pursue an unacted objective step over farming
+        Assert.Contains("OBJECTIVE-OVER-GRIND", p);
         // self-arming before optional combat
         Assert.Contains("SELF-ARM before fighting", p);
         Assert.Contains("UNARMED", p);
