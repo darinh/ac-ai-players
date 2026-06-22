@@ -547,13 +547,14 @@ public class LlmGoalPolicyTests
     public void BuildUserPrompt_HeldItemObjective_NpcDialogPinnedWithSpeaker()
     {
         // The directive can be an NPC-spoken line; when it names the held item it
-        // pins with the speaker attribution. NPC dialogs have a small persistent
-        // store (8) rendered earliest-4 + recent-4, so push the target into the
-        // narrow mushy middle: 4 filler dialogs before, target, 4 after.
+        // pins with the speaker attribution. NPC dialogs render earliest-4 + a
+        // recent-8 sliding window, so push the target into the mushy middle:
+        // 4 filler dialogs before, the target, then enough after (>8) to also
+        // clear the recent window.
         var es = new EventStream();
         for (var i = 0; i < 4; i++) AppendNpcDialog(es, "Greeter", $"filler npc line {i}");
         AppendNpcDialog(es, "Training Master", "Bring the Academy Token back to me when you are ready.");
-        for (var i = 0; i < 4; i++) AppendNpcDialog(es, "Greeter", $"later filler npc line {i}");
+        for (var i = 0; i < 9; i++) AppendNpcDialog(es, "Greeter", $"later filler npc line {i}");
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             BuildWorldHoldingItems("Academy Token"), es, null);
 
