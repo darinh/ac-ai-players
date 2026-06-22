@@ -543,6 +543,45 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsRepeatedDialogText_SameNpcVerbatimRepeat_True()
+    {
+        // Same speaker (guid) re-emitting the same line -> a repeat.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "tip", ItemGuid = 0x1234u, Name = "Golem" });
+        var dup = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "tip", ItemGuid = 0x1234u, Name = "Golem" });
+        Assert.True(LlmGoalPolicy.IsRepeatedDialogText(es, dup));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_DifferentNpcSameText_False()
+    {
+        // A DIFFERENT speaker's first identical line is NOT a repeat — it still
+        // interrupts so a new NPC interaction reaches the LLM.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hello", ItemGuid = 0x1111u, Name = "Guard A" });
+        var other = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hello", ItemGuid = 0x2222u, Name = "Guard B" });
+        Assert.False(LlmGoalPolicy.IsRepeatedDialogText(es, other));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_TwoIdenticalAboveFloor_InterruptsExactlyOnce()
+    {
+        // Two verbatim popups both ARRIVED since the floor: the newest is a repeat
+        // (skipped), but the first occurrence still interrupts -> the scan reports
+        // the kind exactly once rather than swallowing both.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "loot tip" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "loot tip" });
+        Assert.Equal(EventKind.PopupString, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
     public void IsChainInterruptingEvent_TransportFailureActionRejected_DoesNotInterrupt()
     {
         // cp025: a transport-failure rejection (the Motor could not reach/resolve
