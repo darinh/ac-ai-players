@@ -8122,6 +8122,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "## Inventory). Accepting one gives a concrete directed " +
                 "objective plus a reward on turn-in. Raw fact, not a " +
                 "recommendation: whether to is your call.");
+            // Bridge the FIND-A-KILL-TASK REFRESH rule (re-ENGAGE the source when
+            // your batch is finished) to the concrete BUY action: a contract
+            // broker dispenses NEW work by SELLING a fresh contract, not by being
+            // re-Talked. Surfaced only when the bot has NO actionable tracked
+            // contract (none held, or every one already stage-3 DONE) AND a
+            // contract-selling vendor is OPEN right now — the exact "finished
+            // batch, broker open, but the bot re-Talks instead of buying" state
+            // observed live. Gated on the bot's OWN contract state + OWN
+            // open-vendor perception; names no specific contract (the LLM picks
+            // which, if any). Decision-proximate re-statement of existing
+            // guidance; no source-side decision to buy, no game knowledge.
+            if (world.Contracts.Count == 0 || heldBatchAllDone)
+                sb.AppendLine(
+                    "- you have NO unfinished task contract right now and this vendor is OPEN: if any offering " +
+                    "above is a TASK CONTRACT, the way to take new work is to BUY one here — emit " +
+                    "`Buy{target: {name: \"<that contract's exact name>\"}}`, then `Use` it from your `## Inventory` " +
+                    "to accept the task. Re-`Talk`ing town NPCs does NOT give you a new contract; BUYING one from " +
+                    "this broker does. If you have ALREADY bought a task contract and it is sitting in your " +
+                    "`## Inventory` unaccepted, `Use` it to accept the task INSTEAD of buying another. (Whether and " +
+                    "which to buy is your call; health-critical safety and any active server/quest directive come first.)");
         }
 
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────
