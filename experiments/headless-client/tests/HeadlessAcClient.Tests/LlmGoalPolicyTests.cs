@@ -15180,14 +15180,25 @@ public class LlmGoalPolicyTests
     // view; the rule keys off the existing neutral `(repeated xN)` telemetry and
     // tells the LLM to pivot to a NON-Talk verb (Attack a visible monster only
     // after exhaustion, else Use/Give/Pickup/Explore).
+    // Bumped 18000 -> 18600 (give-requested-held-item) for the ACT ON A GIVE-REQUEST
+    // FOR A HELD ITEM rule (folded into the existing item-instruction bullet) + the
+    // REFUSED GIVE rule's NPC-dialogue clause: live evidence showed a bot Talk-looping
+    // the Society Greeter (which kept re-asking it to "drag the Calling Stone to me")
+    // ~12x WITHOUT ever giving the held Calling Stone. The rule tells the LLM an NPC's
+    // give-request — in its dialogue OR a held item's own description — is satisfied by
+    // `Give`, not endless `Talk`; it carves out generic vendor sell barks and defers a
+    // refused give to the REFUSED GIVE rule (which now also recognizes NPC dialogue as
+    // naming the recipient, so a dialogue-requested give is not wrongly abandoned).
+    // Keyed on observed NPC dialogue + the item's server description. Static-floor only;
+    // does not move the runtime 413 risk (per-tick WORLD/visible sections).
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 18000,
-            $"static prompt floor grew to {prompt.Length} chars (budget 18000)");
+        Assert.True(prompt.Length <= 18600,
+            $"static prompt floor grew to {prompt.Length} chars (budget 18600)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
@@ -17379,6 +17390,8 @@ public class LlmGoalPolicyTests
         // self-arming before optional combat
         Assert.Contains("SELF-ARM before fighting", p);
         Assert.Contains("UNARMED", p);
+        // bot gives a requested held item instead of Talk-looping for it
+        Assert.Contains("ACT ON A GIVE-REQUEST FOR A HELD ITEM", p);
         // NOTE: the COMBAT SAFETY & PACE rule (disengage / avoid the killer
         // kind / absolute-HP interpretation) is now conditional — it renders
         // only when a monster is in view OR a fight is active (cp-2369), which
