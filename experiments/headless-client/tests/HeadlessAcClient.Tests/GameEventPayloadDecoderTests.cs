@@ -42,6 +42,35 @@ public class GameEventPayloadDecoderTests
         Assert.Equal("Hello!", p.WeenieErrorWithString.Message);
     }
 
+    [Theory]
+    [InlineData(0x051Bu)] // Turbine chat per-channel join notification (General/Trade/LFG)
+    [InlineData(0x051Du)] // TurbineChatIsEnabled
+    public void IsChatSystemNotification_TrueForTurbineChatCodes(uint code)
+    {
+        Assert.True(WeenieErrorLabels.IsChatSystemNotification(code));
+    }
+
+    [Theory]
+    [InlineData(0x0036u)] // ActionCancelled
+    [InlineData(0x046Au)] // TradeAiDoesntWant
+    [InlineData(0x03F0u)] // InvalidInventoryLocation
+    [InlineData(0x0000u)] // None
+    [InlineData(0x0445u)] // ItemRequiresQuestToBePickedUp
+    public void IsChatSystemNotification_FalseForRealActionRejections(uint code)
+    {
+        // Real server rejections of bot actions must NOT be classified as chat
+        // notifications — they must still surface as ActionRejected so the bot
+        // pivots (e.g. an NPC refusing a traded item).
+        Assert.False(WeenieErrorLabels.IsChatSystemNotification(code));
+    }
+
+    [Fact]
+    public void Label_NamesTurbineChatCodes()
+    {
+        Assert.Equal("TurbineChatChannelNotification", WeenieErrorLabels.Label(0x051Bu));
+        Assert.Equal("TurbineChatIsEnabled", WeenieErrorLabels.Label(0x051Du));
+    }
+
     [Fact]
     public void Decode_WeenieErrorWithString_PadsToFourBytes()
     {

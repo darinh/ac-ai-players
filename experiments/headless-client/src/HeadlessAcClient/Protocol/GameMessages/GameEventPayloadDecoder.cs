@@ -417,10 +417,32 @@ internal static class WeenieErrorLabels
         0x04BE => "YouDoNotOwnThatItem",
         0x04CD => "TradeAiRefuseEmote",
         0x0550 => "MissileOutOfRange",
+        0x051B => "TurbineChatChannelNotification",
+        0x051D => "TurbineChatIsEnabled",
         0x0585 => "HeritageRequiresSpecificArmor",
         0x0586 => "ArmorRequiresSpecificHeritage",
         0x058D => "YouCannotUseThatItem",
         _ => "?",
+    };
+
+    // Chat-system / channel NOTIFICATION codes that the server emits as
+    // WeenieError(WithString) events but which are NOT rejections of any action
+    // the bot took — they are informational chat-subsystem messages (at login the
+    // server enables Turbine chat and announces the standard channels). Surfacing
+    // them as EventKind.ActionRejected is a category error: they get classified as
+    // SEMANTIC, plan-invalidating rejections that drop the bot's current goal,
+    // interrupt the autonomous combat chain, and pollute the ActionRejected dedup
+    // window — none of which a chat-channel join should ever do. This is pure
+    // wire-protocol classification (which WeenieError codes are chat-subsystem
+    // notifications), not game knowledge. Codes verified against
+    // ACE-bots/Source/ACE.Entity/Enum/WeenieError.cs (0x051D = TurbineChatIsEnabled;
+    // 0x051B is the adjacent, enum-unnamed per-channel join notification observed
+    // live carrying the channel name, e.g. "General"/"Trade"/"LFG").
+    public static bool IsChatSystemNotification(uint code) => code switch
+    {
+        0x051B => true, // Turbine chat per-channel join notification
+        0x051D => true, // TurbineChatIsEnabled
+        _ => false,
     };
 }
 
