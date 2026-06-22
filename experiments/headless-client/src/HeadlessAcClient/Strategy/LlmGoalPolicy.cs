@@ -1104,8 +1104,51 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // not in that state, defer to the fallback as before.
     private Goal? EscapeOrFallback(
         WorldStateProjection world, EventStream events, Goal? currentGoal,
-        DateTimeOffset nowUtc, string loopKind)
+        DateTimeOffset nowUtc, string loopKind, string? loopTargetName = null)
     {
+        // Shared egress signals, read ONCE. RecentFreshDirective has per-tick side
+        // effects (advances the directive high-water sequence, may log a grace
+        // credit), so it is read here exactly once AND only for a Talk loop — the
+        // sole egress below that consults it (ShouldEarlyEscapeTalkLoop) is
+        // Talk-only, so a Use / interaction / attack drop must not advance the Talk
+        // directive grace.
+        var monsterInView = AnyAttackableMonsterInView(world);
+        var freshDirective = loopKind == NpcTalkLoopKind && RecentFreshDirective(events, nowUtc);
+
+        // Exhausted-NPC break-contact (cp070): when the bot's OWN goal history PROVES
+        // a single-NPC Talk fixation — it Talked this one NPC >= the fixation
+        // threshold of its last N emitted goals (the cp069 signal, immune to the
+        // interleaved combat/loot that resets the stationary and roving guards) — it
+        // is provably NOT doing anything productive: not advancing the directive it
+        // keeps re-greeting, and not engaging any monster in view (it has chosen Talk
+        // over Attack at least threshold times). Break the loop with ONE generic
+        // Explore FIRST and UNCONDITIONALLY — NOT gated on a fresh directive (a
+        // proven-stale fixation is not finishing guided training) NOR on
+        // monster-in-view: the latched Talk egress and the tapped-out stuck-loop
+        // egress below are BOTH monster-in-view-gated, so in a zone that always shows
+        // a monster (e.g. a training yard full of practice constructs) a proven
+        // fixation would otherwise wedge with NO egress able to fire — re-prompting
+        // the LLM every tick forever. This egress is UNLATCHED: it relocates the bot
+        // one step and RE-DELIBERATES next tick, so a same-landblock next room is not
+        // overshot and, if a winnable monster is in view, the LLM can Attack it on
+        // the very next decision. Audit-clean: generic Explore{anywhere} — the Motor
+        // selects NO target; the LLM picks the next interactable next decision.
+        var provenSingleNpcTalkFixation =
+            loopTargetName is { Length: > 0 } breakContactNpc
+            && CountTalkGoalsToNameInLastN(events, breakContactNpc, SingleNpcTalkHistoryWindowGoals)
+                >= SingleNpcTalkHistoryThreshold;
+        if (ShouldBreakContactExhaustedNpc(loopKind, provenSingleNpcTalkFixation))
+        {
+            Console.WriteLine(
+                "[llm-override] exhausted-npc break-contact: proven single-NPC Talk fixation " +
+                "in recent goal history — one UNLATCHED Explore{anywhere} to break contact and " +
+                "re-deliberate with fresh perception (Motor picks no target).");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:exhausted-npc-breakcontact",
+                "mechanical break-contact: proven single-NPC Talk fixation in recent goal " +
+                "history; one unlatched Explore to leave the spent conversation and re-deliberate");
+        }
+
         if (ShouldEscapeStuckLoopWithExplore(world, nowUtc))
         {
             Console.WriteLine(
@@ -1124,7 +1167,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // bot. Latch it briefly so the picker cannot re-park on the same dead NPC
         // next tick.
         if (ShouldEarlyEscapeTalkLoop(
-                loopKind, AnyAttackableMonsterInView(world), RecentFreshDirective(events, nowUtc)))
+                loopKind, monsterInView, freshDirective))
         {
             _talkLoopEgressUntilUtc = nowUtc + TalkLoopEgressDuration;
             _talkLoopEgressLandblock = world.Self.Landblock;
@@ -1150,7 +1193,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // monster in view still takes priority (engage the visible XP target —
         // defend/flee a hostile or fight a non-hostile — never wander off to find
         // a monster already in view).
-        if (ShouldEscapeWorldUseLoop(loopKind, AnyAttackableMonsterInView(world)))
+        if (ShouldEscapeWorldUseLoop(loopKind, monsterInView))
         {
             Console.WriteLine(
                 "[llm-override] use-loop egress: confirmed world-object Use churn with no " +
@@ -1298,6 +1341,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool ShouldEarlyEscapeTalkLoop(
         string loopKind, bool monsterInView, bool freshDirective)
         => loopKind == NpcTalkLoopKind && !monsterInView && !freshDirective;
+
+    // Pure decision: a single-NPC Talk fixation PROVEN by the bot's OWN recent
+    // goal-emission history (it Talked one NPC past the cp069 fixation threshold of
+    // its last N emitted goals — immune to the interleaved combat/loot that resets
+    // the stationary and roving guards) should break contact with ONE unlatched
+    // Explore. Fires UNCONDITIONALLY for the Talk loop kind once the fixation is
+    // proven — NOT gated on a fresh directive (a proven-stale fixation is not
+    // finishing guided training, it is stuck re-greeting a spent step) and NOT on
+    // monster-in-view (the latched Talk egress and the tapped-out stuck-loop egress
+    // are BOTH monster-in-view-gated, so in a zone that always shows a monster a
+    // proven fixation would wedge with no egress able to fire; and a bot that has
+    // chosen Talk over Attack >= threshold times is provably not going to engage the
+    // monster, so deferring to it just loops). The caller substitutes a target-less
+    // generic Explore and re-deliberates next tick, so a winnable monster can still
+    // be Attacked on the following decision. Extracted for deterministic unit
+    // testing; own-signal only (own emission history), no game content; the Motor
+    // chooses no target.
+    internal static bool ShouldBreakContactExhaustedNpc(
+        string loopKind, bool provenSingleNpcTalkFixation)
+        => loopKind == NpcTalkLoopKind && provenSingleNpcTalkFixation;
 
     // Pure decision: a confirmed bare world-object Use churn should break the
     // loop with a generic Explore (travel through/past the looped object) rather
@@ -2697,7 +2760,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " no separate hand-in, deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: settled stage-3 contract turn-in re-Talk");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
@@ -2714,7 +2777,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary NPC Talk repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress NPC Talk loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Multi-NPC Talk-churn loop-break (cp-2344): the single-NPC guard above
@@ -2729,7 +2792,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress multi-NPC Talk cycle");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Roving multi-NPC Talk-churn (cp roving-multi-npc-talk-loop): the
@@ -2746,7 +2809,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — roving multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: roving no-progress multi-NPC Talk cycle");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Roving single-NPC Talk-loop break (cp-2365): the stationary single-NPC
@@ -2767,7 +2830,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — exhausted-NPC TTL suppression active; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: TTL-suppressed exhausted-NPC Talk loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
         if (IsRovingNpcTalkLoop(goal, world, events))
         {
@@ -2777,7 +2840,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: roving no-progress single-NPC Talk loop");
             RecordTalkLoopSuppression(goal, world, nowUtc);
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Single-NPC Talk-fixation backstop (cp069): the stationary guard resets
@@ -2797,7 +2860,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: single-NPC Talk fixation in recent goal history");
             RecordTalkLoopSuppression(goal, world, nowUtc);
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
@@ -5864,7 +5927,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!selfArmCombatEffective)
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` or a `[missile weapon/ammo]` you can afford, `Buy` it by its exact name — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. After buying it lands in your inventory: a thrown weapon then shows as a `throwable weapon` to Wield (arming you directly, no ammo needed); a launcher and its ammo arm you only as a PAIR — BOTH must be in your bag before the `missile launcher + compatible ammo` hint appears. So if you bought a launcher (or ammo) and see no arming hint, you are missing the matching piece: buy THAT (or a thrown weapon) instead — do NOT re-buy the same item expecting a hint. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
-        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first.");
+        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first. TAPPED-OUT EXCEPTION (overrides the directive hold): when `Combat readiness` says `tapped out` (combat-ready, but no new level or quest item for several minutes in this `landblock`) AND a `monster` is in view, `Attack` it EVEN while a server/quest directive is active. A directive you keep re-`Talk`/`Use`/`Pickup`-ing with no NEW dialog, item, or level is NOT progressing — re-emitting that social verb just loops. `Attack` the visible `monster` for XP (per COMBAT SAFETY — skip a KIND that has already beaten you), then resume the directive. If EVERY visible `monster` is a KIND that has already beaten you (none safe to fight), emit `Explore{target: {name: \"anywhere\"}}` to leave this area rather than re-loop the stalled directive.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
         // can be gated on it too). The rules below reuse it.
         // The NON-HOSTILE rule references `nearest monster`/`monsters in view`

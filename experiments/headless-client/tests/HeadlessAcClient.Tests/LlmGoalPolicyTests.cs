@@ -13362,6 +13362,64 @@ public class LlmGoalPolicyTests
             loopKind: "NPC Talk", monsterInView: false, freshDirective: true));
     }
 
+    // --- exhausted-NPC break-contact (cp070, hardened per council review) ----
+    // A single-NPC Talk fixation PROVEN by the bot's own recent goal history (the
+    // cp069 signal) means the bot is provably stuck: not advancing the directive
+    // it re-greets, and not engaging any monster in view. ShouldBreakContact
+    // ExhaustedNpc fires UNCONDITIONALLY for the Talk loop kind once proven — it is
+    // deliberately NOT gated on freshDirective or monster-in-view, because the
+    // latched early egress AND the tapped-out stuck-loop egress are both
+    // monster-in-view-gated, so in a monster-present zone a proven fixation would
+    // otherwise wedge with no egress able to fire (livelock). The caller substitutes
+    // a target-less Explore and re-deliberates next tick.
+
+    [Fact]
+    public void BreakContact_FiresForProvenTalkFixation()
+    {
+        Assert.True(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: true));
+    }
+
+    [Fact]
+    public void BreakContact_SuppressedWhenFixationNotProven()
+    {
+        // Below the history threshold (or a multi-NPC churn that no single name
+        // dominates): not a proven single-NPC fixation, so the other egresses /
+        // fallback handle it as before.
+        Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: false));
+    }
+
+    [Fact]
+    public void BreakContact_SuppressedForNonTalkLoopKind()
+    {
+        // Break-contact is Talk-only; a world-object Use loop has its own escape.
+        Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+            loopKind: "Use", provenSingleNpcTalkFixation: true));
+    }
+
+    [Fact]
+    public void BreakContact_FiresWhereEarlyEgressIsSuppressed()
+    {
+        // The livelock fix: in EVERY case where the latched ShouldEarlyEscapeTalkLoop
+        // stands down for a Talk loop (a monster is in view, OR the server is freshly
+        // guiding the bot), a PROVEN fixation must STILL break contact — otherwise the
+        // bot wedges with no egress able to fire. So break-contact is true wherever a
+        // proven Talk fixation exists, independent of those two suppressors.
+        foreach (var monster in new[] { true, false })
+        foreach (var fresh in new[] { true, false })
+        {
+            var early = LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
+                loopKind: "NPC Talk", monsterInView: monster, freshDirective: fresh);
+            var breakContact = LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+                loopKind: "NPC Talk", provenSingleNpcTalkFixation: true);
+            Assert.True(breakContact);
+            // Whenever the early egress is suppressed, break-contact still covers it.
+            if (!early)
+                Assert.True(breakContact);
+        }
+    }
+
     // --- world-object Use-loop egress (cp-2372) ----------------------------
     // A confirmed bare world-object Use churn (the cp-2354 churn guard already
     // fired) Explores to travel through/past the looped object instead of
@@ -17315,6 +17373,8 @@ public class LlmGoalPolicyTests
         Assert.Contains("double-click", p);
         // combat target discrimination + proactive leveling
         Assert.Contains("LEVELING is core progress", p);
+        // tapped-out bot attacks visible monsters even mid-directive (cp071)
+        Assert.Contains("TAPPED-OUT EXCEPTION", p);
         Assert.Contains("monster", p);
         // self-arming before optional combat
         Assert.Contains("SELF-ARM before fighting", p);
