@@ -517,6 +517,36 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_FormatsProgressionAndTriggers()
+    {
+        var triggers = new Dictionary<string, int>
+        {
+            ["no-current-goal"] = 9,
+            ["picker-arrived"] = 3,
+        };
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 12, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 12L, model: "openai/gpt-4.1-mini");
+        Assert.Contains("[run-summary] decisions=12", line);
+        // most-frequent trigger first
+        Assert.Contains("triggers={no-current-goal:9,picker-arrived:3}", line);
+        Assert.Contains("distinct-landblocks=1 last-landblock=0x8602", line);
+        Assert.Contains("level=1 total-xp=12", line);
+        Assert.Contains("active-model=openai/gpt-4.1-mini", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_NullsRenderAsQuestionMarks()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 0, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 0,
+            lastLandblock: null, level: null, totalXp: null, model: "m");
+        Assert.Contains("triggers={-}", line);
+        Assert.Contains("last-landblock=? ", line);
+        Assert.Contains("level=? total-xp=?", line);
+    }
+
+    [Fact]
     public void IsRepeatedDialogText_DifferentKindSameText_False()
     {
         // A PopupString does not dedup against an NpcDialog with identical text —
