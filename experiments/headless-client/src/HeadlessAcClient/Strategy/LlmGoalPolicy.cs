@@ -9700,7 +9700,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// beaten regardless of level for autonomous picks (protects the no-death
     /// record); a caller acting on an explicit, deliberate order may set
     /// <paramref name="lethalRetestableWhenOutleveled"/> to let a lethal kind be
-    /// re-tested too once the bot out-levels the loss. Aggregates by
+    /// re-tested too — once the bot out-levels the loss, OR (to break the
+    /// single-death death-spiral) after just ONE recorded lethal loss, since a
+    /// first-encounter death is not proof the kind is unbeatable and a permanent
+    /// lock wedges the bot when this is the only kind in view to fight. A SECOND
+    /// lethal loss (Deaths&gt;=2) restores the out-level requirement. Aggregates by
     /// wcid OR normalized name via <see cref="FindCombatRecord"/>. Shared by the
     /// fallback hunt-target skip AND the outdoor frontier mob-bias so both avoid
     /// the SAME kinds. Bot-owned outcomes + own level only; no game knowledge.
@@ -9724,6 +9728,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && currentLevel is int cur
             && record.MaxLossBotLevel is int maxLossLevel
             && cur > maxLossLevel)
+        {
+            return false;
+        }
+        // First-death re-test (explicit-order path only). A SINGLE recorded
+        // lethal loss is the bot's FIRST-encounter death to this kind: not
+        // conclusive that the kind is unbeatable, and a permanent lock here
+        // death-spirals the bot when this kind is the ONLY thing in view to fight
+        // (die once -> avoid the only XP source -> never level past
+        // MaxLossBotLevel -> never re-test -> wedged). A caller acting on a
+        // deliberate order (lethalRetestableWhenOutleveled) has CHOSEN to engage,
+        // so let it try again after one death. A SECOND lethal loss (Deaths>=2)
+        // restores the out-level gate above. Autonomous picks (flag=false) are
+        // unaffected: they still avoid every lethal kind to protect the no-death
+        // record. Own death count only; no game knowledge.
+        if (lethalRetestableWhenOutleveled && record.Deaths == 1)
         {
             return false;
         }

@@ -11001,6 +11001,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsOptionalAttackOnBeatenKind_SingleLethalLoss_NotVetoed_EvenWhenNotOutleveled()
+    {
+        // DEATH-SPIRAL FIX. A kind the bot died to exactly ONCE (first-encounter
+        // death) is NO LONGER vetoed on the explicit LLM Attack path, even at the
+        // loss level with no kill. Pins the live-observed L1 wedge: the bot died
+        // once to the only monster in view, which then locked the only XP source
+        // out (re-testable only once out-leveled) so the bot could never level to
+        // re-test -> permanently parked. One death is not proof the kind is
+        // unbeatable; the explicit order opts in to re-test.
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1);   // at-level, not out-leveled
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Sparring Golem"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_SecondLethalLoss_StillBeatenWhenNotOutleveled()
+    {
+        // The first-death re-test is a ONE-shot reprieve: a SECOND recorded lethal
+        // loss (Deaths>=2) is now real evidence the kind is unbeatable at this
+        // power, so the out-level lock is restored and the explicit Attack is
+        // vetoed again until the bot out-levels it.
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 2, NearDeaths: 1, Fights: 2, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Sparring Golem"), world));
+    }
+
+    [Fact]
     public void IsOptionalAttackOnBeatenKind_WcidOnlySelector_Vetoes()
     {
         // A wcid-only Attack selector (no name) still matches the ledger by wcid
@@ -11202,6 +11235,44 @@ public class LlmGoalPolicyTests
             Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
             MaxLossBotLevel: 5) };
         Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 20));
+    }
+
+    [Fact]
+    public void IsLethalBeatenKind_SingleDeathNotOutleveled_False()
+    {
+        // DEATH-SPIRAL FIX: a kind that killed the bot exactly ONCE is re-testable
+        // on the shared lethal verdict (which the veto + stalemate egress + the
+        // ## Beaten kinds capsule all consult) even at the loss level. So the
+        // first-encounter death no longer wedges the bot when the kind is the only
+        // monster in view.
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
+    }
+
+    [Fact]
+    public void IsLethalBeatenKind_SecondDeathNotOutleveled_True()
+    {
+        // A SECOND lethal loss restores the out-level lock on the shared verdict.
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 2, NearDeaths: 1, Fights: 2, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
+    }
+
+    [Fact]
+    public void IsBeatenKind_AutonomousPath_SingleDeath_StillBeaten()
+    {
+        // The first-death reprieve is EXPLICIT-ORDER ONLY. The autonomous picker
+        // path (lethalRetestableWhenOutleveled defaults to false) still treats a
+        // single death as beaten, protecting the no-death record: the Motor never
+        // suicides a target the bot has died to without the LLM deliberately
+        // ordering it.
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
     }
 
     [Fact]
