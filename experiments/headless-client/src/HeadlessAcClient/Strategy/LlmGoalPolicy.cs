@@ -4844,16 +4844,50 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         && !(e.Kind == EventKind.ActionRejected
              && (IsTransportFailureRejection(e) || IsAttackLoopCancelRejection(e)));
 
+    // True iff this dialog-class event repeats verbatim an EARLIER dialog event
+    // of the SAME kind already in the retained window — i.e. the bot has already
+    // seen this exact line. Server tutorial/training flavor re-broadcasts the same
+    // NpcDialog / PopupString / BookText every few seconds (live: an Academy
+    // training construct re-emits the same combat-slider tip and the same
+    // "double-click the body to loot" popup repeatedly during a kill grind). The
+    // FIRST occurrence carries whatever novelty it has and is NOT a repeat; only
+    // the verbatim re-emissions are. Restricted to dialog/popup/booktext: an
+    // ActionRejected is a fresh action OUTCOME even when its text repeats, so it is
+    // never deduped here. Exact-text bookkeeping over the bot's OWN perception
+    // stream; no game-content knowledge (no hardcoded text/name/quest).
+    internal static bool IsRepeatedDialogText(EventStream events, StreamEvent e)
+    {
+        if (e.Kind is not (EventKind.NpcDialog or EventKind.PopupString or EventKind.BookText))
+            return false;
+        if (string.IsNullOrWhiteSpace(e.Text))
+            return false;
+        foreach (var p in events.Recent())
+        {
+            if (p.Sequence >= e.Sequence) continue; // only strictly-earlier events
+            if (p.Kind == e.Kind &&
+                string.Equals(p.Text, e.Text, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // The FIRST chain-interrupting event newer than `floorSeq` (newest-first
     // scan), or null when none — and its EventKind names the interrupter so the
-    // no-mint diagnostic (the cp2925 pattern) stays characterizable. Pure
-    // event-kind classification; no game knowledge.
+    // no-mint diagnostic (the cp2925 pattern) stays characterizable. A dialog
+    // event that merely REPEATS an earlier line the bot already saw
+    // (IsRepeatedDialogText) is skipped: re-broadcast tutorial flavor must not
+    // preempt an autonomous kill-chain and burn an LLM round-trip, while the first
+    // occurrence still interrupts so genuinely new dialog reaches the LLM. Pure
+    // event-kind + own-text classification; no game knowledge.
     internal static EventKind? FirstChainInterruptingKindSince(EventStream events, long floorSeq)
     {
         foreach (var e in events.Recent())
         {
             if (e.Sequence < floorSeq) break;
-            if (IsChainInterruptingEvent(e)) return e.Kind;
+            if (IsChainInterruptingEvent(e) && !IsRepeatedDialogText(events, e))
+                return e.Kind;
         }
         return null;
     }
