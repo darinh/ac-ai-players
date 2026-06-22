@@ -2342,10 +2342,50 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             $"[llm-call] kickoff id={decisionId} trigger={trigger} " +
             $"prompt-bytes={userPrompt.Length} dwell-min={dwellMinStr} model={_client.Model} " +
             $"sections={sentSections.Count}[{string.Join("|", sentSections)}]");
+
+        // Run-summary diagnostic: aggregate decision tempo + progression and emit
+        // one [run-summary] line every SummaryIntervalDecisions kickoffs so a run is
+        // self-reporting (stuck-in-landblock, flat level, trigger/loop mix) without
+        // manual log archaeology. Pure observability; no behavior change.
+        _summaryDecisions++;
+        _summaryTriggers[trigger] = _summaryTriggers.GetValueOrDefault(trigger) + 1;
+        if (world.Self.Landblock is uint summaryLb) _summaryLandblocks.Add(summaryLb);
+        if (_summaryDecisions % SummaryIntervalDecisions == 0)
+        {
+            Console.WriteLine(BuildRunSummaryLine(
+                _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
+                world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model));
+        }
         _tempo.RecordLlmCall();
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
+    }
+
+    // Run-summary diagnostic aggregates (pure observability; no behavior change).
+    internal const int SummaryIntervalDecisions = 15;
+    private int _summaryDecisions;
+    private readonly Dictionary<string, int> _summaryTriggers = new(StringComparer.Ordinal);
+    private readonly HashSet<uint> _summaryLandblocks = new();
+
+    // Build the periodic [run-summary] line: decision count, trigger histogram,
+    // distinct landblocks visited + the last one, level + lifetime XP, and the
+    // active LLM model. Lets a run self-report stuck-in-landblock / flat-level /
+    // loop-trigger patterns at a glance. Pure formatting over already-observed run
+    // state; no game knowledge, no behavior.
+    internal static string BuildRunSummaryLine(
+        int decisions, IReadOnlyDictionary<string, int> triggerCounts,
+        int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model)
+    {
+        var triggers = triggerCounts.Count == 0
+            ? "-"
+            : string.Join(",", triggerCounts
+                .OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)
+                .Select(kv => $"{kv.Key}:{kv.Value}"));
+        var lb = lastLandblock is uint l ? $"0x{l:X4}" : "?";
+        return $"[run-summary] decisions={decisions} triggers={{{triggers}}} " +
+               $"distinct-landblocks={distinctLandblocks} last-landblock={lb} " +
+               $"level={(level?.ToString() ?? "?")} total-xp={(totalXp?.ToString() ?? "?")} active-model={model}";
     }
 
     private async Task<(LlmResult, Guid, string, string, long, bool)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart, bool hadCurrentGoalAtCallStart)
