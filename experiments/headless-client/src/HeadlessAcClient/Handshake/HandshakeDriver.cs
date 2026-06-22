@@ -2930,7 +2930,8 @@ internal sealed class HandshakeDriver : IDisposable
                             // LlmGoalPolicy is the minimal mechanical
                             // repair.
                             if (ge.Payload?.WeenieErrorWithString is { } wewe &&
-                                wewe.ErrorCode != 0)
+                                wewe.ErrorCode != 0 &&
+                                !WeenieErrorLabels.IsChatSystemNotification(wewe.ErrorCode))
                             {
                                 var label = WeenieErrorLabels.Label(wewe.ErrorCode);
                                 eventStream.Append(new StreamEvent
