@@ -2282,6 +2282,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"budget={_combatChainCount}/{MaxCombatChainAttacks}");
         }
 
+        // Reduce-llm-call-volume (opt-in, default OFF via AC_BOTS_SKIP_FIXATED_TALK_CALL).
+        // A PROVEN stale single-NPC Talk fixation with NO new EXTERNAL change event
+        // since the last LLM look means the next call would just reproduce a Talk the
+        // fixation guards immediately drop — the break-contact egress/fallback drives
+        // regardless. Skip the redundant call and reach that SAME EscapeOrFallback
+        // directly. The `!hasNonPickerExternal` guard is the correctness gate:
+        // IsExternalChangeKind = (salient AND not goal-lifecycle) OR InventoryItemRemoved,
+        // so a fresh NpcDialog / PopupString / BookText / ServerMessage / inventory
+        // add-or-remove / zone change / ActionRejected BLOCKS the skip and the LLM sees
+        // it — the bot never walks away from fresh input. Crucially it EXCLUDES the
+        // bot's OWN goal-lifecycle (GoalCompleted/Failed/Expired), so the gate still
+        // fires on the dominant no-current-goal case (a finished Talk is not "new
+        // input"). Self-limiting: the egress's Explore goals age the Talk fixation out
+        // of the history window within a few decisions, re-engaging the LLM. NOTE:
+        // unlike the post-LLM Talk-fixation drop site this does NOT call
+        // RecordTalkLoopSuppression (no LLM goal/guid here) — the gate re-detects the
+        // fixation itself. Default OFF so the default decision path is byte-for-byte
+        // unchanged pending live A/B validation.
+        if (SkipFixatedTalkCallEnabled
+            && !hasNonPickerExternal
+            && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
+            && ProvenTalkFixationNameFromHistory(events) is string fixatedTalkName)
+        {
+            Console.WriteLine(
+                $"[llm-skip] proven stale Talk fixation on \"{fixatedTalkName}\" with no new external " +
+                "event — skipping the redundant LLM call; deferring to break-contact egress/fallback.");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, fixatedTalkName);
+        }
+
         _lastCalledAtUtc = nowUtc;
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
@@ -4812,6 +4841,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.GoalFailed
              or EventKind.GoalExpired;
 
+    // True iff a STRATEGIC intent-completion goal-lifecycle event arrived since the
+    // floor. An IntentStack auto-pop emits a GoalId-LESS GoalCompleted/Failed/Expired
+    // (tactical goal churn carries a GoalId); a strategic completion changes the
+    // bot's TOP objective, so it must force a fresh LLM look. The fixated-Talk
+    // kickoff-skip consults this so it never suppresses the LLM across a top-intent
+    // change (gpt-5.4 review). Mirrors the GoalId refinement in the event-level
+    // plan-invalidation classifier; reads the bot's OWN goal-lifecycle, no game
+    // knowledge.
+    internal static bool HasNewStrategicIntentCompletionSince(EventStream events, long sequenceFloor) =>
+        events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => IsGoalLifecycleKind(e.Kind) && e.GoalId is null);
+
     // Events that must ROUTE TO THE LLM rather than let the autonomous combat
     // chain (ChooseCombatChainTarget) mint another Attack toward an active
     // kill-count commitment. A NARROW allowlist of genuinely decision-worthy
@@ -5461,6 +5503,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
+    }
+
+    // History-only proven single-NPC Talk fixation: the dominant Talk-target NAME
+    // across the bot's last SingleNpcTalkHistoryWindowGoals emitted goals, IF that
+    // NPC was Talked at least SingleNpcTalkHistoryThreshold times. Unlike
+    // IsSingleNpcTalkFixationByHistory (which keys on a GIVEN goal's target), this
+    // derives the fixated name from history ALONE, so the kickoff gate can detect a
+    // fixation BEFORE the LLM is called. Same Talk-emission parse as
+    // CountTalkGoalsToNameInLastN. Counts the bot's OWN emissions; no game
+    // knowledge. Returns null when no NPC dominates past the threshold.
+    internal static string? ProvenTalkFixationNameFromHistory(EventStream events)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text))
+                     .Take(SingleNpcTalkHistoryWindowGoals))
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Talk", StringComparison.Ordinal)) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            var name = nm.Groups[1].Value;
+            counts[name] = counts.GetValueOrDefault(name) + 1;
+        }
+        foreach (var kv in counts)
+            if (kv.Value >= SingleNpcTalkHistoryThreshold)
+                return kv.Key;
+        return null;
     }
 
     // Mirror of CountRecentTalkGoalsToName for Explore goals — counts the bot's
@@ -9136,6 +9209,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         !(string.Equals(envValue, "0", StringComparison.Ordinal)
           || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
           || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
+
+    // Opt-in reduce-llm-call-volume gate (default OFF). When the bot's recent goal
+    // history is a PROVEN stale single-NPC Talk fixation and nothing
+    // plan-invalidating has changed since the last LLM look, an LLM call would
+    // just reproduce a Talk the fixation guards immediately drop — so skip it and
+    // go straight to the same break-contact egress/fallback. Default OFF so the
+    // default decision path is byte-for-byte unchanged until this is A/B-validated;
+    // enable with AC_BOTS_SKIP_FIXATED_TALK_CALL=1/true/on. Request-tempo
+    // management, not strategy: the egress/fallback the bot reaches is identical.
+    private static readonly bool SkipFixatedTalkCallEnabled =
+        ResolveSkipFixatedTalkCall(Environment.GetEnvironmentVariable("AC_BOTS_SKIP_FIXATED_TALK_CALL"));
+
+    internal static bool ResolveSkipFixatedTalkCall(string? envValue) =>
+        string.Equals(envValue, "1", StringComparison.Ordinal)
+        || string.Equals(envValue, "true", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(envValue, "on", StringComparison.OrdinalIgnoreCase);
 
     // Max consecutive autonomous Attacks the Motor may mint before it MUST
     // route a real LLM decision. A periodic oversight + hard liveness cap so a
