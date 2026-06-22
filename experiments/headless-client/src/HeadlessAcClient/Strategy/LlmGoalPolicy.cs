@@ -790,6 +790,40 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// </summary>
     private Task<(LlmResult Result, Guid DecisionId, string UserPrompt, string ProjJson, long EventSeqAtCallStart, bool HadCurrentGoalAtCallStart)>? _inflight;
 
+    /// <summary>UtcNow when the current <see cref="_inflight"/> call was kicked
+    /// off, or null when none is in flight. Drives the stuck-call watchdog: the
+    /// <see cref="LlmCallTimeout"/> CTS inside RunAsync is the PRIMARY guard, but
+    /// a hang its cancellation does not unwind (observed live: a kickoff that
+    /// never returned left <c>_inflight</c> non-null and the bot stopped
+    /// deliberating for many minutes) needs a poll-side backstop that does NOT
+    /// depend on the call honoring cancellation. Cleared whenever
+    /// <c>_inflight</c> is cleared.</summary>
+    private DateTimeOffset? _inflightStartedAt;
+
+    /// <summary>Hard wall on a single in-flight LLM call as seen by the
+    /// deliberation poll. Set well ABOVE <see cref="LlmCallTimeout"/> (60s) so it
+    /// only fires when that primary guard failed to unwind the call; the poll
+    /// then abandons the orphaned task and re-deliberates so the bot can never
+    /// wedge on a hung call. Pure infrastructure recovery — no game knowledge.</summary>
+    private static readonly TimeSpan InflightHardWall = TimeSpan.FromSeconds(120);
+
+    /// <summary>How many in-flight LLM calls the watchdog has abandoned this
+    /// session. Telemetry only: a non-zero (and especially a climbing) count flags
+    /// a misbehaving endpoint that ignores the call-timeout, since each abandoned
+    /// call leaves an orphaned request running until it finally returns. A late
+    /// orphan outcome can still nudge <see cref="LlmGoalClient"/> model-selection
+    /// state (cooldown / infra-breaker) — bounded, transient, and self-corrected
+    /// by the periodic primary re-probe — so the count is the early-warning signal
+    /// if abandonment ever stops being rare.</summary>
+    private int _inflightAbandonedCount;
+
+    /// <summary>Poll-side watchdog decision: the current in-flight LLM call has
+    /// outlived the hard wall, so the primary call-timeout CTS did not unwind it.
+    /// Pure time comparison; the caller abandons the orphaned task and
+    /// re-deliberates. Exposed for unit testing the recovery boundary.</summary>
+    internal static bool IsInflightStuck(DateTimeOffset? startedAt, DateTimeOffset now, TimeSpan hardWall) =>
+        startedAt is { } s && now - s >= hardWall;
+
     /// <summary>True iff an LLM call is currently in flight (no result consumed yet).</summary>
     public bool HasInflight => _inflight is not null && !_inflight.IsCompleted;
 
@@ -1785,12 +1819,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             var finished = _inflight;
             _inflight = null;
+            _inflightStartedAt = null;
             return ConsumeResult(finished, world, events, currentGoal, nowUtc);
         }
 
-        // 2) Still in flight: don't kick off another, don't change goal.
+        // 2) Still in flight. The LlmCallTimeout CTS in RunAsync is the primary
+        // guard, but a hang it does not unwind would otherwise pin _inflight
+        // non-null forever and stop deliberation (observed live). If the call has
+        // outlived the hard wall, abandon the orphaned task — its result, if it
+        // ever lands, is ignored because nothing polls it once _inflight is null —
+        // and fall through to re-deliberate. Otherwise keep doing whatever we were
+        // doing while the LLM thinks.
         if (_inflight is not null)
-            return currentGoal;
+        {
+            if (!IsInflightStuck(_inflightStartedAt, nowUtc, InflightHardWall))
+                return currentGoal;
+            _inflightAbandonedCount++;
+            Console.WriteLine(
+                $"[llm-watchdog] in-flight LLM call exceeded the {InflightHardWall.TotalSeconds:F0}s hard wall " +
+                "(the call-timeout did not unwind it) — abandoning it and re-deliberating so the bot does not wedge " +
+                $"(abandoned={_inflightAbandonedCount} this session).");
+            _inflight = null;
+            _inflightStartedAt = null;
+        }
 
         // 2.5) Stale-goal-on-teleport guard. If the bot crossed a
         // landblock boundary since our last LLM look, the prior goal
@@ -2388,6 +2439,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         _tempo.RecordLlmCall();
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
+        _inflightStartedAt = DateTimeOffset.UtcNow;
         return currentGoal; // keep doing whatever we were doing while the LLM thinks
     }
 
