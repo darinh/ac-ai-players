@@ -418,6 +418,184 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsChainInterruptingKind(EventKind.HeardSpeech));
     }
 
+    // ── ## Held-item objectives (directive pinned to a held item) ─────────
+    // A one-time "do X with this item" server/NPC directive scrolls past the
+    // earliest-N / most-recent-M render caps of the directive capsules while the
+    // bot still HOLDS the item it names. The held-item capsule re-surfaces it,
+    // keyed by the bot's OWN inventory item-name matched against the server's OWN
+    // directive text, until the item leaves the pack.
+
+    private static WorldStateProjection BuildWorldHoldingItems(params string[] itemNames) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = itemNames
+            .Select((n, idx) => new InventoryItemProjection
+            {
+                Guid = (uint)(0x50001000 + idx), Name = n, Wcid = (uint)(1000 + idx),
+            })
+            .ToArray(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+    };
+
+    private static void AppendPopup(EventStream es, string text) =>
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = text,
+        });
+
+    private static void AppendNpcDialog(EventStream es, string speaker, string text) =>
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog,
+            Name = speaker, Text = text,
+        });
+
+    // The text of the "## Held-item objectives" capsule only (up to the next
+    // "## " header), or null when the capsule is absent.
+    private static string? HeldItemCapsule(string prompt)
+    {
+        const string header = "## Held-item objectives";
+        var start = prompt.IndexOf(header, StringComparison.Ordinal);
+        if (start < 0) return null;
+        var next = prompt.IndexOf("\n## ", start + header.Length, StringComparison.Ordinal);
+        return next < 0 ? prompt[start..] : prompt[start..next];
+    }
+
+    // Drives the target directive into the "mushy middle": past the earliest-6
+    // render cap (6 fillers first) and out of the most-recent-4 window (4 fillers
+    // after), but still inside the 24-deep persistent store.
+    private static EventStream MushyMiddlePopup(string targetText)
+    {
+        var es = new EventStream();
+        for (var i = 0; i < 6; i++) AppendPopup(es, $"tutorial filler popup before {i}");
+        AppendPopup(es, targetText);
+        for (var i = 0; i < 4; i++) AppendPopup(es, $"tutorial filler popup after {i}");
+        return es;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_RendersDirectiveNamingHeldItem()
+    {
+        // A held item whose turn-in directive has scrolled out of the rendered
+        // directive lists is re-surfaced verbatim, tied to the item name.
+        var es = MushyMiddlePopup("Return the Academy Token to the Training Master in the Practice Area.");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token"), es, null);
+
+        Assert.Contains("## Held-item objectives", prompt);
+        Assert.Contains("Academy Token", prompt);
+        Assert.Contains("Return the Academy Token to the Training Master", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_OmittedWhenItemNotHeld()
+    {
+        // The SAME mushy-middle directive, but the bot does NOT hold an item the
+        // text names — the capsule must not pin a directive for an item it lacks.
+        var es = MushyMiddlePopup("Return the Academy Token to the Training Master in the Practice Area.");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Bruised Apple"), es, null);
+
+        Assert.DoesNotContain("## Held-item objectives", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_NotRepeatedWhenAlreadyShownAbove()
+    {
+        // When the directive is still within the rendered `## Early server
+        // directives` slice (here it is the FIRST/only popup, so earliest-6 shows
+        // it), the held-item capsule must NOT duplicate it.
+        var es = new EventStream();
+        AppendPopup(es, "Return the Academy Token to the Training Master in the Practice Area.");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token"), es, null);
+
+        Assert.Contains("## Early server directives", prompt);
+        Assert.Contains("Return the Academy Token to the Training Master", prompt);
+        Assert.DoesNotContain("## Held-item objectives", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_OmittedWhenNoDirectiveNamesHeldItem()
+    {
+        // Held items but no persisted directive naming any of them: no capsule,
+        // zero prompt cost (no false pin on generic flavor that omits the name).
+        var es = MushyMiddlePopup("A generic tutorial tip that names no carried item.");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token", "Bruised Apple"), es, null);
+
+        Assert.DoesNotContain("## Held-item objectives", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_WordBoundary_NoFalsePositiveSubstring()
+    {
+        // A short held-item name must match only as a WHOLE token: holding "Key"
+        // must NOT pin a directive that merely contains "monkey".
+        var es = MushyMiddlePopup("A wild monkey scampers past; nothing to do here.");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Key"), es, null);
+
+        Assert.DoesNotContain("## Held-item objectives", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_NpcDialogPinnedWithSpeaker()
+    {
+        // The directive can be an NPC-spoken line; when it names the held item it
+        // pins with the speaker attribution. NPC dialogs have a small persistent
+        // store (8) rendered earliest-4 + recent-4, so push the target into the
+        // narrow mushy middle: 4 filler dialogs before, target, 4 after.
+        var es = new EventStream();
+        for (var i = 0; i < 4; i++) AppendNpcDialog(es, "Greeter", $"filler npc line {i}");
+        AppendNpcDialog(es, "Training Master", "Bring the Academy Token back to me when you are ready.");
+        for (var i = 0; i < 4; i++) AppendNpcDialog(es, "Greeter", $"later filler npc line {i}");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token"), es, null);
+
+        var capsule = HeldItemCapsule(prompt);
+        Assert.NotNull(capsule);
+        Assert.Contains("from \"Training Master\"", capsule);
+        Assert.Contains("Bring the Academy Token back to me", capsule);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_HeldItemObjective_MostRecentNamingDirectiveWins()
+    {
+        // Two mushy-middle directives name the held item; the later (higher-seq)
+        // one is the current instruction and is the one surfaced IN THE CAPSULE
+        // (the older line may still echo in `## Server hints`, so assert on the
+        // capsule slice, not the whole prompt).
+        var es = new EventStream();
+        for (var i = 0; i < 6; i++) AppendPopup(es, $"filler popup {i}");
+        AppendPopup(es, "Old step: fetch the Academy Token from the chest.");
+        AppendPopup(es, "New step: Return the Academy Token to the Training Master.");
+        for (var i = 0; i < 4; i++) AppendPopup(es, $"later filler popup {i}");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token"), es, null);
+
+        var capsule = HeldItemCapsule(prompt);
+        Assert.NotNull(capsule);
+        Assert.Contains("Return the Academy Token to the Training Master", capsule);
+        Assert.DoesNotContain("fetch the Academy Token from the chest", capsule);
+    }
+
+    [Theory]
+    [InlineData("Return the Academy Token to the Master.", "Academy Token", true)]
+    [InlineData("a wild monkey appears", "Key", false)]       // substring inside a word
+    [InlineData("cross the milestone marker", "Stone", false)] // substring inside a word
+    [InlineData("drop the Key in the lock", "Key", true)]      // whole word, punctuation/space bounded
+    [InlineData("", "Key", false)]
+    [InlineData("anything", "", false)]
+    public void DirectiveNamesItem_MatchesWholeTokenOnly(string text, string name, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.DirectiveNamesItem(text, name));
+    }
+
     [Fact]
     public void FirstChainInterruptingKindSince_ReturnsTheInterruptingKind()
     {

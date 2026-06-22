@@ -8737,6 +8737,106 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "pursuing it against optional grinding instead of dismissing its existence.");
         }
 
+        // ── ## Held-item objectives (protected-tail: directive pinned to a held item) ──
+        // A one-time server/NPC instruction for what to do with a SPECIFIC item
+        // ("Return this item to <npc>", "give this token back to me", "Use this to
+        // leave") arrives once, then scrolls past the earliest-N / most-recent-M
+        // render caps of the directive capsules above (the "mushy middle" of the
+        // persisted-directive stores) EVEN WHILE the bot still HOLDS the item it
+        // names — so the bot loses the plan for an item it is carrying and grinds
+        // instead of finishing the step (live: a fresh char held two server-given
+        // exit tokens whose turn-in directive had scrolled out, and wedged in the
+        // tutorial). Re-surface, for each item CURRENTLY in inventory, the
+        // most-recent persisted directive whose OWN text NAMES that item, until the
+        // item leaves the pack. Selection is the bot's OWN dynamic inventory
+        // item-name matched (case-insensitive) against the server's OWN dynamic
+        // directive text — NO parsed verbs, NO item/NPC/quest/wcid literals, NO
+        // priority; rendered VERBATIM with the same not-a-recommendation disclaimer
+        // as the directive capsules (greetings/flavor are filtered by the LLM, as
+        // there). The existing FINISH MULTI-STEP DIRECTIVES / ACT ON A GIVE-REQUEST
+        // / SERVER-INSTRUCTION PRECEDENCE / AREA COMPLETE rules do the acting; the
+        // LLM decides. Survives ring eviction via the persistent directive stores.
+        {
+            var heldNames = world.Inventory
+                .Select(i => OneLine(i.Name))
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Select(n => n!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (heldNames.Count > 0)
+            {
+                // All persisted directive lines (these survive the bounded event
+                // ring), each tagged with its optional speaker (popups have none,
+                // NPC dialogs carry the speaking NPC) and original sequence.
+                var heldDirectiveSources = new List<(string Text, string? Speaker, long Seq)>();
+                foreach (var d in events.PersistentPopupStrings())
+                    if (!string.IsNullOrEmpty(d.Text)) heldDirectiveSources.Add((d.Text!, null, d.Sequence));
+                foreach (var d in events.RecentPersistentPopupStrings())
+                    if (!string.IsNullOrEmpty(d.Text)) heldDirectiveSources.Add((d.Text!, null, d.Sequence));
+                foreach (var d in events.PersistentNpcDialogs())
+                    if (!string.IsNullOrEmpty(d.Text)) heldDirectiveSources.Add((d.Text!, d.Name, d.Sequence));
+                foreach (var d in events.RecentPersistentNpcDialogs())
+                    if (!string.IsNullOrEmpty(d.Text)) heldDirectiveSources.Add((d.Text!, d.Name, d.Sequence));
+
+                // Directive texts the `## Early server directives` capsule already
+                // shows (its earliest-N slice + the full recent windows), so this
+                // capsule adds ONLY the dropped "mushy middle" lines and never
+                // repeats one already visible above.
+                var heldShownAbove = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var d in events.PersistentPopupStrings().Take(EarlyServerDirectiveCount))
+                    if (d.Text is not null) heldShownAbove.Add(d.Text);
+                foreach (var d in events.PersistentNpcDialogs().Take(EarlyNpcDirectiveCount))
+                    if (d.Text is not null) heldShownAbove.Add(d.Text);
+                foreach (var d in events.RecentPersistentPopupStrings())
+                    if (d.Text is not null) heldShownAbove.Add(d.Text);
+                foreach (var d in events.RecentPersistentNpcDialogs())
+                    if (d.Text is not null) heldShownAbove.Add(d.Text);
+
+                var heldObjectiveRows = new List<string>();
+                var heldRenderedTexts = new HashSet<string>(StringComparer.Ordinal);
+                var heldObjectiveBudget = 700;
+                foreach (var name in heldNames)
+                {
+                    // The most-recent (highest sequence) persisted directive whose
+                    // own text NAMES this held item (as a whole word, so a short
+                    // name like "Key" does not match "monkey") and is not already
+                    // shown above.
+                    (string Text, string? Speaker, long Seq)? best = null;
+                    foreach (var d in heldDirectiveSources)
+                    {
+                        if (heldShownAbove.Contains(d.Text)) continue;
+                        if (!DirectiveNamesItem(d.Text, name)) continue;
+                        if (best is null || d.Seq > best.Value.Seq) best = d;
+                    }
+                    if (best is null) continue;
+                    // One directive can name several held items; render its line
+                    // once (keyed by the directive text) so the protected tail is
+                    // not spent repeating the same instruction per item.
+                    if (!heldRenderedTexts.Add(best.Value.Text)) continue;
+                    var heldSpeaker = best.Value.Speaker is string s && !string.IsNullOrWhiteSpace(s)
+                        ? $"from \"{OneLine(s)}\": " : "";
+                    var heldRow = $"- `{name}`: {heldSpeaker}\"{Truncate(best.Value.Text, 200)}\"";
+                    if (heldObjectiveBudget - heldRow.Length < 0) break;
+                    heldObjectiveBudget -= heldRow.Length;
+                    heldObjectiveRows.Add(heldRow);
+                }
+                if (heldObjectiveRows.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine(
+                        "## Held-item objectives (server/NPC text that NAMES an item you are STILL " +
+                        "carrying — re-surfaced because such a one-time instruction can scroll out of " +
+                        "the directive lists above while you still hold the item)");
+                    foreach (var r in heldObjectiveRows) sb.AppendLine(r);
+                    sb.AppendLine(
+                        "- raw fact, not a recommendation: these are the server's/NPC's own earlier " +
+                        "words about an item you are STILL carrying, re-shown because you have not yet " +
+                        "acted on it; greetings and flavor are not tasks. Whether it still applies, and " +
+                        "what to do (often `Give`/`Use` the item to the named target), is your call.");
+                }
+            }
+        }
+
         // ── ## Reached Explore target (protected-tail decision-proximate cue) ──
         // cp reached-explore-target. Live (criterion-2 open-world run, cp020-validate.log):
         // the bot Explored toward a named NPC and ARRIVED beside it 28x, but never
@@ -9442,6 +9542,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         if (collapsed.Length == 0) return null;
         return collapsed.Length <= 200 ? collapsed : collapsed[..200] + "...";
+    }
+
+    // True when <paramref name="itemName"/> appears in <paramref name="text"/> as
+    // a WHOLE token (bounded by string edges or non-alphanumeric chars), so a
+    // short/common held-item name does not match inside an unrelated word (e.g.
+    // "Key" must not match "monkey", "Stone" must not match "milestone"). Pure
+    // case-insensitive text matching of the bot's OWN inventory name against the
+    // server's OWN directive text — no game knowledge, no item/NPC literals.
+    internal static bool DirectiveNamesItem(string? text, string? itemName)
+    {
+        if (string.IsNullOrEmpty(text) || string.IsNullOrWhiteSpace(itemName)) return false;
+        var from = 0;
+        int at;
+        while ((at = text.IndexOf(itemName, from, StringComparison.OrdinalIgnoreCase)) >= 0)
+        {
+            var beforeOk = at == 0 || !char.IsLetterOrDigit(text[at - 1]);
+            var end = at + itemName.Length;
+            var afterOk = end >= text.Length || !char.IsLetterOrDigit(text[end]);
+            if (beforeOk && afterOk) return true;
+            from = at + 1;
+        }
+        return false;
     }
 
     // The bot's own global (worldX, worldY) — used to turn a contract's dat-defined
