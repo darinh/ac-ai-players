@@ -351,6 +351,53 @@ public class LlmGoalClientTests
     }
 
     [Fact]
+    public async Task PrimaryReprobe_RecoveredPrimary_PickedBackUp_AfterTransientFailover()
+    {
+        // A TRANSIENT (5xx) primary failure rotates to the fallback (no cooldown).
+        // The next call re-probes the primary, so a recovered preferred model is
+        // picked back up instead of the run staying stuck on the weaker fallback.
+        var clock = new FakeClock(T0);
+        var primaryDown = true;
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? (primaryDown ? ServiceUnavailable() : Ok("ok-A")) : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        var first = await llm.CompleteAsync("s", "u");   // A 503 -> B
+        Assert.True(first.Ok);
+        Assert.Equal("B", llm.Model);
+
+        primaryDown = false;                              // primary recovered
+        var second = await llm.CompleteAsync("s", "u");   // re-probe A -> ok
+        Assert.True(second.Ok);
+        Assert.Equal("ok-A", second.Content);
+        Assert.Equal("A", llm.Model);                     // back on the preferred model
+    }
+
+    [Fact]
+    public async Task PrimaryReprobe_NotRepeated_WithinInterval()
+    {
+        // After one re-probe that still fails, the primary is NOT re-probed again
+        // until the interval elapses (the bot stays on the working fallback).
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(m => m == "A" ? ServiceUnavailable() : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        await llm.CompleteAsync("s", "u");                // call1: A 503 -> B
+        await llm.CompleteAsync("s", "u");                // call2: immediate re-probe A 503 -> B
+        var aAfterCall2 = handler.RequestedModels.Count(m => m == "A");
+
+        clock.Now = T0.AddSeconds(10);                    // within the 45s interval
+        await llm.CompleteAsync("s", "u");               // call3: NO re-probe -> B only
+        Assert.Equal(aAfterCall2, handler.RequestedModels.Count(m => m == "A"));
+
+        clock.Now = T0.AddSeconds(70);                    // past the 45s interval
+        await llm.CompleteAsync("s", "u");               // call4: re-probe A again
+        Assert.True(handler.RequestedModels.Count(m => m == "A") > aAfterCall2);
+    }
+
+    [Fact]
     public async Task Cooldown_SkipsCoolingModel_EvenWhenRotationReachesIt()
     {
         var clock = new FakeClock(T0);
@@ -750,6 +797,14 @@ public class LlmGoalClientTests
             resp.Headers.RetryAfter = new RetryConditionHeaderValue(ra);
         return resp;
     }
+
+    // A 5xx — a TRANSIENT (non-quota) failover candidate: it rotates but sets no
+    // per-model cooldown, so the model stays eligible for the next re-probe.
+    private static HttpResponseMessage ServiceUnavailable() =>
+        new((HttpStatusCode)503)
+        {
+            Content = new StringContent("{\"error\":\"unavailable\"}", Encoding.UTF8, "application/json"),
+        };
 
     /// <summary>
     /// Fake transport that routes each request to a response by the model name

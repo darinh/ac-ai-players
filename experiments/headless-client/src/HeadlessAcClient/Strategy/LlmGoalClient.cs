@@ -130,6 +130,22 @@ internal sealed class LlmGoalClient
     // re-pay N client timeouts every decision. Pure rate-limit bookkeeping.
     private static readonly TimeSpan InfraOutageBackoff = TimeSpan.FromSeconds(20);
 
+    // Periodic re-probe of the PREFERRED (primary, index 0) model after rotation
+    // has SETTLED on a weaker fallback due to a TRANSIENT (non-quota) failure.
+    // Without this a single primary timeout permanently downgrades the whole run to
+    // a weaker fallback: "stick to what worked" (_activeIndex follows the last
+    // success) never re-tries the primary once a fallback answers, so one blip on
+    // the capable model strands the bot on a weak one for the rest of the session.
+    // Every PrimaryReprobeInterval, the next call restarts its try-order at the
+    // primary so a recovered preferred model is picked back up. A still-429-walled
+    // primary is still skipped by the cooldown set below; a still-down one costs at
+    // most one probe per interval (not per call). Paced from the last fallback
+    // settle (see the success branch). Pure availability bookkeeping; guarded by
+    // _gate. NOT model selection by quality — the operator's configured ORDER is
+    // the preference; this only restores it after a transient blip.
+    private DateTimeOffset _lastPrimaryReprobeAt = DateTimeOffset.MinValue;
+    private static readonly TimeSpan PrimaryReprobeInterval = TimeSpan.FromSeconds(45);
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
@@ -225,6 +241,22 @@ internal sealed class LlmGoalClient
         {
             infraBackoff = _infraBackoffUntil;
             start = _activeIndex;
+            // Periodic preferred-model re-probe: if rotation has settled on a
+            // non-primary model and a re-probe is due, restart this call's try-order
+            // at the primary so a preferred model that recovered from a transient
+            // blip is picked back up. A primary still 429-walled is passed over by
+            // the cooldown skip below; a still-down one is paid at most once per
+            // interval. Skip when the infra circuit-breaker is active so this call's
+            // early short-circuit cannot consume the re-probe without probing (which
+            // would delay the next real primary probe by an interval). Reset the
+            // timer so the next re-probe is one interval out.
+            if (start != 0
+                && now - _lastPrimaryReprobeAt >= PrimaryReprobeInterval
+                && !(infraBackoff is { } breakerUntilForReprobe && now < breakerUntilForReprobe))
+            {
+                start = 0;
+                _lastPrimaryReprobeAt = now;
+            }
             var multi = _models.Count > 1;
             order = new List<int>(_models.Count);
             soonestCooling = null;
