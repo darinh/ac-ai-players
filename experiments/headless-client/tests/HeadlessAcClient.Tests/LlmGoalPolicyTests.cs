@@ -17389,6 +17389,8 @@ public class LlmGoalPolicyTests
         Assert.Contains("double-click", p);
         // combat target discrimination + proactive leveling
         Assert.Contains("LEVELING is core progress", p);
+        // tapped-out bot attacks visible monsters even mid-directive (cp071)
+        Assert.Contains("TAPPED-OUT EXCEPTION", p);
         Assert.Contains("monster", p);
         // self-arming before optional combat
         Assert.Contains("SELF-ARM before fighting", p);
