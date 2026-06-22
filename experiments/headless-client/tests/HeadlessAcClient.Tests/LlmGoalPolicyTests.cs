@@ -597,6 +597,26 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsInflightStuck_NoCallInFlight_NeverStuck()
+    {
+        // null start time = nothing in flight; the watchdog must never fire.
+        Assert.False(LlmGoalPolicy.IsInflightStuck(null, DateTimeOffset.UtcNow, TimeSpan.FromSeconds(120)));
+    }
+
+    [Theory]
+    [InlineData(0, false)]     // just kicked off
+    [InlineData(60, false)]    // at the primary call-timeout CTS, still under the wall
+    [InlineData(119, false)]   // under the hard wall
+    [InlineData(120, true)]    // exactly at the hard wall -> abandon
+    [InlineData(600, true)]    // long hang (live wedge was ~26 min) -> abandon
+    public void IsInflightStuck_FiresOnlyAtOrPastTheHardWall(int ageSeconds, bool expected)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var startedAt = now - TimeSpan.FromSeconds(ageSeconds);
+        Assert.Equal(expected, LlmGoalPolicy.IsInflightStuck(startedAt, now, TimeSpan.FromSeconds(120)));
+    }
+
+    [Fact]
     public void FirstChainInterruptingKindSince_ReturnsTheInterruptingKind()
     {
         // Diagnostic (cp2925 pattern): name the specific event-kind that starves
