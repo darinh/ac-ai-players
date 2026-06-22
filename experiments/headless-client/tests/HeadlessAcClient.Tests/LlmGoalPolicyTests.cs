@@ -20171,6 +20171,83 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void ProvenTalkFixationNameFromHistory_DominantPastThreshold_ReturnsName()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"));
+        Assert.Equal("Greeter", LlmGoalPolicy.ProvenTalkFixationNameFromHistory(es));
+    }
+
+    [Fact]
+    public void ProvenTalkFixationNameFromHistory_BelowThreshold_ReturnsNull()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"));   // only 5 < threshold 6
+        Assert.Null(LlmGoalPolicy.ProvenTalkFixationNameFromHistory(es));
+    }
+
+    [Fact]
+    public void ProvenTalkFixationNameFromHistory_NonTalkGoals_ReturnsNull()
+    {
+        var es = Cp069Stream(
+            ("Attack", "Golem"), ("Explore", "anywhere"), ("Use", "Door"),
+            ("Attack", "Golem"), ("Explore", "anywhere"), ("Attack", "Golem"));
+        Assert.Null(LlmGoalPolicy.ProvenTalkFixationNameFromHistory(es));
+    }
+
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("ON", true)]
+    [InlineData(null, false)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("off", false)]
+    [InlineData("yes", false)]
+    public void ResolveSkipFixatedTalkCall_DefaultsOff_OptInOnly(string? env, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveSkipFixatedTalkCall(env));
+    }
+
+    [Fact]
+    public void HasNewStrategicIntentCompletionSince_GoalIdLessLifecycle_True()
+    {
+        // An IntentStack auto-pop emits a GoalId-LESS GoalCompleted — a top-objective
+        // change that must force a fresh LLM look (so it blocks the fixated-Talk skip).
+        var es = new EventStream();
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = null });
+        Assert.True(LlmGoalPolicy.HasNewStrategicIntentCompletionSince(es, floor));
+    }
+
+    [Fact]
+    public void HasNewStrategicIntentCompletionSince_TacticalGoalChurn_False()
+    {
+        // A tactical goal completing carries a GoalId — ordinary churn, not a
+        // strategic change, so it does NOT block the skip.
+        var es = new EventStream();
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = Guid.NewGuid() });
+        Assert.False(LlmGoalPolicy.HasNewStrategicIntentCompletionSince(es, floor));
+    }
+
+    [Fact]
+    public void HasNewStrategicIntentCompletionSince_BelowFloor_False()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalCompleted, GoalId = null });
+        var floor = es.NextSequence;   // strategic completion is BELOW the floor
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "x" });
+        Assert.False(LlmGoalPolicy.HasNewStrategicIntentCompletionSince(es, floor));
+    }
+
+    [Fact]
     public void CountTalkGoalsToNameInLastN_IgnoresNonTalkAndOtherNames()
     {
         var es = Cp069Stream(
