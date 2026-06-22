@@ -397,6 +397,22 @@ public class LlmGoalClientTests
         Assert.True(handler.RequestedModels.Count(m => m == "A") > aAfterCall2);
     }
 
+    [Theory]
+    [InlineData(null, 40)]      // unset -> raised default (under the 45s re-probe interval)
+    [InlineData("", 40)]        // blank -> default
+    [InlineData("abc", 40)]     // unparseable -> default
+    [InlineData("40", 40)]      // valid override
+    [InlineData("10", 10)]      // min bound
+    [InlineData("44", 44)]      // max bound (PrimaryReprobeInterval - 1)
+    [InlineData("5", 40)]       // below min -> default
+    [InlineData("45", 40)]      // == re-probe interval -> rejected (would break re-probe spacing)
+    [InlineData("60", 40)]      // >= policy CTS -> rejected (would disable failover)
+    [InlineData("999", 40)]     // absurd -> default
+    public void ResolveHttpTimeout_DefaultsTo40_ClampedUnderReprobeInterval(string? env, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), LlmGoalClient.ResolveHttpTimeout(env));
+    }
+
     [Fact]
     public async Task Cooldown_SkipsCoolingModel_EvenWhenRotationReachesIt()
     {

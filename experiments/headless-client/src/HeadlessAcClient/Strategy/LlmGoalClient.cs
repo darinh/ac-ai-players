@@ -146,6 +146,35 @@ internal sealed class LlmGoalClient
     private DateTimeOffset _lastPrimaryReprobeAt = DateTimeOffset.MinValue;
     private static readonly TimeSpan PrimaryReprobeInterval = TimeSpan.FromSeconds(45);
 
+    // Per-call HttpClient timeout for an LLM request. Default RAISED from a
+    // hardcoded 30s after a live run showed a single 30s timeout on the capable
+    // model rotate the whole session to a weaker fallback (the large ~26 KB prompt
+    // plus endpoint latency legitimately exceeds 30s under load). Override with
+    // AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS.
+    //
+    // The clamp ceiling is held strictly BELOW the primary re-probe interval for
+    // two reasons:
+    //   1. _lastPrimaryReprobeAt is stamped at call START, so a timeout >= the
+    //      interval lets a single slow primary call push the NEXT call past the
+    //      interval, making every decision re-probe the slow primary (a 50s
+    //      timeout vs the 45s interval did exactly that). Staying under the
+    //      interval keeps re-probes spaced one-per-window as designed.
+    //   2. The interval (45s) is itself under the policy's ~60s CTS backstop
+    //      (LlmGoalPolicy.LlmCallTimeout). Only the HttpClient timeout triggers
+    //      transport FAILOVER to the next model; a CTS cancellation is treated as
+    //      caller-cancellation (no failover). Firing the HttpClient timeout first
+    //      keeps failover working. A value above the CTS would silently disable it.
+    // Pure request-infrastructure tuning; no game knowledge, model-agnostic.
+    internal static TimeSpan ResolveHttpTimeout(string? envValue)
+    {
+        const int minSeconds = 10;
+        var maxSeconds = (int)PrimaryReprobeInterval.TotalSeconds - 1;   // 44s: under the re-probe interval (and the ~60s CTS)
+        var defaultSeconds = Math.Max(minSeconds, Math.Min(40, maxSeconds));
+        return int.TryParse(envValue, out var s) && s >= minSeconds && s <= maxSeconds
+            ? TimeSpan.FromSeconds(s)
+            : TimeSpan.FromSeconds(defaultSeconds);
+    }
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
@@ -159,7 +188,8 @@ internal sealed class LlmGoalClient
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         })
         {
-            Timeout = TimeSpan.FromSeconds(30),
+            Timeout = ResolveHttpTimeout(
+                Environment.GetEnvironmentVariable("AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS")),
         };
 
         _endpoint = endpoint
