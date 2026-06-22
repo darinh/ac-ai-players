@@ -4844,16 +4844,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         && !(e.Kind == EventKind.ActionRejected
              && (IsTransportFailureRejection(e) || IsAttackLoopCancelRejection(e)));
 
+    // True iff this dialog-class event repeats verbatim an EARLIER dialog event
+    // of the SAME kind AND SAME source already in the retained window — i.e. the
+    // bot has already seen this exact line from this exact speaker. Server
+    // tutorial/training flavor re-broadcasts the same NpcDialog / PopupString /
+    // BookText every few seconds (live: an Academy training construct re-emits the
+    // same combat-slider tip and the same "double-click the body to loot" popup
+    // repeatedly during a kill grind). The FIRST occurrence carries whatever
+    // novelty it has and is NOT a repeat; only verbatim re-emissions from the same
+    // source are. Source identity (SameDialogSource) keeps a different NPC's first
+    // identical line from being swallowed. Restricted to dialog/popup/booktext: an
+    // ActionRejected is a fresh action OUTCOME even when its text repeats, so it is
+    // never deduped here. Exact-text + source bookkeeping over the bot's OWN
+    // perception stream; no game-content knowledge (no hardcoded text/name/quest).
+    internal static bool IsRepeatedDialogText(EventStream events, StreamEvent e)
+    {
+        if (e.Kind is not (EventKind.NpcDialog or EventKind.PopupString or EventKind.BookText))
+            return false;
+        if (string.IsNullOrWhiteSpace(e.Text))
+            return false;
+        foreach (var p in events.Recent())
+        {
+            if (p.Sequence >= e.Sequence) continue; // only strictly-earlier events
+            if (p.Kind != e.Kind) continue;
+            if (!string.Equals(p.Text, e.Text, StringComparison.Ordinal)) continue;
+            if (SameDialogSource(p, e)) return true;
+        }
+        return false;
+    }
+
+    // Whether two same-kind dialog events share a source/speaker. A PopupString
+    // carries no source, so two identical popups always match. NpcDialog / BookText
+    // carry the speaker / book identity (ItemGuid, with Name as a fallback when a
+    // guid is absent): a verbatim line is a REPEAT only from the SAME source, so a
+    // different NPC's first identical line still interrupts. Own-perception
+    // identity comparison; no game knowledge.
+    private static bool SameDialogSource(StreamEvent earlier, StreamEvent e)
+    {
+        if (e.Kind == EventKind.PopupString) return true;
+        if (earlier.ItemGuid is uint pg && pg != 0 && e.ItemGuid is uint eg && eg != 0)
+            return pg == eg;
+        return string.Equals(earlier.Name, e.Name, StringComparison.OrdinalIgnoreCase);
+    }
+
     // The FIRST chain-interrupting event newer than `floorSeq` (newest-first
     // scan), or null when none — and its EventKind names the interrupter so the
-    // no-mint diagnostic (the cp2925 pattern) stays characterizable. Pure
-    // event-kind classification; no game knowledge.
+    // no-mint diagnostic (the cp2925 pattern) stays characterizable. A dialog
+    // event that merely REPEATS an earlier line the bot already saw
+    // (IsRepeatedDialogText) is skipped: re-broadcast tutorial flavor must not
+    // preempt an autonomous kill-chain and burn an LLM round-trip, while the first
+    // occurrence still interrupts so genuinely new dialog reaches the LLM. Pure
+    // event-kind + own-text classification; no game knowledge.
     internal static EventKind? FirstChainInterruptingKindSince(EventStream events, long floorSeq)
     {
         foreach (var e in events.Recent())
         {
             if (e.Sequence < floorSeq) break;
-            if (IsChainInterruptingEvent(e)) return e.Kind;
+            if (IsChainInterruptingEvent(e) && !IsRepeatedDialogText(events, e))
+                return e.Kind;
         }
         return null;
     }

@@ -467,6 +467,121 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FirstChainInterruptingKindSince_RepeatedPopupAlreadySeen_NotInterrupting()
+    {
+        // Re-broadcast tutorial flavor: the bot already saw this exact popup (below
+        // the floor); the verbatim re-emission since the floor must NOT preempt the
+        // autonomous kill-chain (it carries no new information).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "double-click the body to loot" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "double-click the body to loot" });
+        Assert.Null(LlmGoalPolicy.FirstChainInterruptingKindSince(es, floor));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_NovelDialogAfterRepeat_StillInterrupts()
+    {
+        // A DIFFERENT dialog line since the floor is genuinely new -> still
+        // interrupts so it reaches the LLM, even though an earlier (different) line
+        // exists.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "aim high or low" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "adjust your slider" });
+        Assert.Equal(EventKind.NpcDialog, LlmGoalPolicy.FirstChainInterruptingKindSince(es, floor));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_VerbatimRepeat_True()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "tip" });
+        var dup = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "tip" });
+        Assert.True(LlmGoalPolicy.IsRepeatedDialogText(es, dup));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_FirstOccurrence_False()
+    {
+        var es = new EventStream();
+        var first = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "tip" });
+        Assert.False(LlmGoalPolicy.IsRepeatedDialogText(es, first));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_DifferentKindSameText_False()
+    {
+        // A PopupString does not dedup against an NpcDialog with identical text —
+        // they are distinct channels of information.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "same" });
+        var pop = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "same" });
+        Assert.False(LlmGoalPolicy.IsRepeatedDialogText(es, pop));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_RepeatedActionRejected_False()
+    {
+        // ActionRejected is a fresh action OUTCOME each time, never deduped here —
+        // a repeated rejection still interrupts the chain.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, Text = "no", ErrorCode = 0x046A });
+        var dup = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected, Text = "no", ErrorCode = 0x046A });
+        Assert.False(LlmGoalPolicy.IsRepeatedDialogText(es, dup));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_SameNpcVerbatimRepeat_True()
+    {
+        // Same speaker (guid) re-emitting the same line -> a repeat.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "tip", ItemGuid = 0x1234u, Name = "Golem" });
+        var dup = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "tip", ItemGuid = 0x1234u, Name = "Golem" });
+        Assert.True(LlmGoalPolicy.IsRepeatedDialogText(es, dup));
+    }
+
+    [Fact]
+    public void IsRepeatedDialogText_DifferentNpcSameText_False()
+    {
+        // A DIFFERENT speaker's first identical line is NOT a repeat — it still
+        // interrupts so a new NPC interaction reaches the LLM.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hello", ItemGuid = 0x1111u, Name = "Guard A" });
+        var other = es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Text = "hello", ItemGuid = 0x2222u, Name = "Guard B" });
+        Assert.False(LlmGoalPolicy.IsRepeatedDialogText(es, other));
+    }
+
+    [Fact]
+    public void FirstChainInterruptingKindSince_TwoIdenticalAboveFloor_InterruptsExactlyOnce()
+    {
+        // Two verbatim popups both ARRIVED since the floor: the newest is a repeat
+        // (skipped), but the first occurrence still interrupts -> the scan reports
+        // the kind exactly once rather than swallowing both.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "loot tip" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.PopupString, Text = "loot tip" });
+        Assert.Equal(EventKind.PopupString, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
+    }
+
+    [Fact]
     public void IsChainInterruptingEvent_TransportFailureActionRejected_DoesNotInterrupt()
     {
         // cp025: a transport-failure rejection (the Motor could not reach/resolve
