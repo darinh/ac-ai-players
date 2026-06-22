@@ -846,6 +846,63 @@ public class LlmGoalPolicyTests
         Text = $"Explore target=name=\"{targetName}\" item= source=llm:test",
     };
 
+    private static StreamEvent TalkEmission(string targetName) => new()
+    {
+        Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+        Text = $"Talk target=name=\"{targetName}\" item=<empty> source=llm:test",
+    };
+
+    // cp072 livelock-guard (gemini-3.1-pro review caught this): the unlatched
+    // break-contact egress for a PROVEN single-NPC Talk fixation must fire even
+    // with a monster in view. The original bug gated break-contact (and every
+    // other Talk egress) on !monsterInView, so in a monster-filled zone NONE of
+    // them could fire and a fixated bot WEDGED permanently after a death. cp072
+    // removed that gate. This test drives the whole ProposeGoal pipeline: the LLM
+    // re-emits Talk to one NPC the bot has already Talked past the fixation
+    // threshold, a monster IS in view, and the result must be the target-less
+    // break-contact Explore (not a re-locked Talk, not the fallback). It FAILS if
+    // a monster-in-view gate is ever re-introduced onto the break-contact egress.
+    [Fact]
+    public async Task ProposeGoal_ProvenTalkFixation_WithMonsterInView_BreaksContactExplore()
+    {
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Talk\",\"target\":{\"name\":\"Npc 90000001\"},\"rationale\":\"x\",\"priority\":5}" } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler((req, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) })));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        // Bot's OWN recent history: Talked this one NPC well past the fixation
+        // threshold (proven single-NPC Talk fixation).
+        var events = new EventStream();
+        for (var i = 0; i < 8; i++)
+            events.Append(TalkEmission("Npc 90000001"));
+
+        // A monster IS in view — the case the livelock fix must survive.
+        var monster = new VisibleObjectProjection
+        {
+            Guid = 0x91000001u, Name = "Mite", Wcid = 7u, ItemType = 0x10u,
+            Distance = 5f, IsCreature = true, IsMonster = true, IsAttackable = true,
+        };
+        var world = BuildVisibleWorld(new[] { CivilianNpc(0x90000001u), monster });
+
+        Assert.Null(policy.ProposeGoal(world, events, null)); // kicks the LLM
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);   // processes the Talk
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.Contains("breakcontact", goal.Source ?? "");
+    }
+
     private static VisibleObjectProjection NamedVisible(string name, float distance) => new()
     {
         Guid = 0x800000A1u, Name = name, Distance = distance, IsCreature = true,
