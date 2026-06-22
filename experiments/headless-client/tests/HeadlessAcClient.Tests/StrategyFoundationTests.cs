@@ -170,7 +170,7 @@ public class StrategyFoundationTests
         Assert.Equal(1, persisted.Count(e => e.Text == "Go to the next room."));
         Assert.DoesNotContain(persisted, e => e.Text == "not an npc line");
         Assert.DoesNotContain(persisted, e => string.IsNullOrEmpty(e.Text));
-        Assert.True(persisted.Count <= 8, $"persistent npc dialogs {persisted.Count} exceeds cap");
+        Assert.True(persisted.Count <= 12, $"persistent npc dialogs {persisted.Count} exceeds cap");
         Assert.DoesNotContain(persisted, e => e.Text == "line 19"); // beyond the earliest-N cap
     }
 
@@ -182,8 +182,8 @@ public class StrategyFoundationTests
         // never added there — yet it is the CURRENT instruction. The recent
         // sliding window must keep it even though the earliest store does not.
         var es = new EventStream(8);
-        // Fill the earliest NpcDialog cap (8) with distinct early lines.
-        for (int i = 0; i < 8; i++)
+        // Fill the earliest NpcDialog cap (12) with distinct early lines.
+        for (int i = 0; i < 12; i++)
             es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Greeter", Text = $"early line {i:D2}" });
         es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Master", Text = "You have finished. Take the portal." });
 
@@ -192,6 +192,29 @@ public class StrategyFoundationTests
         // The recent window DOES carry the current instruction.
         Assert.Contains(es.RecentPersistentNpcDialogs(), e => e.Text == "You have finished. Take the portal.");
         Assert.Equal("Master", es.RecentPersistentNpcDialogs().Last(e => e.Text == "You have finished. Take the portal.").Name);
+    }
+
+    [Fact]
+    public void EventStream_RecentNpcDialogs_CompletionDirectiveSurvivesTipFlood()
+    {
+        // Pins the sizing rationale: a one-time progression directive must stay in
+        // the recent window through the trailing tutorial-tip dialogs a training
+        // area emits during a grind (live: 6 distinct tip lines). With the 8-slot
+        // recent window it survives 7 distinct later tips and is only pushed out by
+        // the 8th — comfortably above the observed 6.
+        var es = new EventStream(8);
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Master", Text = "You have finished. Take the portal." });
+        bool Present() => es.RecentPersistentNpcDialogs().Any(e => e.Text == "You have finished. Take the portal.");
+
+        for (int i = 0; i < 6; i++) // the observed tip-flood volume
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Golem", Text = $"combat tip {i:D2}" });
+        Assert.True(Present(), "directive evicted by the observed 6-tip flood");
+
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Golem", Text = "combat tip 06" }); // 7th distinct trailing tip
+        Assert.True(Present(), "directive should still survive a 7th distinct trailing tip");
+
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Golem", Text = "combat tip 07" }); // 8th distinct trailing tip
+        Assert.False(Present(), "an 8th distinct trailing tip fills the window and evicts the directive");
     }
 
     [Fact]

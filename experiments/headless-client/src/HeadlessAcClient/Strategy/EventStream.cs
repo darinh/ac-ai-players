@@ -290,7 +290,14 @@ internal sealed class EventStream
     // + cap only — never by parsing the content (that would be hardcoded game
     // knowledge); the LLM and the prompt's "greetings/flavor are not tasks" rule
     // filter non-directives.
-    private const int MaxPersistentNpcDialogs = 8;
+    // Raised for CAPTURE headroom: this earliest-distinct store locks once full,
+    // and the `## Held-item objectives` capsule scans the WHOLE persistent store
+    // (not just the earliest-rendered slice), so retaining more distinct early
+    // directives lets a held-item turn-in directive be re-surfaced even when many
+    // tutorial-tip dialogs precede it. (A non-held-item LATE directive is kept
+    // VISIBLE by the recent window below, not by this store's earliest-render
+    // slice — see MaxRecentNpcDialogs.)
+    private const int MaxPersistentNpcDialogs = 12;
     private readonly List<StreamEvent> _persistentNpcDialogs = new();
     private readonly HashSet<string> _persistentNpcDialogTexts = new(StringComparer.Ordinal);
 
@@ -303,8 +310,13 @@ internal sealed class EventStream
     // MOST-RECENT distinct directives (newest pushes out oldest) so the CURRENT
     // actionable instruction also survives ring eviction and the prompt hard-cut.
     // Captured by event KIND + text only — never parsed (no game knowledge).
+    // The NpcDialog window is sized ABOVE the number of distinct tutorial-tip
+    // lines a training area emits during a grind (live: ~6) so a just-arrived
+    // progression directive is not pushed back out by tip chatter before the bot
+    // acts on it (live: a "you have completed your training" line evicted from a
+    // 4-slot window by repeated combat-tip dialogs while the bot kept grinding).
     private const int MaxRecentPopups = 4;
-    private const int MaxRecentNpcDialogs = 4;
+    private const int MaxRecentNpcDialogs = 8;
     private const int MaxRecentServerMessages = 6;
     private readonly List<StreamEvent> _recentPopups = new();
     private readonly List<StreamEvent> _recentNpcDialogs = new();
