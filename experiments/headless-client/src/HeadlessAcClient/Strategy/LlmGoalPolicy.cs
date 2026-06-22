@@ -461,6 +461,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // re-emission can be judged a no-progress loop.
     private const int NpcTalkRepeatThreshold = 4;
 
+    // Movement- AND novelty-independent single-NPC Talk-fixation backstop. The
+    // stationary guard (IsExhaustedNpcTalkRepeat) resets on movement, the roving
+    // guard (IsRovingNpcTalkLoop) resets its raw streak on ANY inventory /
+    // landblock / self-progress event — so a bot that interleaves re-Talking ONE
+    // onboarding NPC with incidental combat/loot (each kill = self-progress, each
+    // pickup = inventory-added) keeps resetting that streak and loops the NPC
+    // indefinitely while the dialog cycles new-looking canned lines. This backstop
+    // counts the bot's OWN Talk emissions to one NPC over its last-N emitted GOALS
+    // (immune to interleaving, since unrelated goals are simply other entries in
+    // the window) and fires when they dominate the window. Threshold sits above
+    // the stationary (4) and below the roving raw (8) thresholds; the window
+    // mirrors the `## Recent Talk` recency render the LLM already sees ("Talk to X
+    // xN in last 10 goals"). Mechanical repeat-count over the bot's own history —
+    // no NPC/quest content, no game knowledge.
+    private const int SingleNpcTalkHistoryWindowGoals = 10;
+    private const int SingleNpcTalkHistoryThreshold = 6;
+
     // Cross-kind interaction fixation loop-break (2026-06-05). After a kill,
     // a weak model fixates on the resulting EMPTY corpse, ALTERNATING
     // Use{Corpse} and Pickup{Corpse} forever. The per-kind guards above each
@@ -2763,6 +2780,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
         }
 
+        // Single-NPC Talk-fixation backstop (cp069): the stationary guard resets
+        // on movement and the roving guard resets its raw streak on ANY inventory/
+        // landblock/self-progress event, so a bot that re-Talks ONE onboarding NPC
+        // while interleaving incidental combat/loot (each kill = self-progress,
+        // each pickup = inventory-added) keeps resetting both and loops the NPC
+        // forever as its dialog cycles new-looking canned lines. This reads the
+        // durable goal-emission history (Talks to ONE NPC dominating the last N
+        // emitted goals) so the interleaved loop is caught, and breaks it via the
+        // SAME egress + TTL suppression so the bot does something else instead.
+        if (IsSingleNpcTalkFixationByHistory(goal, events))
+        {
+            Console.WriteLine(
+                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
+                " — single-NPC Talk fixation across recent goal history; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-dedup: single-NPC Talk fixation in recent goal history");
+            RecordTalkLoopSuppression(goal, world, nowUtc);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+        }
+
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
         // guards above each count only their own GoalKind, so a mixed
         // Use{target} ↔ Pickup{target} alternation on one stationary target
@@ -4211,6 +4248,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
+    /// Movement- and novelty-independent single-NPC Talk-fixation backstop. True
+    /// when the bot's CURRENT Talk goal targets an NPC it has already Talked
+    /// <see cref="SingleNpcTalkHistoryThreshold"/>+ times within its last
+    /// <see cref="SingleNpcTalkHistoryWindowGoals"/> emitted goals. Unlike
+    /// <see cref="IsExhaustedNpcTalkRepeat"/> (resets on movement) and
+    /// <see cref="IsRovingNpcTalkLoop"/> (resets its raw streak on any inventory /
+    /// landblock / self-progress event), this reads the durable goal-emission
+    /// history, so a Talk loop INTERLEAVED with incidental combat/loot — which
+    /// resets the episode guards every cycle — is still caught.
+    ///
+    /// <para>Keyed on the LLM goal's NAME (an LLM Talk target carries a name
+    /// only), matched against the bot's own past Talk emissions exactly as the
+    /// <c>## Recent Talk</c> recency render counts them. Counts the bot's OWN
+    /// emissions; no NPC/quest content, no game knowledge.</para>
+    /// </summary>
+    internal static bool IsSingleNpcTalkFixationByHistory(Goal goal, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Talk) return false;
+        var name = goal.Target?.Name ?? goal.Target?.NameContains;
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        return CountTalkGoalsToNameInLastN(events, name, SingleNpcTalkHistoryWindowGoals)
+            >= SingleNpcTalkHistoryThreshold;
+    }
+
+    /// <summary>
     /// cp-2415: true when this Talk goal's resolved NPC is currently within the
     /// TTL suppression window opened by a recently-confirmed roving Talk loop —
     /// the LLM's persistent intent should not re-drive the bot back to it yet.
@@ -5212,6 +5274,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // target's name is the FIRST name="..." AFTER target=. Reading it
             // this way is robust to a name that itself contains " item=" or
             // " source=" (a bounded target=(.*?) item= regex would truncate it).
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            if (!nm.Success) continue;
+            if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// Counts how many of the bot's LAST <paramref name="lastN"/> emitted goals
+    /// were a <c>Talk</c> to <paramref name="npcName"/>. Window is by GOAL COUNT
+    /// (newest <paramref name="lastN"/> emissions), NOT time — so it is immune to
+    /// interleaved combat/loot/Explore goals diluting a Talk fixation, mirroring
+    /// the <c>## Recent Talk</c> "Talk to X xN in last 10 goals" recency render.
+    /// Structural parse of the bot's own emission Text; no game knowledge.
+    /// </summary>
+    internal static int CountTalkGoalsToNameInLastN(EventStream events, string npcName, int lastN)
+    {
+        if (string.IsNullOrWhiteSpace(npcName) || lastN <= 0) return 0;
+        var n = 0;
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text))
+                     .Take(lastN))
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Talk", StringComparison.Ordinal)) continue;
             var ti = txt.IndexOf("target=", StringComparison.Ordinal);
             if (ti < 0) continue;
             var nm = System.Text.RegularExpressions.Regex.Match(

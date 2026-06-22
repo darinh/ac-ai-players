@@ -19727,4 +19727,119 @@ public class LlmGoalPolicyTests
         Assert.Contains("`Cap`", capsule);
         Assert.DoesNotContain("and more", capsule);
     }
+
+    // ── cp069: single-NPC Talk-fixation backstop (goal-emission history) ──
+    private static StreamEvent Cp069Emit(string kind, string target, DateTimeOffset utc) => new StreamEvent
+    {
+        Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+        Text = $"{kind} target=name=\"{target}\" item= source=llm:test",
+    };
+
+    private static EventStream Cp069Stream(params (string kind, string target)[] emissions)
+    {
+        var es = new EventStream();
+        var t0 = DateTimeOffset.UtcNow.AddMinutes(-5);
+        for (var i = 0; i < emissions.Length; i++)
+            es.Append(Cp069Emit(emissions[i].kind, emissions[i].target, t0.AddSeconds(i)));
+        return es;
+    }
+
+    private static Goal Cp069Talk(string npc) =>
+        new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = npc } };
+
+    [Fact]
+    public void CountTalkGoalsToNameInLastN_CountsTalksToName()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"));
+        Assert.Equal(6, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "Greeter", 10));
+    }
+
+    [Fact]
+    public void CountTalkGoalsToNameInLastN_WindowIsByGoalCount_OldestFallOut()
+    {
+        // 8 Talks to "Old" then 3 to "New" (11 emissions). Last-10 window drops the
+        // single oldest "Old", so only 7 of the 8 "Old" Talks remain in window.
+        var seq = new System.Collections.Generic.List<(string, string)>();
+        for (var i = 0; i < 8; i++) seq.Add(("Talk", "Old"));
+        for (var i = 0; i < 3; i++) seq.Add(("Talk", "New"));
+        var es = Cp069Stream(seq.ToArray());
+        Assert.Equal(7, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "Old", 10));
+        Assert.Equal(3, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "New", 10));
+    }
+
+    [Fact]
+    public void CountTalkGoalsToNameInLastN_IgnoresNonTalkAndOtherNames()
+    {
+        var es = Cp069Stream(
+            ("Attack", "Greeter"), ("Pickup", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Other"));
+        Assert.Equal(2, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "Greeter", 10));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_FiresAtThreshold_InterleavedWithCombat()
+    {
+        // 6 Talks to one NPC interleaved with 4 Attacks (10 goals). The episode
+        // guards would have reset on each kill; this history-based backstop fires.
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"));
+        Assert.True(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(Cp069Talk("Greeter"), es));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_DoesNotFireBelowThreshold()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"),
+            ("Talk", "Greeter"), ("Attack", "Apple"));
+        Assert.Equal(5, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "Greeter", 10));
+        Assert.False(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(Cp069Talk("Greeter"), es));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_DoesNotFireForNonTalkGoal()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"));
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Greeter" } };
+        Assert.False(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(attack, es));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_DoesNotFireWhenSpreadAcrossNpcs()
+    {
+        // 5 Talks each to two NPCs: neither alone reaches the single-NPC threshold.
+        var es = Cp069Stream(
+            ("Talk", "A"), ("Talk", "B"), ("Talk", "A"), ("Talk", "B"),
+            ("Talk", "A"), ("Talk", "B"), ("Talk", "A"), ("Talk", "B"),
+            ("Talk", "A"), ("Talk", "B"));
+        Assert.False(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(Cp069Talk("A"), es));
+        Assert.False(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(Cp069Talk("B"), es));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_MatchesNameContainsTarget()
+    {
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
+            ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"));
+        var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { NameContains = "Greeter" } };
+        Assert.True(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(goal, es));
+    }
+
+    [Fact]
+    public void IsSingleNpcTalkFixationByHistory_EmptyHistory_DoesNotFire()
+    {
+        Assert.False(LlmGoalPolicy.IsSingleNpcTalkFixationByHistory(Cp069Talk("Greeter"), new EventStream()));
+    }
 }
