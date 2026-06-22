@@ -13362,41 +13362,32 @@ public class LlmGoalPolicyTests
             loopKind: "NPC Talk", monsterInView: false, freshDirective: true));
     }
 
-    // --- exhausted-NPC break-contact during directive grace (cp070) ---------
-    // ShouldEarlyEscapeTalkLoop above vetoes itself while a fresh server
-    // directive is in grace so guided training can finish. But a single-NPC
-    // Talk fixation PROVEN by the bot's own recent goal history (the cp069
-    // signal) is not advancing that training — it is stuck re-greeting a spent
-    // step — so ShouldBreakContactExhaustedNpc fires through the grace with one
-    // UNLATCHED Explore (the caller re-deliberates next tick). It is the exact
-    // complement of ShouldEarlyEscapeTalkLoop on the freshDirective axis.
+    // --- exhausted-NPC break-contact (cp070, hardened per council review) ----
+    // A single-NPC Talk fixation PROVEN by the bot's own recent goal history (the
+    // cp069 signal) means the bot is provably stuck: not advancing the directive
+    // it re-greets, and not engaging any monster in view. ShouldBreakContact
+    // ExhaustedNpc fires UNCONDITIONALLY for the Talk loop kind once proven — it is
+    // deliberately NOT gated on freshDirective or monster-in-view, because the
+    // latched early egress AND the tapped-out stuck-loop egress are both
+    // monster-in-view-gated, so in a monster-present zone a proven fixation would
+    // otherwise wedge with no egress able to fire (livelock). The caller substitutes
+    // a target-less Explore and re-deliberates next tick.
 
     [Fact]
-    public void BreakContact_FiresForProvenFixationDuringDirectiveGrace()
+    public void BreakContact_FiresForProvenTalkFixation()
     {
         Assert.True(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-            loopKind: "NPC Talk", freshDirective: true, monsterInView: false,
-            provenSingleNpcTalkFixation: true));
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: true));
     }
 
     [Fact]
     public void BreakContact_SuppressedWhenFixationNotProven()
     {
         // Below the history threshold (or a multi-NPC churn that no single name
-        // dominates): not a proven single-NPC fixation, so do NOT punch through
-        // the directive grace — let guided training continue.
+        // dominates): not a proven single-NPC fixation, so the other egresses /
+        // fallback handle it as before.
         Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-            loopKind: "NPC Talk", freshDirective: true, monsterInView: false,
-            provenSingleNpcTalkFixation: false));
-    }
-
-    [Fact]
-    public void BreakContact_SuppressedWhenMonsterInView()
-    {
-        // A monster is in view — engage that XP target instead of wandering off.
-        Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-            loopKind: "NPC Talk", freshDirective: true, monsterInView: true,
-            provenSingleNpcTalkFixation: true));
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: false));
     }
 
     [Fact]
@@ -13404,35 +13395,28 @@ public class LlmGoalPolicyTests
     {
         // Break-contact is Talk-only; a world-object Use loop has its own escape.
         Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-            loopKind: "Use", freshDirective: true, monsterInView: false,
-            provenSingleNpcTalkFixation: true));
+            loopKind: "Use", provenSingleNpcTalkFixation: true));
     }
 
     [Fact]
-    public void BreakContact_SuppressedOutsideDirectiveGrace()
+    public void BreakContact_FiresWhereEarlyEgressIsSuppressed()
     {
-        // With no fresh directive, the normal latched ShouldEarlyEscapeTalkLoop
-        // handles the loop; this grace-only exception stands down.
-        Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-            loopKind: "NPC Talk", freshDirective: false, monsterInView: false,
-            provenSingleNpcTalkFixation: true));
-    }
-
-    [Fact]
-    public void BreakContact_ComplementsEarlyEgressOnDirectiveAxis()
-    {
-        // For a proven Talk fixation with no monster in view, exactly ONE of the
-        // two Talk-loop egresses fires depending on whether a directive is in
-        // grace: the latched early egress when NOT guided, the unlatched
-        // break-contact when guided. They never both fire and never both miss.
+        // The livelock fix: in EVERY case where the latched ShouldEarlyEscapeTalkLoop
+        // stands down for a Talk loop (a monster is in view, OR the server is freshly
+        // guiding the bot), a PROVEN fixation must STILL break contact — otherwise the
+        // bot wedges with no egress able to fire. So break-contact is true wherever a
+        // proven Talk fixation exists, independent of those two suppressors.
+        foreach (var monster in new[] { true, false })
         foreach (var fresh in new[] { true, false })
         {
             var early = LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-                loopKind: "NPC Talk", monsterInView: false, freshDirective: fresh);
+                loopKind: "NPC Talk", monsterInView: monster, freshDirective: fresh);
             var breakContact = LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-                loopKind: "NPC Talk", freshDirective: fresh, monsterInView: false,
-                provenSingleNpcTalkFixation: true);
-            Assert.NotEqual(early, breakContact);
+                loopKind: "NPC Talk", provenSingleNpcTalkFixation: true);
+            Assert.True(breakContact);
+            // Whenever the early egress is suppressed, break-contact still covers it.
+            if (!early)
+                Assert.True(breakContact);
         }
     }
 

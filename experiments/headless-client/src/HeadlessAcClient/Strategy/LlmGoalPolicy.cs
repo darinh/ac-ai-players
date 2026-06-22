@@ -1108,9 +1108,46 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         // Shared egress signals, read ONCE. RecentFreshDirective has per-tick side
         // effects (advances the directive high-water sequence, may log a grace
-        // credit), so it is evaluated a single time here and the result reused.
+        // credit), so it is read here exactly once AND only for a Talk loop — the
+        // sole egress below that consults it (ShouldEarlyEscapeTalkLoop) is
+        // Talk-only, so a Use / interaction / attack drop must not advance the Talk
+        // directive grace.
         var monsterInView = AnyAttackableMonsterInView(world);
-        var freshDirective = RecentFreshDirective(events, nowUtc);
+        var freshDirective = loopKind == NpcTalkLoopKind && RecentFreshDirective(events, nowUtc);
+
+        // Exhausted-NPC break-contact (cp070): when the bot's OWN goal history PROVES
+        // a single-NPC Talk fixation — it Talked this one NPC >= the fixation
+        // threshold of its last N emitted goals (the cp069 signal, immune to the
+        // interleaved combat/loot that resets the stationary and roving guards) — it
+        // is provably NOT doing anything productive: not advancing the directive it
+        // keeps re-greeting, and not engaging any monster in view (it has chosen Talk
+        // over Attack at least threshold times). Break the loop with ONE generic
+        // Explore FIRST and UNCONDITIONALLY — NOT gated on a fresh directive (a
+        // proven-stale fixation is not finishing guided training) NOR on
+        // monster-in-view: the latched Talk egress and the tapped-out stuck-loop
+        // egress below are BOTH monster-in-view-gated, so in a zone that always shows
+        // a monster (e.g. a training yard full of practice constructs) a proven
+        // fixation would otherwise wedge with NO egress able to fire — re-prompting
+        // the LLM every tick forever. This egress is UNLATCHED: it relocates the bot
+        // one step and RE-DELIBERATES next tick, so a same-landblock next room is not
+        // overshot and, if a winnable monster is in view, the LLM can Attack it on
+        // the very next decision. Audit-clean: generic Explore{anywhere} — the Motor
+        // selects NO target; the LLM picks the next interactable next decision.
+        var provenSingleNpcTalkFixation =
+            loopTargetName is { Length: > 0 } breakContactNpc
+            && CountTalkGoalsToNameInLastN(events, breakContactNpc, SingleNpcTalkHistoryWindowGoals)
+                >= SingleNpcTalkHistoryThreshold;
+        if (ShouldBreakContactExhaustedNpc(loopKind, provenSingleNpcTalkFixation))
+        {
+            Console.WriteLine(
+                "[llm-override] exhausted-npc break-contact: proven single-NPC Talk fixation " +
+                "in recent goal history — one UNLATCHED Explore{anywhere} to break contact and " +
+                "re-deliberate with fresh perception (Motor picks no target).");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:exhausted-npc-breakcontact",
+                "mechanical break-contact: proven single-NPC Talk fixation in recent goal " +
+                "history; one unlatched Explore to leave the spent conversation and re-deliberate");
+        }
 
         if (ShouldEscapeStuckLoopWithExplore(world, nowUtc))
         {
@@ -1122,37 +1159,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 nowUtc, "override:stuck-loop-egress",
                 $"mechanical stuck-loop egress: tapped-out, looping {loopKind} with no " +
                 "progress; leaving to find monsters (enforces the LOOP-BREAK rules)");
-        }
-        // Exhausted-NPC break-contact (cp070): the early Talk-loop egress below is
-        // vetoed while the server is freshly guiding the bot (FreshDirectiveGrace)
-        // so genuine guided training can finish. But when the bot's OWN goal history
-        // PROVES a single-NPC Talk fixation — it Talked this one NPC >= the fixation
-        // threshold of its last N emitted goals (the cp069 signal, immune to the
-        // interleaved combat/loot that resets the stationary and roving guards) —
-        // the bot is NOT advancing that training, it is stuck re-greeting a spent
-        // step. Free it with ONE generic Explore even during the grace. This is
-        // UNLATCHED (no _talkLoopEgressUntilUtc / landblock latch): it moves the bot
-        // a single step and RE-DELIBERATES with fresh perception next tick, so a
-        // same-landblock next room is not overshot and the bot's next legitimate
-        // interaction is never suppressed. Audit-clean: generic Explore{anywhere} —
-        // the Motor selects NO target; the LLM picks the next interactable on the
-        // very next decision. Defers to a monster in view (engage the XP target).
-        var provenSingleNpcTalkFixation =
-            loopTargetName is { Length: > 0 } breakContactNpc
-            && CountTalkGoalsToNameInLastN(events, breakContactNpc, SingleNpcTalkHistoryWindowGoals)
-                >= SingleNpcTalkHistoryThreshold;
-        if (ShouldBreakContactExhaustedNpc(
-                loopKind, freshDirective, monsterInView, provenSingleNpcTalkFixation))
-        {
-            Console.WriteLine(
-                "[llm-override] exhausted-npc break-contact: proven single-NPC Talk fixation " +
-                "in recent goal history while a server directive is in grace — one UNLATCHED " +
-                "Explore{anywhere} to break contact and re-deliberate (Motor picks no target).");
-            return MakeEgressExploreGoal(
-                nowUtc, "override:exhausted-npc-breakcontact",
-                "mechanical break-contact: proven single-NPC Talk fixation in recent goal " +
-                "history during directive grace; one unlatched Explore to leave the spent " +
-                "conversation and re-deliberate with fresh perception");
         }
         // Early Talk-loop egress: a PROVEN stationary NPC Talk fixation is a
         // dead end regardless of dwell time, so break it now (before the 5-min
@@ -1340,19 +1346,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // goal-emission history (it Talked one NPC past the cp069 fixation threshold of
     // its last N emitted goals — immune to the interleaved combat/loot that resets
     // the stationary and roving guards) should break contact with ONE unlatched
-    // Explore EVEN while a fresh server directive is in grace. The early Talk-loop
-    // egress above vetoes itself during the grace (freshDirective) so genuine
-    // guided training can finish, but a PROVEN-stale fixation is not advancing that
-    // training — it is stuck re-greeting a spent step — so the proven-fixation case
-    // is the one exception that fires through the grace. Scoped to the Talk loop
-    // kind; defers to a monster in view (engage that XP target instead of
-    // wandering). Extracted for deterministic unit testing; own-signal only (own
-    // emission history + own monster-in-view perception + the directive timer), no
-    // game content, and the Motor still chooses no target (the caller substitutes a
-    // generic Explore).
+    // Explore. Fires UNCONDITIONALLY for the Talk loop kind once the fixation is
+    // proven — NOT gated on a fresh directive (a proven-stale fixation is not
+    // finishing guided training, it is stuck re-greeting a spent step) and NOT on
+    // monster-in-view (the latched Talk egress and the tapped-out stuck-loop egress
+    // are BOTH monster-in-view-gated, so in a zone that always shows a monster a
+    // proven fixation would wedge with no egress able to fire; and a bot that has
+    // chosen Talk over Attack >= threshold times is provably not going to engage the
+    // monster, so deferring to it just loops). The caller substitutes a target-less
+    // generic Explore and re-deliberates next tick, so a winnable monster can still
+    // be Attacked on the following decision. Extracted for deterministic unit
+    // testing; own-signal only (own emission history), no game content; the Motor
+    // chooses no target.
     internal static bool ShouldBreakContactExhaustedNpc(
-        string loopKind, bool freshDirective, bool monsterInView, bool provenSingleNpcTalkFixation)
-        => loopKind == NpcTalkLoopKind && freshDirective && !monsterInView && provenSingleNpcTalkFixation;
+        string loopKind, bool provenSingleNpcTalkFixation)
+        => loopKind == NpcTalkLoopKind && provenSingleNpcTalkFixation;
 
     // Pure decision: a confirmed bare world-object Use churn should break the
     // loop with a generic Explore (travel through/past the looped object) rather
@@ -5919,7 +5927,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!selfArmCombatEffective)
         sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` you cannot win fights — arm yourself before OPTIONAL combat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` or a `[missile weapon/ammo]` you can afford, `Buy` it by its exact name — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. After buying it lands in your inventory: a thrown weapon then shows as a `throwable weapon` to Wield (arming you directly, no ammo needed); a launcher and its ammo arm you only as a PAIR — BOTH must be in your bag before the `missile launcher + compatible ammo` hint appears. So if you bought a launcher (or ammo) and see no arming hint, you are missing the matching piece: buy THAT (or a thrown weapon) instead — do NOT re-buy the same item expecting a hint. If NO weapon/ammo is available to wield, pick up, OR buy anywhere, keep doing quests/`Explore` (do not stall waiting for one). A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not. Then raise that trained weapon skill with spare XP (see SPEND XP).");
-        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first. TAPPED-OUT EXCEPTION (overrides the directive hold): when `Combat readiness` says `tapped out` (combat-ready, but no new level or quest item for several minutes in this `landblock`) AND a `monster` is in view, `Attack` it EVEN while a server/quest directive is active. A directive you keep re-`Talk`/`Use`/`Pickup`-ing with no NEW dialog, item, or level is NOT progressing — re-emitting that social verb just loops. `Attack` the visible `monster` for XP (per COMBAT SAFETY — skip a KIND that has already beaten you), then resume the directive.");
+        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first. TAPPED-OUT EXCEPTION (overrides the directive hold): when `Combat readiness` says `tapped out` (combat-ready, but no new level or quest item for several minutes in this `landblock`) AND a `monster` is in view, `Attack` it EVEN while a server/quest directive is active. A directive you keep re-`Talk`/`Use`/`Pickup`-ing with no NEW dialog, item, or level is NOT progressing — re-emitting that social verb just loops. `Attack` the visible `monster` for XP (per COMBAT SAFETY — skip a KIND that has already beaten you), then resume the directive. If EVERY visible `monster` is a KIND that has already beaten you (none safe to fight), emit `Explore{target: {name: \"anywhere\"}}` to leave this area rather than re-loop the stalled directive.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
         // can be gated on it too). The rules below reuse it.
         // The NON-HOSTILE rule references `nearest monster`/`monsters in view`
