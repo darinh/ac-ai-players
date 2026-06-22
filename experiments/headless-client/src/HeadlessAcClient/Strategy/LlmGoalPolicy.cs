@@ -1104,8 +1104,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // not in that state, defer to the fallback as before.
     private Goal? EscapeOrFallback(
         WorldStateProjection world, EventStream events, Goal? currentGoal,
-        DateTimeOffset nowUtc, string loopKind)
+        DateTimeOffset nowUtc, string loopKind, string? loopTargetName = null)
     {
+        // Shared egress signals, read ONCE. RecentFreshDirective has per-tick side
+        // effects (advances the directive high-water sequence, may log a grace
+        // credit), so it is evaluated a single time here and the result reused.
+        var monsterInView = AnyAttackableMonsterInView(world);
+        var freshDirective = RecentFreshDirective(events, nowUtc);
+
         if (ShouldEscapeStuckLoopWithExplore(world, nowUtc))
         {
             Console.WriteLine(
@@ -1117,6 +1123,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"mechanical stuck-loop egress: tapped-out, looping {loopKind} with no " +
                 "progress; leaving to find monsters (enforces the LOOP-BREAK rules)");
         }
+        // Exhausted-NPC break-contact (cp070): the early Talk-loop egress below is
+        // vetoed while the server is freshly guiding the bot (FreshDirectiveGrace)
+        // so genuine guided training can finish. But when the bot's OWN goal history
+        // PROVES a single-NPC Talk fixation — it Talked this one NPC >= the fixation
+        // threshold of its last N emitted goals (the cp069 signal, immune to the
+        // interleaved combat/loot that resets the stationary and roving guards) —
+        // the bot is NOT advancing that training, it is stuck re-greeting a spent
+        // step. Free it with ONE generic Explore even during the grace. This is
+        // UNLATCHED (no _talkLoopEgressUntilUtc / landblock latch): it moves the bot
+        // a single step and RE-DELIBERATES with fresh perception next tick, so a
+        // same-landblock next room is not overshot and the bot's next legitimate
+        // interaction is never suppressed. Audit-clean: generic Explore{anywhere} —
+        // the Motor selects NO target; the LLM picks the next interactable on the
+        // very next decision. Defers to a monster in view (engage the XP target).
+        var provenSingleNpcTalkFixation =
+            loopTargetName is { Length: > 0 } breakContactNpc
+            && CountTalkGoalsToNameInLastN(events, breakContactNpc, SingleNpcTalkHistoryWindowGoals)
+                >= SingleNpcTalkHistoryThreshold;
+        if (ShouldBreakContactExhaustedNpc(
+                loopKind, freshDirective, monsterInView, provenSingleNpcTalkFixation))
+        {
+            Console.WriteLine(
+                "[llm-override] exhausted-npc break-contact: proven single-NPC Talk fixation " +
+                "in recent goal history while a server directive is in grace — one UNLATCHED " +
+                "Explore{anywhere} to break contact and re-deliberate (Motor picks no target).");
+            return MakeEgressExploreGoal(
+                nowUtc, "override:exhausted-npc-breakcontact",
+                "mechanical break-contact: proven single-NPC Talk fixation in recent goal " +
+                "history during directive grace; one unlatched Explore to leave the spent " +
+                "conversation and re-deliberate with fresh perception");
+        }
         // Early Talk-loop egress: a PROVEN stationary NPC Talk fixation is a
         // dead end regardless of dwell time, so break it now (before the 5-min
         // tapped-out gate the general egress needs) unless an attackable monster
@@ -1124,7 +1161,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // bot. Latch it briefly so the picker cannot re-park on the same dead NPC
         // next tick.
         if (ShouldEarlyEscapeTalkLoop(
-                loopKind, AnyAttackableMonsterInView(world), RecentFreshDirective(events, nowUtc)))
+                loopKind, monsterInView, freshDirective))
         {
             _talkLoopEgressUntilUtc = nowUtc + TalkLoopEgressDuration;
             _talkLoopEgressLandblock = world.Self.Landblock;
@@ -1150,7 +1187,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // monster in view still takes priority (engage the visible XP target —
         // defend/flee a hostile or fight a non-hostile — never wander off to find
         // a monster already in view).
-        if (ShouldEscapeWorldUseLoop(loopKind, AnyAttackableMonsterInView(world)))
+        if (ShouldEscapeWorldUseLoop(loopKind, monsterInView))
         {
             Console.WriteLine(
                 "[llm-override] use-loop egress: confirmed world-object Use churn with no " +
@@ -1298,6 +1335,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool ShouldEarlyEscapeTalkLoop(
         string loopKind, bool monsterInView, bool freshDirective)
         => loopKind == NpcTalkLoopKind && !monsterInView && !freshDirective;
+
+    // Pure decision: a single-NPC Talk fixation PROVEN by the bot's OWN recent
+    // goal-emission history (it Talked one NPC past the cp069 fixation threshold of
+    // its last N emitted goals — immune to the interleaved combat/loot that resets
+    // the stationary and roving guards) should break contact with ONE unlatched
+    // Explore EVEN while a fresh server directive is in grace. The early Talk-loop
+    // egress above vetoes itself during the grace (freshDirective) so genuine
+    // guided training can finish, but a PROVEN-stale fixation is not advancing that
+    // training — it is stuck re-greeting a spent step — so the proven-fixation case
+    // is the one exception that fires through the grace. Scoped to the Talk loop
+    // kind; defers to a monster in view (engage that XP target instead of
+    // wandering). Extracted for deterministic unit testing; own-signal only (own
+    // emission history + own monster-in-view perception + the directive timer), no
+    // game content, and the Motor still chooses no target (the caller substitutes a
+    // generic Explore).
+    internal static bool ShouldBreakContactExhaustedNpc(
+        string loopKind, bool freshDirective, bool monsterInView, bool provenSingleNpcTalkFixation)
+        => loopKind == NpcTalkLoopKind && freshDirective && !monsterInView && provenSingleNpcTalkFixation;
 
     // Pure decision: a confirmed bare world-object Use churn should break the
     // loop with a generic Explore (travel through/past the looped object) rather
@@ -2697,7 +2752,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " no separate hand-in, deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: settled stage-3 contract turn-in re-Talk");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
@@ -2714,7 +2769,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — stationary NPC Talk repeated with no progress; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress NPC Talk loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Multi-NPC Talk-churn loop-break (cp-2344): the single-NPC guard above
@@ -2729,7 +2784,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: stationary no-progress multi-NPC Talk cycle");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Roving multi-NPC Talk-churn (cp roving-multi-npc-talk-loop): the
@@ -2746,7 +2801,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — roving multi-NPC Talk cycle with no progress or dialog novelty; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: roving no-progress multi-NPC Talk cycle");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Roving single-NPC Talk-loop break (cp-2365): the stationary single-NPC
@@ -2767,7 +2822,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " — exhausted-NPC TTL suppression active; deferring to fallback.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: TTL-suppressed exhausted-NPC Talk loop");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
         if (IsRovingNpcTalkLoop(goal, world, events))
         {
@@ -2777,7 +2832,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: roving no-progress single-NPC Talk loop");
             RecordTalkLoopSuppression(goal, world, nowUtc);
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Single-NPC Talk-fixation backstop (cp069): the stationary guard resets
@@ -2797,7 +2852,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: single-NPC Talk fixation in recent goal history");
             RecordTalkLoopSuppression(goal, world, nowUtc);
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind);
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // Cross-kind interaction fixation loop-break (2026-06-05): the per-kind
