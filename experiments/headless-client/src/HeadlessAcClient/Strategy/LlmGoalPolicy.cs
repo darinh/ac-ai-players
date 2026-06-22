@@ -8355,7 +8355,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // a not-a-recommendation disclaimer that points to ## Inventory (where the
         // LLM can see whether it still holds the item); no urgency, no "loop", no
         // game knowledge.
-        var giveByKey = new Dictionary<string, (int Count, string Display, string? Guid)>(StringComparer.OrdinalIgnoreCase);
+        var giveByKey = new Dictionary<string, (int Count, string Display, string? Guid, string? ItemName)>(StringComparer.OrdinalIgnoreCase);
         foreach (var ge in recentGoalEmits)
         {
             var txt = ge.Text!;
@@ -8373,16 +8373,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(itemSel, "name=\"([^\"]+)\"");
             var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : itemSel);
             var itemDisplay = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : itemSel);
+            var itemName = nm.Success ? nm.Groups[1].Value : null;
             var display = tnm.Success ? $"{itemDisplay} to {tnm.Groups[1].Value}" : itemDisplay;
             if (giveByKey.TryGetValue(key, out var cur))
             {
                 var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
                     ? display : cur.Display;
-                giveByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null));
+                giveByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null), cur.ItemName ?? itemName);
             }
             else
             {
-                giveByKey[key] = (1, display, gm.Success ? gm.Value : null);
+                giveByKey[key] = (1, display, gm.Success ? gm.Value : null, itemName);
             }
         }
         if (giveByKey.Count > 0)
@@ -8409,6 +8410,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- raw fact, not a recommendation. A Give moves an item from your inventory to a recipient, " +
                 "so it requires that item to still be in `## Inventory` above; the goal verbs Talk, Use, " +
                 "Pickup, Attack, and Explore also remain executable right now. Your call.");
+            // Spent-Give backstop. Live (a fresh-character run that finished the
+            // starting area; the concrete trace is in this slice's commit body):
+            // after a turn-in Give SUCCEEDED and the bot changed zones, the LLM
+            // re-emitted that same Give many times in the next zone where neither
+            // the item nor the recipient existed (each resolving to no target) — a
+            // wasted deliberation per tick. The passive disclaimer above did not
+            // stop it. When the bot has emitted a Give for a NAMED item >=2 times
+            // AND that item is NO LONGER in inventory, the Give cannot succeed now
+            // (the item left the pack — often because the Give already went
+            // through) — surface a decision-proximate, actionable fact so the loop
+            // ends. Pure compare of the bot's OWN emitted-Give history against its
+            // OWN inventory (same OneLine normalization on both sides); no item/NPC
+            // literals, no priority, the LLM still chooses what to do instead.
+            var heldNamesLc = new HashSet<string>(
+                world.Inventory
+                    .Select(i => OneLine(i.Name))
+                    .Where(n => n is not null)
+                    .Select(n => n!.ToLowerInvariant()),
+                StringComparer.Ordinal);
+            var spentGiveDisplays = giveByKey.Values
+                .Where(v => v.Count >= 2
+                    && OneLine(v.ItemName) is string inm
+                    && !heldNamesLc.Contains(inm.ToLowerInvariant()))
+                .OrderByDescending(v => v.Count)
+                .Select(v => v.Display)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (spentGiveDisplays.Count > 0)
+                sb.AppendLine(
+                    $"- you have repeatedly emitted Give for {string.Join(", ", spentGiveDisplays)}, but that " +
+                    "item is NOT in `## Inventory` — you do NOT currently hold it, so you CANNOT Give it right " +
+                    "now (a Give needs the item in your pack; if you already handed it over, that step is " +
+                    "finished). Stop re-emitting this Give — re-acquire the item FIRST if you still intend to " +
+                    "give it, otherwise pursue DIFFERENT progress (hunt a `monster`, `Talk` an un-talked NPC, " +
+                    "`Explore` onward, or act on a `## Held-item objectives` entry).");
         }
         // ── ## Recent Pickup (end-of-prompt salience capsule) ────────────
         // Mirrors ## Recent Use/## Recent Give/## Recent Talk for the Pickup
