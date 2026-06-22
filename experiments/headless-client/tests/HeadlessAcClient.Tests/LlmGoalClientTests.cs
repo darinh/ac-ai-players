@@ -297,7 +297,32 @@ public class LlmGoalClientTests
         Assert.Single(handler.RequestedModels);
     }
 
-    // ---- per-model cooldown (skip known-walled models across calls) ----
+    [Fact]
+    public void DefaultClient_UsesCapableFirstFallbackChain()
+    {
+        // A fully UNCONFIGURED client (no model arg, no AC_BOTS_LLM_MODEL / no
+        // AC_BOTS_LLM_FALLBACK_MODELS) must roster the built-in capable-first
+        // rotation, NOT a single weak model — so an unconfigured run prefers the
+        // most capable model and only degrades to a high-availability one as a
+        // last resort when every capable model is quota-walled.
+        var savedModel = Environment.GetEnvironmentVariable("AC_BOTS_LLM_MODEL");
+        var savedFallback = Environment.GetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS");
+        try
+        {
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_MODEL", null);
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS", null);
+            var llm = new LlmGoalClient(new HttpClient(new ModelRoutingHandler(_ => TooMany())));
+
+            Assert.True(llm.Models.Count >= 2, "default client must roster a fallback chain, not one model");
+            Assert.Equal("openai/gpt-4o", llm.Models[0]);
+            Assert.Contains("meta/llama-3.3-70b-instruct", llm.Models); // high-availability last resort present
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_MODEL", savedModel);
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS", savedFallback);
+        }
+    }
 
     private static readonly DateTimeOffset T0 = new(2026, 6, 10, 12, 0, 0, TimeSpan.Zero);
 

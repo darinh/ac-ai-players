@@ -56,13 +56,22 @@ internal sealed class LlmGoalClient
 {
     private const string DefaultEndpoint = "https://models.github.ai/inference/chat/completions";
 
-    // meta/llama-3.3-70b-instruct verified working on GitHub Models
-    // (flexguid01-run-01 spike: 12/20 LLM kickoffs succeeded). The
-    // previous default `openai/gpt-4o-mini` is chronically 429-rate-
-    // limited on the same endpoint — every spike using it burned the
-    // Slice T backoff window within the first call. Override via
-    // AC_BOTS_LLM_MODEL env var if you need a specific model.
-    private const string DefaultModel    = "meta/llama-3.3-70b-instruct";
+    // Default model rotation. GitHub Models is rate-limited per-model-per-day, so
+    // the bot must lean on a CHAIN of models, not one. The primary is the most
+    // capable generally-available model (better quest/combat decisions); on a 429
+    // (daily quota) the client rotates to the next candidate within a single
+    // CompleteAsync call and STICKS to whatever answers, ending at a
+    // high-availability model as a last resort so the bot keeps deciding even when
+    // every capable model is quota-walled. Override via AC_BOTS_LLM_MODEL /
+    // AC_BOTS_LLM_FALLBACK_MODELS. (History: earlier single defaults of
+    // openai/gpt-4o-mini, then meta/llama-3.3-70b-instruct, shipped with NO
+    // fallback chain — so an unconfigured run used ONE model and degraded to weak
+    // decisions the instant it 429'd. gpt-4o-mini was noted as chronically
+    // 429-prone, which is exactly why a rotation, not a single fixed model, is the
+    // right default.)
+    private const string DefaultModel = "openai/gpt-4o";
+    private const string DefaultFallbackModels =
+        "openai/gpt-4.1-mini;mistral-ai/mistral-small-2503;meta/llama-3.3-70b-instruct";
 
     private readonly HttpClient _http;
     private readonly string _endpoint;
@@ -140,11 +149,18 @@ internal sealed class LlmGoalClient
         _endpoint = endpoint
             ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_ENDPOINT")
             ?? DefaultEndpoint;
-        var primary = model
-            ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_MODEL")
-            ?? DefaultModel;
+        // Resolve the primary model; remember whether it came from the built-in
+        // DEFAULT (no explicit model arg and no AC_BOTS_LLM_MODEL). The default
+        // fallback CHAIN is only auto-applied for a fully-unconfigured client — a
+        // caller that names its own primary (even a blank one, as a degenerate
+        // fixed-model config) keeps the old behaviour of NO implicit fallbacks
+        // unless it also names them.
+        var primaryFromConfig = model
+            ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_MODEL");
+        var primary = primaryFromConfig ?? DefaultModel;
         var fallbacks = fallbackModels
-            ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS");
+            ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS")
+            ?? (primaryFromConfig is null ? DefaultFallbackModels : null);
         _models = BuildModelList(primary, fallbacks);
         _explicitApiKey = apiKey
             ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_API_KEY")
