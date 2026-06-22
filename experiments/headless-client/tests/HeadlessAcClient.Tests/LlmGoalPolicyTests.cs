@@ -6945,6 +6945,80 @@ public class LlmGoalPolicyTests
         Assert.Equal(2u, proj.Contracts[0].Stage);
     }
 
+    private static WorldStateProjection BuildVendorContractWorld(uint[] stages, bool vendorOpen) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+        Contracts = stages.Select((s, i) => new ContractProjection { ContractId = (uint)(100 + i), Stage = s }).ToArray(),
+        Vendor = vendorOpen
+            ? new VendorProjection
+            {
+                VendorGuid = 0x9001u, BuyCostMultiplier = 1.0f,
+                Offers = new[] { new VendorOfferProjection { Name = "Contract for the Den", Value = 10u, StackSize = -1, ItemType = 0u } },
+            }
+            : null,
+    };
+
+    [Fact]
+    public void ContractBuyCue_FiresWhenNoContractsAndVendorOpen()
+    {
+        // At a contract-selling vendor with NO tracked contract, the bot should
+        // BUY one (the live "broker open, 0 Buy" gap) — the cue bridges to Buy.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(System.Array.Empty<uint>(), vendorOpen: true), new EventStream(), null);
+        Assert.Contains("## Vendor offerings", prompt);
+        Assert.Contains("BUY one here", prompt);
+    }
+
+    [Fact]
+    public void ContractBuyCue_FiresWhenBatchAllDoneAndVendorOpen()
+    {
+        // Every tracked contract is stage-3 DONE (finished batch) and the broker is
+        // open -> refresh the batch by BUYing a fresh contract.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(new[] { 3u, 3u }, vendorOpen: true), new EventStream(), null);
+        Assert.Contains("BUY one here", prompt);
+    }
+
+    [Fact]
+    public void ContractBuyCue_SuppressedWhenUnfinishedContractHeld()
+    {
+        // An unfinished (stage-2) contract is in progress; the bot should pursue it,
+        // not buy another — the cue must NOT fire even with the vendor open.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(new[] { 2u }, vendorOpen: true), new EventStream(), null);
+        Assert.Contains("## Vendor offerings", prompt);
+        Assert.DoesNotContain("BUY one here", prompt);
+    }
+
+    [Fact]
+    public void ContractBuyCue_SuppressedWhenBatchMixedDoneAndUnfinished()
+    {
+        // A mixed batch (one stage-3 DONE, one stage-2 unfinished) is NOT a finished
+        // batch (HeldBatchAllDone requires ALL stage-3) and Count>0, so the bot still
+        // has work to do — the cue must stay off.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(new[] { 3u, 2u }, vendorOpen: true), new EventStream(), null);
+        Assert.Contains("## Vendor offerings", prompt);
+        Assert.DoesNotContain("BUY one here", prompt);
+    }
+
+    [Fact]
+    public void ContractBuyCue_SuppressedWhenVendorNotOpen()
+    {
+        // No vendor panel open -> the whole ## Vendor offerings capsule (and the
+        // cue) is absent; the FIND-A-KILL-TASK rule handles getting TO a source.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(System.Array.Empty<uint>(), vendorOpen: false), new EventStream(), null);
+        Assert.DoesNotContain("## Vendor offerings", prompt);
+        Assert.DoesNotContain("BUY one here", prompt);
+    }
+
     private static WorldStateProjection BuildEnrichedContractWorld(params ContractProjection[] contracts) => new()
     {
         Self = new SelfProjection
