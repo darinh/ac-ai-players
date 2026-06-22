@@ -16828,6 +16828,67 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Recent Use", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_SpentGiveCue_FiresWhenItemNoLongerHeld()
+    {
+        // After a Give succeeds the item leaves inventory; if the LLM keeps
+        // re-emitting that Give (>=2x) for an item NOT in inventory, the strong
+        // "you cannot Give it right now" backstop fires so the loop ends.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(),  // empty inventory: the given item is gone
+            BuildGiveStream("name=\"Academy Token\"", "name=\"Jonathan\"", 3), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.Contains("CANNOT Give it right now", prompt);
+        Assert.Contains("Academy Token to Jonathan", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpentGiveCue_FiresAtCountTwo()
+    {
+        // Pin the chosen loop threshold: exactly two emits of a not-held item
+        // already fire the backstop (one tick earlier than three).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(),
+            BuildGiveStream("name=\"Academy Token\"", "name=\"Jonathan\"", 2), null);
+        Assert.Contains("CANNOT Give it right now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpentGiveCue_SuppressedWhileItemStillHeld()
+    {
+        // The item is still in inventory (the Give has not yet succeeded), so the
+        // passive Recent-Give capsule renders but the strong cue must NOT.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Academy Token"),
+            BuildGiveStream("name=\"Academy Token\"", "name=\"Jonathan\"", 3), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.DoesNotContain("CANNOT Give it right now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpentGiveCue_SuppressedForSingleEmit()
+    {
+        // A single emit (count 1) for a not-held item is not yet a loop; the strong
+        // backstop only fires once the LLM has repeated it.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(),
+            BuildGiveStream("name=\"Academy Token\"", "name=\"Jonathan\"", 1), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.DoesNotContain("CANNOT Give it right now", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpentGiveCue_SuppressedForGuidOnlyGive()
+    {
+        // A guid-only Give carries no item name= to compare against inventory, so
+        // the backstop conservatively does NOT fire (no false "you don't hold it").
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(),
+            BuildGiveStream("guid=0x80002F58", "name=\"Jonathan\"", 3), null);
+        Assert.Contains("## Recent Give", prompt);
+        Assert.DoesNotContain("CANNOT Give it right now", prompt);
+    }
+
     // ── ## Recent Pickup endcap (mirrors ## Recent Use) ──────────────
     // Live academy runs (gpt-4o-mini) show the LLM re-emitting Pickup of the SAME
     // un-acquirable ground item many times (0 inventory add). cp-2375's failed-
