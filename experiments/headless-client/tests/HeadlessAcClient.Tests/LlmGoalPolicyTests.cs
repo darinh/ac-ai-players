@@ -11198,6 +11198,21 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void OnlyBeatenMonstersInView_SingleDeathKind_False()
+    {
+        // First-death re-test propagation (gpt-5.4 review): a kind the bot died to
+        // exactly ONCE is no longer lethal-beaten on the shared verdict, so the
+        // stalemate egress must NOT classify the scene as "only beaten monsters" —
+        // the bot stays to re-engage rather than wandering off (the live wedge).
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1,
+            Mob(MobGuid, "Sparring Golem", 12698u));
+        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
     public void OnlyBeatenMonstersInView_CorpseOnly_False()
     {
         // A corpse is not an attackable monster -> no stalemate.
@@ -11314,6 +11329,44 @@ public class LlmGoalPolicyTests
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Explore, goal!.Kind);
         Assert.Equal("override:beaten-kind-egress", goal.Source);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_SingleDeathKind_AttackHonored_NotVetoed()
+    {
+        // End-to-end first-death re-test (gpt-5.4 review): the LLM orders Attack on
+        // a kind it died to exactly ONCE, the only monster in view. The veto must
+        // NOT fire and the Attack is RETURNED (not substituted to the beaten-kind
+        // Explore egress) — the bot re-engages to try for its first kill. This is
+        // the end-to-end mirror of the live A/B that produced the first kills.
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Attack\",\"target\":{\"name\":\"Sparring Golem\"},\"rationale\":\"x\",\"priority\":3}" } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
+            MaxLossBotLevel: 1) };
+        var world = BuildWorldBeaten(hist, selfLevel: 1,
+            Mob(MobGuid, "Sparring Golem", 12698u));
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.DoesNotContain("egress", goal.Source ?? "");
     }
 
     [Fact]
