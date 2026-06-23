@@ -2676,7 +2676,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
             world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
-            FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count));
+            FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
+            world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2711,7 +2712,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
-        int refreshOpps = 0)
+        int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2756,6 +2757,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // self-reports the buy-gap. Pure observability; no behavior change.
         if (refreshOpps > 0)
             line += $" refresh-opps={refreshOpps}";
+        // Combat-effectiveness signal: surface the session swing-outcome counters
+        // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
+        // only when at least one has incremented. Pure observability; no behavior
+        // change, no game knowledge.
+        if (swingsLanded + swingsEvaded > 0)
+            line += $" swings={swingsLanded}L/{swingsEvaded}E";
         return line;
     }
 

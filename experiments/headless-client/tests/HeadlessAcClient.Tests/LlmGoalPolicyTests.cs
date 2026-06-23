@@ -809,6 +809,31 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("refresh-opps", without);
     }
 
+    [Fact]
+    public void BuildRunSummaryLine_Swings_ShownOnlyWhenAnyResolved()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            swingsLanded: 41, swingsEvaded: 45);
+        Assert.Contains("swings=41L/45E", with);
+
+        // Landed-only and evaded-only both render (any resolved swing).
+        var landedOnly = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            swingsLanded: 3, swingsEvaded: 0);
+        Assert.Contains("swings=3L/0E", landedOnly);
+
+        // No swings resolved -> field omitted (no noise).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            swingsLanded: 0, swingsEvaded: 0);
+        Assert.DoesNotContain("swings=", none);
+    }
+
     private static VisibleObjectProjection VendorObj(uint guid, float dist)
         => new() { Guid = guid, Name = "Shop", IsVendor = true, Distance = dist, IsMonster = false, IsCorpse = false };
 
