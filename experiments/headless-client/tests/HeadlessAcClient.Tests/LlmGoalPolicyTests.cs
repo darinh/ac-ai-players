@@ -789,6 +789,82 @@ public class LlmGoalPolicyTests
         Assert.Contains("triggers={-}", line);
         Assert.Contains("last-landblock=? ", line);
         Assert.Contains("level=? total-xp=?", line);
+        Assert.DoesNotContain("top-emit", line); // omitted when no repeated emit
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_WithTopEmit_AppendsLoopField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int> { ["no-current-goal"] = 15 },
+            distinctLandblocks: 1, lastLandblock: 0xA9B4u, level: 8, totalXp: 42000L,
+            model: "m", topEmit: "[Talk Wilomine]x12");
+        Assert.Contains(" top-emit=[Talk Wilomine]x12", line);
+    }
+
+    [Fact]
+    public void TopRepeatedGoalEmitLabel_RepeatedTalk_ReportsLoopWithCount()
+    {
+        var es = new EventStream();
+        for (var i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Talk target=name=\"Wilomine\" item= source=llm:test",
+            });
+        Assert.Equal("[Talk Wilomine]x3", LlmGoalPolicy.TopRepeatedGoalEmitLabel(es, 15));
+    }
+
+    [Fact]
+    public void TopRepeatedGoalEmitLabel_GuidKeyedFixation_ReportsLoop()
+    {
+        var es = new EventStream();
+        for (var i = 0; i < 2; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Attack target=guid=0x80000C68 name=\"Drudge Skulker\" item= source=llm:test",
+            });
+        Assert.Equal("[Attack guid=0x80000C68]x2", LlmGoalPolicy.TopRepeatedGoalEmitLabel(es, 15));
+    }
+
+    [Fact]
+    public void TopRepeatedGoalEmitLabel_NoRepeat_ReturnsNull()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"Alcott\" item= source=llm:test",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Attack target=name=\"Black Rabbit\" item= source=llm:test",
+        });
+        Assert.Null(LlmGoalPolicy.TopRepeatedGoalEmitLabel(es, 15));
+    }
+
+    [Fact]
+    public void TopRepeatedGoalEmitLabel_EmptyStream_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.TopRepeatedGoalEmitLabel(new EventStream(), 15));
+    }
+
+    [Fact]
+    public void TopRepeatedGoalEmitLabel_NameContainsItemToken_NotTruncated()
+    {
+        // A pathological target name that itself contains " item=" must not be
+        // truncated (the bounded `target=(.*?) item=` regex would clip it and
+        // mis-key the loop). The quote-robust name extraction spans it intact.
+        var es = new EventStream();
+        for (var i = 0; i < 2; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Talk target=name=\"Odd item= name\" item= source=llm:test",
+            });
+        Assert.Equal("[Talk Odd item= name]x2", LlmGoalPolicy.TopRepeatedGoalEmitLabel(es, 15));
     }
 
     [Fact]

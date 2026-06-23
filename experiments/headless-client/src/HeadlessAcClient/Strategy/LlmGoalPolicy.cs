@@ -2481,7 +2481,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             Console.WriteLine(BuildRunSummaryLine(
                 _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
-                world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model));
+                world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
+                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions)));
         }
         _tempo.RecordLlmCall();
 
@@ -2503,7 +2504,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // state; no game knowledge, no behavior.
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
-        int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model)
+        int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
+        string? topEmit = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2511,9 +2513,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 .OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key, StringComparer.Ordinal)
                 .Select(kv => $"{kv.Key}:{kv.Value}"));
         var lb = lastLandblock is uint l ? $"0x{l:X4}" : "?";
-        return $"[run-summary] decisions={decisions} triggers={{{triggers}}} " +
+        var line = $"[run-summary] decisions={decisions} triggers={{{triggers}}} " +
                $"distinct-landblocks={distinctLandblocks} last-landblock={lb} " +
                $"level={(level?.ToString() ?? "?")} total-xp={(totalXp?.ToString() ?? "?")} active-model={model}";
+        // Loop-detector field: the single most-repeated recent goal emission, shown
+        // only when it recurs (>=2). A goal the bot re-emits many times is the
+        // signature of a fixation OR an unresolved-target (target=MISS) loop — the
+        // dominant gap class — so surfacing it makes a run self-report the loop
+        // without manual log archaeology. Purely a structural read of the bot's OWN
+        // emission history; no behavior change, no game knowledge.
+        if (!string.IsNullOrEmpty(topEmit))
+            line += $" top-emit={topEmit}";
+        return line;
+    }
+
+    /// <summary>
+    /// The most-repeated goal emission (keyed by verb + target identity — guid token
+    /// if present, else name) among the last <paramref name="window"/> GoalEmitted
+    /// events, returned as a <c>[verb target]xN</c> label ONLY when it recurs
+    /// (count &gt;= 2). Mirrors the GoalEmitted Text parse used by the repeat-loop
+    /// guards (Tactics formats it as <c>&lt;Kind&gt; target=&lt;Selector&gt; item=...
+    /// source=...</c>). A run that re-emits the same goal — a fixation, or an
+    /// unresolved-target re-emit loop — self-reports it in <c>[run-summary]</c>.
+    /// Pure structural read of the bot's OWN emission history; no game knowledge.
+    /// </summary>
+    internal static string? TopRepeatedGoalEmitLabel(EventStream events, int window)
+    {
+        var recent = events.RecentGoalEmissions()
+            .Where(e => !string.IsNullOrEmpty(e.Text))
+            .Take(window)
+            .ToList();
+        if (recent.Count == 0) return null;
+        var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+        string? topKey = null;
+        var topCount = 0;
+        foreach (var ge in recent)
+        {
+            var txt = ge.Text!;
+            var sp = txt.IndexOf(' ');
+            var kind = sp > 0 ? txt[..sp] : txt;
+            var key = kind;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti >= 0)
+            {
+                // Identity of the target selector. Robust against a name that itself
+                // contains " item="/" source=" — a bounded `target=(.*?) item=` regex
+                // truncates such names (the same hazard CountRecentTalkGoalsToName
+                // calls out). The selector prints `guid=...` before `name="..."`, so a
+                // guid-LED target keys by its guid (the leading token); otherwise the
+                // first `name="..."` after `target=` is the target's (a name-only item
+                // appears later), and the quote run [^"]+ safely spans embedded tokens.
+                var after = txt[ti..];
+                var body = after.Length > 7 ? after[7..] : string.Empty;
+                if (body.StartsWith("guid=0x", StringComparison.Ordinal))
+                {
+                    var gm = System.Text.RegularExpressions.Regex.Match(body, "^guid=0x[0-9A-Fa-f]+");
+                    if (gm.Success) key = kind + " " + gm.Value;
+                }
+                else
+                {
+                    var nm = System.Text.RegularExpressions.Regex.Match(after, "name=\"([^\"]+)\"");
+                    if (nm.Success) key = kind + " " + nm.Groups[1].Value;
+                }
+            }
+            var c = counts.GetValueOrDefault(key) + 1;
+            counts[key] = c;
+            if (c > topCount) { topCount = c; topKey = key; }
+        }
+        return topCount >= 2 && topKey is not null ? $"[{topKey}]x{topCount}" : null;
     }
 
     private async Task<(LlmResult, Guid, string, string, long, bool)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart, bool hadCurrentGoalAtCallStart)
