@@ -8582,6 +8582,95 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "in `## Inventory` is not entering your bag. The goal verbs Talk, Use, Attack, and Explore also " +
                 "remain executable right now. Your call.");
         }
+        // ── ## Recent Buy (end-of-prompt salience capsule) ────────────────
+        // Mirrors ## Recent Pickup/Give/Use/Talk for the Buy verb. Live (open-world
+        // gpt-4o run): the LLM re-emitted Buy of the SAME vendor item many times
+        // when the purchase never completed — the bot could not afford it (or the
+        // vendor wanted a currency it lacked), so the bought item never arrived in
+        // ## Inventory and the LLM kept re-buying. The Motor's pendingBuy dedup
+        // throttles the actual purchases, but nothing tells the LLM the buy is not
+        // sticking, so it burns a decision per cycle. Re-surface the recent Buy
+        // emission history keyed by the item identity (the goal's target); and when
+        // an item has been Bought >=2 times yet is STILL not in ## Inventory, add an
+        // actionable "the buy is not completing — stop re-buying it" backstop (the
+        // Buy analogue of the spent-Give backstop). RAW counts + own inventory; no
+        // urgency, no game knowledge.
+        var buyByKey = new Dictionary<string, (int Count, string Display, string? Guid, string? ItemName)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in recentGoalEmits)
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Buy ", StringComparison.Ordinal)) continue;
+            var sm = System.Text.RegularExpressions.Regex.Match(txt, "target=(.*?) item=.*? source=");
+            if (!sm.Success) continue;
+            var sel = sm.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>") continue;
+            var gm = System.Text.RegularExpressions.Regex.Match(sel, "guid=0x[0-9A-Fa-f]+");
+            var nm = System.Text.RegularExpressions.Regex.Match(sel, "name=\"([^\"]+)\"");
+            var key = gm.Success ? gm.Value : (nm.Success ? nm.Groups[1].Value : sel);
+            var display = nm.Success ? nm.Groups[1].Value : (gm.Success ? gm.Value : sel);
+            var itemName = nm.Success ? nm.Groups[1].Value : null;
+            if (buyByKey.TryGetValue(key, out var cur))
+            {
+                var betterDisplay = cur.Display.StartsWith("guid=", StringComparison.Ordinal) && nm.Success
+                    ? display : cur.Display;
+                buyByKey[key] = (cur.Count + 1, betterDisplay, cur.Guid ?? (gm.Success ? gm.Value : null), cur.ItemName ?? itemName);
+            }
+            else
+            {
+                buyByKey[key] = (1, display, gm.Success ? gm.Value : null, itemName);
+            }
+        }
+        if (buyByKey.Count > 0)
+        {
+            var endcapBuyDupDisplays = buyByKey.Values
+                .GroupBy(v => v.Display, StringComparer.OrdinalIgnoreCase)
+                .Where(g => g.Count() > 1)
+                .Select(g => g.Key)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var endcapBuyList = string.Join(", ", buyByKey
+                .OrderByDescending(p => p.Value.Count)
+                .Select(p =>
+                {
+                    var label = endcapBuyDupDisplays.Contains(p.Value.Display) && p.Value.Guid is not null
+                        ? $"{p.Value.Display} ({p.Value.Guid})"
+                        : p.Value.Display;
+                    return $"{label} x{p.Value.Count}";
+                }));
+            sb.AppendLine();
+            sb.AppendLine("## Recent Buy");
+            sb.AppendLine($"- in your last 10 emitted goals you emitted Buy on: {endcapBuyList}.");
+            sb.AppendLine(
+                "- raw fact, not a recommendation. A successful Buy moves the item from the open vendor INTO " +
+                "`## Inventory` above (spending your currency). The goal verbs Talk, Use, Pickup, Attack, and " +
+                "Explore also remain executable right now. Your call.");
+            // Buy-not-completing backstop (the Buy analogue of the spent-Give
+            // backstop): an item Bought >=2 times that is STILL not in ## Inventory
+            // is not being acquired — most often it is unaffordable, or the vendor
+            // wants a currency the bot lacks — so re-buying it only burns decisions.
+            // Own emit history vs own inventory (OneLine-normalized both sides); no
+            // game knowledge, no source-side decision.
+            var buyHeldNamesLc = new HashSet<string>(
+                world.Inventory
+                    .Select(i => OneLine(i.Name))
+                    .Where(n => n is not null)
+                    .Select(n => n!.ToLowerInvariant()),
+                StringComparer.Ordinal);
+            var stalledBuyDisplays = buyByKey.Values
+                .Where(v => v.Count >= 2
+                    && OneLine(v.ItemName) is string inm
+                    && !buyHeldNamesLc.Contains(inm.ToLowerInvariant()))
+                .OrderByDescending(v => v.Count)
+                .Select(v => v.Display)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (stalledBuyDisplays.Count > 0)
+                sb.AppendLine(
+                    $"- you have repeatedly emitted Buy for {string.Join(", ", stalledBuyDisplays)}, but it is NOT in " +
+                    "`## Inventory` — if the purchase keeps FAILING to go through (you likely cannot afford it, or " +
+                    "this vendor wants a currency you do not have), re-buying it will not help: try a CHEAPER " +
+                    "offering, a different vendor, or go earn currency / pursue another objective. (If you are " +
+                    "deliberately re-stocking a consumable you `Use` right after buying, ignore this.)");
+        }
         // The cp-2338 InteractUnreachableTracker is a Motor-only guard: when
         // the server refuses an interaction as out-of-reach, the Motor marks
         // that guid and treats any goal that resolves to it as unresolved for
