@@ -20829,14 +20829,54 @@ public class LlmGoalPolicyTests
     [InlineData("1", true)]
     [InlineData("true", true)]
     [InlineData("ON", true)]
-    [InlineData(null, false)]
+    [InlineData(null, true)]      // default ON (unset)
+    [InlineData("", true)]        // default ON (empty)
     [InlineData("0", false)]
     [InlineData("false", false)]
     [InlineData("off", false)]
-    [InlineData("yes", false)]
-    public void ResolveSkipEmptyExploreCall_DefaultsOff_OptInOnly(string? env, bool expected)
+    [InlineData("yes", true)]     // any non-off value stays ON
+    public void ResolveSkipEmptyExploreCall_DefaultsOn_OptOutOnly(string? env, bool expected)
     {
         Assert.Equal(expected, LlmGoalPolicy.ResolveSkipEmptyExploreCall(env));
+    }
+
+    private static Intent MakeStatusIntent(IntentLifecycle status) => new()
+    {
+        Id = "i-test",
+        Kind = "quest:test",
+        Rationale = "test",
+        Completion = new KillCountSincePushAtLeastPredicate(3),
+        Baseline = IntentBaseline.Capture(BuildImmobileWorld(0), new EventStream(), DateTime.UtcNow),
+        Status = status,
+    };
+
+    [Fact]
+    public void StackHasNoActiveObjective_NullStack_False()
+        // A null stack = no intent system engaged (free-wandering); the skip gates
+        // must STILL skip in this common case, so this is NOT "no active objective".
+        => Assert.False(LlmGoalPolicy.StackHasNoActiveObjective(null));
+
+    [Fact]
+    public void StackHasNoActiveObjective_EmptyStack_True()
+        => Assert.True(LlmGoalPolicy.StackHasNoActiveObjective(new IntentStack()));
+
+    [Fact]
+    public void StackHasNoActiveObjective_ActiveTop_False()
+    {
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(MakeStatusIntent(IntentLifecycle.Active)));
+        Assert.False(LlmGoalPolicy.StackHasNoActiveObjective(stack));
+    }
+
+    [Fact]
+    public void StackHasNoActiveObjective_BlockedTop_True()
+    {
+        // A root deadline-Blocked IN PLACE (Intent.CheckTopForCompletion) emits no
+        // Goal lifecycle event, so the event-based completion guard misses it; this
+        // status check is what makes the skip gates wake the LLM to re-plan.
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(MakeStatusIntent(IntentLifecycle.Blocked)));
+        Assert.True(LlmGoalPolicy.StackHasNoActiveObjective(stack));
     }
 
     [Fact]
