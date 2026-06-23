@@ -335,6 +335,77 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void SelectorResolver_PartialName_TitleLadenWireName_ResolvesUniquely()
+    {
+        // The model names an NPC by the distinctive part of an occupation/title-
+        // laden wire name. With a single matching object, the fuzzy fallback
+        // resolves it.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, 0x90001001u, "Barkeeper Wilomine", wcid: 710u, itemType: 0x10u, cellId: 0x86020001u);
+        var npc = SelectorResolver.Resolve(new Selector { Name = "Wilomine" }, ws);
+        Assert.Single(npc);
+        Assert.Equal(0x90001001u, npc[0].Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_PartialName_LeadingDistinctiveWord_Resolves()
+    {
+        // The distinctive word can lead the wire name (personal name + descriptor),
+        // with punctuation between words; tokenization is whole-word so a comma
+        // does not block the match.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, 0x90001002u, "Rand, Game Hunter", wcid: 711u, itemType: 0x10u, cellId: 0x86020001u);
+        var npc = SelectorResolver.Resolve(new Selector { Name = "Rand" }, ws);
+        Assert.Single(npc);
+        Assert.Equal(0x90001002u, npc[0].Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_PartialName_Ambiguous_ResolvesToNothing()
+    {
+        // Two different objects share the distinctive word — the partial is
+        // ambiguous, so it must stay UNRESOLVED (empty) rather than snap to one.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, 0x90001003u, "Barkeeper Wilomine", wcid: 710u, itemType: 0x10u, cellId: 0x86020001u);
+        SeedSnapshot(ws, 0x90001004u, "Apprentice Wilomine", wcid: 712u, itemType: 0x10u, cellId: 0x86020001u);
+        var npc = SelectorResolver.Resolve(new Selector { Name = "Wilomine" }, ws);
+        Assert.Empty(npc);
+    }
+
+    [Fact]
+    public void SelectorResolver_PartialName_ExactMatchStillWinsOverFuzzy()
+    {
+        // When an EXACT name match exists, the fuzzy fallback never runs — even if
+        // another object would also fuzzy-match the partial.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, 0x90001005u, "Wilomine", wcid: 710u, itemType: 0x10u, cellId: 0x86020001u);
+        SeedSnapshot(ws, 0x90001006u, "Barkeeper Wilomine", wcid: 713u, itemType: 0x10u, cellId: 0x86020001u);
+        var npc = SelectorResolver.Resolve(new Selector { Name = "Wilomine" }, ws);
+        Assert.Single(npc);
+        Assert.Equal(0x90001005u, npc[0].Guid);
+    }
+
+    [Theory]
+    [InlineData("Barkeeper Wilomine", "Wilomine", true)]   // trailing distinctive word
+    [InlineData("Sean the Speedy", "Sean", true)]          // leading distinctive word
+    [InlineData("Rand, Game Hunter", "Rand", true)]        // punctuation tokenized away
+    [InlineData("Rand, Game Hunter", "Game Hunter", true)] // contiguous multi-word subsequence
+    [InlineData("Contract Broker", "broker", true)]        // case-insensitive
+    [InlineData("Barkeeper Wilomine", "keeper", false)]    // whole-word, not substring
+    [InlineData("Drudge Slinker", "Skulker", false)]       // absent word
+    [InlineData("Drudge Slinker", "Slinker Drudge", false)]// out-of-order is not contiguous
+    [InlineData("Wilomine", "Barkeeper Wilomine", false)]  // selector longer than object
+    [InlineData("Barkeeper Wilomine", "", false)]          // empty selector
+    public void MatchesNameWordSubsequence_WholeWordContiguous(string obj, string sel, bool expected)
+    {
+        Assert.Equal(expected, SelectorResolver.MatchesNameWordSubsequence(obj, sel));
+    }
+
+    [Fact]
     public void SelectorResolver_Wcid_ExactMatch()
     {
         var ws = BuildSeededWorld();

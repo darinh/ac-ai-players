@@ -55,17 +55,39 @@ internal static class SelectorResolver
         if (sel is null) throw new ArgumentNullException(nameof(sel));
         if (sel.IsEmpty) return Array.Empty<WorldObjectSnapshot>();
 
-        return world.Objects.Values
+        // Candidate set after every NON-name-exact filter. The exact name match
+        // is applied separately so a miss can fall back to a bounded fuzzy name
+        // match WITHOUT relaxing any other constraint (guid/wcid/itemtype/
+        // shortdesc/namecontains/landblock/corpse/excluded-guids all still hold).
+        var candidates = world.Objects.Values
             .Where(o => !excludeCorpses || !IsCorpse(o))
             .Where(o => excludeGuids is null || !excludeGuids.Contains(o.Guid))
             .Where(o => MatchesGuid(o, sel))
-            .Where(o => MatchesName(o, sel))
             .Where(o => MatchesNameContains(o, sel))
             .Where(o => MatchesWcid(o, sel))
             .Where(o => MatchesItemTypeMask(o, sel))
             .Where(o => MatchesShortDescContains(o, sel, weenies))
             .Where(o => MatchesSameLandblockAsActor(o, actor))
             .ToList();
+
+        var exact = candidates.Where(o => MatchesName(o, sel)).ToList();
+        if (exact.Count > 0 || string.IsNullOrEmpty(sel.Name))
+            return exact;
+
+        // Exact name match (including the quoted-role strip in MatchesName) found
+        // nothing. AC NPC names frequently bake an occupation/title into the wire
+        // name (a personal name preceded or followed by descriptor words), and the
+        // model often refers to the NPC by only the distinctive part. Fall back to
+        // matching the selector name as a contiguous WHOLE-WORD subsequence of the
+        // object name — but accept it ONLY when it identifies a SINGLE candidate, so
+        // a partial that could mean several different objects stays unresolved (the
+        // LLM re-decides) rather than silently snapping to the nearest. Resolves the
+        // LLM's OWN named target more leniently; never invents a target; no game
+        // knowledge (pure word-boundary string comparison on observed names).
+        var fuzzy = candidates
+            .Where(o => MatchesNameWordSubsequence(o.Name, sel.Name))
+            .ToList();
+        return fuzzy.Count == 1 ? fuzzy : exact; // exact is empty here
     }
 
     public static WorldObjectSnapshot? ResolveSingleNearest(
@@ -141,6 +163,54 @@ internal static class SelectorResolver
         if (openIdx <= 0 || !char.IsWhiteSpace(trimmed[openIdx - 1])) return null;
         var bare = trimmed[..openIdx].TrimEnd();
         return bare.Length > 0 ? bare : null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="selectorName"/>, split into whole words, appears
+    /// as a CONTIGUOUS subsequence of <paramref name="objectName"/>'s words
+    /// (case-insensitive). Words are runs of letters/digits, so punctuation
+    /// (commas, apostrophes) neither fuses nor splits a word inconsistently. Used
+    /// only as a uniqueness-gated fallback after an exact name match fails, so the
+    /// model can name an NPC by the distinctive part of an occupation/title-laden
+    /// wire name. Pure string comparison; no game knowledge.
+    /// </summary>
+    internal static bool MatchesNameWordSubsequence(string? objectName, string? selectorName)
+    {
+        if (string.IsNullOrWhiteSpace(objectName) || string.IsNullOrWhiteSpace(selectorName))
+            return false;
+        var objWords = TokenizeWords(objectName);
+        var selWords = TokenizeWords(selectorName);
+        if (selWords.Count == 0 || selWords.Count > objWords.Count) return false;
+        for (int start = 0; start + selWords.Count <= objWords.Count; start++)
+        {
+            bool all = true;
+            for (int k = 0; k < selWords.Count; k++)
+            {
+                if (!string.Equals(objWords[start + k], selWords[k], StringComparison.OrdinalIgnoreCase))
+                {
+                    all = false;
+                    break;
+                }
+            }
+            if (all) return true;
+        }
+        return false;
+    }
+
+    // Split a name into whole-word tokens (maximal runs of letters/digits),
+    // dropping all punctuation/whitespace. No StringBuilder/regex dependency.
+    private static List<string> TokenizeWords(string s)
+    {
+        var tokens = new List<string>();
+        int i = 0, n = s.Length;
+        while (i < n)
+        {
+            while (i < n && !char.IsLetterOrDigit(s[i])) i++;
+            int start = i;
+            while (i < n && char.IsLetterOrDigit(s[i])) i++;
+            if (i > start) tokens.Add(s.Substring(start, i - start));
+        }
+        return tokens;
     }
 
     private static bool MatchesNameContains(WorldObjectSnapshot o, Selector s)

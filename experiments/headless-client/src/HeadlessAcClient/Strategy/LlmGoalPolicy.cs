@@ -3677,8 +3677,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Self-defense exemption: a kind actively hostile in view is attacking
         // the bot now; fighting back (and the Motor's flee reflexes) own that —
         // do not veto. Only a non-threatened, chosen engagement is overridable.
-        if (world.Visible.Any(v => !v.IsCorpse && v.ObservedHostile
-                                   && VisibleMatchesSelector(target, v)))
+        // Uses the Motor's exact-then-unique-fuzzy name semantics so a partial-name
+        // Attack the Motor WILL resolve to a hostile in view is not wrongly vetoed.
+        if (TargetResolvesToHostileInViewLikeMotor(target, world))
             return false;
 
         // Override an explicit Attack order ONLY to prevent an UNRECOVERABLE
@@ -3723,11 +3724,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // ANY hostile in view would be too broad — the Motor attacks the named
         // selector, NOT the hostile, so an Attack on a PASSIVE target while a
         // different hostile is elsewhere is still a doomed optional swing and must be
-        // dropped. Mirrors IsOptionalAttackOnBeatenKind's target-specific exemption.
-        if (goal.Target is { } t &&
-            world.Visible.Any(v => !v.IsCorpse && v.ObservedHostile && VisibleMatchesSelector(t, v)))
+        // dropped. Mirrors IsOptionalAttackOnBeatenKind's target-specific exemption,
+        // including the Motor's exact-then-unique-fuzzy name resolution.
+        if (goal.Target is { } t && TargetResolvesToHostileInViewLikeMotor(t, world))
             return false;
         return true;
+    }
+
+    /// <summary>
+    /// True iff <paramref name="target"/> resolves to a live HOSTILE in view using the
+    /// SAME exact-then-unique-fuzzy name semantics as the Motor's
+    /// <see cref="SelectorResolver"/> (Attack path: corpses excluded). Exact name
+    /// (incl. the quoted-role strip), <c>NameContains</c>, and <c>Wcid</c> matches
+    /// are the primary path; if NONE match, a UNIQUE whole-word-subsequence name
+    /// match is accepted. Keeps the Attack self-defense exemptions in agreement with
+    /// the target the Motor will actually attack, so a partial-name Attack on a
+    /// hostile-in-view is not wrongly vetoed/dropped by the policy. Bot-owned
+    /// perception only; no game knowledge.
+    /// </summary>
+    private static bool TargetResolvesToHostileInViewLikeMotor(Selector target, WorldStateProjection world)
+    {
+        // Primary: non-corpse visible objects matching by exact name / NameContains
+        // / Wcid (the Motor returns ALL such and picks nearest). Self-defense fires
+        // when any such match is hostile.
+        var exact = world.Visible
+            .Where(v => !v.IsCorpse && VisibleMatchesSelector(target, v))
+            .ToList();
+        if (exact.Count > 0)
+            return exact.Any(v => v.ObservedHostile);
+        // No exact match anywhere in view: mirror the Motor's UNIQUE whole-word-
+        // subsequence fallback (only meaningful for a name selector).
+        if (string.IsNullOrEmpty(target.Name)) return false;
+        var fuzzy = world.Visible
+            .Where(v => !v.IsCorpse
+                        && HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, target.Name))
+            .ToList();
+        return fuzzy.Count == 1 && fuzzy[0].ObservedHostile;
     }
 
     // The DECISION-path definition of a LETHAL-beaten kind: the bot's own
