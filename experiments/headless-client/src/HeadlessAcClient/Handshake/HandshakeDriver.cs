@@ -40,16 +40,89 @@ internal sealed class HandshakeDriver : IDisposable
 {
     private const int RecvBufferSize = 1024;
     private const int ClientVersion = 1802;
-    // Phase 7f.5 — bumped from 1800 → 3600 (60 min). With the
-    // exploration fallback, the bot keeps making progress past 30
-    // min: in phase7f5-headless21-fullrun.log it killed 5 golems
-    // and got the Academy Exit Token within 23 cycles / 30 min,
-    // but ran out of time before reaching the Calling Stone (the
-    // exit mechanism, sometimes 60+u away across multiple cells).
-    // 60 min gives ~75-100 cycles of work, enough to reach the
-    // Calling Stone, USE the exit, and start surveying landblock
-    // 0x86020188 (the academy exit destination — needs research).
-    private const int ObserveSeconds = 3600;
+    // Per-run observe budget (seconds): how long a single process drives the
+    // post-handshake observe loop before it returns and the process exits.
+    // Default 3600 (1 hr). For a LONG autonomous run, override with
+    // AC_BOTS_OBSERVE_SECONDS (e.g. 86400 = 24h) so the process is not bounded
+    // to an hour per launch — the prior hard-coded hour forced a periodic exit
+    // that an external supervisor then had to restart (~tens of seconds of
+    // downtime per cycle). The outer cancellation budget in Program.cs is derived
+    // from this + OuterBudgetHeadroomSeconds, so the two bounds stay consistent.
+    // Mirrors the AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS resolver pattern. Read once at
+    // type-load; pure runtime config, no game knowledge.
+    internal static readonly int ObserveSeconds =
+        ResolveObserveSeconds(Environment.GetEnvironmentVariable("AC_BOTS_OBSERVE_SECONDS"));
+
+    // Outer cancellation headroom (seconds) added on top of ObserveSeconds so the
+    // process-level budget always exceeds the observe loop PLUS the worst-case
+    // pre-observe handshake — including the login resilience loop's full backoff
+    // ladder and per-attempt connect waits. Derived from the actual reconnect
+    // constants so it stays correct if those change (a fixed 100s was smaller than
+    // the ~135s worst-case reconnect overhead, which could cancel a fresh run's
+    // observe window early). The outer budget is a BACKSTOP; the inner observe
+    // deadline is the real run-length control. A mid-observe reconnect restarts the
+    // inner deadline, but the outer budget still bounds total process time, so
+    // aggregate observe time stays ≈ ObserveSeconds.
+    internal static readonly int OuterBudgetHeadroomSeconds = ComputeOuterBudgetHeadroomSeconds();
+
+    // Per-attempt allowance for receiving the server's ConnectRequest (matches the
+    // ReceiveConnectRequestAsync timeout). Named so the headroom derivation and the
+    // receive call share one source of truth.
+    private const int ConnectRequestReceiveTimeoutSeconds = 10;
+
+    // Per-run action budget: the Motor dispatches up to this many actions, then
+    // stays idle until the observe window closes. Default 100. For a LONG run,
+    // raise via AC_BOTS_MAX_ACTIONS_PER_SESSION alongside AC_BOTS_OBSERVE_SECONDS —
+    // otherwise the bot would complete 100 actions and then idle for the remainder
+    // of a long observe window. Read once at type-load; pure runtime config, no
+    // game knowledge.
+    internal static readonly int MaxActionsPerSession =
+        ResolveMaxActionsPerSession(Environment.GetEnvironmentVariable("AC_BOTS_MAX_ACTIONS_PER_SESSION"));
+
+    // Resolve the per-run observe budget from the env var. Falls back to the 3600s
+    // default for an unset/blank/invalid value; clamps to [60s, 7 days] so a typo
+    // can neither starve a run nor leave a process effectively immortal.
+    internal static int ResolveObserveSeconds(string? envValue)
+    {
+        const int Default = 3600;
+        const int Min = 60;
+        const int Max = 7 * 24 * 3600;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
+    // Resolve the per-run action budget from the env var. Falls back to the default
+    // (100) for an unset/blank/invalid/below-min value; clamps to [1, 10,000,000]
+    // so a typo can neither stop the bot immediately nor be unbounded.
+    internal static int ResolveMaxActionsPerSession(string? envValue)
+    {
+        const int Default = 100;
+        const int Min = 1;
+        const int Max = 10_000_000;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
+    // Worst-case seconds the login/handshake resilience loop can consume BEFORE the
+    // observe window starts: the full login-reconnect backoff ladder plus a connect
+    // wait per attempt, plus a small margin. Used to size the outer cancellation
+    // budget so a fresh run always gets its full observe window even after the
+    // maximum login retries.
+    internal static int ComputeOuterBudgetHeadroomSeconds()
+    {
+        // Backoff ladder: base * (1 + 2 + ... + MaxLoginReconnects).
+        var backoffSumSeconds = (LoginReconnectBackoffBaseMs / 1000)
+            * (MaxLoginReconnects * (MaxLoginReconnects + 1) / 2);
+        // Each of the (MaxLoginReconnects + 1) attempts can wait up to the
+        // ConnectRequest receive timeout for the server's first reply.
+        var connectWaitSeconds = (MaxLoginReconnects + 1) * ConnectRequestReceiveTimeoutSeconds;
+        const int MarginSeconds = 30;
+        return backoffSumSeconds + connectWaitSeconds + MarginSeconds;
+    }
 
     // ConnectResponse retransmit constants — see spec/04-handshake.md
     // "Race condition with server-side bcrypt password verification".
@@ -451,13 +524,9 @@ internal sealed class HandshakeDriver : IDisposable
         // complete before the picker dispatches a competing AP/MS.
         // See files/portal03-spike.log:20224..20266 for the
         // smoking-gun trace of the 2-second-default regression.
-        // Phase 7f.5 — bumped from 30 → 100. With the exploration
-        // fallback the bot can keep finding new things to do well
-        // past 30 actions (whole academy has ~50+ named objects:
-        // 10 golems, 3-5 NPCs, ~20 signs, 5-6 doors, ~10 wearables).
-        // The 30s damage-watchdog still protects against per-fight
-        // runaways; this just lets the session-length budget breathe.
-        const int            MaxActionsPerSession = 100;
+        // The per-fight damage-watchdog still protects against per-fight
+        // runaways; the session-length budget (MaxActionsPerSession, now a
+        // configurable static field) bounds total actions per run.
         int                  actionsCompleted = 0;
         var                  visitedTargetGuids = new HashSet<uint>();
         // Diagnostic: throttle silent goal-kind fall-through logs to
@@ -10063,7 +10132,7 @@ internal sealed class HandshakeDriver : IDisposable
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(10));
+        cts.CancelAfter(TimeSpan.FromSeconds(ConnectRequestReceiveTimeoutSeconds));
         var ep = (EndPoint)new IPEndPoint(IPAddress.Any, 0);
         var result = await _socket!.ReceiveFromAsync(new ArraySegment<byte>(recvBuf), SocketFlags.None, ep, cts.Token).ConfigureAwait(false);
         var len = result.ReceivedBytes;
