@@ -1895,6 +1895,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return matches.Count == 1 ? matches[0].Guid : (uint?)null;
     }
 
+    // True (returns the corpse guid) iff this Pickup goal names a visible CORPSE.
+    // A corpse is a Use-container, not a takeable item, so a Pickup targeting the
+    // corpse object resolves to MISS and the bot loops the wrong verb without
+    // looting. The mechanical prerequisite the LLM's own choice requires is to Use
+    // the corpse — the Motor's Use handler opens it and pulls its items, so a Use of
+    // an already-looted corpse is a harmless no-op (no stale-state gate needed).
+    // Mirrors TryResolveWieldGroundWeapon: matched by the goal's OWN selector against
+    // visible corpses (UNIQUE match; server-refused excluded). The LLM chose WHICH
+    // corpse — the Motor only substitutes the mechanically-correct verb; no
+    // autonomous target pick, no game knowledge.
+    internal static uint? TryResolvePickupCorpse(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Pickup) return null;
+        if (goal.Target.IsEmpty) return null;
+        var refused = events
+            .RecentOfKind(EventKind.ActionRejected, 32)
+            .Where(e => e.ItemGuid is uint && !IsTransportFailureRejection(e))
+            .Select(e => e.ItemGuid!.Value)
+            .ToHashSet();
+        var matches = world.Visible.Where(v =>
+            v.IsCorpse &&
+            !refused.Contains(v.Guid) &&
+            VisibleMatchesSelector(goal.Target, v)).ToList();
+        return matches.Count == 1 ? matches[0].Guid : (uint?)null;
+    }
+
     // True iff this RaiseSkill goal's target skill is NOT present in the bot's
     // loaded raisable-skills list (`world.Self.TrainedSkills`, already filtered to
     // raisable). Matching mirrors the Motor's resolver (SkillRaise.TryResolveSkillId,
@@ -3492,6 +3518,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Pickup,
                 Target = new Selector { Guid = groundWeaponGuid },
+                Item = null,
+            };
+        }
+
+        // Pickup-of-a-corpse -> Use (mechanical prerequisite, reduce-llm-call-volume +
+        // loot progress). A model sometimes emits Pickup for a CORPSE, but a corpse is
+        // a Use-container (not a takeable item), so the Pickup selector resolves to
+        // MISS and the bot loops the wrong verb without looting. Perform the
+        // prerequisite the LLM's choice requires: rewrite the Pickup of a resolved,
+        // not-yet-opened corpse into a Use of that SAME corpse (opening it so its items
+        // become pickable). The LLM chose WHICH corpse — the Motor only substitutes the
+        // correct verb (mechanical execution, like the Wield->Pickup rewrite above; no
+        // autonomous target pick, no game knowledge).
+        if (TryResolvePickupCorpse(goal, world, events) is uint pickupCorpseGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] pickup-corpse -> use: target={goal.Target}" +
+                $" guid=0x{pickupCorpseGuid:X8} — a corpse is a Use-container, not a" +
+                " takeable item; Use it to open it for loot.");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = pickupCorpseGuid },
                 Item = null,
             };
         }
