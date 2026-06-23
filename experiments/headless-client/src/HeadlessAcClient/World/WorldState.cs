@@ -305,6 +305,13 @@ internal sealed class WorldState
     public int CumulativeSwingsEvaded { get; set; }
 
     /// <summary>
+    /// The bot's last death location (global meters + landblock + time), set on a
+    /// detected self-death and cleared once self comes within the visible radius
+    /// of it. Raw position bookkeeping.
+    /// </summary>
+    public Strategy.DeathLocation? LastDeathLocation { get; set; }
+
+    /// <summary>
     /// active-combat-telemetry: rolling-window summary of recent inbound
     /// damage the bot has TAKEN, set/cleared by HandshakeDriver before each
     /// projection build from a short TTL window of landed DefenderNotification
@@ -837,6 +844,16 @@ internal sealed class WorldState
         snap.CellId = up.CellId;
         snap.Position = up.Position;
         snap.Rotation = up.Rotation;
+        // Clear the recorded death location once SELF is within perception range
+        // of it. Distance, not landblock equality: a landblock is far wider than
+        // the visible radius.
+        if (up.Guid == SelfGuid && LastDeathLocation is { } dloc)
+        {
+            var (sgx, sgy) = Strategy.AcCoords.ToGlobalXY(up.CellId, up.Position);
+            if (Strategy.CorpseRecovery.WithinReach(
+                    (sgx, sgy), dloc, Strategy.WorldStateProjection.DefaultVisibleRadiusUnits))
+                LastDeathLocation = null;
+        }
         if (up.Velocity is { } v) snap.Velocity = v;
 
         snap.AdvanceSeqInstance(up.InstanceSequence);

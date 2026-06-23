@@ -1654,6 +1654,9 @@ internal sealed class HandshakeDriver : IDisposable
         // after each attributed death.
         (uint? Wcid, string? Name, DateTime At)? lastInboundDamager = null;
         var                  selfDeathAttributed = false;
+        // Last self position observed while alive (HP>0); the death-location
+        // capture reads it, so it is immune to the respawn teleport's arrival order.
+        (uint Cell, System.Numerics.Vector3 Pos)? lastAliveSelfPos = null;
         // Publish the prompt snapshot AND durably persist any new outcome.
         // Both run at the same outcome sites (kill / death / near-death /
         // ineffective), and SaveIfDirty is a no-op unless something changed.
@@ -1679,10 +1682,21 @@ internal sealed class HandshakeDriver : IDisposable
             {
                 // Alive or respawned — re-arm attribution for the next life.
                 selfDeathAttributed = false;
+                if (worldState.Self is { CellId: uint aliveCell } aliveSelf)
+                    lastAliveSelfPos = (aliveCell, aliveSelf.Position);
                 return;
             }
             if (selfDeathAttributed) return;
             selfDeathAttributed = true;
+            // Record the death location from the cached last-alive self position
+            // (the respawn teleport is a separate channel that may precede this
+            // HP=0 update). Best-effort: only when an alive position is known.
+            if (lastAliveSelfPos is { } ap)
+            {
+                var (dgx, dgy) = Strategy.AcCoords.ToGlobalXY(ap.Cell, ap.Pos);
+                worldState.LastDeathLocation = new Strategy.DeathLocation(
+                    dgx, dgy, ap.Cell >> 16, DateTimeOffset.UtcNow);
+            }
             var deathFoe = CombatDeathAttribution.ChooseDeathFoe(
                 lastCombatFoe, lastInboundDamager,
                 DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness);

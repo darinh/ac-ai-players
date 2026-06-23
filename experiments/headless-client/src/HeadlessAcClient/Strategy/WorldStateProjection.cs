@@ -435,6 +435,21 @@ internal sealed record WorldStateProjection
     public int CumulativeSwingsEvaded { get; init; }
 
     /// <summary>
+    /// Global-X of the bot's last death location, set only when
+    /// <see cref="CorpseRecovery.ShouldSurfaceCorpse"/> passes; null otherwise.
+    /// </summary>
+    [JsonPropertyName("corpse_world_x")]
+    public float? CorpseWorldX { get; init; }
+
+    /// <summary>Global-Y companion of <see cref="CorpseWorldX"/>.</summary>
+    [JsonPropertyName("corpse_world_y")]
+    public float? CorpseWorldY { get; init; }
+
+    /// <summary>Seconds since the recorded death (when a corpse bearing is surfaced).</summary>
+    [JsonPropertyName("corpse_age_seconds")]
+    public int? CorpseAgeSeconds { get; init; }
+
+    /// <summary>
     /// active-combat-telemetry: rolling-window summary of recent inbound
     /// damage the bot has TAKEN. Copied straight from
     /// <see cref="WorldState.RecentInboundDamage"/>. Surfaced to the LLM as
@@ -882,6 +897,27 @@ internal sealed record WorldStateProjection
             };
         }
 
+        // corpse-bearing-recovery: carry the last death location (coords + age)
+        // only while ShouldSurfaceCorpse passes (fresh AND self not yet within the
+        // visible radius of it); null otherwise.
+        float? corpseWorldX = null, corpseWorldY = null;
+        int? corpseAgeSeconds = null;
+        if (world.LastDeathLocation is { } deathLoc)
+        {
+            var corpseAge = DateTimeOffset.UtcNow - deathLoc.At;
+            (float, float)? currentXY = self.CellId is uint scc
+                ? AcCoords.ToGlobalXY(scc, self.Position)
+                : null;
+            if (CorpseRecovery.ShouldSurfaceCorpse(
+                    world.LastDeathLocation, currentXY, corpseAge, CorpseRecovery.CorpseTtl,
+                    DefaultVisibleRadiusUnits))
+            {
+                corpseWorldX = deathLoc.WorldX;
+                corpseWorldY = deathLoc.WorldY;
+                corpseAgeSeconds = (int)corpseAge.TotalSeconds;
+            }
+        }
+
         return new WorldStateProjection
         {
             Self = new SelfProjection
@@ -913,6 +949,9 @@ internal sealed record WorldStateProjection
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
+            CorpseWorldX = corpseWorldX,
+            CorpseWorldY = corpseWorldY,
+            CorpseAgeSeconds = corpseAgeSeconds,
             RecentInboundDamage = world.RecentInboundDamage,
             OpenedCorpseGuids = world.OpenedCorpseGuids,
             CombatHistory = world.CombatHistory,
