@@ -290,6 +290,51 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void SelectorResolver_NameWithQuotedRoleSuffix_MatchesBareName()
+    {
+        // The prompt renders objects as `<Name> "<role>"`; the model often copies
+        // the whole label into a target selector. That selector must still resolve
+        // to the bare-named object (the role/title is not part of the wire name).
+        var ws = BuildSeededWorld();
+        var npc = SelectorResolver.Resolve(
+            new Selector { Name = "Jonathan \"Lifestone Greeter\"" }, ws);
+        Assert.Single(npc);
+        Assert.Equal(NpcGuid, npc[0].Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_NameWithQuotedRoleSuffix_WrongBaseName_StillMisses()
+    {
+        // Stripping the role must not over-match: a wrong base name still misses.
+        var ws = BuildSeededWorld();
+        var none = SelectorResolver.Resolve(
+            new Selector { Name = "Someone Else \"Lifestone Greeter\"" }, ws);
+        Assert.Empty(none);
+    }
+
+    [Theory]
+    [InlineData("Jonathan \"Lifestone Greeter\"", "Jonathan")]
+    [InlineData("Contract Broker \"Armorer\"", "Contract Broker")]
+    [InlineData("Captain  \"Town Guard\"  ", "Captain")]
+    [InlineData("Foo \"\"", "Foo")]
+    public void StripTrailingQuotedRoleTitle_StripsTrailingQuotedSegment(string input, string expected)
+    {
+        Assert.Equal(expected, SelectorResolver.StripTrailingQuotedRoleTitle(input));
+    }
+
+    [Theory]
+    [InlineData("Jonathan")]      // no quoted suffix
+    [InlineData("")]              // empty
+    [InlineData("   ")]           // whitespace
+    [InlineData("\"Orphan")]      // unbalanced — opening quote only
+    [InlineData("\"role-only\"")] // no base name before the role
+    [InlineData("Foo\"Bar\"")]    // no whitespace before the quote — real name, not a role label
+    public void StripTrailingQuotedRoleTitle_ReturnsNull_WhenNoStrippableSuffix(string input)
+    {
+        Assert.Null(SelectorResolver.StripTrailingQuotedRoleTitle(input));
+    }
+
+    [Fact]
     public void SelectorResolver_Wcid_ExactMatch()
     {
         var ws = BuildSeededWorld();

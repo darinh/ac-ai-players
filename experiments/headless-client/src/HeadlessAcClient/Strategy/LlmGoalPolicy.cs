@@ -1724,7 +1724,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!hasIdentity) return false;
         if (sel.Guid is uint g && v.Guid != g) return false;
         if (!string.IsNullOrEmpty(sel.Name)
-            && !string.Equals(v.Name, sel.Name, StringComparison.OrdinalIgnoreCase))
+            && !string.Equals(v.Name, sel.Name, StringComparison.OrdinalIgnoreCase)
+            // Mirror SelectorResolver.MatchesName: the prompt renders objects as
+            // `<Name> "<role>"`, and the model often copies that whole label into a
+            // selector. Tolerate a trailing quoted-role suffix and re-test the bare
+            // name, so the policy-side "is this target visible" checks stay
+            // consistent with the Motor's resolver.
+            && !(HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(sel.Name) is string bareName
+                 && string.Equals(v.Name, bareName, StringComparison.OrdinalIgnoreCase)))
             return false;
         if (!string.IsNullOrEmpty(sel.NameContains)
             && (v.Name is null
