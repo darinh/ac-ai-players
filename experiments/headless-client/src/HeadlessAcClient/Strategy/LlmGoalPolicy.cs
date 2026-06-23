@@ -3462,8 +3462,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         Console.WriteLine(
             $"[llm-call] success id={decisionId} latency={result.LatencyMs}ms " +
             $"goal=kind={goal.Kind} target={goal.Target}" +
-            (goal.Item is null ? "" : $" item={goal.Item}"));
+            (goal.Item is null ? "" : $" item={goal.Item}") +
+            (RationaleLogPreview(goal.Rationale) is { Length: > 0 } why ? $" why=\"{why}\"" : ""));
         return goal;
+    }
+
+    // Truncate + single-line the LLM's OWN rationale for the [llm-call] success log
+    // so each strategic decision's REASONING is greppable (why the LLM chose this
+    // goal over an alternative) without flooding the line or letting a long
+    // rationale evict it. The rationale is free-form LLM text, so we also collapse
+    // whitespace to one line, strip stray control chars, and neutralize embedded
+    // double-quotes so they cannot prematurely close the why="..." field. Pure
+    // formatter over the LLM's own output (logging only; never read by
+    // decision-making), so it carries no game knowledge.
+    internal static string RationaleLogPreview(string? rationale)
+    {
+        if (string.IsNullOrWhiteSpace(rationale)) return "";
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(
+            rationale, @"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "");
+        var oneLine = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ")
+            .Replace('"', '\'')
+            .Trim();
+        const int Max = 160;
+        if (oneLine.Length <= Max) return oneLine;
+        // Avoid truncating in the middle of a UTF-16 surrogate pair.
+        var cut = char.IsHighSurrogate(oneLine[Max - 1]) ? Max - 1 : Max;
+        return oneLine.Substring(0, cut) + "…";
     }
 
     /// <summary>
