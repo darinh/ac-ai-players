@@ -828,6 +828,62 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.FormatContractCounts(new List<ContractProjection>()));
     }
 
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData("   ", "")]
+    [InlineData("buying the contract here", "buying the contract here")]
+    public void RationaleLogPreview_EmptyOrShort_PassesThroughTrimmed(string? input, string expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.RationaleLogPreview(input));
+    }
+
+    [Fact]
+    public void RationaleLogPreview_Multiline_CollapsesToOneLine()
+    {
+        Assert.Equal("line one line two", LlmGoalPolicy.RationaleLogPreview("line one\r\nline two"));
+        Assert.Equal("a b c", LlmGoalPolicy.RationaleLogPreview("  a\nb\nc  "));
+    }
+
+    [Fact]
+    public void RationaleLogPreview_Long_TruncatesWithEllipsis()
+    {
+        var longText = new string('x', 200);
+        var preview = LlmGoalPolicy.RationaleLogPreview(longText);
+        Assert.Equal(161, preview.Length);          // 160 chars + the ellipsis
+        Assert.EndsWith("…", preview);
+        Assert.StartsWith(new string('x', 160), preview);
+    }
+
+    [Fact]
+    public void RationaleLogPreview_EmbeddedQuotes_NeutralizedToSingleQuotes()
+    {
+        // Free-form rationale that quotes a name must not break the why="..." field.
+        var preview = LlmGoalPolicy.RationaleLogPreview("buy the \"contract\" here");
+        Assert.DoesNotContain('"', preview);
+        Assert.Equal("buy the 'contract' here", preview);
+    }
+
+    [Fact]
+    public void RationaleLogPreview_ControlChars_Stripped()
+    {
+        var preview = LlmGoalPolicy.RationaleLogPreview("ab\u0000c\u0007d\u007Fe");
+        Assert.Equal("abcde", preview);
+    }
+
+    [Fact]
+    public void RationaleLogPreview_SurrogateBoundary_NoLoneSurrogate()
+    {
+        // A non-BMP char (emoji) straddling the 160-char cut must not leave a lone
+        // high surrogate in the truncated preview.
+        var text = new string('x', 159) + "\uD83D\uDE00" + new string('y', 40); // 😀
+        var preview = LlmGoalPolicy.RationaleLogPreview(text);
+        Assert.EndsWith("…", preview);
+        var body = preview.Substring(0, preview.Length - 1); // drop the ellipsis
+        Assert.False(body.Length > 0 && char.IsHighSurrogate(body[^1]),
+            "truncated preview must not end with a lone high surrogate");
+    }
+
     [Fact]
     public void FormatContractCounts_CountsInProgressAndDoneByStage()
     {
