@@ -64,20 +64,19 @@ internal static class Program
         var indoorNav = TryInitIndoorNav();
         var contractCatalog = TryInitContractCatalog();
 
-        // Outer cancellation budget. Must exceed
-        // HandshakeDriver.ObserveSeconds (currently 3600) plus
-        // the pre-observe handshake budget (~30s on a healthy
-        // localhost link, much higher if the server is slow to
-        // reply during ConnectResponse). 3700s gives 100s of
-        // handshake headroom while still bounding a single run.
-        // Phase 7f.5 bumped 1900 -> 3700 (1 hr) to match the
-        // ObserveSeconds bump that lets the bot finish the academy.
-        // Previously hard-coded to 200s, which silently killed
-        // long-running observations mid-cycle and exited the
-        // outer loop BEFORE the picker could send its next walk
-        // — symptom: runs always terminated at ~3min 20s regardless
-        // of ObserveSeconds. See spec/12 future ops notes.
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3700));
+        // Outer cancellation budget. Must exceed HandshakeDriver.ObserveSeconds
+        // (the per-run observe loop budget) plus the worst-case pre-observe
+        // handshake/login-reconnect overhead. Derived directly from ObserveSeconds +
+        // OuterBudgetHeadroomSeconds (the latter computed from the reconnect
+        // constants), so a long-run override (AC_BOTS_OBSERVE_SECONDS, e.g.
+        // 86400 = 24h) lifts BOTH bounds together instead of silently capping the
+        // run. With the default observe budget the outer budget is 3600 + 165 = 3765s.
+        // Previously hard-coded to 200s, which silently killed long-running
+        // observations mid-cycle and exited the outer loop BEFORE the picker could
+        // send its next walk — symptom: runs always terminated at ~3min 20s
+        // regardless of ObserveSeconds. See spec/12 future ops notes.
+        var outerBudgetSeconds = HandshakeDriver.ObserveSeconds + HandshakeDriver.OuterBudgetHeadroomSeconds;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(outerBudgetSeconds));
         using var driver = new HandshakeDriver(host, port, account, password, characterName, indoorNav, contractCatalog);
         try
         {
