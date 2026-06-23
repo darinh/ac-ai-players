@@ -78,6 +78,58 @@ public class ContractLocationTests
         Assert.Contains("objective area: ~50u N from you", cap);
     }
 
+    private static WorldStateProjection WorldWithContractAndVisible(
+        ContractProjection contract, params VisibleObjectProjection[] visible) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = SelfCell,
+            PositionX = SelfPos.X, PositionY = SelfPos.Y, PositionZ = SelfPos.Z, HealthFraction = 1.0f,
+        },
+        Inventory = Array.Empty<InventoryItemProjection>(),
+        Visible = visible,
+        Contracts = new[] { contract },
+    };
+
+    private static VisibleObjectProjection ShopVendor() => new()
+    { Guid = 0x900u, Name = "Shopkeeper", IsVendor = true, Distance = 5f, IsMonster = false, IsCorpse = false };
+
+    private const string RefreshCueMarker = "fresh contract to keep earning is BOUGHT at a `vendor`";
+
+    [Fact]
+    public void Capsule_AllDoneBatch_WithVendorInView_SurfacesRefreshBuyCue()
+    {
+        var done = new ContractProjection { ContractId = 1u, Stage = 3u, Name = "Done" };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContractAndVisible(done, ShopVendor()), new EventStream(), null);
+        Assert.Contains(RefreshCueMarker, prompt);
+        // Lock the SALIENCE placement: the cue must live in the real ## Contracts
+        // capsule (which opens with "- tracked objectives"), not only somewhere in the
+        // prompt body — so a future refactor that moves it elsewhere fails this test.
+        var capsuleStart = prompt.IndexOf("- tracked objectives (stage code", StringComparison.Ordinal);
+        Assert.True(capsuleStart >= 0, "## Contracts capsule header not found");
+        Assert.True(prompt.IndexOf(RefreshCueMarker, capsuleStart, StringComparison.Ordinal) >= 0,
+            "refresh cue must appear inside the ## Contracts capsule");
+    }
+
+    [Fact]
+    public void Capsule_AllDoneBatch_NoVendorInView_OmitsRefreshBuyCue()
+    {
+        var done = new ContractProjection { ContractId = 1u, Stage = 3u, Name = "Done" };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWith(done), new EventStream(), null);
+        Assert.DoesNotContain(RefreshCueMarker, prompt);
+    }
+
+    [Fact]
+    public void Capsule_UnfinishedContract_WithVendorInView_OmitsRefreshBuyCue()
+    {
+        // Stage 2 (in progress) -> batch is NOT finished -> no refresh cue.
+        var inProgress = new ContractProjection { ContractId = 1u, Stage = 2u, Name = "Active" };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContractAndVisible(inProgress, ShopVendor()), new EventStream(), null);
+        Assert.DoesNotContain(RefreshCueMarker, prompt);
+    }
+
     [Fact]
     public void Capsule_OmitsBearing_WhenDatHasNoLocation()
     {

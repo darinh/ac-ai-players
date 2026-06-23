@@ -8497,6 +8497,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             if (contractsShown < world.Contracts.Count)
                 sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
+            // Decision-proximate REFRESH cue: when EVERY tracked contract is DONE
+            // (stage 3 — the batch is finished and earns no more) AND a `vendor` is
+            // in `## Visible nearby`, surface the refresh ACTION right here beside the
+            // done states (the body's FIND-A-KILL-TASK-SOURCE rule states the same
+            // mechanic, but a model can miss it buried in the rules — this places it
+            // where the done states are SEEN). A fresh contract is BOUGHT at a vendor,
+            // not received by Talking. Wire facts only (all-stage-3 + vendor-in-view)
+            // + the generic buy mechanic already stated elsewhere; the LLM decides
+            // whether to pursue it. No NPC/contract name, no priority verb.
+            if (HeldBatchAllDone(world) && world.Visible.Any(v => v.IsVendor))
+                sb.AppendLine(
+                    "- a fresh contract to keep earning is BOUGHT at a `vendor`, not received by " +
+                    "`Talk`ing: a `vendor` is in `## Visible nearby`, so `Use` it to reveal its " +
+                    "`## Vendor offerings`, and if those list a contract, `Buy` one to take new work " +
+                    "(if it offers none, not every vendor sells contracts — move on).");
             if (anyContractBearing)
                 sb.AppendLine(
                     "- to TRAVEL to an `objective area` or `turn-in location` above that is NOT yet in " +
