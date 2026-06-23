@@ -105,7 +105,42 @@ internal static class SelectorResolver
     private static bool MatchesName(WorldObjectSnapshot o, Selector s)
     {
         if (string.IsNullOrEmpty(s.Name)) return true;
-        return o.Name is not null && string.Equals(o.Name, s.Name, StringComparison.OrdinalIgnoreCase);
+        if (o.Name is null) return false;
+        if (string.Equals(o.Name, s.Name, StringComparison.OrdinalIgnoreCase)) return true;
+        // The prompt renders a visible object as `<Name> "<role/title>"` (the
+        // weenie Quality string in quotes after the name) so role-named directives
+        // can be matched. The model frequently copies that WHOLE rendered label
+        // into a target selector (e.g. `<Name> "<role>"`), which never equals the
+        // bare wire `<Name>`. Tolerate a trailing quoted-role suffix on the SELECTOR
+        // name and re-test against the bare object name. Pure string normalization
+        // of the LLM's own selector input; no game knowledge, no hardcoded names.
+        var bare = StripTrailingQuotedRoleTitle(s.Name);
+        return bare is not null
+            && string.Equals(o.Name, bare, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Strip a trailing ` "&lt;role/title&gt;"` quoted segment from a selector name —
+    /// the exact shape the prompt appends after an object's name. Returns the bare
+    /// base name (trimmed) when such a trailing quoted segment is present and a
+    /// non-empty base remains; otherwise null (so callers do not re-test the same
+    /// string they already matched exactly). The base name is taken up to the LAST
+    /// opening double-quote, so a rare name that itself contains quotes degrades
+    /// gracefully. Sanitization only; no game knowledge.
+    /// </summary>
+    internal static string? StripTrailingQuotedRoleTitle(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return null;
+        var trimmed = name.TrimEnd();
+        if (trimmed.Length < 2 || trimmed[^1] != '"') return null;
+        var openIdx = trimmed.LastIndexOf('"', trimmed.Length - 2);
+        // The prompt appends the role as ` "<role>"` — a SPACE then the quoted
+        // segment. Require whitespace immediately before the opening quote so this
+        // only strips that rendered role suffix, never a double-quote that is part
+        // of a genuine wire name (e.g. `Foo"Bar"`, which must remain a MISS).
+        if (openIdx <= 0 || !char.IsWhiteSpace(trimmed[openIdx - 1])) return null;
+        var bare = trimmed[..openIdx].TrimEnd();
+        return bare.Length > 0 ? bare : null;
     }
 
     private static bool MatchesNameContains(WorldObjectSnapshot o, Selector s)
