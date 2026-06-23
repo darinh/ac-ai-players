@@ -2373,6 +2373,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Console.WriteLine(
                 $"[llm-skip] proven stale Talk fixation on \"{fixatedTalkName}\" with no new external " +
                 "event — skipping the redundant LLM call; deferring to break-contact egress/fallback.");
+            _summarySkips++;
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, fixatedTalkName);
         }
 
@@ -2406,6 +2407,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && LastEmitWasUntargetedExplore(events))
         {
             _emptyExploreSkips++;
+            _summarySkips++;
             Console.WriteLine(
                 "[llm-skip] sustained empty-space Explore travel: nothing in view to engage and no new event " +
                 $"since the last look — skipping the redundant LLM call and continuing to Explore " +
@@ -2489,7 +2491,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Console.WriteLine(BuildRunSummaryLine(
                 _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
                 world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
-                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions)));
+                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips));
         }
         _tempo.RecordLlmCall();
 
@@ -2501,6 +2503,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Run-summary diagnostic aggregates (pure observability; no behavior change).
     internal const int SummaryIntervalDecisions = 15;
     private int _summaryDecisions;
+    // Count of LLM calls SKIPPED by the reduce-llm-call-volume gates (fixated-talk +
+    // empty-explore) since the run started — surfaced in [run-summary] so a run
+    // self-reports how many redundant calls the tempo gates saved (the standing
+    // reduce-llm-call-volume goal's per-run effect). Pure observability.
+    private int _summarySkips;
     private readonly Dictionary<string, int> _summaryTriggers = new(StringComparer.Ordinal);
     private readonly HashSet<uint> _summaryLandblocks = new();
 
@@ -2512,7 +2519,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
-        string? topEmit = null)
+        string? topEmit = null, int skips = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2523,6 +2530,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var line = $"[run-summary] decisions={decisions} triggers={{{triggers}}} " +
                $"distinct-landblocks={distinctLandblocks} last-landblock={lb} " +
                $"level={(level?.ToString() ?? "?")} total-xp={(totalXp?.ToString() ?? "?")} active-model={model}";
+        // Reduce-llm-call-volume effect: how many redundant LLM calls the tempo skip
+        // gates have saved this run (shown only when >0). Pure observability.
+        if (skips > 0)
+            line += $" skips={skips}";
         // Loop-detector field: the single most-repeated recent goal emission, shown
         // only when it recurs (>=2). A goal the bot re-emits many times is the
         // signature of a fixation OR an unresolved-target (target=MISS) loop — the

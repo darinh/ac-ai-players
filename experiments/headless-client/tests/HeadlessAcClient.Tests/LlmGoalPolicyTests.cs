@@ -803,6 +803,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_WithSkips_AppendsSkipsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int> { ["no-current-goal"] = 15 },
+            distinctLandblocks: 2, lastLandblock: 0xA9B4u, level: 8, totalXp: 42000L,
+            model: "m", topEmit: null, skips: 7);
+        Assert.Contains(" skips=7", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_ZeroSkips_OmitsSkipsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 0L, model: "m", topEmit: null, skips: 0);
+        Assert.DoesNotContain("skips=", line);
+    }
+
+    [Fact]
     public void TopRepeatedGoalEmitLabel_RepeatedTalk_ReportsLoopWithCount()
     {
         var es = new EventStream();
