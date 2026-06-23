@@ -2629,6 +2629,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-reports how many redundant calls the tempo gates saved (the standing
     // reduce-llm-call-volume goal's per-run effect). Pure observability.
     private int _summarySkips;
+    // DISTINCT vendor guids seen this run while the bot held a finished contract
+    // batch (a contract-refresh BUY opportunity). A set (not a per-tick counter) so
+    // lingering at or re-approaching the same vendor counts ONCE; surfaced as
+    // refresh-opps=N in [run-summary] so a run self-reports whether the bot acts on
+    // the criterion-2 contract refresh or stalls. Pure observability.
+    private readonly HashSet<uint> _summaryRefreshVendorGuids = new();
     private readonly Dictionary<string, int> _summaryTriggers = new(StringComparer.Ordinal);
     private readonly HashSet<uint> _summaryLandblocks = new();
 
@@ -2647,7 +2653,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
             world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
-            FormatContractCounts(world.Contracts), _stack?.Depth));
+            FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2681,7 +2687,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
-        string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null)
+        string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
+        int refreshOpps = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2719,6 +2726,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // behavior change, no game knowledge.
         if (intentDepth is int depth && depth >= 0)
             line += $" intents={depth}";
+        // Criterion-2 contract-refresh opportunity count: distinct situations this
+        // run where the bot held a finished contract batch AND a vendor was in view
+        // (a chance to Buy a fresh contract). Shown only when >0. Read together with
+        // `contracts=` (state): refresh-opps>0 while the done-batch never refreshes
+        // self-reports the buy-gap. Pure observability; no behavior change.
+        if (refreshOpps > 0)
+            line += $" refresh-opps={refreshOpps}";
         return line;
     }
 
@@ -6335,12 +6349,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // above owns clearing the throttle, so just skip emission here.
         if (!HeldBatchAllDone(world)) return;
         var vendorInView = world.Visible.Any(v => v.IsVendor);
+        // Criterion-2 self-report: record each DISTINCT vendor seen while the bot
+        // holds a finished contract batch (a refresh BUY opportunity). The set
+        // dedups by vendor guid, so lingering at or re-approaching the same vendor
+        // counts ONCE regardless of how the diagnostic key below changes (distance,
+        // nearby-NPC flips). Pure observability over the bot's OWN contract +
+        // perception state; runs before the log dedup so it is not gated by it.
+        CollectRefreshVendorGuids(world, _summaryRefreshVendorGuids);
         var untalkedNpcInView =
             CountUntalkedNpcsInView(world, _talkedNpcGuids, _talkedNpcNames, excludeVendors: true) > 0;
         var key = BuildContractSourceDiagKey(world, untalkedNpcInView, vendorInView);
         if (key == _lastContractBatchSourceDiag) return;
         _lastContractBatchSourceDiag = key;
         Console.WriteLine("[contract-source] " + key);
+    }
+
+    // Accumulate the guids of vendors in view WHILE the bot holds a finished
+    // contract batch (a contract-refresh BUY opportunity) into <paramref
+    // name="into"/>. A set keyed by vendor guid, so the SAME vendor across many
+    // ticks (or with a changing diagnostic key — distance, nearby-NPC flips) counts
+    // ONCE. Static + pure for unit testing. Own contract + perception state; no
+    // game knowledge, no decision.
+    internal static void CollectRefreshVendorGuids(WorldStateProjection world, HashSet<uint> into)
+    {
+        if (!HeldBatchAllDone(world)) return;
+        foreach (var v in world.Visible)
+            if (v.IsVendor) into.Add(v.Guid);
     }
 
     // Pure key builder for the contract-batch-source diagnostic (extracted for
