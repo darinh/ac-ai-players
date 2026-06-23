@@ -834,6 +834,42 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("swings=", none);
     }
 
+    [Fact]
+    public void BuildRunSummaryLine_Deaths_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 11, totalXp: 80000L, model: "m",
+            deathsThisRun: 3);
+        Assert.Contains("deaths=3", with);
+
+        // Zero deaths this run -> omitted (the healthy norm; no noise).
+        var noneZero = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 11, totalXp: 80000L, model: "m",
+            deathsThisRun: 0);
+        Assert.DoesNotContain("deaths=", noneZero);
+
+        // Unknown (no baseline yet) -> omitted.
+        var unknown = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 11, totalXp: 80000L, model: "m",
+            deathsThisRun: null);
+        Assert.DoesNotContain("deaths=", unknown);
+    }
+
+    [Theory]
+    [InlineData(null, null, null)]   // both unknown -> null
+    [InlineData(5, null, null)]      // baseline unknown -> null
+    [InlineData(null, 3, null)]      // current unknown -> null
+    [InlineData(3, 3, 0)]            // no deaths since baseline -> 0
+    [InlineData(7, 3, 4)]            // 4 deaths this run
+    public void ComputeRunDeaths_DeltaOrNull(int? current, int? baseline, int? expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ComputeRunDeaths(current, baseline));
+    }
+
     private static VisibleObjectProjection VendorObj(uint guid, float dist)
         => new() { Guid = guid, Name = "Shop", IsVendor = true, Distance = dist, IsMonster = false, IsCorpse = false };
 

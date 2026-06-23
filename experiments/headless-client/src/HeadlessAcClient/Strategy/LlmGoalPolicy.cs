@@ -2624,6 +2624,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         _summaryDecisions++;
         _summaryTriggers[trigger] = _summaryTriggers.GetValueOrDefault(trigger) + 1;
         if (world.Self.Landblock is uint summaryLb) _summaryLandblocks.Add(summaryLb);
+        if (world.Self.NumDeaths is int nd0) _summaryBaselineDeaths ??= nd0;
         if (_summaryDecisions % SummaryIntervalDecisions == 0 && !_summaryEmittedThisTick)
             EmitRunSummary(world, events);
         _tempo.RecordLlmCall();
@@ -2652,6 +2653,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-reports how many redundant calls the tempo gates saved (the standing
     // reduce-llm-call-volume goal's per-run effect). Pure observability.
     private int _summarySkips;
+    // NumDeaths observed at the first decision of this run. [run-summary] reports
+    // current NumDeaths minus this baseline = deaths THIS run. Null until first
+    // observed.
+    private int? _summaryBaselineDeaths;
     // DISTINCT vendor guids seen this run while the bot held a finished contract
     // batch (a contract-refresh BUY opportunity). A set (not a per-tick counter) so
     // lingering at or re-approaching the same vendor counts ONCE; surfaced as
@@ -2672,12 +2677,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // time-based fallback) so they share one format and one clock. Pure observability.
     private void EmitRunSummary(WorldStateProjection world, EventStream events)
     {
+        var deathsThisRun = ComputeRunDeaths(world.Self.NumDeaths, _summaryBaselineDeaths);
         Console.WriteLine(BuildRunSummaryLine(
             _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
             world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
-            world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded));
+            world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2708,11 +2714,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return $"{contracts.Count}(p{inProgress}/d{done})";
     }
 
+    // Per-run deaths = current lifetime NumDeaths minus the run-start baseline, or
+    // null when either is unknown. Pure derivation (extracted for testing).
+    internal static int? ComputeRunDeaths(int? currentNumDeaths, int? baseline)
+        => currentNumDeaths is int cur && baseline is int b ? cur - b : (int?)null;
+
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
-        int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0)
+        int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2763,6 +2774,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // change, no game knowledge.
         if (swingsLanded + swingsEvaded > 0)
             line += $" swings={swingsLanded}L/{swingsEvaded}E";
+        // Deaths recorded THIS run (current lifetime NumDeaths minus the run-start
+        // baseline), shown only when >0. Pure observability; no behavior change.
+        if (deathsThisRun is int dr && dr > 0)
+            line += $" deaths={dr}";
         return line;
     }
 
