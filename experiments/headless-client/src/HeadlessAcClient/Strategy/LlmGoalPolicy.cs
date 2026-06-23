@@ -1819,6 +1819,59 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
+    // Returns the resolved ground-weapon guid iff this Wield goal names a takeable
+    // weapon lying on the GROUND — a visible world object, not a bag item. The
+    // Motor's Wield dispatch equips ONLY items already in inventory, so a weapon on
+    // the ground must be PICKED UP first; the Combat-readiness capsule already
+    // advises "Pickup it to arm" for exactly this object, but a model sometimes
+    // emits the end-goal verb Wield for the named ground weapon instead of the
+    // Pickup step, which the Motor then fails (wasting the call and leaving the bot
+    // unarmed). Detecting it lets ProposeGoalCore perform the mechanical
+    // prerequisite (rewrite to a Pickup of the SAME named weapon). Mirrors the
+    // groundWeapon capsule predicate (visible, non-monster, non-corpse, melee
+    // weapon, equippable, not server-refused) and matches it by the goal's OWN
+    // selector — the LLM chose WHICH weapon, so there is no autonomous target pick
+    // and no game knowledge.
+    internal static uint? TryResolveWieldGroundWeapon(Goal goal, WorldStateProjection world, EventStream events)
+    {
+        if (goal.Kind != GoalKind.Wield) return null;
+        // The wielded object may be named in `target` (the observed mis-shape) or
+        // `item`; use whichever the LLM populated.
+        var sel = !goal.Target.IsEmpty ? goal.Target
+                : (goal.Item is { IsEmpty: false } ? goal.Item : null);
+        if (sel is null) return null;
+        // A matching BAG item that is itself EQUIPPABLE and not already wielded is
+        // wieldable directly by the normal Wield path (and its swap/dequip handling)
+        // — no pickup prerequisite, so defer to it. A non-equippable same-named bag
+        // item (e.g. a quest item) does NOT suppress arming from a ground weapon.
+        // (A same-named ground copy resolving ahead of an in-bag copy inside the
+        // Motor is a pre-existing resolver edge, not introduced here.)
+        if (world.Inventory.Any(i =>
+                InventoryMatchesSelector(sel, i) &&
+                i.ValidLocations is uint ivl && ivl != 0 &&
+                (i.WieldedAt is null || i.WieldedAt == 0)))
+            return null;
+        // Semantic refusals only (transport/walk-timeout failures clear on arrival),
+        // mirroring the groundWeapon capsule so a server-refused weapon stops being
+        // re-picked instead of looping.
+        var refused = events
+            .RecentOfKind(EventKind.ActionRejected, 32)
+            .Where(e => e.ItemGuid is uint && !IsTransportFailureRejection(e))
+            .Select(e => e.ItemGuid!.Value)
+            .ToHashSet();
+        // Require a UNIQUE match: the LLM must have named a single weapon. An
+        // ambiguous selector (e.g. name_contains, or two same-named ground weapons)
+        // stays unresolved so the LLM re-decides — the Motor never autonomously
+        // picks one of several candidates (mirrors SelectorResolver's unique-match
+        // rule).
+        var matches = world.Visible.Where(v =>
+            !v.IsMonster && !v.IsCorpse &&
+            v.ItemType is uint vit && (vit & ItemTypeMasks.MeleeWeapon) != 0 &&
+            !refused.Contains(v.Guid) &&
+            VisibleMatchesSelector(sel, v)).ToList();
+        return matches.Count == 1 ? matches[0].Guid : (uint?)null;
+    }
+
     // Pure "hunt tapped out" perception signal. Returns a raw self-progress
     // fact string to surface to the LLM when the bot, combat-ready, has
     // dwelled in its current landblock past the threshold WITHOUT gaining a
@@ -3324,6 +3377,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 $"dropped-by-override: LLM Attack while not combat-capable (no usable weapon; {threatNote})");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "unarmed-attack");
+        }
+
+        // Wield-of-a-ground-weapon -> Pickup (mechanical prerequisite,
+        // reduce-llm-call-volume). A model sometimes emits Wield for a weapon lying
+        // on the GROUND (which the Combat-readiness capsule shows as "Pickup it to
+        // arm"); the Motor's Wield equips only IN-BAG items, so it fails the call and
+        // the bot stays unarmed. Perform the prerequisite the LLM's own choice
+        // requires: rewrite the Wield of a resolved ground weapon into a Pickup of
+        // that SAME named weapon. Next tick it is in the bag and the normal Wield
+        // path equips it. The LLM chose WHICH weapon — the Motor only fetches it
+        // (mechanical execution, like the pre-existing dequip-before-wield swap; no
+        // autonomous target pick, no game knowledge). Placed before the Wield-specific
+        // guards below so the rewritten Pickup flows through the normal pickup path.
+        if (TryResolveWieldGroundWeapon(goal, world, events) is uint groundWeaponGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] wield-ground-weapon -> pickup: target={goal.Target}" +
+                $" guid=0x{groundWeaponGuid:X8} — named weapon is on the ground, not in the" +
+                " bag; Wield equips only in-bag items, so picking it up first.");
+            return goal with
+            {
+                Kind = GoalKind.Pickup,
+                Target = new Selector { Guid = groundWeaponGuid },
+                Item = null,
+            };
         }
 
         // Wield no-weapon loop-break (reduce-llm-call-volume): the Motor's direct
