@@ -314,6 +314,30 @@ public class CombatChainTests
     }
 
     [Fact]
+    public void ChooseChainTarget_BudgetBoundary_HonorsNonDefaultMaxChain()
+    {
+        // The configurable cap (AC_BOTS_MAX_COMBAT_CHAIN -> maxChain) controls the
+        // mint-exhaustion boundary, not a hardcoded 6: with maxChain=3, the chain
+        // mints at chainCount 0..2 and yields budget-exhausted at chainCount 3.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(10, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+        const int maxChain = 3;
+
+        for (var chainCount = 0; chainCount < maxChain; chainCount++)
+        {
+            var minted = LlmGoalPolicy.ChooseCombatChainTarget(
+                commit, oneQuarry, null, 5, enabled: true, chainCount, maxChain, out var reason);
+            Assert.NotNull(minted);
+            Assert.Null(reason);
+        }
+
+        var exhausted = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, enabled: true, chainCount: maxChain, maxChain, out var exhaustedReason);
+        Assert.Null(exhausted);
+        Assert.Equal("budget-exhausted", exhaustedReason);
+    }
+
+    [Fact]
     public void ChooseChainTarget_NotCombatCapable_SkipsEvenWithMatchingTarget()
     {
         // cp047: the chain must NOT mint an Attack while the bot cannot deal damage

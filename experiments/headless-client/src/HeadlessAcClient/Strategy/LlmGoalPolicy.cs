@@ -10108,8 +10108,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Max consecutive autonomous Attacks the Motor may mint before it MUST
     // route a real LLM decision. A periodic oversight + hard liveness cap so a
     // never-completing commitment cannot chain forever. Reset to 0 whenever a
-    // real LLM call is made (so each grind run gets a fresh budget).
-    internal const int MaxCombatChainAttacks = 6;
+    // real LLM call is made (so each grind run gets a fresh budget). Tunable via
+    // AC_BOTS_MAX_COMBAT_CHAIN (default 6, clamp [1, 12]); read once at type-load.
+    // The ceiling is kept near the well-tested default so the window before a
+    // forced LLM re-check (during which a non-chain-interrupting signal goes
+    // unseen) stays small.
+    internal static readonly int MaxCombatChainAttacks =
+        ResolveMaxCombatChainAttacks(Environment.GetEnvironmentVariable("AC_BOTS_MAX_COMBAT_CHAIN"));
+
+    // Parse AC_BOTS_MAX_COMBAT_CHAIN. A positive integer is used (clamped to
+    // [1, 12]); anything else (unset/blank/unparseable/<1) falls back to 6.
+    internal static int ResolveMaxCombatChainAttacks(string? envValue)
+    {
+        const int Default = 6;
+        const int Min = 1;
+        const int Max = 12;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
     private int _combatChainCount;
     // Throttle for the [combat-chain] no-mint diagnostic: only log when the
     // reason CHANGES (the chain gate is evaluated ~4x/sec, so logging every tick
