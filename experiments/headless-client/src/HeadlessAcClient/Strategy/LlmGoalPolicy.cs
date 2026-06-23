@@ -2340,26 +2340,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"budget={_combatChainCount}/{MaxCombatChainAttacks}");
         }
 
-        // Reduce-llm-call-volume (opt-in, default OFF via AC_BOTS_SKIP_FIXATED_TALK_CALL).
-        // A PROVEN stale single-NPC Talk fixation with NO new EXTERNAL change event
-        // since the last LLM look means the next call would just reproduce a Talk the
-        // fixation guards immediately drop — the break-contact egress/fallback drives
-        // regardless. Skip the redundant call and reach that SAME EscapeOrFallback
-        // directly. The `!hasNonPickerExternal` guard is the correctness gate:
-        // IsExternalChangeKind = (salient AND not goal-lifecycle) OR InventoryItemRemoved,
-        // so a fresh NpcDialog / PopupString / BookText / ServerMessage / inventory
-        // add-or-remove / zone change / ActionRejected BLOCKS the skip and the LLM sees
-        // it — the bot never walks away from fresh input. Crucially it EXCLUDES the
-        // bot's OWN goal-lifecycle (GoalCompleted/Failed/Expired), so the gate still
-        // fires on the dominant no-current-goal case (a finished Talk is not "new
-        // input"). Self-limiting: the egress's Explore goals age the Talk fixation out
-        // of the history window within a few decisions, re-engaging the LLM. NOTE:
-        // unlike the post-LLM Talk-fixation drop site this does NOT call
-        // RecordTalkLoopSuppression (no LLM goal/guid here) — the gate re-detects the
-        // fixation itself. Default OFF so the default decision path is byte-for-byte
-        // unchanged pending live A/B validation.
+        // Reduce-llm-call-volume (default ON; opt OUT via AC_BOTS_SKIP_FIXATED_TALK_CALL=0/false/off).
+        // A PROVEN stale single-NPC Talk fixation with NO new decision-worthy change
+        // since the last LLM look: re-deliberating most often just reproduces a Talk the
+        // fixation guards immediately drop to the break-contact egress, so skip the
+        // redundant call and reach that SAME EscapeOrFallback directly. This is a bounded
+        // request-tempo heuristic, NOT strict behavioral equivalence — the freshness gates
+        // ensure the bot never skips over genuinely new input it could act on:
+        //   - `!hasNonPickerExternal`: IsExternalChangeKind = (salient AND not
+        //     goal-lifecycle) OR InventoryItemRemoved, so a fresh NpcDialog / PopupString /
+        //     BookText / ServerMessage / inventory add-or-remove / zone change /
+        //     ActionRejected BLOCKS the skip (it EXCLUDES the bot's OWN goal-lifecycle, so
+        //     the gate still fires on the dominant no-current-goal post-Talk tick);
+        //   - `!pickerArrived && !pickerStartWake`: a NEW autonomous picker discovery
+        //     (corpse/door/portal/ground-item) BLOCKS the skip so the LLM can choose
+        //     Pickup/Use on it rather than being forced into a break-contact Explore
+        //     (mirrors the empty-explore skip's picker guard);
+        //   - `!HasNewStrategicIntentCompletionSince`: an intent-stack pop BLOCKS the skip.
+        // Self-limiting: the egress's Explore goals age the Talk fixation out of the
+        // history window within a few decisions, re-engaging the LLM. NOTE: unlike the
+        // post-LLM Talk-fixation drop site this does NOT call RecordTalkLoopSuppression
+        // (no LLM goal/guid here) — the gate re-detects the fixation itself. Enabled by
+        // default because the saved call is redundant in the common case and the egress is
+        // identical to the post-LLM fixation-drop path.
         if (SkipFixatedTalkCallEnabled
             && !hasNonPickerExternal
+            && !pickerArrived
+            && !pickerStartWake
             && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
             && ProvenTalkFixationNameFromHistory(events) is string fixatedTalkName)
         {
@@ -9653,21 +9660,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
           || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
           || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
 
-    // Opt-in reduce-llm-call-volume gate (default OFF). When the bot's recent goal
+    // Reduce-llm-call-volume gate (default ON; opt OUT with
+    // AC_BOTS_SKIP_FIXATED_TALK_CALL=0/false/off). When the bot's recent goal
     // history is a PROVEN stale single-NPC Talk fixation and nothing
     // plan-invalidating has changed since the last LLM look, an LLM call would
     // just reproduce a Talk the fixation guards immediately drop — so skip it and
-    // go straight to the same break-contact egress/fallback. Default OFF so the
-    // default decision path is byte-for-byte unchanged until this is A/B-validated;
-    // enable with AC_BOTS_SKIP_FIXATED_TALK_CALL=1/true/on. Request-tempo
-    // management, not strategy: the egress/fallback the bot reaches is identical.
+    // go straight to the same break-contact egress/fallback. Enabled by default
+    // because the egress/fallback the bot reaches is IDENTICAL to the post-LLM
+    // fixation-drop path (call -> Talk -> drop -> EscapeOrFallback), so the only
+    // behavioral difference is the saved redundant call; the `!hasNonPickerExternal`
+    // guard means a productive NPC (new dialog/item/etc.) blocks the skip.
+    // Request-tempo management, not strategy.
     private static readonly bool SkipFixatedTalkCallEnabled =
         ResolveSkipFixatedTalkCall(Environment.GetEnvironmentVariable("AC_BOTS_SKIP_FIXATED_TALK_CALL"));
 
     internal static bool ResolveSkipFixatedTalkCall(string? envValue) =>
-        string.Equals(envValue, "1", StringComparison.Ordinal)
-        || string.Equals(envValue, "true", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(envValue, "on", StringComparison.OrdinalIgnoreCase);
+        !(string.Equals(envValue, "0", StringComparison.Ordinal)
+          || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
+          || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
 
     // Opt-in reduce-llm-call-volume gate (default OFF). When the bot is travelling
     // through empty space on a sustained UNTARGETED Explore with nothing in view to

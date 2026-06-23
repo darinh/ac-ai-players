@@ -1329,7 +1329,7 @@ public class LlmGoalPolicyTests
     // break-contact Explore (not a re-locked Talk, not the fallback). It FAILS if
     // a monster-in-view gate is ever re-introduced onto the break-contact egress.
     [Fact]
-    public async Task ProposeGoal_ProvenTalkFixation_WithMonsterInView_BreaksContactExplore()
+    public void ProposeGoal_ProvenTalkFixation_WithMonsterInView_BreaksContactExplore()
     {
         var canned = JsonSerializer.Serialize(new
         {
@@ -1360,13 +1360,57 @@ public class LlmGoalPolicyTests
         };
         var world = BuildVisibleWorld(new[] { CivilianNpc(0x90000001u), monster });
 
-        Assert.Null(policy.ProposeGoal(world, events, null)); // kicks the LLM
-        await policy.WaitForInFlightAsync();
-        var goal = policy.ProposeGoal(world, events, null);   // processes the Talk
+        // With the skip-fixated-talk gate ON by default, a PROVEN single-NPC Talk
+        // fixation with no new external change short-circuits the redundant LLM call
+        // and reaches the SAME break-contact egress directly on the FIRST call. The
+        // cp072 livelock guard still holds: that egress fires even with a monster in
+        // view (no monster-in-view gate on the break-contact Explore).
+        var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Explore, goal!.Kind);
         Assert.Contains("breakcontact", goal.Source ?? "");
+    }
+
+    [Fact]
+    public async Task ProposeGoal_ProvenTalkFixation_PickerArrived_WakesLlmInsteadOfSkipping()
+    {
+        // The skip-fixated-talk gate must NOT short-circuit the LLM when the
+        // autonomous picker has just discovered a NEW target (PickerArrivedNoAction).
+        // A picker arrival is not a "non-picker external" change, so without the
+        // dedicated picker guard the proven fixation would wrongly skip to a
+        // break-contact Explore — foreclosing the LLM's chance to Pickup/Use the
+        // discovered target. With the guard, the LLM is woken (first call kicks it).
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content =
+                "{\"kind\":\"Talk\",\"target\":{\"name\":\"Npc 90000001\"},\"rationale\":\"x\",\"priority\":5}" } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler((req, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) })));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var events = new EventStream();
+        for (var i = 0; i < 8; i++)
+            events.Append(TalkEmission("Npc 90000001"));
+        // A NEW picker discovery arrives AFTER the fixation (newest event).
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction, Name = "Corpse of Mite", ItemGuid = 0x70000001u,
+        });
+        var world = BuildVisibleWorld(new[] { CivilianNpc(0x90000001u) });
+
+        // Gate is blocked by the picker guard -> the LLM is kicked (null returned)
+        // rather than the break-contact egress fired directly.
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
     }
 
     private static VisibleObjectProjection NamedVisible(string name, float distance) => new()
@@ -20770,12 +20814,13 @@ public class LlmGoalPolicyTests
     [InlineData("1", true)]
     [InlineData("true", true)]
     [InlineData("ON", true)]
-    [InlineData(null, false)]
+    [InlineData(null, true)]      // default ON (unset)
+    [InlineData("", true)]        // default ON (empty)
     [InlineData("0", false)]
     [InlineData("false", false)]
     [InlineData("off", false)]
-    [InlineData("yes", false)]
-    public void ResolveSkipFixatedTalkCall_DefaultsOff_OptInOnly(string? env, bool expected)
+    [InlineData("yes", true)]     // any non-off value stays ON
+    public void ResolveSkipFixatedTalkCall_DefaultsOn_OptOutOnly(string? env, bool expected)
     {
         Assert.Equal(expected, LlmGoalPolicy.ResolveSkipFixatedTalkCall(env));
     }
