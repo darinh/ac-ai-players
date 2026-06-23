@@ -1175,6 +1175,82 @@ public class LlmGoalPolicyTests
             WieldGoalTo("Training Spadone"), world, es));
     }
 
+    // ---- TryResolvePickupCorpse (pickup-of-corpse -> Use) ----
+
+    private static VisibleObjectProjection CorpseObj(uint guid, string name)
+        => new() { Guid = guid, Name = name, IsCorpse = true, IsMonster = false, ObservedHostile = false };
+
+    private static Goal PickupGoalTo(string name)
+        => new() { Kind = GoalKind.Pickup, Target = new Selector { Name = name } };
+
+    [Fact]
+    public void PickupCorpse_NamedUnopenedCorpse_ResolvesToUseGuid()
+    {
+        var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken"));
+        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupCorpse(
+            PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupCorpse_NonCorpseItem_ReturnsNull()
+    {
+        // Pickup of a real takeable item (not a corpse) is NOT rewritten.
+        var apple = new VisibleObjectProjection
+        { Guid = 0xAAAu, Name = "Apple", IsCorpse = false, IsMonster = false };
+        var world = WorldWithVisible(apple);
+        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+            PickupGoalTo("Apple"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupCorpse_NonPickupGoal_ReturnsNull()
+    {
+        var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken"));
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Corpse of Chicken" } };
+        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(use, world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupCorpse_OpenedCorpse_StillRewrites()
+    {
+        // The opened-state is NOT a suppression gate: OpenedCorpseGuids is TTL
+        // telemetry (not reliable "currently open" state), and the Motor's Use
+        // handler opens + pulls items, so re-Using an already-looted corpse is a
+        // harmless no-op. Suppressing on opened would instead re-introduce the
+        // Pickup-MISS loop after an auto-closed / failed open.
+        var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken")) with
+        {
+            OpenedCorpseGuids = new HashSet<uint> { 0xC0FFEEu },
+        };
+        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupCorpse(
+            PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupCorpse_AmbiguousTwoCorpses_ReturnsNull()
+    {
+        // Two same-named corpses -> ambiguous -> unresolved (the Motor never picks one).
+        var world = WorldWithVisible(
+            CorpseObj(0xC1u, "Corpse of Chicken"),
+            CorpseObj(0xC2u, "Corpse of Chicken"));
+        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+            PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupCorpse_SemanticRefusal_ReturnsNull()
+    {
+        var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken"));
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0xC0FFEEu, ErrorCode = 0x0001u, // not a transport code
+        });
+        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+            PickupGoalTo("Corpse of Chicken"), world, es));
+    }
+
     [Fact]
     public void WieldGroundWeapon_TwoSameNamedGroundWeapons_DoesNotRewrite()
     {
