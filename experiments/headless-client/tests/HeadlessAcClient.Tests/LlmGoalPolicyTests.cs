@@ -891,6 +891,32 @@ public class LlmGoalPolicyTests
     }
 
     [Theory]
+    [InlineData(null, 0L)]      // unset -> default (no floor = prior behavior)
+    [InlineData("", 0L)]        // blank -> default
+    [InlineData("xyz", 0L)]     // unparseable -> default
+    [InlineData("0", 0L)]       // explicit 0
+    [InlineData("50", 50L)]     // a meaningful-chunk floor
+    [InlineData("-5", 0L)]      // negative -> default
+    [InlineData("1000000", 1000000L)]   // max (accepted)
+    [InlineData("9999999", 1000000L)]   // above max -> clamped
+    public void ResolveMinMeaningfulUnspentXp_DefaultsAndClamps(string? env, long expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveMinMeaningfulUnspentXp(env));
+    }
+
+    [Theory]
+    [InlineData(0L, 0L, false)]    // no unspent -> never surface
+    [InlineData(10L, 0L, true)]    // default floor (0): any positive surfaces (prior behavior)
+    [InlineData(44L, 50L, false)]  // a sub-floor (phantom) residual is NOT surfaced
+    [InlineData(50L, 50L, true)]   // exactly at the floor -> surface
+    [InlineData(800L, 50L, true)]  // a meaningful chunk -> surface
+    [InlineData(-3L, 0L, false)]   // negative (shouldn't occur) -> not surfaced
+    public void ShouldSurfaceUnspentXp_GatesOnMeaningfulFloor(long unspent, long floor, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ShouldSurfaceUnspentXp(unspent, floor));
+    }
+
+    [Theory]
     [InlineData(null, "")]
     [InlineData("", "")]
     [InlineData("   ", "")]
@@ -16510,6 +16536,40 @@ public class LlmGoalPolicyTests
 
         Assert.Contains("## Unspent XP", prompt);
         Assert.DoesNotContain("your melee swings this session have landed", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AllUnspentXpSpendSurfaces_RenderAtDefaultFloor()
+    {
+        // Every unspent-XP spend surface shares one floor predicate
+        // (ShouldSurfaceUnspentXp). With AC_BOTS_MIN_RAISE_XP unset (default floor
+        // 0) every surface renders for any positive unspent, so the default path
+        // stays byte-identical to the prior `unspent > 0` gates. A monster in view
+        // makes the combat-gated surfaces (NON-HOSTILE, COMBAT SAFETY) render too;
+        // a small unspent value exercises the floor boundary.
+        var world = BuildXpWorld(50000, 30) with
+        {
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = 0x91000001u, Name = "Mite", Wcid = 7u, Distance = 5f,
+                    IsCreature = true, IsMonster = true, IsAttackable = true,
+                },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        // Four dedicated surfaces.
+        Assert.Contains("## Unspent XP", prompt);                    // tail capsule
+        Assert.Contains("SPEND XP is a FIRST-CLASS action", prompt); // SPEND XP rule
+        Assert.Contains("invest unspent XP", prompt);                // priority band
+        Assert.Contains("available to invest NOW", prompt);          // ## Self cue
+        // Three combat-embedded clauses (gated via inline fragments — byte-identity
+        // at the default floor).
+        Assert.Contains("Then raise that trained weapon skill with spare XP", prompt);
+        Assert.Contains("(and `Raise...` any `unspent` XP between fights)", prompt);
+        Assert.Contains("so SPEND XP on coordination", prompt);
     }
 
     [Fact]
