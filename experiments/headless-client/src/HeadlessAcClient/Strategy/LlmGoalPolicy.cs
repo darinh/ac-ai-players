@@ -865,6 +865,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
+        // One run-summary emit per tick at most: the time-based fallback (below) and
+        // the every-15-kickoffs trigger (in ProposeGoalCore) can both come due on the
+        // same tick; this flag, reset each tick, lets the kickoff path skip a
+        // duplicate when the time-based path already emitted.
+        _summaryEmittedThisTick = false;
         // Diagnostic tempo: detect new kills from the bot's OWN combat-feel
         // total and, when it rises, log the LLM round-trips spent since the
         // prior kill. Read-only; never affects the goal returned below. Anchor
@@ -876,6 +881,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (world.CombatHistoryFull is { } tempoHist
             && _tempo.ObserveTotalKills(tempoHist.Sum(h => (long)h.Kills), DateTimeOffset.UtcNow) is string tempoLine)
             Console.WriteLine($"[tempo] {tempoLine}");
+        // Time-based [run-summary] fallback: the primary trigger fires every
+        // SummaryIntervalDecisions LLM kickoffs, but under sustained 429 the bot
+        // rarely kicks off, so without this a struggling run emits almost no
+        // summaries. Emitting at least every SummaryMaxIntervalSeconds keeps the run
+        // self-reporting (explored landblocks, level, active model) even while the
+        // LLM is walled. Pure observability; never affects the goal returned.
+        if (ShouldEmitTimeBasedSummary(_lastSummaryEmitAtUtc, DateTimeOffset.UtcNow))
+            EmitRunSummary(world, events);
         return ApplyHuntEgressOverride(ProposeGoalCore(world, events, currentGoal), world, events);
     }
 
@@ -2486,14 +2499,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         _summaryDecisions++;
         _summaryTriggers[trigger] = _summaryTriggers.GetValueOrDefault(trigger) + 1;
         if (world.Self.Landblock is uint summaryLb) _summaryLandblocks.Add(summaryLb);
-        if (_summaryDecisions % SummaryIntervalDecisions == 0)
-        {
-            Console.WriteLine(BuildRunSummaryLine(
-                _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
-                world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
-                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
-                FormatContractCounts(world.Contracts), _stack?.Depth));
-        }
+        if (_summaryDecisions % SummaryIntervalDecisions == 0 && !_summaryEmittedThisTick)
+            EmitRunSummary(world, events);
         _tempo.RecordLlmCall();
 
         _inflight = RunAsync(userPrompt, decisionId, projJson, eventSeqAtCallStart, currentGoal is not null);
@@ -2504,6 +2511,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Run-summary diagnostic aggregates (pure observability; no behavior change).
     internal const int SummaryIntervalDecisions = 15;
     private int _summaryDecisions;
+    // Wall-clock of the last [run-summary] emit. Under sustained LLM 429 (or any
+    // low-kickoff state) the every-15-kickoffs trigger rarely fires, so a struggling
+    // run would go dark; a time-based fallback (SummaryMaxIntervalSeconds) keeps the
+    // run self-reporting liveness + progress regardless of kickoff rate. Initialized
+    // to construction time so the first time-based emit is one interval in, not at
+    // tick 0 with empty aggregates.
+    private DateTimeOffset _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
+    internal const int SummaryMaxIntervalSeconds = 300;
+    // Reset at the top of each ProposeGoal tick; set when EmitRunSummary fires, so
+    // the time-based and every-15-kickoffs triggers never double-emit on one tick.
+    private bool _summaryEmittedThisTick;
     // Count of LLM calls SKIPPED by the reduce-llm-call-volume gates (fixated-talk +
     // empty-explore) since the run started — surfaced in [run-summary] so a run
     // self-reports how many redundant calls the tempo gates saved (the standing
@@ -2511,6 +2529,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private int _summarySkips;
     private readonly Dictionary<string, int> _summaryTriggers = new(StringComparer.Ordinal);
     private readonly HashSet<uint> _summaryLandblocks = new();
+
+    // True when at least SummaryMaxIntervalSeconds have elapsed since the last
+    // [run-summary] emit — the time-based fallback trigger that keeps a low-kickoff
+    // (e.g. 429-walled) run self-reporting. Pure predicate, unit-testable.
+    internal static bool ShouldEmitTimeBasedSummary(DateTimeOffset lastEmitUtc, DateTimeOffset nowUtc)
+        => (nowUtc - lastEmitUtc).TotalSeconds >= SummaryMaxIntervalSeconds;
+
+    // Build + print the [run-summary] line from the current aggregates and reset the
+    // time-based emit clock. Called by BOTH triggers (every-N-kickoffs and the
+    // time-based fallback) so they share one format and one clock. Pure observability.
+    private void EmitRunSummary(WorldStateProjection world, EventStream events)
+    {
+        Console.WriteLine(BuildRunSummaryLine(
+            _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
+            world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
+            TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
+            FormatContractCounts(world.Contracts), _stack?.Depth));
+        _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
+        _summaryEmittedThisTick = true;
+    }
 
     // Build the periodic [run-summary] line: decision count, trigger histogram,
     // distinct landblocks visited + the last one, level + lifetime XP, and the
