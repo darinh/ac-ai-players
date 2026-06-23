@@ -17056,6 +17056,81 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Recent Give", prompt);
     }
 
+    // ── ## Recent Buy endcap + buy-not-completing backstop ───────────
+    private static EventStream BuildBuyStream(string itemSelector, int times)
+    {
+        var events = new EventStream();
+        for (var i = 0; i < times; i++)
+        {
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(times - i),
+                Kind = EventKind.GoalEmitted,
+                GoalId = Guid.NewGuid(),
+                Text = $"Buy target={itemSelector} item= source=llm:test",
+            });
+        }
+        return events;
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentBuyEndcap_RendersWhenBuyPresent()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(), BuildBuyStream("name=\"Benevolent Calm\"", 3), null);
+        Assert.Contains("## Recent Buy", prompt);
+        Assert.Contains("Benevolent Calm x3", prompt);
+        Assert.DoesNotContain("## Recent Pickup", prompt); // verb isolation
+        Assert.DoesNotContain("## Recent Give", prompt);
+        Assert.DoesNotContain("## Recent Use", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentBuyEndcap_KeysByItemGuidDisplaysName()
+    {
+        // A resolved Buy goal reads `target=guid=0x.. name="X"`; the capsule keys by
+        // the guid but DISPLAYS the human name (mirrors the Pickup/Give guid tests).
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(), BuildBuyStream("guid=0x80000CEE name=\"Benevolent Calm\"", 3), null);
+        var idx = prompt.IndexOf("## Recent Buy", System.StringComparison.Ordinal);
+        Assert.True(idx >= 0, "capsule missing");
+        Assert.Contains("Benevolent Calm x3", prompt.Substring(idx));
+        Assert.Contains("re-buying it will not help", prompt); // stalled backstop fires on the guid case too
+    }
+
+    [Fact]
+    public void BuildUserPrompt_StalledBuy_FiresWhenItemNeverArrives()
+    {
+        // Bought >=2x but the item is NOT in inventory -> the purchase is not
+        // completing (unaffordable / wrong currency); the backstop fires.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(), BuildBuyStream("name=\"Benevolent Calm\"", 3), null);
+        Assert.Contains("re-buying it will not help", prompt);
+        Assert.Contains("Benevolent Calm", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_StalledBuy_SuppressedWhenItemArrived()
+    {
+        // The bought item is now in inventory (purchase succeeded), so the passive
+        // ## Recent Buy capsule renders but the "not completing" backstop must NOT.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems("Benevolent Calm"), BuildBuyStream("name=\"Benevolent Calm\"", 3), null);
+        Assert.Contains("## Recent Buy", prompt);
+        Assert.DoesNotContain("re-buying it will not help", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_StalledBuy_SuppressedForSingleBuy()
+    {
+        // A single Buy is not yet a stall; the backstop only fires on a repeat.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildWorldHoldingItems(), BuildBuyStream("name=\"Benevolent Calm\"", 1), null);
+        Assert.Contains("## Recent Buy", prompt);
+        Assert.DoesNotContain("re-buying it will not help", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_PriorityBand_OmitsInvestWhenNoUnspentXp()
     {
