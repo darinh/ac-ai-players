@@ -884,6 +884,160 @@ public class LlmGoalPolicyTests
             "truncated preview must not end with a lone high surrogate");
     }
 
+    // ---- TryResolveWieldGroundWeapon (wield-of-ground-weapon -> Pickup) ----
+
+    private static VisibleObjectProjection GroundMeleeWeapon(uint guid, string name)
+        => new() { Guid = guid, Name = name, ItemType = ItemTypeMasks.MeleeWeapon,
+                   IsMonster = false, IsCorpse = false, ObservedHostile = false };
+
+    private static Goal WieldGoalTo(string name)
+        => new() { Kind = GoalKind.Wield, Target = new Selector { Name = name } };
+
+    [Fact]
+    public void WieldGroundWeapon_NamedGroundWeapon_ResolvesToPickupGuid()
+    {
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Training Spadone"));
+        var guid = LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Training Spadone"), world, new EventStream());
+        Assert.Equal(0xABCu, guid);
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_MatchingEquippableBagItem_DoesNotRewrite()
+    {
+        // An equippable, un-wielded bag weapon with the same name is wieldable
+        // directly -> leave it to the normal Wield path; no pickup prerequisite.
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Training Spadone"))
+            with
+            {
+                Inventory = new[]
+                {
+                    new InventoryItemProjection
+                    {
+                        Guid = 0xDEFu, Name = "Training Spadone", Wcid = 1234u,
+                        ItemType = ItemTypeMasks.MeleeWeapon, ValidLocations = 0x1u,
+                    },
+                },
+            };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Training Spadone"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_NonEquippableBagItem_RewritesToGroundWeapon()
+    {
+        // A same-named bag item that is NOT equippable (no ValidLocations, e.g. a
+        // quest item) must not suppress arming from a real ground weapon.
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Relic"))
+            with
+            {
+                Inventory = new[]
+                {
+                    new InventoryItemProjection
+                    {
+                        Guid = 0xDEFu, Name = "Relic", Wcid = 1234u, ItemType = 0u,
+                    },
+                },
+            };
+        Assert.Equal(0xABCu, LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Relic"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_NonWeaponGroundItem_DoesNotRewrite()
+    {
+        var apple = new VisibleObjectProjection
+        {
+            Guid = 0xA11u, Name = "Apple", ItemType = 0u,
+            IsMonster = false, IsCorpse = false,
+        };
+        var world = WorldWithVisible(apple);
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Apple"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_NonWieldGoal_ReturnsNull()
+    {
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Training Spadone"));
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Training Spadone" } };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(attack, world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_MonsterNameMatch_DoesNotRewrite()
+    {
+        // A monster is never picked up, even if its name matches the selector.
+        var mob = new VisibleObjectProjection
+        {
+            Guid = 0x9001u, Name = "Drudge", ItemType = ItemTypeMasks.MeleeWeapon,
+            IsMonster = true, IsCorpse = false,
+        };
+        var world = WorldWithVisible(mob);
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Drudge"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_SemanticRefusal_DoesNotRewrite()
+    {
+        // A SEMANTIC refusal of this weapon's guid excludes it (loop-safety),
+        // mirroring the groundWeapon capsule predicate.
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Training Spadone"));
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0xABCu, ErrorCode = 0x0001u, // not a transport code (0xFFFC/D/E)
+        });
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Training Spadone"), world, es));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_TransportFailure_StillRewrites()
+    {
+        // A transport/walk-timeout failure (0xFFFD) clears on arrival, so it must
+        // NOT permanently exclude the weapon -- the pickup is still attempted.
+        var world = WorldWithVisible(GroundMeleeWeapon(0xABCu, "Training Spadone"));
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0xABCu, ErrorCode = 0xFFFDu,
+        });
+        Assert.Equal(0xABCu, LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Training Spadone"), world, es));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_TwoSameNamedGroundWeapons_DoesNotRewrite()
+    {
+        // Ambiguous: an exact-name selector matches TWO ground weapons. The Motor
+        // must NOT autonomously pick one -- stay unresolved so the LLM re-decides.
+        var world = WorldWithVisible(
+            GroundMeleeWeapon(0xABCu, "Dagger"),
+            GroundMeleeWeapon(0xABDu, "Dagger"));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(
+            WieldGoalTo("Dagger"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void WieldGroundWeapon_NameContainsMatchingMultiple_DoesNotRewrite()
+    {
+        // A generic name_contains selector (e.g. "weapon") matching multiple ground
+        // weapons is ambiguous -> no autonomous selection.
+        var world = WorldWithVisible(
+            GroundMeleeWeapon(0xABCu, "Iron Weapon"),
+            GroundMeleeWeapon(0xABDu, "Bronze Weapon"));
+        var goal = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Target = new Selector { NameContains = "Weapon" },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(goal, world, new EventStream()));
+    }
+
     [Fact]
     public void FormatContractCounts_CountsInProgressAndDoneByStage()
     {
