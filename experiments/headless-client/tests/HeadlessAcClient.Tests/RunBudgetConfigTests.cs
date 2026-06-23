@@ -57,6 +57,24 @@ public class RunBudgetConfigTests
         Assert.Equal(expected, HandshakeDriver.ResolveMaxActionsPerSession(env));
     }
 
+    [Theory]
+    [InlineData(null, 12)]      // unset -> default
+    [InlineData("", 12)]        // blank -> default
+    [InlineData("xyz", 12)]     // unparseable -> default
+    [InlineData("12", 12)]      // explicit default value
+    [InlineData("6", 6)]        // faster failed-raise recovery override
+    [InlineData("3", 3)]        // min bound (accepted)
+    [InlineData("2", 12)]       // below min -> default
+    [InlineData("1", 12)]       // below min -> default
+    [InlineData("0", 12)]       // zero -> default
+    [InlineData("-5", 12)]      // negative -> default
+    [InlineData("120", 120)]    // max (accepted)
+    [InlineData("999", 120)]    // above max -> clamped
+    public void ResolveRaiseConfirmTimeoutSeconds_DefaultsAndClamps(string? env, int expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveRaiseConfirmTimeoutSeconds(env));
+    }
+
     [Fact]
     public void OuterBudgetHeadroom_CoversWorstCaseReconnectOverhead()
     {

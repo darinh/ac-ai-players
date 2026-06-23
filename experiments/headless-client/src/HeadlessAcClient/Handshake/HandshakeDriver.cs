@@ -79,6 +79,33 @@ internal sealed class HandshakeDriver : IDisposable
     internal static readonly int MaxActionsPerSession =
         ResolveMaxActionsPerSession(Environment.GetEnvironmentVariable("AC_BOTS_MAX_ACTIONS_PER_SESSION"));
 
+    // How long a dispatched XP raise (RaiseAttribute/RaiseVital/RaiseSkill) stays
+    // PENDING awaiting an AvailableExperience-decrease confirmation before it is
+    // declared timed out and abandoned so it can never wedge the dedup window.
+    // Default 12s. A confirmed raise clears on the next AvailableExperience update,
+    // so this bound governs only how long an UNconfirmed pending raise lingers
+    // before the bot re-deliberates. Tunable via AC_BOTS_RAISE_CONFIRM_TIMEOUT_SECONDS.
+    // Read once at type-load; pure runtime config, no game knowledge.
+    internal static readonly int RaiseConfirmTimeoutSeconds =
+        ResolveRaiseConfirmTimeoutSeconds(Environment.GetEnvironmentVariable("AC_BOTS_RAISE_CONFIRM_TIMEOUT_SECONDS"));
+
+    // Resolve the raise-confirm timeout from the env var. Falls back to the 12s
+    // default for an unset/blank/invalid/below-min value; clamps to [3s, 120s]. The
+    // 3s floor keeps a comfortable margin over a normal sub-second confirmation so a
+    // low override cannot false-timeout a slow-but-successful raise, while still
+    // allowing faster recovery than the default; the 120s ceiling stops a typo from
+    // wedging a pending raise for minutes.
+    internal static int ResolveRaiseConfirmTimeoutSeconds(string? envValue)
+    {
+        const int Default = 12;
+        const int Min = 3;
+        const int Max = 120;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
     // Resolve the per-run observe budget from the env var. Falls back to the 3600s
     // default for an unset/blank/invalid value; clamps to [60s, 7 days] so a typo
     // can neither starve a run nor leave a process effectively immortal.
@@ -5497,7 +5524,7 @@ internal sealed class HandshakeDriver : IDisposable
                         // wedge the dedup window.
                         if (pendingRaise is { } pr0 &&
                             ((pr0.PreAvailableXp is long preXp && availXpNow is long nowXp && nowXp < preXp) ||
-                             (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(12)))
+                             (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmed = pr0.PreAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
                             Console.WriteLine(
@@ -5592,7 +5619,7 @@ internal sealed class HandshakeDriver : IDisposable
 
                         if (pendingRaise is { } pv0 &&
                             ((pv0.PreAvailableXp is long preXpV && availXpNow is long nowXpV && nowXpV < preXpV) ||
-                             (DateTime.UtcNow - pv0.At) > TimeSpan.FromSeconds(12)))
+                             (DateTime.UtcNow - pv0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmedV = pv0.PreAvailableXp is long pxpV && availXpNow is long nxpV && nxpV < pxpV;
                             Console.WriteLine(
@@ -5681,7 +5708,7 @@ internal sealed class HandshakeDriver : IDisposable
 
                         if (pendingRaise is { } ps0 &&
                             ((ps0.PreAvailableXp is long preXpS && availXpNow is long nowXpS && nowXpS < preXpS) ||
-                             (DateTime.UtcNow - ps0.At) > TimeSpan.FromSeconds(12)))
+                             (DateTime.UtcNow - ps0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmedS = ps0.PreAvailableXp is long pxpS && availXpNow is long nxpS && nxpS < pxpS;
                             Console.WriteLine(
