@@ -2491,7 +2491,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Console.WriteLine(BuildRunSummaryLine(
                 _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
                 world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
-                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips));
+                TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
+                FormatContractCounts(world.Contracts)));
         }
         _tempo.RecordLlmCall();
 
@@ -2516,10 +2517,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // active LLM model. Lets a run self-report stuck-in-landblock / flat-level /
     // loop-trigger patterns at a glance. Pure formatting over already-observed run
     // state; no game knowledge, no behavior.
+    // Compact contract-state summary for [run-summary]: total tracked contracts
+    // with the in-progress / done breakdown, e.g. "5(p3/d2)". Surfaced so a run
+    // self-reports criterion-2/3 contract THROUGHPUT at a glance — whether batches
+    // advance to done and then refresh (counts cycle) or stall at done. Returns
+    // null when no contracts are tracked. Pure read of the wire ContractStage
+    // codes (source ACE ContractTracker.cs: 1 Available, 2 InProgress, 3
+    // DoneOrPendingRepeat, 4+ ProgressCounter); no game knowledge, no behavior.
+    internal static string? FormatContractCounts(IReadOnlyList<ContractProjection>? contracts)
+    {
+        if (contracts is null || contracts.Count == 0) return null;
+        var inProgress = 0;
+        var done = 0;
+        for (var i = 0; i < contracts.Count; i++)
+        {
+            var stage = contracts[i].Stage;
+            if (stage == 3u) done++;
+            else if (stage == 2u || stage >= 4u) inProgress++;
+        }
+        return $"{contracts.Count}(p{inProgress}/d{done})";
+    }
+
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
-        string? topEmit = null, int skips = 0)
+        string? topEmit = null, int skips = 0, string? contracts = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2542,6 +2564,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // emission history; no behavior change, no game knowledge.
         if (!string.IsNullOrEmpty(topEmit))
             line += $" top-emit={topEmit}";
+        // Criterion-2/3 contract throughput: tracked contracts with the
+        // in-progress/done breakdown (shown only when any are tracked). Lets a run
+        // self-report whether contract batches advance to done and then refresh, or
+        // stall. Pure observability; no behavior change, no game knowledge.
+        if (!string.IsNullOrEmpty(contracts))
+            line += $" contracts={contracts}";
         return line;
     }
 

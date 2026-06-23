@@ -822,6 +822,48 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FormatContractCounts_NullOrEmpty_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.FormatContractCounts(null));
+        Assert.Null(LlmGoalPolicy.FormatContractCounts(new List<ContractProjection>()));
+    }
+
+    [Fact]
+    public void FormatContractCounts_CountsInProgressAndDoneByStage()
+    {
+        // Stage codes (ACE ContractTracker): 1 Available, 2 InProgress,
+        // 3 DoneOrPendingRepeat, 4+ ProgressCounter (counts as in-progress).
+        var contracts = new List<ContractProjection>
+        {
+            new() { ContractId = 1, Stage = 2u },   // in progress
+            new() { ContractId = 2, Stage = 5u },   // 4+ -> in progress
+            new() { ContractId = 3, Stage = 3u },   // done
+            new() { ContractId = 4, Stage = 3u },   // done
+            new() { ContractId = 5, Stage = 1u },   // available (neither p nor d)
+        };
+        Assert.Equal("5(p2/d2)", LlmGoalPolicy.FormatContractCounts(contracts));
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_WithContracts_AppendsContractsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int> { ["no-current-goal"] = 15 },
+            distinctLandblocks: 2, lastLandblock: 0xA9B4u, level: 8, totalXp: 42000L,
+            model: "m", topEmit: null, skips: 0, contracts: "5(p3/d2)");
+        Assert.Contains(" contracts=5(p3/d2)", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_NoContracts_OmitsContractsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 0L, model: "m", topEmit: null, skips: 0, contracts: null);
+        Assert.DoesNotContain("contracts=", line);
+    }
+
+    [Fact]
     public void TopRepeatedGoalEmitLabel_RepeatedTalk_ReportsLoopWithCount()
     {
         var es = new EventStream();
