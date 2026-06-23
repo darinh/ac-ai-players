@@ -139,6 +139,63 @@ internal sealed class HandshakeDriver : IDisposable
     private const int MaxLoginReconnects = 5;
     private const int LoginReconnectBackoffBaseMs = 5000;
 
+    // Reconnect budget reset: MaxLoginReconnects bounds CONSECUTIVE connect/login
+    // failures, not failures over the whole process lifetime. If an observe window
+    // ran healthily IN-WORLD for at least this many seconds before a disconnect, the
+    // bot was genuinely playing, so the earlier reconnects are ancient history and
+    // the consecutive-failure budget resets. This way transient disconnects spread
+    // across a long run (AC_BOTS_OBSERVE_SECONDS) do not accumulate toward the cap,
+    // while a rapid failure streak (no healthy window between failures) still gives
+    // up at MaxLoginReconnects — so a permanently dead/misconfigured server cannot
+    // livelock. 300s (5 min) of successful play clearly distinguishes real play
+    // from a flapping connection. The reset REQUIRES actual world entry, so a long
+    // pre-world stall cannot reset the budget (which would itself be a livelock).
+    private const int HealthyObserveWindowResetSeconds = 300;
+
+    // Pure consecutive-reconnect budget. Bounds a CONSECUTIVE failure streak at
+    // MaxLoginReconnects; a healthy in-world observe window resets the streak.
+    // Extracted from the socket loop so the state transitions are unit-testable
+    // (the loop itself cannot be, lacking a socket harness).
+    internal sealed class ReconnectBudget
+    {
+        private readonly int _maxConsecutive;
+        private readonly double _healthyWindowSeconds;
+        private readonly int _backoffBaseMs;
+        private int _consecutive;
+
+        internal ReconnectBudget(int maxConsecutive, double healthyWindowSeconds, int backoffBaseMs)
+        {
+            _maxConsecutive = maxConsecutive;
+            _healthyWindowSeconds = healthyWindowSeconds;
+            _backoffBaseMs = backoffBaseMs;
+        }
+
+        // Current consecutive-failure streak (for logging "n/Max").
+        internal int ConsecutiveFailures => _consecutive;
+
+        // True if another retry is within the consecutive-failure budget.
+        internal bool CanRetry => _consecutive < _maxConsecutive;
+
+        // A healthy IN-WORLD observe window before a disconnect resets the streak.
+        // inWorldSeconds is the time the bot was actually committed to the world
+        // this window (0 if it never entered), so a long pre-world stall cannot
+        // reset the budget (which would itself be a livelock) and a brief play
+        // window after a long stall does not count either.
+        internal void NoteObserveWindow(double inWorldSeconds)
+        {
+            if (inWorldSeconds >= _healthyWindowSeconds)
+                _consecutive = 0;
+        }
+
+        // Register one consecutive failure; returns the backoff delay (ms) for it.
+        // Call only when CanRetry is true.
+        internal int RegisterFailure()
+        {
+            _consecutive++;
+            return _backoffBaseMs * _consecutive;
+        }
+    }
+
     // Slice 8 — max global-coord distance (meters) between two consecutive
     // self-observations that straddle a landblock boundary for the change
     // to be classified as an on-foot seam crossing rather than a teleport.
@@ -197,7 +254,12 @@ internal sealed class HandshakeDriver : IDisposable
             // dead, so recovery is a full reconnect with a fresh socket and
             // a fresh LoginRequest, after a backoff. Bounded by
             // MaxLoginReconnects so a permanent failure cannot livelock.
-            for (int reconnect = 0; ; reconnect++)
+            // The budget tracks a CONSECUTIVE failure streak (reset by a healthy
+            // in-world observe window) rather than the loop iteration, so transient
+            // disconnects across a long run do not accumulate toward the cap.
+            var reconnectBudget = new ReconnectBudget(
+                MaxLoginReconnects, HealthyObserveWindowResetSeconds, LoginReconnectBackoffBaseMs);
+            for (;;)
             {
                 // (Re)bind a fresh UDP socket for this attempt — mirrors a
                 // real client relaunch and avoids reusing a source port the
@@ -221,7 +283,7 @@ internal sealed class HandshakeDriver : IDisposable
                 catch (Exception ex) when (
                     (ex is OperationCanceledException || ex is SocketException || ex is InvalidOperationException)
                     && !ct.IsCancellationRequested
-                    && reconnect < MaxLoginReconnects)
+                    && reconnectBudget.CanRetry)
                 {
                     // A relaunch during the prior session's teardown can leave the
                     // server briefly unresponsive or rejecting at the connect stage:
@@ -234,9 +296,10 @@ internal sealed class HandshakeDriver : IDisposable
                     // escape the reconnect loop. Past the cap (or on outer-ct
                     // cancellation) the exception propagates and the run ends, so a
                     // genuinely dead/misconfigured server still fails loud (and each
-                    // attempt logs the cause).
-                    var backoffMs = LoginReconnectBackoffBaseMs * (reconnect + 1);
-                    Console.WriteLine($"[handshake] connect handshake failed ({ex.GetType().Name}: {ex.Message}) -> reconnect {reconnect + 1}/{MaxLoginReconnects} after {backoffMs}ms");
+                    // attempt logs the cause). A connect-stage failure has no healthy
+                    // window before it, so it always advances the consecutive streak.
+                    var backoffMs = reconnectBudget.RegisterFailure();
+                    Console.WriteLine($"[handshake] connect handshake failed ({ex.GetType().Name}: {ex.Message}) -> reconnect {reconnectBudget.ConsecutiveFailures}/{MaxLoginReconnects} after {backoffMs}ms");
                     await Task.Delay(backoffMs, ct).ConfigureAwait(false);
                     continue;
                 }
@@ -285,15 +348,26 @@ internal sealed class HandshakeDriver : IDisposable
                 var observe = await ObservePostHandshakePackets(
                     recvBuf, ObserveSeconds, cryptoRecv, cryptoSend, connectReq.ClientId, ct).ConfigureAwait(false);
 
-                if (observe.ReconnectRequested && reconnect < MaxLoginReconnects)
-                {
-                    var backoffMs = LoginReconnectBackoffBaseMs * (reconnect + 1);
-                    Console.WriteLine($"[handshake] transient login rejection -> reconnect {reconnect + 1}/{MaxLoginReconnects} after {backoffMs}ms");
-                    await Task.Delay(backoffMs, ct).ConfigureAwait(false);
-                    continue;
-                }
                 if (observe.ReconnectRequested)
+                {
+                    // A healthy in-world observe window before this disconnect means
+                    // the bot genuinely played, so the earlier reconnects are ancient
+                    // history: reset the streak. observe.InWorldSeconds is the actual
+                    // time committed to the world (0 if it never entered, small after
+                    // a long pre-world stall), so a flapping connection or a stall
+                    // does NOT reset and a real failure streak still gives up at
+                    // MaxLoginReconnects.
+                    reconnectBudget.NoteObserveWindow(observe.InWorldSeconds);
+
+                    if (reconnectBudget.CanRetry)
+                    {
+                        var backoffMs = reconnectBudget.RegisterFailure();
+                        Console.WriteLine($"[handshake] transient login rejection -> reconnect {reconnectBudget.ConsecutiveFailures}/{MaxLoginReconnects} after {backoffMs}ms");
+                        await Task.Delay(backoffMs, ct).ConfigureAwait(false);
+                        continue;
+                    }
                     Console.WriteLine($"[handshake] transient login rejection persisted past {MaxLoginReconnects} reconnects - giving up");
+                }
 
                 return new HandshakeResult(
                     connectReq.ServerTime,
@@ -484,6 +558,11 @@ internal sealed class HandshakeDriver : IDisposable
         var enterWorldRequestSent = false;
         var enterWorldSent = false;
         var loginCompleteSent = false;
+        // Wall-clock of the FIRST world commit this window, so the caller can tell
+        // how long the bot was actually IN-WORLD (not merely how long the observe
+        // loop ran). Used to decide whether a window counts as healthy play before
+        // a disconnect (resets the reconnect budget). Null until world entry.
+        DateTime? loginCompleteFirstAtUtc = null;
 
         // Login resilience: if the server rejects this connection with a
         // TRANSIENT CharacterError BEFORE we commit to the world, the whole
@@ -3750,6 +3829,8 @@ internal sealed class HandshakeDriver : IDisposable
                     (!loginCompleteSent || loginCompleteResendNeeded))
                 {
                     var isResend = loginCompleteSent && loginCompleteResendNeeded;
+                    if (!loginCompleteSent)
+                        loginCompleteFirstAtUtc = DateTime.UtcNow;
                     loginCompleteSent = true;
                     loginCompleteResendNeeded = false;
                     // Phase 7g — capture the instance + teleport sequences we
@@ -10089,6 +10170,13 @@ internal sealed class HandshakeDriver : IDisposable
             Console.WriteLine($"[observe] WARNING: EnterWorldRequest sent but no 0xF7DF received within window");
         if (lastCharacterError is not null)
             Console.WriteLine($"[observe] LAST CharacterError observed: code=0x{lastCharacterError.ErrorCode:X4}");
+        // Seconds the bot was actually IN-WORLD this window (0 if it never
+        // committed to the world). Captured BEFORE the flush/dispose teardown below
+        // so disk-flush time is not counted as play time. Lets the caller reset the
+        // reconnect budget only after genuine in-world play, not a pre-world stall.
+        var inWorldSeconds = loginCompleteFirstAtUtc is DateTime t
+            ? Math.Max(0.0, (DateTime.UtcNow - t).TotalSeconds)
+            : 0.0;
         // Slice D — flush nav graph + close training sink before
         // returning. The bot may be killed by Ctrl-C between session
         // end and the next run, so we want everything on disk.
@@ -10112,7 +10200,7 @@ internal sealed class HandshakeDriver : IDisposable
         }
         return new ObserveResult(count, charList, serverName, ddd, characterCreateSent, createResponse,
             enterWorldRequestSent, enterWorldServerReady, enterWorldSent, lastCharacterError, chosenCharacterGuid,
-            reconnectRequested);
+            reconnectRequested, inWorldSeconds);
     }
 
     private readonly record struct ObserveResult(
@@ -10127,7 +10215,8 @@ internal sealed class HandshakeDriver : IDisposable
         bool EnterWorldSent,
         CharacterErrorMessage? LastCharacterError,
         uint ChosenCharacterGuid,
-        bool ReconnectRequested);
+        bool ReconnectRequested,
+        double InWorldSeconds);
 
     private async Task<ConnectRequestData> ReceiveConnectRequestAsync(byte[] recvBuf, CancellationToken ct)
     {
