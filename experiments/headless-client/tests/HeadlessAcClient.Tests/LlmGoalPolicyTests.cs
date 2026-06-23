@@ -20620,6 +20620,51 @@ public class LlmGoalPolicyTests
         Assert.Equal(expected, LlmGoalPolicy.ResolveSkipFixatedTalkCall(env));
     }
 
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("ON", true)]
+    [InlineData(null, false)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("off", false)]
+    [InlineData("yes", false)]
+    public void ResolveSkipEmptyExploreCall_DefaultsOff_OptInOnly(string? env, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveSkipEmptyExploreCall(env));
+    }
+
+    [Fact]
+    public void LastEmitWasUntargetedExplore_TrueWhenLastEmitIsExploreAnywhere()
+    {
+        var es = Cp069Stream(("Attack", "Golem"), ("Explore", "anywhere"));
+        Assert.True(LlmGoalPolicy.LastEmitWasUntargetedExplore(es));
+    }
+
+    [Fact]
+    public void LastEmitWasUntargetedExplore_FalseWhenLastEmitIsTargetedExplore()
+    {
+        // A targeted Explore (toward a named place/object) is a pursuit, not aimless
+        // travel — the skip must not fire.
+        var es = Cp069Stream(("Explore", "anywhere"), ("Explore", "Buckminster"));
+        Assert.False(LlmGoalPolicy.LastEmitWasUntargetedExplore(es));
+    }
+
+    [Fact]
+    public void LastEmitWasUntargetedExplore_FalseWhenLastEmitIsOtherVerb()
+    {
+        // The most-recent emit decides; a Talk after an Explore means the bot was
+        // doing something concrete last.
+        var es = Cp069Stream(("Explore", "anywhere"), ("Talk", "Greeter"));
+        Assert.False(LlmGoalPolicy.LastEmitWasUntargetedExplore(es));
+    }
+
+    [Fact]
+    public void LastEmitWasUntargetedExplore_FalseWhenNoEmits()
+    {
+        Assert.False(LlmGoalPolicy.LastEmitWasUntargetedExplore(new EventStream()));
+    }
+
     [Fact]
     public void HasNewStrategicIntentCompletionSince_GoalIdLessLifecycle_True()
     {

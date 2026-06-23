@@ -2362,6 +2362,46 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, fixatedTalkName);
         }
 
+        // Reduce-llm-call-volume (opt-in, default OFF via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL).
+        // When the bot is on a sustained UNTARGETED Explore (its last emitted goal was
+        // `Explore{anywhere}` — pure Motor-owned travel with nothing to interact with),
+        // with NOTHING in view to engage (no attackable monster, no vendor, no un-talked
+        // NPC) and NO decision-worthy change since the last LLM look, re-deliberating just
+        // reproduces the SAME untargeted Explore — so skip the redundant call and continue
+        // traveling. The freshness gates are a SUPERSET of the Talk-fixation skip's:
+        //   - !hasNonPickerExternal: a fresh dialog / inventory change / zone change /
+        //     rejection / damage BLOCKS the skip (the LLM sees it);
+        //   - !pickerArrived && !pickerStartWake: the autonomous picker discovering or
+        //     arriving at an interactable (door/portal/corpse/ground item/weapon) BLOCKS
+        //     the skip, so a discovery is never hidden behind the travel skip;
+        //   - !HasNewStrategicIntentCompletionSince: an intent-stack pop / top-objective
+        //     change BLOCKS the skip so the bot re-deliberates the new objective.
+        // Bounded by MaxEmptyExploreSkips so the LLM re-chooses the heading periodically.
+        // Default OFF so the default decision path is byte-for-byte unchanged pending live
+        // A/B; request-tempo only — the bot continues its OWN prior untargeted-travel
+        // decision, no new target is picked (no source-side interaction choice).
+        if (SkipEmptyExploreCallEnabled
+            && !hasNonPickerExternal
+            && !pickerArrived
+            && !pickerStartWake
+            && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
+            && _emptyExploreSkips < MaxEmptyExploreSkips
+            && !AnyAttackableMonsterInView(world)
+            && !world.Visible.Any(v => v.IsVendor)
+            && CountUntalkedNpcsInView(world, _talkedNpcGuids, _talkedNpcNames, excludeVendors: true) == 0
+            && LastEmitWasUntargetedExplore(events))
+        {
+            _emptyExploreSkips++;
+            Console.WriteLine(
+                "[llm-skip] sustained empty-space Explore travel: nothing in view to engage and no new event " +
+                $"since the last look — skipping the redundant LLM call and continuing to Explore " +
+                $"({_emptyExploreSkips}/{MaxEmptyExploreSkips}).");
+            return MakeEgressExploreGoal(
+                nowUtc, "skip:empty-explore",
+                "continuing an untargeted Explore through empty space without a redundant LLM call");
+        }
+        _emptyExploreSkips = 0;
+
         _lastCalledAtUtc = nowUtc;
         var eventSeqAtCallStart = events.NextSequence;
         _lastEventConsideredSequence = eventSeqAtCallStart;
@@ -9522,6 +9562,53 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         string.Equals(envValue, "1", StringComparison.Ordinal)
         || string.Equals(envValue, "true", StringComparison.OrdinalIgnoreCase)
         || string.Equals(envValue, "on", StringComparison.OrdinalIgnoreCase);
+
+    // Opt-in reduce-llm-call-volume gate (default OFF). When the bot is travelling
+    // through empty space on a sustained UNTARGETED Explore with nothing in view to
+    // engage and no new external event, an LLM call would just reproduce the same
+    // Explore — so skip it and continue. Default OFF so the default decision path is
+    // byte-for-byte unchanged until A/B-validated; enable with
+    // AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=1/true/on. Request-tempo management only.
+    private static readonly bool SkipEmptyExploreCallEnabled =
+        ResolveSkipEmptyExploreCall(Environment.GetEnvironmentVariable("AC_BOTS_SKIP_EMPTY_EXPLORE_CALL"));
+
+    internal static bool ResolveSkipEmptyExploreCall(string? envValue) =>
+        string.Equals(envValue, "1", StringComparison.Ordinal)
+        || string.Equals(envValue, "true", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(envValue, "on", StringComparison.OrdinalIgnoreCase);
+
+    // Consecutive empty-space Explore LLM-call skips since the last real call. Bounds
+    // how far an untargeted travel excursion runs before the LLM re-evaluates the
+    // heading; reset to 0 on every real LLM call (and whenever the skip gate declines).
+    private int _emptyExploreSkips;
+
+    // How many consecutive empty-space Explore calls the gate may skip before forcing
+    // a real LLM deliberation. Keeps a barren excursion from drifting one direction
+    // indefinitely without the LLM re-choosing where to look.
+    private const int MaxEmptyExploreSkips = 6;
+
+    // True iff the bot's MOST-RECENT emitted goal was an UNTARGETED Explore (the schema
+    // "anywhere" sentinel or an empty target) — i.e. the bot is mid-travel with nothing
+    // to interact with. Scans the bot's own emission history newest-first and stops at
+    // the first emitted goal: a targeted Explore or any other verb returns false (the
+    // bot was doing something concrete, not aimless travel). Schema-level goal-shape
+    // over the bot's OWN history; no game knowledge.
+    internal static bool LastEmitWasUntargetedExplore(EventStream events)
+    {
+        foreach (var e in events.Recent())
+        {
+            if (e.Kind != EventKind.GoalEmitted) continue;
+            var t = e.Text;
+            if (string.IsNullOrEmpty(t) || !t.StartsWith("Explore ", StringComparison.Ordinal)) return false;
+            var m = System.Text.RegularExpressions.Regex.Match(t, "target=(.*?) item=");
+            if (!m.Success) return false;
+            var sel = m.Groups[1].Value.Trim();
+            return sel.Length == 0 || sel == "<empty>"
+                || System.Text.RegularExpressions.Regex.IsMatch(
+                    sel, "name=\"anywhere\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+        return false;
+    }
 
     // Max consecutive autonomous Attacks the Motor may mint before it MUST
     // route a real LLM decision. A periodic oversight + hard liveness cap so a
