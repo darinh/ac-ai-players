@@ -75,6 +75,27 @@ public class RunBudgetConfigTests
         Assert.Equal(expected, HandshakeDriver.ResolveRaiseConfirmTimeoutSeconds(env));
     }
 
+    [Theory]
+    [InlineData(null, 60.0)]    // unset -> default
+    [InlineData("", 60.0)]      // blank -> default
+    [InlineData("   ", 60.0)]   // whitespace -> default
+    [InlineData("abc", 60.0)]   // unparseable -> default
+    [InlineData("60", 60.0)]    // explicit default value
+    [InlineData("50", 50.0)]    // shorter cycle-off override (above floor)
+    [InlineData("45.5", 45.5)]  // fractional override (accepted)
+    [InlineData("45", 45.0)]    // min bound (accepted) — conservatively above the 30+s first-hit latency
+    [InlineData("44.9", 60.0)]  // just below min -> default
+    [InlineData("35", 60.0)]    // below min -> default
+    [InlineData("0", 60.0)]     // zero -> default
+    [InlineData("-5", 60.0)]    // negative -> default
+    [InlineData("600", 600.0)]  // max (accepted)
+    [InlineData("601", 600.0)]  // above max -> clamped
+    [InlineData("100000", 600.0)] // far above max -> clamped
+    public void ResolveAbandonNoDamageSeconds_DefaultsAndClamps(string? env, double expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveAbandonNoDamageSeconds(env));
+    }
+
     [Fact]
     public void OuterBudgetHeadroom_CoversWorstCaseReconnectOverhead()
     {
@@ -118,5 +139,9 @@ public class RunBudgetConfigTests
             HandshakeDriver.ResolveMaxActionsPerSession(
                 System.Environment.GetEnvironmentVariable("AC_BOTS_MAX_ACTIONS_PER_SESSION")),
             HandshakeDriver.MaxActionsPerSession);
+        Assert.Equal(
+            HandshakeDriver.ResolveAbandonNoDamageSeconds(
+                System.Environment.GetEnvironmentVariable("AC_BOTS_NO_DAMAGE_ABANDON_SECONDS")),
+            HandshakeDriver.AbandonOnNoDamageSeconds);
     }
 }

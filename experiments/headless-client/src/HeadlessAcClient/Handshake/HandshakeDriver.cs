@@ -89,6 +89,14 @@ internal sealed class HandshakeDriver : IDisposable
     internal static readonly int RaiseConfirmTimeoutSeconds =
         ResolveRaiseConfirmTimeoutSeconds(Environment.GetEnvironmentVariable("AC_BOTS_RAISE_CONFIRM_TIMEOUT_SECONDS"));
 
+    // Seconds of ZERO recorded damage to the current combat target before the
+    // no-progress watchdog abandons it (any recorded damage to it resets the
+    // timer, so this fires only on a target the bot has not damaged at all).
+    // Default 60s; tunable via AC_BOTS_NO_DAMAGE_ABANDON_SECONDS. Read once at
+    // type-load; pure runtime config, no game knowledge.
+    internal static readonly double AbandonOnNoDamageSeconds =
+        ResolveAbandonNoDamageSeconds(Environment.GetEnvironmentVariable("AC_BOTS_NO_DAMAGE_ABANDON_SECONDS"));
+
     // Resolve the raise-confirm timeout from the env var. Falls back to the 12s
     // default for an unset/blank/invalid/below-min value; clamps to [3s, 120s]. The
     // 3s floor keeps a comfortable margin over a normal sub-second confirmation so a
@@ -101,6 +109,24 @@ internal sealed class HandshakeDriver : IDisposable
         const int Min = 3;
         const int Max = 120;
         if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
+    // Resolve the no-damage combat-abandon backstop from the env var. Falls back
+    // to the 60s default for an unset/blank/invalid/below-min value; clamps to
+    // [45s, 600s]. The 45s floor sits comfortably above the watchdog comment's
+    // documented "30+ s" first-damage latency (a conservative margin over that
+    // open-ended figure) so a low override cannot trip the timer before damage
+    // can be recorded against a slow-to-connect target; the 600s ceiling stops a
+    // typo from pinning the watchdog on one target for many minutes.
+    internal static double ResolveAbandonNoDamageSeconds(string? envValue)
+    {
+        const double Default = 60.0;
+        const double Min = 45.0;
+        const double Max = 600.0;
+        if (double.TryParse(envValue, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
             return Math.Min(v, Max);
         return Default;
@@ -757,10 +783,10 @@ internal sealed class HandshakeDriver : IDisposable
         // the server is IsBusy, so a re-sent TargetedMeleeAttack is rejected
         // with WeenieError.YoureTooBusy (0x1D) and the server then fires
         // GameEventAttackDone(ActionCancelled), NULLING its own MeleeTarget —
-        // killing the loop. Against a near-instant mob (Chicken) the fight ends
-        // before any re-send; against a longer-lived mob the loop-keeper's
-        // re-sends cancel the server loop every cadence → the fight stalls after
-        // the first landed hit. Track the most recent SERVER signal that its
+        // killing the loop. If the target dies before any re-send the fight ends
+        // cleanly; if it outlives a re-send the loop-keeper's re-sends cancel the
+        // server loop every cadence → progress stalls after the first landed hit.
+        // Track the most recent SERVER signal that its
         // loop is ALIVE (a normal AttackDone(None) between-swings power-refill,
         // or a target health update) and suppress the loop-keeper until that
         // observation is older than CombatActivityQuiescenceSec — i.e. the loop
@@ -770,15 +796,14 @@ internal sealed class HandshakeDriver : IDisposable
         // mistaken for a dropped loop.
         const double         CombatActivityQuiescenceSec = 4.0;
         DateTime?            lastServerCombatActivityAt = null;
-        const double         AbandonOnNoDamageSec   = 60.0;
-        // Phase 7f — EARLY "cannot damage" abandon. The 60s no-damage
-        // watchdog above is the ultimate backstop; this trips sooner once
-        // the bot has swung enough times with EVERY swing evaded and zero
-        // damage dealt that "0 landed" is conclusive (a fresh low-skill bot
-        // routinely meets mobs it cannot hit and otherwise burns the full
-        // 60s per such mob). Requires both a minimum all-evaded swing count
-        // and a minimum elapsed time so a winnable fight's unlucky early
-        // evade streak does not trip it. See CombatRetry.ShouldAbandonUnbeatable.
+        double               AbandonOnNoDamageSec   = AbandonOnNoDamageSeconds;
+        // Phase 7f — EARLY zero-progress abandon. The no-damage watchdog
+        // above is the ultimate backstop; this trips sooner once enough
+        // swings have resolved with EVERY swing evaded and zero damage
+        // dealt that the outcome is conclusive. Requires both a minimum
+        // all-evaded swing count and a minimum elapsed time so a short
+        // early evade streak does not trip it. See
+        // CombatRetry.ShouldAbandonUnbeatable.
         const int            AbandonAllEvadedMinSwings = 12;
         const double         AbandonAllEvadedMinSec    = 25.0;
         // Phase 7f.S — STALEMATE abandon. The no-damage / all-evaded abandons
@@ -863,19 +888,17 @@ internal sealed class HandshakeDriver : IDisposable
         // skips these so it picks the next-nearest LIVE target.
         var                  recentlyKilledCooldown = TimeSpan.FromSeconds(45);
         var                  recentlyKilledTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
-        // cp-2396 — guids the bot ABANDONED after landing ZERO damage (the
+        // cp-2396 — guids the bot ABANDONED after recording ZERO damage (the
         // NO-PROGRESS no-damage / all-evaded abandon below). The abandon adds the
         // guid to visitedTargetGuids, but the name-only Attack resolver
         // (tactics.ResolveTarget) BYPASSES visitedTargetGuids, so when the LLM
-        // re-emits Attack on the same KIND the resolver re-locks the SAME
-        // un-damageable individual and the bot loops 60s no-damage fights on it
-        // (live: one guid abandoned 7x in a row = ~7 min wasted). Merge these into
-        // the resolver's skip set so it picks the next-nearest DIFFERENT target
-        // instead. TTL'd so a later approach (e.g. after the bot has leveled or
-        // re-armed) may retry. Same generic TTL guid-suppression structure as
-        // recentlyKilledTargets; keyed only on a guid the bot could not damage —
-        // no object type/name/wcid, the combat-feel ledger separately records the
-        // per-KIND ineffective outcome for the LLM.
+        // re-emits Attack on the same selector the resolver can re-lock the SAME
+        // guid and repeat the no-damage abandon on it. Merge these into the
+        // resolver's skip set so it picks the next-nearest DIFFERENT guid
+        // instead. TTL'd so a later approach may retry. Same generic TTL
+        // guid-suppression structure as recentlyKilledTargets; keyed only on a
+        // guid that recorded no damage — no object type/name/wcid; the
+        // combat-feel ledger separately records the per-kind ineffective outcome.
         var                  recentlyAbandonedNoDamageCooldown = TimeSpan.FromSeconds(120);
         var                  recentlyAbandonedNoDamageTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
         // cp-2403 — containers (chests/corpses) the bot OPENED and confirmed
