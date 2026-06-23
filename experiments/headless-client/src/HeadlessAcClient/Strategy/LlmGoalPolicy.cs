@@ -55,15 +55,44 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// <summary>
     /// Minimum interval between LLM calls. Even when an event would
     /// normally trigger a call, we coalesce within this window to
-    /// avoid bursting the LLM with quick-fire popups.
+    /// avoid bursting the LLM with quick-fire popups. Default 2s; a long
+    /// unattended run can RAISE it via AC_BOTS_MIN_CALL_INTERVAL_SECONDS to
+    /// stretch a daily per-model LLM quota across more wall-clock hours — the
+    /// bot keeps executing its current goal during the coalesce defer, so this
+    /// throttles call RATE without slowing action execution. The standing
+    /// reduce-llm-call-volume goal. ~10s is a reasonable unattended value; the
+    /// value is capped at StuckTimeout (a longer window would suppress the
+    /// stuck-timer re-deliberation backstop, and salient/picker/stuck wakes still
+    /// bound the effective delay). 0 disables the throttle (tests set Zero).
     /// </summary>
-    public TimeSpan MinCallInterval { get; init; } = TimeSpan.FromSeconds(2);
+    public TimeSpan MinCallInterval { get; init; } =
+        ResolveMinCallInterval(Environment.GetEnvironmentVariable("AC_BOTS_MIN_CALL_INTERVAL_SECONDS"));
+
+    // Parse the AC_BOTS_MIN_CALL_INTERVAL_SECONDS override for MinCallInterval. A
+    // non-negative integer is used (clamped to the StuckTimeout ceiling so the
+    // coalesce window can never outlast the stuck-timer re-deliberation backstop);
+    // anything else (unset, blank, unparseable, negative) falls back to the 2s
+    // default. Request-RATE management keyed to the per-model daily LLM quota, NOT
+    // strategy or game knowledge.
+    internal static TimeSpan ResolveMinCallInterval(string? envValue)
+    {
+        const int DefaultSeconds = 2;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= 0)
+            return TimeSpan.FromSeconds(Math.Min(v, StuckTimeoutSeconds));
+        return TimeSpan.FromSeconds(DefaultSeconds);
+    }
 
     /// <summary>
     /// Wall-clock "stuck" timer: if no event arrives and no goal
     /// completes within this, re-deliberate.
     /// </summary>
-    public TimeSpan StuckTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan StuckTimeout { get; init; } = TimeSpan.FromSeconds(StuckTimeoutSeconds);
+
+    // The stuck-timer backstop in seconds. Shared so the MinCallInterval ceiling
+    // (ResolveMinCallInterval) can cap at it: a coalesce window longer than the
+    // stuck timer would suppress the re-deliberation the stuck timer guarantees.
+    internal const int StuckTimeoutSeconds = 30;
 
     /// <summary>
     /// Hard deadline on a single LLM HTTP call. Belt-and-suspenders
@@ -2081,9 +2110,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         var anyWake = hasNonPickerSalient || pickerArrived || pickerStartWake;
         if (currentGoal is not null && !anyWake && !stuck) return currentGoal;
-        // Non-picker salient events still respect the 2s coalesce; the
-        // picker arrival + new-target picker-start paths bypass it.
-        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake) return currentGoal;
+        // Non-picker salient events still respect the coalesce window; the
+        // picker arrival + new-target picker-start paths bypass it. The `&& !stuck`
+        // guard ensures the stuck-timer re-deliberation backstop always punches
+        // through, so a (capped, but defensively also a hypothetical caller-set)
+        // MinCallInterval can never suppress re-deliberation past StuckTimeout.
+        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake && !stuck) return currentGoal;
 
         // STICKY LLM-OBJECTIVE (call-volume reduction). The tactical
         // goal has cleared (currentGoal == null), so without this gate
