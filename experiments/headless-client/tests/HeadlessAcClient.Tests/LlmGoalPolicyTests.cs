@@ -942,6 +942,22 @@ public class LlmGoalPolicyTests
     }
 
     [Theory]
+    [InlineData(null, 6)]    // unset -> default
+    [InlineData("", 6)]      // blank -> default
+    [InlineData("xyz", 6)]   // unparseable -> default
+    [InlineData("0", 6)]     // below min (1) -> default
+    [InlineData("-4", 6)]    // negative -> default
+    [InlineData("1", 1)]     // min accepted
+    [InlineData("10", 10)]   // a higher chain budget (fewer forced LLM re-checks)
+    [InlineData("12", 12)]   // max accepted
+    [InlineData("13", 12)]   // above max -> clamped
+    [InlineData("100", 12)]  // well above max -> clamped
+    public void ResolveMaxCombatChainAttacks_DefaultsAndClamps(string? env, int expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveMaxCombatChainAttacks(env));
+    }
+
+    [Theory]
     [InlineData(null, "")]
     [InlineData("", "")]
     [InlineData("   ", "")]
