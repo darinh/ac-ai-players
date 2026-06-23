@@ -8559,6 +8559,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "or turn one in is your call.");
         }
 
+        // corpse-bearing-recovery: render the `## Corpse` bearing when the
+        // projection carries a death location.
+        AppendCorpseBearing(sb, world);
+
         // ── ## Vendor offerings (open-vendor perception, end-of-prompt capsule) ─
         // When the bot has a vendor trade panel open (it Used/Talked a vendor),
         // render WHAT that vendor sells — each item's name + the cost to buy it
@@ -10361,6 +10365,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             from = at + 1;
         }
         return false;
+    }
+
+    // Append a `## Corpse` section: a bearing+distance from the bot's current
+    // position to the projection's corpse coords, when present. Prompt text only.
+    private static void AppendCorpseBearing(StringBuilder sb, WorldStateProjection world)
+    {
+        if (world.CorpseWorldX is not float cx || world.CorpseWorldY is not float cy) return;
+        if (ContractSelfXY(world) is not { } s) return;
+        var dx = cx - s.Gx;
+        var dy = cy - s.Gy;
+        var dist = MathF.Sqrt(dx * dx + dy * dy);
+        var dir = Compass8(dx, dy).ToLowerInvariant();
+        var age = world.CorpseAgeSeconds is int a ? $" (you died ~{a}s ago)" : string.Empty;
+        sb.AppendLine();
+        sb.AppendLine("## Corpse");
+        sb.AppendLine(
+            $"- your own corpse is ~{dist:F0}u to the {dir}{age} and holds whatever you dropped when you " +
+            $"died. To recover it, travel back — `Explore{{target: {{name: \"anywhere\"}}, direction: \"{dir}\"}}` " +
+            "(keep heading that bearing each tick) — and once your `corpse` is in `## Visible nearby`, `Use` it " +
+            "to loot. This is OPTIONAL: if it is far or you have more pressing progress, skip it.");
     }
 
     // The bot's own global (worldX, worldY) — used to turn a contract's dat-defined

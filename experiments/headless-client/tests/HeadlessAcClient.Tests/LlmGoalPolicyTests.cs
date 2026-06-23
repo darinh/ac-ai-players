@@ -16614,6 +16614,37 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_CorpseBearing_RendersReturnBearingWhenDeathLocationPresent()
+    {
+        // corpse-bearing-recovery: when the projection carries the last death
+        // location (already gated by CorpseRecovery), the prompt surfaces a `##
+        // Corpse` return bearing from the bot's current position so it can go back
+        // and Use its corpse. The far corpse coords render some bearing+distance.
+        var world = BuildXpWorld(50000, 0) with
+        {
+            CorpseWorldX = 999999f,
+            CorpseWorldY = 999999f,
+            CorpseAgeSeconds = 42,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("## Corpse", prompt);
+        Assert.Contains("your own corpse is", prompt);
+        Assert.Contains("you died ~42s ago", prompt);
+        Assert.Contains("`Use` it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_CorpseBearing_AbsentWhenNoDeathLocation()
+    {
+        // No recorded death location -> no `## Corpse` section.
+        var world = BuildXpWorld(50000, 0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.DoesNotContain("## Corpse", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_UnspentXpCapsule_RestatesEvadeToAccuracyLeverMapping_NoTrainedSkill()
     {
         // cp2924: live the bot read its own evade-heavy split yet poured XP into
