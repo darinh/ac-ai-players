@@ -2492,7 +2492,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 _summaryDecisions, _summaryTriggers, _summaryLandblocks.Count,
                 world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
                 TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
-                FormatContractCounts(world.Contracts)));
+                FormatContractCounts(world.Contracts), _stack?.Depth));
         }
         _tempo.RecordLlmCall();
 
@@ -2541,7 +2541,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
-        string? topEmit = null, int skips = 0, string? contracts = null)
+        string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2570,6 +2570,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // stall. Pure observability; no behavior change, no game knowledge.
         if (!string.IsNullOrEmpty(contracts))
             line += $" contracts={contracts}";
+        // Criterion-3 plan-compilation signal: the strategic IntentStack depth. The
+        // LLM compiles NPC/quest dialog into pushed Intents (a Plan). intents=0 means
+        // no active strategic stack, intents=1 means a single active strategic
+        // intent, intents>1 means a nested/multi-step compiled plan. Watching the
+        // depth across a run shows whether plans get compiled and persist. Shown when
+        // known (>=0). Pure structural read of the bot's OWN strategic state; no
+        // behavior change, no game knowledge.
+        if (intentDepth is int depth && depth >= 0)
+            line += $" intents={depth}";
         return line;
     }
 

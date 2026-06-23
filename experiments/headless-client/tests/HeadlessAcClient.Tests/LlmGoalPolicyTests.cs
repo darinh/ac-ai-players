@@ -864,6 +864,38 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_WithIntentDepth_AppendsIntentsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int> { ["no-current-goal"] = 15 },
+            distinctLandblocks: 2, lastLandblock: 0xA9B4u, level: 8, totalXp: 42000L,
+            model: "m", topEmit: null, skips: 0, contracts: null, intentDepth: 3);
+        Assert.Contains(" intents=3", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_ZeroIntentDepth_StillShown()
+    {
+        // depth 0 (empty strategic stack) is meaningful — it flags that no plan is
+        // active — so it is shown, unlike the null (unknown) case.
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 0L, model: "m",
+            topEmit: null, skips: 0, contracts: null, intentDepth: 0);
+        Assert.Contains(" intents=0", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_NullIntentDepth_OmitsIntentsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 0L, model: "m",
+            topEmit: null, skips: 0, contracts: null, intentDepth: null);
+        Assert.DoesNotContain("intents=", line);
+    }
+
+    [Fact]
     public void TopRepeatedGoalEmitLabel_RepeatedTalk_ReportsLoopWithCount()
     {
         var es = new EventStream();
