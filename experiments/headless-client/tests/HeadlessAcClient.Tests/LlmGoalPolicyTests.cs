@@ -895,6 +895,19 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("intents=", line);
     }
 
+    [Theory]
+    [InlineData(0, false)]      // just emitted -> not due
+    [InlineData(120, false)]    // 2 min -> not due
+    [InlineData(299, false)]    // just under the 300s interval
+    [InlineData(300, true)]     // exactly at the interval -> due
+    [InlineData(600, true)]     // well past -> due
+    public void ShouldEmitTimeBasedSummary_FiresAfterMaxInterval(int elapsedSeconds, bool expected)
+    {
+        var last = new DateTimeOffset(2026, 6, 23, 12, 0, 0, TimeSpan.Zero);
+        var now = last.AddSeconds(elapsedSeconds);
+        Assert.Equal(expected, LlmGoalPolicy.ShouldEmitTimeBasedSummary(last, now));
+    }
+
     [Fact]
     public void TopRepeatedGoalEmitLabel_RepeatedTalk_ReportsLoopWithCount()
     {
