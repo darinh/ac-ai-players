@@ -11254,6 +11254,44 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsOptionalAttackOnBeatenKind_PartialNameActivelyHostile_Exempt()
+    {
+        // The model names the hostile by the distinctive part of a title-laden
+        // wire name ("Skulker" for "Drudge Skulker"). The self-defense exemption
+        // must recognize the UNIQUE partial-name match the Motor will resolve and
+        // NOT veto — the bot is fighting back the thing engaging it.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 3f, IsMonster = true, ObservedHostile = true,
+            });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Skulker"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_AmbiguousPartialName_StillVetoes()
+    {
+        // An ambiguous partial ("Drudge" matches two visible hostiles) is NOT a
+        // unique Motor resolution, so the self-defense exemption must NOT fire and
+        // the beaten-kind veto stands.
+        var world = BuildWorldBeaten(LethalBeaten("Drudge", 7u), selfLevel: 11,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
+                Distance = 3f, IsMonster = true, ObservedHostile = true,
+            },
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid + 1, Name = "Drudge Slinker", Wcid = 8u,
+                Distance = 5f, IsMonster = true, ObservedHostile = true,
+            });
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Drudge"), world));
+    }
+
+    [Fact]
     public void IsOptionalAttackOnBeatenKind_NotBeatenKind_DoesNotFire()
     {
         // A kind the bot has killed (no losses) is not beaten -> never vetoed.
