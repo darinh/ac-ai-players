@@ -2356,7 +2356,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         //     (corpse/door/portal/ground-item) BLOCKS the skip so the LLM can choose
         //     Pickup/Use on it rather than being forced into a break-contact Explore
         //     (mirrors the empty-explore skip's picker guard);
-        //   - `!HasNewStrategicIntentCompletionSince`: an intent-stack pop BLOCKS the skip.
+        //   - `!HasNewStrategicIntentCompletionSince`: an intent-stack pop BLOCKS the skip;
+        //   - `!StackHasNoActiveObjective`: a non-Active top (incl. a root deadline-Blocked
+        //     in place, which emits no lifecycle event) BLOCKS the skip so the bot wakes to
+        //     re-plan rather than escape-Explore while objective-less.
         // Self-limiting: the egress's Explore goals age the Talk fixation out of the
         // history window within a few decisions, re-engaging the LLM. NOTE: unlike the
         // post-LLM Talk-fixation drop site this does NOT call RecordTalkLoopSuppression
@@ -2368,6 +2371,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && !pickerArrived
             && !pickerStartWake
             && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
+            && !StackHasNoActiveObjective(_stack)
             && ProvenTalkFixationNameFromHistory(events) is string fixatedTalkName)
         {
             Console.WriteLine(
@@ -2376,7 +2380,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, fixatedTalkName);
         }
 
-        // Reduce-llm-call-volume (opt-in, default OFF via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL).
+        // Reduce-llm-call-volume (default ON; opt OUT via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=0/false/off).
         // When the bot is on a sustained UNTARGETED Explore (its last emitted goal was
         // `Explore{anywhere}` — pure Motor-owned travel with nothing to interact with),
         // with NOTHING in view to engage (no attackable monster, no vendor, no un-talked
@@ -2389,16 +2393,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         //     arriving at an interactable (door/portal/corpse/ground item/weapon) BLOCKS
         //     the skip, so a discovery is never hidden behind the travel skip;
         //   - !HasNewStrategicIntentCompletionSince: an intent-stack pop / top-objective
-        //     change BLOCKS the skip so the bot re-deliberates the new objective.
+        //     change BLOCKS the skip so the bot re-deliberates the new objective;
+        //   - !StackHasNoActiveObjective: a non-Active top (incl. a root deadline-Blocked
+        //     IN PLACE, which emits no lifecycle event) BLOCKS the skip so the bot wakes to
+        //     re-plan rather than auto-Explore while objective-less.
         // Bounded by MaxEmptyExploreSkips so the LLM re-chooses the heading periodically.
-        // Default OFF so the default decision path is byte-for-byte unchanged pending live
-        // A/B; request-tempo only — the bot continues its OWN prior untargeted-travel
-        // decision, no new target is picked (no source-side interaction choice).
+        // Default ON (opt out with the env var); request-tempo only — the bot continues its
+        // OWN prior untargeted-travel decision, no new target is picked (no source-side
+        // interaction choice).
         if (SkipEmptyExploreCallEnabled
             && !hasNonPickerExternal
             && !pickerArrived
             && !pickerStartWake
             && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
+            && !StackHasNoActiveObjective(_stack)
             && _emptyExploreSkips < MaxEmptyExploreSkips
             && !AnyAttackableMonsterInView(world)
             && !world.Visible.Any(v => v.IsVendor)
@@ -5058,6 +5066,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
             .Any(e => IsGoalLifecycleKind(e.Kind) && e.GoalId is null);
+
+    // True when the strategic stack has NO ACTIVE top objective: a non-null stack
+    // whose top is gone (popped to empty) OR whose top status is non-Active — the
+    // SAME condition the `## No active objective` prompt capsule renders on. The
+    // critical case the event-based HasNewStrategicIntentCompletionSince MISSES is a
+    // ROOT DEADLINE elapsing: Intent.CheckTopForCompletion marks the root Blocked IN
+    // PLACE and returns null WITHOUT emitting any Goal* lifecycle event, so a
+    // reduce-llm-call skip gate keyed only on lifecycle events would keep
+    // short-circuiting the LLM while the bot is actually objective-less and must
+    // re-deliberate (REPLACE_TOP the blocked root). The skip gates AND the prompt
+    // capsule therefore agree: in this state, wake the LLM. A NULL stack (no intent
+    // system engaged — the bot is free-wandering) is NOT this state, so the gates
+    // still skip the common no-stack travel case. Reads the bot's OWN stack status;
+    // no game knowledge.
+    internal static bool StackHasNoActiveObjective(IntentStack? stack) =>
+        stack is not null && (stack.Top is null || stack.Top.Status != IntentLifecycle.Active);
 
     // Events that must ROUTE TO THE LLM rather than let the autonomous combat
     // chain (ChooseCombatChainTarget) mint another Attack toward an active
@@ -9679,19 +9703,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
           || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
           || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
 
-    // Opt-in reduce-llm-call-volume gate (default OFF). When the bot is travelling
+    // Reduce-llm-call-volume gate (default ON; opt OUT with
+    // AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=0/false/off). When the bot is travelling
     // through empty space on a sustained UNTARGETED Explore with nothing in view to
-    // engage and no new external event, an LLM call would just reproduce the same
-    // Explore — so skip it and continue. Default OFF so the default decision path is
-    // byte-for-byte unchanged until A/B-validated; enable with
-    // AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=1/true/on. Request-tempo management only.
+    // engage and no new decision-worthy change, an LLM call would just reproduce the
+    // same Explore — so skip it and continue (bounded by MaxEmptyExploreSkips). The
+    // gate's freshness guards (!hasNonPickerExternal, !pickerArrived/!pickerStartWake,
+    // !HasNewStrategicIntentCompletionSince, plus nothing attackable/vendor/un-talked
+    // in view) ensure the bot never skips over input it could act on. Request-tempo
+    // management only; the Explore continued is the bot's OWN prior untargeted-travel
+    // decision (no new target picked).
     private static readonly bool SkipEmptyExploreCallEnabled =
         ResolveSkipEmptyExploreCall(Environment.GetEnvironmentVariable("AC_BOTS_SKIP_EMPTY_EXPLORE_CALL"));
 
     internal static bool ResolveSkipEmptyExploreCall(string? envValue) =>
-        string.Equals(envValue, "1", StringComparison.Ordinal)
-        || string.Equals(envValue, "true", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(envValue, "on", StringComparison.OrdinalIgnoreCase);
+        !(string.Equals(envValue, "0", StringComparison.Ordinal)
+          || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
+          || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
 
     // Consecutive empty-space Explore LLM-call skips since the last real call. Bounds
     // how far an untargeted travel excursion runs before the LLM re-evaluates the
