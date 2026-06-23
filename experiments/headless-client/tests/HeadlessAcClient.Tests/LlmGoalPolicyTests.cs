@@ -20496,7 +20496,44 @@ public class LlmGoalPolicyTests
         Assert.Equal(26000, LlmGoalPolicy.ResolvePromptCeiling((min - 1).ToString()));
     }
 
-    // ---- LowerCeilingOnPayloadTooLarge (adaptive ceiling auto-lowers on 413) ----
+    // ---- ResolveMinCallInterval (AC_BOTS_MIN_CALL_INTERVAL_SECONDS override) ----
+
+    [Theory]
+    [InlineData(null)]        // unset -> default 2s
+    [InlineData("")]          // empty
+    [InlineData("   ")]       // whitespace only
+    [InlineData("abc")]       // unparseable
+    [InlineData("10abc")]     // trailing garbage -> TryParse fails
+    [InlineData("-1")]        // negative -> default
+    [InlineData("-30")]       // negative -> default
+    public void ResolveMinCallInterval_InvalidOrNegative_FallsBackTo2s(string? envValue)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(2), LlmGoalPolicy.ResolveMinCallInterval(envValue));
+    }
+
+    [Theory]
+    [InlineData("0", 0)]        // 0 disables the throttle (tests/burst use this)
+    [InlineData("2", 2)]        // explicit default
+    [InlineData("10", 10)]      // recommended quota-stretch value
+    [InlineData("20", 20)]      // aggressive stretch
+    [InlineData("30", 30)]      // StuckTimeout ceiling (accepted)
+    [InlineData("31", 30)]      // above the StuckTimeout ceiling -> clamped
+    [InlineData("100000", 30)]  // absurd -> clamped to StuckTimeout
+    [InlineData("  15  ", 15)]  // int.TryParse tolerates surrounding whitespace
+    public void ResolveMinCallInterval_ValidNonNegative_HonouredAndClamped(string envValue, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), LlmGoalPolicy.ResolveMinCallInterval(envValue));
+    }
+
+    [Fact]
+    public void ResolveMinCallInterval_CeilingIsStuckTimeout()
+    {
+        // The ceiling must equal StuckTimeout: a coalesce window longer than the
+        // stuck timer would suppress the re-deliberation the stuck timer guarantees.
+        Assert.Equal(TimeSpan.FromSeconds(LlmGoalPolicy.StuckTimeoutSeconds),
+            LlmGoalPolicy.ResolveMinCallInterval("99999"));
+    }
+
 
     [Fact]
     public void LowerCeilingOnPayloadTooLarge_On413Status_StepsDownNotStraightToFloor()
