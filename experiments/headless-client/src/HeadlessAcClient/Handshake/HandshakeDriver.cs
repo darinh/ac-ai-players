@@ -6595,6 +6595,71 @@ internal sealed class HandshakeDriver : IDisposable
                             });
                             tactics.Clear("inventory-use dispatched", eventStream);
                         }
+                        // Self-Use of an inventory item (read / activate / "double-
+                        // click" ON yourself). The LLM expresses "use this item on
+                        // myself" by putting the item in `item` and EITHER no target
+                        // or a self-reference in `target`. The trigger keys on the
+                        // GOAL'S target INTENT (empty selector, or a selector that
+                        // resolves to / names our own self), NOT merely on the target
+                        // failing to resolve — a two-object `Use{target=container,
+                        // item=key}` whose container is momentarily out of view also
+                        // has a null targetSnap with a valid item, and that case must
+                        // still fall through to the explore/unresolved path below, not
+                        // be hijacked into using the key on ourselves. When the
+                        // resolved item is in OUR OWN inventory and the goal targets
+                        // self (or nothing), dispatch the GameActionUse straight at the
+                        // item (same wire path as the item-as-target inventory-Use
+                        // above). Mechanically executes the LLM's own (Use, item)
+                        // choice on the bot itself; picks no new target; reads no
+                        // names/wcids/types.
+                        else if (goal.Kind == GoalKind.Use &&
+                            itemSnap is not null &&
+                            itemSnap.ContainerGuid is uint selfUseContainer &&
+                            selfUseContainer == tacticsSelf.Guid &&
+                            (goal.Target.IsEmpty
+                             || (targetSnap is not null && targetSnap.Guid == tacticsSelf.Guid)
+                             || (!string.IsNullOrWhiteSpace(goal.Target.Name)
+                                 && string.Equals(goal.Target.Name, tacticsSelf.Name,
+                                                  StringComparison.OrdinalIgnoreCase))))
+                        {
+                            var selfUsePktSeq  = nextOutboundPacketSequence++;
+                            var selfUseFragSeq = nextOutboundFragmentSequence++;
+                            var selfUseBuf = new byte[GameActionUseMessage.PackedSize];
+                            var selfUseLen = GameActionUseMessage.Pack(selfUseBuf, itemSnap.Guid);
+                            var selfUseMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                selfUseMsg.AddAckSequence(lastReceivedSeq);
+                            selfUseMsg.AddBlobFragment(
+                                fragSequence: selfUseFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: selfUseBuf.AsSpan(0, selfUseLen));
+                            var selfUseSent = selfUseMsg.Pack(sendBuf, myClientId,
+                                                              sequence: selfUsePktSeq, iteration: 1,
+                                                              encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, selfUseSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL self-USE direct: " +
+                                $"item='{itemSnap.Name}' guid=0x{itemSnap.Guid:X8} " +
+                                $"target={(targetSnap is null ? "none" : "self")} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={selfUsePktSeq} fragSeq={selfUseFragSeq} bytes={selfUseSent}");
+                            // Self-Use dedup: record the dispatch so
+                            // LlmGoalPolicy.IsInventoryUseRecentlyDispatched can drop
+                            // repeat goals against the same item (a non-consumable
+                            // letter otherwise re-emits a Use every kickoff).
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc      = DateTimeOffset.UtcNow,
+                                Kind     = EventKind.InventoryItemUsed,
+                                ItemGuid = itemSnap.Guid,
+                                Wcid     = itemSnap.WeenieClassId,
+                                Name     = itemSnap.Name,
+                            });
+                            tactics.Clear("self-use dispatched", eventStream);
+                        }
                         else
                         {
                             var actionable =
