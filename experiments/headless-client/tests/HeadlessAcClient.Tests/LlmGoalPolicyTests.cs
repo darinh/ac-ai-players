@@ -793,6 +793,68 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_RefreshOpps_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            refreshOpps: 7);
+        Assert.Contains("refresh-opps=7", with);
+
+        var without = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            refreshOpps: 0);
+        Assert.DoesNotContain("refresh-opps", without);
+    }
+
+    private static VisibleObjectProjection VendorObj(uint guid, float dist)
+        => new() { Guid = guid, Name = "Shop", IsVendor = true, Distance = dist, IsMonster = false, IsCorpse = false };
+
+    private static WorldStateProjection FinishedBatchWorld(IEnumerable<VisibleObjectProjection> visible, uint contractStage)
+        => new()
+        {
+            Self = new SelfProjection { Guid = 0x500u, Name = "H", HealthFraction = 1.0f },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = visible.ToArray(),
+            Contracts = new[] { new ContractProjection { ContractId = 1, Stage = contractStage } },
+        };
+
+    [Fact]
+    public void CollectRefreshVendorGuids_DedupsSameVendorAcrossTicks()
+    {
+        var set = new HashSet<uint>();
+        // Same vendor guid, two ticks, different distance -> counts ONCE (the
+        // overcount regression: distance is part of the diagnostic key but not the
+        // refresh-opp identity).
+        LlmGoalPolicy.CollectRefreshVendorGuids(FinishedBatchWorld(new[] { VendorObj(0xA01u, 10f) }, 3u), set);
+        LlmGoalPolicy.CollectRefreshVendorGuids(FinishedBatchWorld(new[] { VendorObj(0xA01u, 3f) }, 3u), set);
+        Assert.Single(set);
+        // A DIFFERENT vendor is a distinct opportunity.
+        LlmGoalPolicy.CollectRefreshVendorGuids(FinishedBatchWorld(new[] { VendorObj(0xA02u, 5f) }, 3u), set);
+        Assert.Equal(2, set.Count);
+        // A formerly-volatile field flips (an extra non-vendor NPC in view) while the
+        // SAME vendor guids are present -> count is unchanged (the helper keys only on
+        // vendor guid; non-vendors never contribute).
+        var npc = new VisibleObjectProjection
+        { Guid = 0xB01u, Name = "Townsperson", IsVendor = false, IsCreature = true, IsMonster = false, IsCorpse = false };
+        LlmGoalPolicy.CollectRefreshVendorGuids(
+            FinishedBatchWorld(new[] { VendorObj(0xA01u, 2f), npc }, 3u), set);
+        Assert.Equal(2, set.Count);
+    }
+
+    [Fact]
+    public void CollectRefreshVendorGuids_NoFinishedBatch_AddsNothing()
+    {
+        var set = new HashSet<uint>();
+        // Contract at stage 2 (in-progress) -> NOT a finished batch -> no refresh opp.
+        LlmGoalPolicy.CollectRefreshVendorGuids(FinishedBatchWorld(new[] { VendorObj(0xA01u, 5f) }, 2u), set);
+        Assert.Empty(set);
+    }
+
+
+    [Fact]
     public void BuildRunSummaryLine_WithTopEmit_AppendsLoopField()
     {
         var line = LlmGoalPolicy.BuildRunSummaryLine(
