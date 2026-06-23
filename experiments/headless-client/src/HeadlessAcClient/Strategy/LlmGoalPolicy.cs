@@ -8623,9 +8623,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "or turn one in is your call.");
         }
 
-        // corpse-bearing-recovery: render the `## Corpse` bearing when the
-        // projection carries a death location.
-        AppendCorpseBearing(sb, world);
+        // render the `## Corpse` prompt section (see AppendCorpseRecovery).
+        AppendCorpseRecovery(sb, world);
 
         // ── ## Vendor offerings (open-vendor perception, end-of-prompt capsule) ─
         // When the bot has a vendor trade panel open (it Used/Talked a vendor),
@@ -10431,10 +10430,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
-    // Append a `## Corpse` section: a bearing+distance from the bot's current
-    // position to the projection's corpse coords, when present. Prompt text only.
-    private static void AppendCorpseBearing(StringBuilder sb, WorldStateProjection world)
+    // Append the `## Corpse` prompt section. Two mutually-exclusive branches,
+    // prompt text only: (1) when HasOwnCorpseInView matches a visible entry,
+    // emit that branch's text and return; (2) otherwise, when the projection
+    // carries CorpseWorldX/Y, emit a bearing+distance from those coords vs the
+    // bot's position. Renders only; makes no decision.
+    private static void AppendCorpseRecovery(StringBuilder sb, WorldStateProjection world)
     {
+        // (1) A visible entry matched HasOwnCorpseInView.
+        if (HasOwnCorpseInView(world.Visible, world.Self.Name))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Corpse");
+            sb.AppendLine(
+                $"- one of the corpses in `## Visible nearby` is YOUR OWN (`Corpse of {world.Self.Name}`): " +
+                "it holds the items you dropped when you died. `Use` it to recover them before it decays. " +
+                "OPTIONAL: skip if you have already looted it or have more pressing progress.");
+            return;
+        }
+        // (2) Projection carries death coords -> emit the bearing.
         if (world.CorpseWorldX is not float cx || world.CorpseWorldY is not float cy) return;
         if (ContractSelfXY(world) is not { } s) return;
         var dx = cx - s.Gx;
@@ -10449,6 +10463,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             $"died. To recover it, travel back — `Explore{{target: {{name: \"anywhere\"}}, direction: \"{dir}\"}}` " +
             "(keep heading that bearing each tick) — and once your `corpse` is in `## Visible nearby`, `Use` it " +
             "to loot. This is OPTIONAL: if it is far or you have more pressing progress, skip it.");
+    }
+
+    // True when some visible entry has IsCorpse set and Name equal (ordinal,
+    // case-insensitive) to "Corpse of " + selfName. Pure match on the
+    // caller-supplied name; returns on the first match; no decision.
+    internal static bool HasOwnCorpseInView(
+        IReadOnlyList<VisibleObjectProjection> visible, string? selfName)
+    {
+        if (visible is null || string.IsNullOrWhiteSpace(selfName)) return false;
+        var ownCorpseName = "Corpse of " + selfName;
+        foreach (var v in visible)
+        {
+            if (!v.IsCorpse) continue;
+            if (string.Equals(v.Name, ownCorpseName, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
     }
 
     // The bot's own global (worldX, worldY) — used to turn a contract's dat-defined
