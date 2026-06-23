@@ -2367,11 +2367,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // default because the saved call is redundant in the common case and the egress is
         // identical to the post-LLM fixation-drop path.
         if (SkipFixatedTalkCallEnabled
-            && !hasNonPickerExternal
-            && !pickerArrived
-            && !pickerStartWake
-            && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
-            && !StackHasNoActiveObjective(_stack)
+            && SkipGateFreshnessAllows(hasNonPickerExternal, pickerArrived, pickerStartWake, events)
             && ProvenTalkFixationNameFromHistory(events) is string fixatedTalkName)
         {
             Console.WriteLine(
@@ -2402,11 +2398,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // OWN prior untargeted-travel decision, no new target is picked (no source-side
         // interaction choice).
         if (SkipEmptyExploreCallEnabled
-            && !hasNonPickerExternal
-            && !pickerArrived
-            && !pickerStartWake
-            && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
-            && !StackHasNoActiveObjective(_stack)
+            && SkipGateFreshnessAllows(hasNonPickerExternal, pickerArrived, pickerStartWake, events)
             && _emptyExploreSkips < MaxEmptyExploreSkips
             && !AnyAttackableMonsterInView(world)
             && !world.Visible.Any(v => v.IsVendor)
@@ -5082,6 +5074,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // no game knowledge.
     internal static bool StackHasNoActiveObjective(IntentStack? stack) =>
         stack is not null && (stack.Top is null || stack.Top.Status != IntentLifecycle.Active);
+
+    // Shared FRESHNESS guard for the reduce-llm-call-volume SKIP gates
+    // (skip-fixated-talk and skip-empty-explore). Skipping the LLM call is safe
+    // ONLY when nothing decision-worthy has changed since the last LLM look:
+    //   - !hasNonPickerExternal: no fresh salient external event (dialog / readable
+    //     text / inventory add-or-remove / zone change / server message / rejection);
+    //   - !pickerArrived && !pickerStartWake: no NEW autonomous picker discovery
+    //     (corpse/door/portal/ground-item) the LLM should be free to act on;
+    //   - !HasNewStrategicIntentCompletionSince: no intent-stack pop / top-objective
+    //     completion since the last look;
+    //   - !StackHasNoActiveObjective: the top objective is still ACTIVE (catches a
+    //     root deadline-Blocked IN PLACE, which emits no Goal lifecycle event).
+    // CENTRALIZED so the two gates can never DIVERGE on these guards — both
+    // gpt-5.4-blocking review findings this session were exactly such a divergence
+    // (a gate missing the picker guard; both missing the stack-status guard). Each
+    // gate ANDs its OWN remaining conditions on top of this. Reads the bot's OWN
+    // event / picker / intent-stack state; no game knowledge.
+    private bool SkipGateFreshnessAllows(
+        bool hasNonPickerExternal, bool pickerArrived, bool pickerStartWake, EventStream events) =>
+        !hasNonPickerExternal
+        && !pickerArrived
+        && !pickerStartWake
+        && !HasNewStrategicIntentCompletionSince(events, _lastEventConsideredSequence)
+        && !StackHasNoActiveObjective(_stack);
 
     // Events that must ROUTE TO THE LLM rather than let the autonomous combat
     // chain (ChooseCombatChainTarget) mint another Attack toward an active
