@@ -1872,6 +1872,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return matches.Count == 1 ? matches[0].Guid : (uint?)null;
     }
 
+    // True iff this RaiseSkill goal's target skill is NOT present in the bot's
+    // loaded raisable-skills list (`world.Self.TrainedSkills`, already filtered to
+    // raisable). Matching mirrors the Motor's resolver (SkillRaise.TryResolveSkillId,
+    // separator/case tolerant) PLUS a raw case-insensitive name fallback, so a skill
+    // that IS present is never flagged. Only judges when the list is loaded (Count>0).
+    // Own skill list + the goal's own target; no game knowledge, no skill list.
+    internal static bool IsRaiseOfUntrainedSkill(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.RaiseSkill) return false;
+        if (goal.Target.Name is not string raiseSkillName) return false;
+        if (world.Self.TrainedSkills is not { Count: > 0 } trained) return false;
+        if (!SkillRaise.TryResolveSkillId(raiseSkillName, out var raiseSkillId)) return false;
+        return !trained.Any(ts =>
+            string.Equals(ts.Name, raiseSkillName, StringComparison.OrdinalIgnoreCase)
+            || (SkillRaise.TryResolveSkillId(ts.Name, out var trainedId) && trainedId == raiseSkillId));
+    }
+
     // Pure "hunt tapped out" perception signal. Returns a raw self-progress
     // fact string to surface to the LLM when the bot, combat-ready, has
     // dwelled in its current landblock past the threshold WITHOUT gaining a
@@ -3377,6 +3394,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 $"dropped-by-override: LLM Attack while not combat-capable (no usable weapon; {threatNote})");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "unarmed-attack");
+        }
+
+        // Unactuatable-RaiseSkill drop (reduce-llm-call-volume). When the bot's
+        // raisable-skills list is loaded and a RaiseSkill names a skill that is NOT
+        // in it, the goal cannot be actuated and a model may otherwise re-emit it.
+        // Drop it and defer to the fallback so the bot does something useful and
+        // re-deliberates. The LLM still owns WHICH target to raise — this only drops
+        // one it cannot actuate, like the Wield-no-weapon / useless-launcher drops.
+        if (IsRaiseOfUntrainedSkill(goal, world))
+        {
+            Console.WriteLine(
+                $"[llm-override] untrained-raiseskill drop: target={goal.Target}" +
+                " — skill not in the bot's raisable-skills list; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-override: RaiseSkill of a skill not in trained skills");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "untrained-raiseskill");
         }
 
         // Wield-of-a-ground-weapon -> Pickup (mechanical prerequisite,

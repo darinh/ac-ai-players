@@ -1038,6 +1038,79 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.TryResolveWieldGroundWeapon(goal, world, new EventStream()));
     }
 
+    // ---- IsRaiseOfUntrainedSkill (drop a RaiseSkill of an untrained skill) ----
+
+    private static WorldStateProjection WorldWithTrainedSkillNames(params string[] names)
+        => new()
+        {
+            Self = new SelfProjection
+            {
+                Guid = 0x500u, Name = "H", HealthFraction = 1.0f,
+                TrainedSkills = names.Length == 0
+                    ? null
+                    : names.Select(n => new SelfSkillProjection
+                        { Name = n, Advancement = "trained", RaisedRanks = 0 }).ToArray(),
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+    private static Goal RaiseSkillGoalTo(string skillName)
+        => new() { Kind = GoalKind.RaiseSkill, Target = new Selector { Name = skillName } };
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_UntrainedSkill_True()
+    {
+        var world = WorldWithTrainedSkillNames("UnarmedCombat", "MeleeDefense");
+        Assert.True(LlmGoalPolicy.IsRaiseOfUntrainedSkill(
+            RaiseSkillGoalTo("TwoHandedCombat"), world));
+    }
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_TrainedSkill_False()
+    {
+        var world = WorldWithTrainedSkillNames("TwoHandedCombat", "MeleeDefense");
+        Assert.False(LlmGoalPolicy.IsRaiseOfUntrainedSkill(
+            RaiseSkillGoalTo("TwoHandedCombat"), world));
+    }
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_TrainedSkillNameVariance_False()
+    {
+        // The resolver strips spaces/case, so "two handed combat" must match the
+        // trained "TwoHandedCombat" -> not flagged untrained.
+        var world = WorldWithTrainedSkillNames("TwoHandedCombat");
+        Assert.False(LlmGoalPolicy.IsRaiseOfUntrainedSkill(
+            RaiseSkillGoalTo("two handed combat"), world));
+    }
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_NonRaiseSkillGoal_False()
+    {
+        var world = WorldWithTrainedSkillNames("UnarmedCombat");
+        var raiseAttr = new Goal { Kind = GoalKind.RaiseAttribute, Target = new Selector { Name = "coordination" } };
+        Assert.False(LlmGoalPolicy.IsRaiseOfUntrainedSkill(raiseAttr, world));
+    }
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_NoTrainedSkillsList_False()
+    {
+        // Skills not loaded yet -> do NOT judge (never drop on an unknown list).
+        var world = WorldWithTrainedSkillNames();
+        Assert.False(LlmGoalPolicy.IsRaiseOfUntrainedSkill(
+            RaiseSkillGoalTo("TwoHandedCombat"), world));
+    }
+
+    [Fact]
+    public void IsRaiseOfUntrainedSkill_UnresolvableSkillName_False()
+    {
+        // A name that does not resolve to a real skill is a different error -> let
+        // the Motor reject it; do not drop here.
+        var world = WorldWithTrainedSkillNames("UnarmedCombat");
+        Assert.False(LlmGoalPolicy.IsRaiseOfUntrainedSkill(
+            RaiseSkillGoalTo("NotASkillName"), world));
+    }
+
     [Fact]
     public void FormatContractCounts_CountsInProgressAndDoneByStage()
     {
