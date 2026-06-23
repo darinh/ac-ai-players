@@ -6120,7 +6120,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // HasRecentActionRejected (cp-2402 per-rule relevance-gating). A render
         // gate on the bot's OWN rejection events; the LLM still decides; no game
         // knowledge.
-        sb.AppendLine("- Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (target = your own name from `## Self`) before related Give/Talk unlock — prefer `Use{target: name=\"<your-name>\", item: name=\"<that item>\"}` over retrying a refused combo.");
+        sb.AppendLine("- Items whose `short_desc` says 'double-click', 'read', or 'activate' must be Use'd on yourself FIRST (before related Give/Talk unlock) — emit `Use{item: name=\"<that item>\"}` (the item acts on you; no target needed) over retrying a refused combo.");
         if (HasRecentActionRejected(events))
         sb.AppendLine("- `ActionRejected` = the server refused that exact (kind, target, item). Do NOT immediately retry the same combo; read its `label`/`message`, then pick a different verb, item, or NPC. TWO+ rejections of the same target+item (any verb) = BLOCKED (unmet prerequisite).");
         sb.AppendLine("- Read `## Server hints`, `## Early server directives`, and `## System messages`: phrases like \"Double click X\" or \"Use X to ...\" tell you the exact verb+target. If that object is visible AND the server instructed it, emit `Use{target: name=\"X\"}`. The server is your tutorial; don't ignore it for pure exploration.");
@@ -11274,7 +11274,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 bool wieldHasItem =
                     parsed.Kind == GoalKind.Wield &&
                     parsed.Item is not null && !parsed.Item.IsEmpty;
-                if (!wieldHasItem)
+                // Self-Use (read / activate / "double-click" an inventory item ON
+                // yourself) is, like Wield, logically an ITEM action with no world
+                // target: the item acts on the user. The prompt directs the model to
+                // emit the item in `item` with no target for these, so accept an
+                // item-only Use instead of discarding the LLM's decision to the
+                // heuristic fallback. The Motor's self-Use dispatch sends the
+                // GameActionUse at the item. All other verbs still require a target.
+                bool useHasItem =
+                    parsed.Kind == GoalKind.Use &&
+                    parsed.Item is not null && !parsed.Item.IsEmpty;
+                if (!wieldHasItem && !useHasItem)
                 {
                     error = "target selector missing or empty";
                     return false;

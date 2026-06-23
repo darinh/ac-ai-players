@@ -61,6 +61,52 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_AcceptsItemOnlySelfUse()
+    {
+        // Self-Use (read / activate an inventory item ON yourself) carries the
+        // item in `item` and no world target — like Wield. The parser must accept
+        // it (the Motor's self-Use dispatch sends GameActionUse at the item).
+        var json = """{"kind":"Use","item":{"name":"Letter From Home"},"rationale":"read it","priority":5}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Use, g!.Kind);
+        Assert.Equal("Letter From Home", g.Item?.Name);
+        Assert.True(g.Target.IsEmpty);
+    }
+
+    [Fact]
+    public void TryParseGoal_AcceptsItemUseWithExplicitEmptyTarget()
+    {
+        // An explicit empty target object alongside a non-empty item is the same
+        // item-only self-Use shape and must parse.
+        var json = """{"kind":"Use","target":{},"item":{"name":"Mana Charge"},"rationale":"activate","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Use, g!.Kind);
+        Assert.Equal("Mana Charge", g.Item?.Name);
+    }
+
+    [Fact]
+    public void TryParseGoal_StillRejectsItemlessUseWithEmptyTarget()
+    {
+        // A Use with neither a target NOR an item is still nonsense — reject it.
+        var json = """{"kind":"Use","target":{},"rationale":"x","priority":3}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_AcceptsLegacyTargetPlusItemUse()
+    {
+        // Backward-compat at the PARSER level: the older self-Use shape (a name in
+        // `target` plus the item) still parses. (The Motor only self-dispatches when
+        // the target is empty or names self, so the clean item-only shape is now the
+        // preferred form; this test asserts only that the legacy JSON still parses.)
+        var json = """{"kind":"Use","target":{"name":"<your-name>"},"item":{"name":"Letter From Home"},"rationale":"read","priority":5}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Use, g!.Kind);
+        Assert.Equal("Letter From Home", g.Item?.Name);
+    }
+
+    [Fact]
     public void TryParseGoal_RejectsGarbage()
     {
         Assert.False(LlmGoalPolicy.TryParseGoal("not json at all", out _, out _));
@@ -230,12 +276,12 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void TryParseGoal_NonWieldItemOnly_StillRejected()
+    public void TryParseGoal_NonWieldNonUseItemOnly_StillRejected()
     {
-        // The item-only relaxation is Wield-scoped: a Use/Attack/Talk/Pickup
-        // with an item but no target is still rejected (their primary object is
-        // the target, not the item).
-        foreach (var kind in new[] { "Use", "Attack", "Talk", "Pickup" })
+        // The item-only relaxation is scoped to Wield and Use (their object is an
+        // inventory item that acts on the user). Attack/Talk/Pickup with an item
+        // but no target are still rejected — their primary object is the target.
+        foreach (var kind in new[] { "Attack", "Talk", "Pickup" })
         {
             var json = $$"""{"kind":"{{kind}}","target":null,"item":{"name":"Acid Ken"},"rationale":"x","priority":4}""";
             Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err), $"{kind} item-only should reject");
