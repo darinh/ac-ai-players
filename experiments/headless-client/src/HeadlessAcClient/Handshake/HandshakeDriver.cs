@@ -1292,6 +1292,10 @@ internal sealed class HandshakeDriver : IDisposable
         // milestone reached this run and logs each advance once. No effect on
         // behavior.
         var contractFunnel = new ContractProgressFunnel();
+        // Companion to the funnel: counts EACH contract completion (transition into
+        // stage 3) so criterion-2 throughput across batch refreshes is visible, not
+        // just the first "reached done". Pure observation.
+        var contractCompletions = new ContractCompletionMeter();
         // Lifestone-recall in-flight bookkeeping. Recall (TeleToLifestone
         // 0x0063) is NOT instant like the Raise* self-actions: the server
         // plays a recall animation, then teleports the bot — and it ABORTS
@@ -5245,6 +5249,8 @@ internal sealed class HandshakeDriver : IDisposable
                         // where the contract chain stalls. Pure observation.
                         if (contractFunnel.Observe(projection) is string c2Line)
                             Console.WriteLine(c2Line);
+                        if (contractCompletions.Observe(projection) is string ccLine)
+                            Console.WriteLine(ccLine);
 
                         // Slice 0 (Hunt) — push operator-authorised
                         // initial intent on the first tick where a
