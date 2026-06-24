@@ -2870,7 +2870,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
-            IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue));
+            IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
+            world.Self.AvailableExperience));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2911,7 +2912,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
-        bool armed = true, int? maxHpProxy = null, int? coin = null)
+        bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2964,6 +2965,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // change, no game knowledge.
         if (coin is int cn && cn >= 0)
             line += $" coin={cn}";
+        // Unspent (raisable) experience — shown when known + >0 (the hoarding signal;
+        // 0 = nothing to spend, omitted). Pairs with swings= / armed= to flag XP the
+        // bot is not spending. Pure observability; no behavior change, no game knowledge.
+        if (unspent is long ux && ux > 0)
+            line += $" unspent={ux}";
         // Combat-effectiveness signal: surface the session swing-outcome counters
         // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
         // only when at least one has incremented. Pure observability; no behavior
