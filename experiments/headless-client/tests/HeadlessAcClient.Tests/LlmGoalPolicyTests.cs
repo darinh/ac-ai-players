@@ -1104,6 +1104,23 @@ public class LlmGoalPolicyTests
     }
 
     [Theory]
+    [InlineData(null, 3)]   // unset -> default
+    [InlineData("", 3)]     // blank -> default
+    [InlineData("xyz", 3)]  // unparseable -> default
+    [InlineData("0", 3)]    // below min (2) -> default
+    [InlineData("1", 3)]    // below min (a single approach must never be preempted) -> default
+    [InlineData("-4", 3)]   // negative -> default
+    [InlineData("2", 2)]    // min accepted (convert a vendor-Explore loop one kickoff sooner)
+    [InlineData("3", 3)]    // default explicit
+    [InlineData("10", 10)]  // max accepted (more conservative; tolerate a longer loop)
+    [InlineData("11", 10)]  // above max -> clamped
+    [InlineData("100", 10)] // well above max -> clamped
+    public void ResolveExploreLoopedVendorThreshold_DefaultsAndClamps(string? env, int expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveExploreLoopedVendorThreshold(env));
+    }
+
+    [Theory]
     [InlineData(null, "")]
     [InlineData("", "")]
     [InlineData("   ", "")]
