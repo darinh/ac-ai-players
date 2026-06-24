@@ -1338,13 +1338,19 @@ internal sealed class HandshakeDriver : IDisposable
         // (Coin-only reconciliation would never confirm alternate-currency
         // purchases.)
         (uint VendorGuid, uint ItemGuid, string ItemName, uint ItemWcid, DateTime At, int PreCount)? pendingBuy = null;
-        // Diagnostic only: tracks the furthest contract-cycle (criterion-2)
-        // milestone reached this run and logs each advance once. No effect on
-        // behavior.
+        // Vendor-sell in-flight bookkeeping. Sell (0x0060) removes an item from
+        // the bot's own pack and credits coin; like Buy, only ONE sell is allowed
+        // in flight. It is reconciled by either a coin increase (the server pays
+        // coin on a completed sale — robust to a partial-stack sale where the
+        // guid stays) or the sold item's guid leaving the pack, else dropped after
+        // a timeout, so a Sell->Sell burst can never re-send the same item.
+        (uint VendorGuid, uint ItemGuid, string ItemName, int? PreCoin, DateTime At)? pendingSell = null;
+        // Diagnostic only: records the furthest progress milestone reached this
+        // run and logs each advance once. No effect on behavior.
         var contractFunnel = new ContractProgressFunnel();
-        // Companion to the funnel: counts EACH contract completion (transition into
-        // stage 3) so criterion-2 throughput across batch refreshes is visible, not
-        // just the first "reached done". Pure observation.
+        // Companion to the funnel: counts EACH completion event (a transition into
+        // the terminal stage) so throughput across refreshes is visible, not just
+        // the first milestone reached. Pure observation.
         var contractCompletions = new ContractCompletionMeter();
         // Lifestone-recall in-flight bookkeeping. Recall (TeleToLifestone
         // 0x0063) is NOT instant like the Raise* self-actions: the server
@@ -5989,6 +5995,122 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={buyPktSeq} fragSeq={buyFragSeq} bytes={buySent}");
                             tactics.Clear("buy dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.Sell)
+                    {
+                        // Vendor self-action: sell a named item from the bot's OWN
+                        // inventory to the vendor whose trade panel is open. The LLM
+                        // chose the item (goal.Target.name, from `## Inventory`); the
+                        // motor only resolves that EXACT name to a bagged item guid
+                        // and sends the Sell (0x0060) opcode. It never opens a vendor
+                        // itself and makes NO decision about WHAT/WHETHER to sell. One
+                        // sell at a time: a Sell->Sell burst is suppressed until the
+                        // prior sell confirms (coin rose, or the item left the pack)
+                        // or times out.
+
+                        // Reconcile any prior pending sell via the pure settle
+                        // predicate (coin rose, the item left the pack, or the
+                        // in-flight window elapsed). Coin is not sale-specific, so
+                        // settling here ONLY clears the one-in-flight dedup — it
+                        // must NOT enable a same-tick re-dispatch (sellJustSettled
+                        // gates that below).
+                        var sellJustSettled = false;
+                        if (pendingSell is { } ps0)
+                        {
+                            var stillOwned = worldState.IsOwnedInventoryGuid(ps0.ItemGuid);
+                            var coinNow = worldState.SelfCoinValue;
+                            var coinRose = ps0.PreCoin is int was0 && coinNow is int now0 && now0 > was0;
+                            if (HeadlessAcClient.World.VendorSellReconcile.IsSettled(
+                                    ps0.PreCoin, coinNow, stillOwned, (DateTime.UtcNow - ps0.At).TotalSeconds))
+                            {
+                                Console.WriteLine(
+                                    $"[vendor-sell] pending Sell '{ps0.ItemName}' guid=0x{ps0.ItemGuid:X8} " +
+                                    ((!stillOwned || coinRose)
+                                        ? $"CONFIRMED ({(coinRose ? "coin rose" : "item left inventory")})"
+                                        : "timed out (no coin/inventory change)"));
+                                pendingSell = null;
+                                sellJustSettled = true;
+                            }
+                        }
+
+                        var wantedSellName = goal.Target?.Name;
+                        if (!worldState.TryGetLiveOpenVendor(out var ovSell) || ovSell is null)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-sell] Sell '{goal.Target}': no vendor panel open within reach — " +
+                                $"approach/Use the vendor first. source={goal.Source}");
+                            tactics.Fail("sell: no live vendor panel", eventStream);
+                        }
+                        else if (worldState.ResolveOwnedInventoryItemExact(wantedSellName) is not { } sellItem)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-sell] Sell: no bagged inventory item whose name exactly matches " +
+                                $"'{wantedSellName}'; not sending — retry with an exact name from `## Inventory`. " +
+                                $"source={goal.Source}");
+                            tactics.Fail("sell: no exact inventory item match", eventStream);
+                        }
+                        else if (!HeadlessAcClient.World.WorldState.VendorBuysItemType(
+                                     ovSell.MerchandiseItemTypes, sellItem.ItemType))
+                        {
+                            // The vendor advertises which ItemTypes it buys; don't
+                            // send a sell it will refuse (which would only time
+                            // out). The bot can sell this item at a vendor that
+                            // buys this type.
+                            Console.WriteLine(
+                                $"[vendor-sell] Sell '{sellItem.Name}' (itemType=0x{(sellItem.ItemType ?? 0u):X}) " +
+                                $"not sent — this vendor buys only itemTypes 0x{ovSell.MerchandiseItemTypes:X}; " +
+                                $"sell it at a vendor that buys this type. source={goal.Source}");
+                            tactics.Fail("sell: vendor does not buy this item type", eventStream);
+                        }
+                        else if (sellJustSettled)
+                        {
+                            // A prior sell settled THIS tick (possibly off the
+                            // non-sale-specific coin signal). Do not re-dispatch on
+                            // the same tick — re-deliberate next tick with fresh
+                            // perception so a coin gain can never trigger a resend.
+                            Console.WriteLine(
+                                $"[vendor-sell] Sell '{sellItem.Name}' held — a prior sell just settled this " +
+                                $"tick; re-deliberating next tick. source={goal.Source}");
+                            tactics.Fail("sell: prior sell just settled this tick", eventStream);
+                        }
+                        else if (pendingSell is { } psDup)
+                        {
+                            Console.WriteLine(
+                                $"[vendor-sell] Sell '{sellItem.Name}' suppressed — a sell ('{psDup.ItemName}') is " +
+                                $"still pending (dispatched {(DateTime.UtcNow - psDup.At).TotalSeconds:F1}s ago); " +
+                                $"awaiting sale confirmation.");
+                            tactics.Fail("sell: a sell is already pending", eventStream);
+                        }
+                        else
+                        {
+                            var sellAmount = goal.Amount is long sqa && sqa > 0 ? (int)Math.Min(sqa, 1000) : 1;
+                            var preCoinSell = worldState.SelfCoinValue;
+                            var sellPktSeq  = nextOutboundPacketSequence++;
+                            var sellFragSeq = nextOutboundFragmentSequence++;
+                            var sellBuf = new byte[GameActionSellMessage.PackedSize];
+                            var sellLen = GameActionSellMessage.Pack(sellBuf, ovSell.VendorGuid, sellItem.Guid, sellAmount);
+                            var sellMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                sellMsg.AddAckSequence(lastReceivedSeq);
+                            sellMsg.AddBlobFragment(
+                                fragSequence: sellFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: sellBuf.AsSpan(0, sellLen));
+                            var sellSent = sellMsg.Pack(sendBuf, myClientId,
+                                                        sequence: sellPktSeq, iteration: 1,
+                                                        encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sellSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            pendingSell = (ovSell.VendorGuid, sellItem.Guid,
+                                           sellItem.Name ?? wantedSellName ?? "?", preCoinSell, DateTime.UtcNow);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Sell: '{sellItem.Name}' guid=0x{sellItem.Guid:X8} " +
+                                $"amount={sellAmount} to vendor 0x{ovSell.VendorGuid:X8} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={sellPktSeq} fragSeq={sellFragSeq} bytes={sellSent}");
+                            tactics.Clear("sell dispatched", eventStream);
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)

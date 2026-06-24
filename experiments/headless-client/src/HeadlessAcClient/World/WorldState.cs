@@ -650,6 +650,67 @@ internal sealed class WorldState
     }
 
     /// <summary>
+    /// Resolve an item in the bot's OWN inventory by EXACT (case-insensitive)
+    /// name. Searches only objects directly contained by self (ContainerGuid ==
+    /// self.Guid), which naturally excludes WIELDED items (an equipped item
+    /// carries WielderGuid = self and no ContainerGuid). Returns null when no
+    /// bagged item matches exactly. Mirrors <see cref="ResolveVendorItemExact"/>'s
+    /// exact-match discipline: a Sell is dispatched only for the precise item the
+    /// LLM named (or nothing) — never a fuzzy pick. When several bagged items
+    /// share the name, returns the lowest guid for determinism.
+    /// </summary>
+    public WorldObjectSnapshot? ResolveOwnedInventoryItemExact(string? name)
+    {
+        if (Self is not { } self || string.IsNullOrWhiteSpace(name)) return null;
+        WorldObjectSnapshot? best = null;
+        foreach (var o in _objects.Values)
+        {
+            if (o.ContainerGuid is not uint cg || cg != self.Guid) continue;
+            if (!string.Equals(o.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+            if (best is null || o.Guid < best.Guid) best = o;
+        }
+        return best;
+    }
+
+    /// <summary>
+    /// True when the given guid is currently an item in the bot's OWN inventory
+    /// (present and directly contained by self). Used as the "the sale landed"
+    /// signal when reconciling an in-flight Sell: once the sold item's guid is no
+    /// longer owned (the server removed it from the pack on a completed sell), the
+    /// sell confirmed. A guid-precise signal (vs a wcid count) so it reconciles a
+    /// distinct sold object even when an identically-named item remains.
+    /// </summary>
+    public bool IsOwnedInventoryGuid(uint guid)
+    {
+        if (Self is not { } self) return false;
+        return _objects.TryGetValue(guid, out var o)
+            && o.ContainerGuid is uint cg && cg == self.Guid;
+    }
+
+    /// <summary>
+    /// The Self snapshot's PropertyInt 20 (CoinValue), or null if unknown. A coin
+    /// increase is the reconcile signal for a completed Sell (the server credits
+    /// coin on a sale), robust to a partial-stack sale where the sold object's
+    /// guid stays in the pack.
+    /// </summary>
+    public int? SelfCoinValue =>
+        Self?.PropertyInts is { } p && p.TryGetValue(20u, out var v) ? v : null;
+
+    /// <summary>
+    /// Item-type gate: a vendor advertises the ItemType bitmask it will buy
+    /// (MerchandiseItemTypes); an item's ItemType is a single type bit. Returns
+    /// true when that type bit is in the mask. Fails OPEN (returns true) when the
+    /// mask is 0/unknown or the item's type is unknown, so a missing wire fact
+    /// never blocks a send the server might still accept.
+    /// </summary>
+    public static bool VendorBuysItemType(uint merchandiseItemTypes, uint? itemType)
+    {
+        if (merchandiseItemTypes == 0u) return true; // unknown/unrestricted
+        if (itemType is not uint t) return true;     // unknown item type
+        return (merchandiseItemTypes & t) != 0u;
+    }
+
+    /// <summary>
     /// Apply a single SendClientContractTracker (0x0315) update: remove the
     /// matching contract when <see cref="ContractTrackerPayload.DeleteContract"/>
     /// is set, otherwise upsert it by contract id (replace an existing entry or
