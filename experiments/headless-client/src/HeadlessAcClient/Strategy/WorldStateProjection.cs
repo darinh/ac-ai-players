@@ -227,9 +227,10 @@ internal sealed record SelfProjection
 
     /// <summary>
     /// Character-sheet attribute base values (StartingValue + raised Ranks),
-    /// seeded once from the login PlayerDescription. Null until the login
-    /// bundle is decoded. Login-only: stale after a RaiseAttribute/RaiseVital
-    /// until relogin.
+    /// seeded from the login PlayerDescription and kept live thereafter by
+    /// PrivateUpdateAttribute (0x02E3): a RaiseAttribute updates the affected
+    /// attribute in place (sequence-guarded), so the value reflects a raise
+    /// immediately — no relogin needed. Null until the login bundle is decoded.
     /// </summary>
     [JsonPropertyName("attributes")]
     public IReadOnlyList<SelfAttributeProjection>? Attributes { get; init; }
