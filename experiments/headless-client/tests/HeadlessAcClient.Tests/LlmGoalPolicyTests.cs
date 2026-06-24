@@ -1400,6 +1400,113 @@ public class LlmGoalPolicyTests
             PickupGoalTo("Chest"), world, new EventStream()));
     }
 
+    // ---- TryResolveExploreLoopedVendor (Explore-toward-a-visible-vendor loop -> Use) ----
+
+    private static EventStream ExploreEmissionsTo(string name, int count)
+    {
+        var es = new EventStream();
+        for (var i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = $"Explore target=name=\"{name}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    private static Goal ExploreGoalTo(string name)
+        => new() { Kind = GoalKind.Explore, Target = new Selector { Name = name } };
+
+    private static VisibleObjectProjection VendorObj(uint guid, string name) => new()
+    { Guid = guid, Name = name, IsVendor = true, IsMonster = false, IsCorpse = false, Distance = 12f };
+
+    private static readonly DateTimeOffset ExploreVendorSince = DateTimeOffset.UtcNow.AddMinutes(-5);
+
+    [Fact]
+    public void ExploreLoopedVendor_RepeatedExploreTowardVisibleVendor_ResolvesToUseGuid()
+    {
+        var world = WorldWithVisible(VendorObj(0x7A9B4026u, "Sedor Wystan the Blacksmith"));
+        var es = ExploreEmissionsTo("Sedor Wystan the Blacksmith", 3);
+        Assert.Equal(0x7A9B4026u, LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Sedor Wystan the Blacksmith"), world, es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_BelowThreshold_ReturnsNull()
+    {
+        // Only 2 prior Explores (< threshold 3) -> a first/legitimate approach is not preempted.
+        var es = ExploreEmissionsTo("Blacksmith", 2);
+        Assert.Null(LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Blacksmith"), WorldWithVisible(VendorObj(0xBA9u, "Blacksmith")), es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_VisibleIsMonsterNotVendor_ReturnsNull()
+    {
+        // The named object is a monster, not a vendor -> never rewrite an Explore toward a monster.
+        var monster = new VisibleObjectProjection { Guid = 0x800012A5u, Name = "Drudge", IsMonster = true, IsVendor = false };
+        var es = ExploreEmissionsTo("Drudge", 3);
+        Assert.Null(LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Drudge"), WorldWithVisible(monster), es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_NoMatchingVisibleVendor_ReturnsNull()
+    {
+        // Looped Explore but the name binds no visible vendor (a different vendor is in
+        // view) -> the departed-target ## Explore loop cue owns that; do not rewrite.
+        var es = ExploreEmissionsTo("Blacksmith", 3);
+        Assert.Null(LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Blacksmith"), WorldWithVisible(VendorObj(0xBA9u, "Grocer")), es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_NonExploreGoal_ReturnsNull()
+    {
+        var es = ExploreEmissionsTo("Blacksmith", 3);
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Blacksmith" } };
+        Assert.Null(LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            use, WorldWithVisible(VendorObj(0xBA9u, "Blacksmith")), es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_AmbiguousTwoVendors_ReturnsNull()
+    {
+        var world = WorldWithVisible(
+            VendorObj(0x7A9B0001u, "Blacksmith"), VendorObj(0x7A9B0002u, "Blacksmith"));
+        var es = ExploreEmissionsTo("Blacksmith", 3);
+        Assert.Null(LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Blacksmith"), world, es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_PartialNameResolvesFuzzily_ResolvesToUseGuid()
+    {
+        // Under-fire fix (gpt-5.4): the bot loops a PARTIAL name the Motor resolves fuzzily
+        // (unique whole-word subsequence) to the full wire name. The rewrite must use the
+        // SAME fuzzy semantics, or a fuzzy-resolved loop gets neither the cue nor the rewrite.
+        var world = WorldWithVisible(VendorObj(0x7A9B4026u, "Sedor Wystan the Blacksmith"));
+        var es = ExploreEmissionsTo("Blacksmith", 3);
+        Assert.Equal(0x7A9B4026u, LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Blacksmith"), world, es, ExploreVendorSince));
+    }
+
+    [Fact]
+    public void ExploreLoopedVendor_AliasesForSameVendorAccumulate_ResolvesToUseGuid()
+    {
+        // Identity-count: aliases that bind the SAME vendor accumulate toward the loop
+        // threshold (2 partial + 1 full = 3 toward one vendor guid).
+        var world = WorldWithVisible(VendorObj(0x7A9B4026u, "Sedor Wystan the Blacksmith"));
+        var es = ExploreEmissionsTo("Blacksmith", 2);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"Sedor Wystan the Blacksmith\" item= source=llm:test",
+        });
+        Assert.Equal(0x7A9B4026u, LlmGoalPolicy.TryResolveExploreLoopedVendor(
+            ExploreGoalTo("Sedor Wystan the Blacksmith"), world, es, ExploreVendorSince));
+    }
+
     [Fact]
     public void WieldGroundWeapon_TwoSameNamedGroundWeapons_DoesNotRewrite()
     {
