@@ -7248,9 +7248,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // known broker in view that can hand out a FRESH batch) — the case FIND's
         // un-talked/unbrowsed disjuncts miss. Bounded; see DoneBatchSourceInViewToRefresh.
         var doneBatchSourceToRefresh = DoneBatchSourceInViewToRefresh(world, events);
+        // Combat-readiness gate (cp gate-contract-cues-unarmed): an UNARMED bot
+        // cannot complete a kill-task, so pursuing the contract cycle here competes
+        // with the SELF-ARM loot-to-arm hunt — the prompt's stated TOP priority when
+        // unarmed. Suppress this contract-pursuit nudge until the bot is combat-
+        // effective; once armed it re-enables. Render gate on the combat-readiness
+        // wire fact (mirrors the SELF-ARM rule's own `!selfArmCombatEffective` gate);
+        // no game knowledge.
         if (((vendorInView && world.Vendor is null) || untalkedNpcInView || doneBatchSourceToRefresh)
             && noActionableContract
-            && (monsterInView || heldBatchAllDone))
+            && (monsterInView || heldBatchAllDone)
+            && selfArmCombatEffective)
         {
             // The finished-batch refresh action depends on panel state: when a
             // vendor's trade panel is ALREADY open (world.Vendor set), the
@@ -7330,8 +7338,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && !anyRenderedContractBearing
             && firstContract is { } fcn
             && (OneLine(fcn.NpcEnd) is not null || OneLine(fcn.NpcStart) is not null);
+        // Same combat-readiness gate as FIND-A-KILL-TASK-SOURCE: when UNARMED,
+        // traveling back to a contract source competes with the SELF-ARM loot-to-arm
+        // hunt — arm first, then resume the contract cycle. Mechanical render gate on
+        // the combat-readiness wire fact; no game knowledge.
         if (heldBatchAllDone && noContractSourceInView
-            && (aContractBearingRenders || aContractTurnInNameRenders))
+            && (aContractBearingRenders || aContractTurnInNameRenders)
+            && selfArmCombatEffective)
         {
             if (aContractBearingRenders)
                 sb.AppendLine("- RETURN TO A CONTRACT SOURCE: every tracked contract is DONE (stage 3) — your batch is finished and you need a FRESH source to keep earning — but NO contract source (a `vendor` or un-talked `npc`) is in `Visible nearby`. A fresh source sits back in the populated area your batch came from, in the direction of a contract's `objective area` / `turn-in location` bearing listed with your contracts below. TRAVEL back there — follow the travel instruction shown with your contracts to `Explore` toward that bearing — instead of grinding monsters that carry you FURTHER from any source. This is TRAVEL to reach a source area, NOT a hand-in: do NOT re-`Talk` a done contract's settled turn-in NPC. The moment a `vendor` or un-talked `npc` comes into view, switch to checking it for a new task (the FIND A KILL-TASK SOURCE rule). Health-critical safety and any active server/quest directive still come first.");
@@ -8899,8 +8912,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // off to avoid telling the bot to `Use` an already-open vendor. Wire
             // facts only (all-stage-3 + vendor-in-view + panel-closed) + the
             // generic buy mechanic; the LLM decides. No NPC/contract name.
+            // Combat-readiness gate (cp gate-contract-cues-unarmed): a fresh-contract
+            // refresh BUY competes with the SELF-ARM loot-to-arm hunt when UNARMED, so
+            // suppress this nudge until the bot is combat-effective. Mechanical gate.
             if (HeldBatchAllDone(world) && world.Vendor is null
-                && world.Visible.Any(v => v.IsVendor))
+                && world.Visible.Any(v => v.IsVendor)
+                && selfArmCombatEffective)
                 sb.AppendLine(
                     "- a fresh contract to keep earning is BOUGHT at a `vendor`, not received by " +
                     "`Talk`ing: a `vendor` is in `## Visible nearby`, so `Use` it to reveal its " +
@@ -9041,7 +9058,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // terminal stage) AND an open vendor in perception; names no specific
             // contract (the LLM picks which, if any). Prompt text only; no
             // source-side decision to buy.
-            if (world.Contracts.Count == 0 || heldBatchAllDone)
+            // Combat-readiness gate (cp gate-contract-cues-unarmed): the open-panel
+            // BUY-a-contract bridge competes with the SELF-ARM loot-to-arm hunt when
+            // UNARMED, so suppress it until the bot is combat-effective — matching the
+            // closed-panel refresh + FIND/RETURN gates. Mechanical render gate.
+            if ((world.Contracts.Count == 0 || heldBatchAllDone) && selfArmCombatEffective)
                 sb.AppendLine(
                     "- you have NO unfinished task contract right now and this vendor is OPEN: if any offering " +
                     "above is a TASK CONTRACT, the way to take new work is to BUY one here — emit " +

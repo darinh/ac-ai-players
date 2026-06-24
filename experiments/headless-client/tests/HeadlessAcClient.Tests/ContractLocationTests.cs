@@ -79,14 +79,20 @@ public class ContractLocationTests
     }
 
     private static WorldStateProjection WorldWithContractAndVisible(
-        ContractProjection contract, params VisibleObjectProjection[] visible) => new()
+        ContractProjection contract, params VisibleObjectProjection[] visible)
+        => WorldWithContractAndVisibleArmed(contract, true, visible);
+
+    private static WorldStateProjection WorldWithContractAndVisibleArmed(
+        ContractProjection contract, bool armed, params VisibleObjectProjection[] visible) => new()
     {
         Self = new SelfProjection
         {
             Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = SelfCell,
             PositionX = SelfPos.X, PositionY = SelfPos.Y, PositionZ = SelfPos.Z, HealthFraction = 1.0f,
         },
-        Inventory = Array.Empty<InventoryItemProjection>(),
+        Inventory = armed
+            ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+            : Array.Empty<InventoryItemProjection>(),
         Visible = visible,
         Contracts = new[] { contract },
     };
@@ -117,6 +123,17 @@ public class ContractLocationTests
     {
         var done = new ContractProjection { ContractId = 1u, Stage = 3u, Name = "Done" };
         var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWith(done), new EventStream(), null);
+        Assert.DoesNotContain(RefreshCueMarker, prompt);
+    }
+
+    [Fact]
+    public void Capsule_AllDoneBatch_WithVendorInView_Unarmed_OmitsRefreshBuyCue()
+    {
+        // Combat-readiness gate: the refresh-BUY cue is suppressed when UNARMED — a
+        // fresh contract is useless until the bot can fight; arming comes first.
+        var done = new ContractProjection { ContractId = 1u, Stage = 3u, Name = "Done" };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContractAndVisibleArmed(done, armed: false, ShopVendor()), new EventStream(), null);
         Assert.DoesNotContain(RefreshCueMarker, prompt);
     }
 
