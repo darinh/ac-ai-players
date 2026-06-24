@@ -1943,6 +1943,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return matches.Count == 1 ? matches[0].Guid : (uint?)null;
     }
 
+    // The recent-window + repeat threshold for the looped-Explore-toward-a-vendor rewrite.
+    private const int ExploreLoopedVendorThreshold = 3;
+    private static readonly TimeSpan ExploreLoopedVendorWindow = TimeSpan.FromMinutes(5);
+
+    // Returns the guid of a visible VENDOR the bot has repeatedly Explored TOWARD (>=
+    // ExploreLoopedVendorThreshold recent Explore emissions naming it). Explore only WALKS
+    // to a target and never interacts, so an Explore that NAMES a vendor "arrives" at it
+    // without engaging and a model then re-Explores the SAME in-view vendor every cycle (a
+    // loop). The bot named the vendor (intent to reach it); the mechanically-correct way to
+    // engage a reached vendor is `Use` (open its trade panel), so ProposeGoalCore rewrites
+    // the looped Explore into a Use of that SAME vendor. UNIQUE match only; never a monster
+    // or corpse. The >= threshold gate means a first/legitimate approach Explore is never
+    // preempted (the LLM may switch to Use itself); only a stuck loop is rewritten. Own
+    // emission history + perception; no game knowledge, no source-side target choice.
+    internal static uint? TryResolveExploreLoopedVendor(
+        Goal goal, WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (goal.Kind != GoalKind.Explore) return null;
+        if (goal.Target.Name is not string targetName || string.IsNullOrWhiteSpace(targetName)) return null;
+        // Resolve the target to a UNIQUE visible vendor using the SAME name semantics the
+        // Motor's SelectorResolver uses (exact / quoted-role-strip / unique whole-word
+        // subsequence), so a partial name resolves the same way the Motor actually walked
+        // there — otherwise an exact-only check would MISS a fuzzy-resolved loop.
+        if (ResolveUniqueVisibleVendorByName(world.Visible, targetName) is not uint vendorGuid) return null;
+        // Count recent Explore emissions that bind the SAME vendor IDENTITY (by guid, via
+        // the same resolver), not the raw string — so aliases for one vendor accumulate,
+        // and the count is attributed by what each name binds in the CURRENT view.
+        var counts = CountRecentEmittedTargetNames(events, since, "Explore", excludeItemGoals: false);
+        var loopCount = 0;
+        foreach (var kv in counts)
+            if (ResolveUniqueVisibleVendorByName(world.Visible, kv.Key) == vendorGuid)
+                loopCount += kv.Value;
+        return loopCount >= ExploreLoopedVendorThreshold ? vendorGuid : (uint?)null;
+    }
+
+    // Returns the guid of the UNIQUE visible VENDOR (IsVendor, not monster/corpse) that
+    // binds `name` under the SAME name semantics as the Motor's SelectorResolver: exact
+    // (case-insensitive), exact after stripping a trailing quoted-role suffix, OR a UNIQUE
+    // whole-word subsequence fuzzy match. Returns null when none OR more than one binds
+    // (ambiguous stays unrewritten). Mirrors VisibleResolvesName but over vendors only and
+    // returns the identity. Pure string comparison on observed names + the IsVendor wire
+    // bit; no game knowledge.
+    private static uint? ResolveUniqueVisibleVendorByName(
+        IReadOnlyList<VisibleObjectProjection> visible, string name)
+    {
+        var vendors = visible.Where(v => v.IsVendor && !v.IsMonster && !v.IsCorpse && v.Name is not null).ToList();
+        if (vendors.Count == 0) return null;
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        var exact = vendors.Where(v =>
+            string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count == 1) return exact[0].Guid;
+        if (exact.Count > 1) return null;
+        var fuzzy = vendors.Where(v =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name)).ToList();
+        return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
+    }
+
     // True iff the guid is in the server's DYNAMIC range (0x80000000-0xFFFFFFFE):
     // world-generated, takeable objects. Guids below this range are world-static
     // (StaticObjectMin 0x70000000+, landblock-organized) and a Pickup of them is
@@ -3671,6 +3729,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = pickupContainerGuid },
+                Item = null,
+            };
+        }
+
+        // Explore-toward-a-visible-vendor loop -> Use (reduce-llm-call-volume + engagement
+        // progress). Explore only WALKS to a target and never interacts, so an Explore that
+        // NAMES a vendor "arrives" at it without engaging and a model then re-Explores the
+        // SAME in-view vendor every cycle (a loop). The bot named the vendor — intent to
+        // reach it — and the mechanically-correct way to engage a reached vendor is `Use`
+        // (open its trade panel), so rewrite the looped Explore into a Use of that SAME
+        // vendor. Like the Pickup->Use / Wield->Pickup rewrites; no autonomous target pick
+        // (the LLM chose WHICH vendor), no game knowledge — keyed on the IsVendor wire bit
+        // + the bot's OWN Explore-emission history. The >= threshold gate never preempts a
+        // first/legitimate approach Explore.
+        if (TryResolveExploreLoopedVendor(goal, world, events, nowUtc - ExploreLoopedVendorWindow) is uint exploreVendorGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] explore-vendor -> use: target={goal.Target}" +
+                $" guid=0x{exploreVendorGuid:X8} — repeatedly Exploring a visible vendor" +
+                " without engaging; Use it (Explore only walks, never interacts).");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = exploreVendorGuid },
                 Item = null,
             };
         }
