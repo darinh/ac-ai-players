@@ -37,6 +37,18 @@ internal static class CorpseRecovery
     }
 
     /// <summary>
+    /// Radius (game units) within which the bot is treated as having REACHED its
+    /// corpse: inside it the return bearing is suppressed and the recorded death
+    /// location is cleared. Deliberately TIGHT — far smaller than the 120u
+    /// perception radius — so the bearing keeps directing the bot toward an
+    /// out-of-view corpse across the whole approach, and a transient pass (or a
+    /// respawn near the recorded death location) within perception range does NOT
+    /// permanently clear the death location. Once the corpse enters perception, the
+    /// in-view cue takes over.
+    /// </summary>
+    internal const float CorpseReachedRadiusUnits = 10f;
+
+    /// <summary>
     /// True when a recorded death location should render: it is present, its age
     /// is in <c>[0, ttl)</c>, and the bot (<paramref name="currentXY"/>) is NOT
     /// within <paramref name="visibleRadius"/> of it. A null

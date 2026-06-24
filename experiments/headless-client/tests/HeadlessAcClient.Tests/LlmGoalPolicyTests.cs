@@ -17703,6 +17703,29 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_CorpseInViewTakesPrecedence_OverBearing()
+    {
+        // When the bot's OWN corpse is an actual Visible entry, the in-view cue
+        // (branch 1) renders and the return bearing (branch 2) is skipped — even
+        // though the projection still carries the death coords. No duplicate cue.
+        var world = BuildXpWorld(50000, 0) with
+        {
+            CorpseWorldX = 999999f,
+            CorpseWorldY = 999999f,
+            CorpseAgeSeconds = 42,
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0xC0FFEEu, Name = "Corpse of Headless", IsCorpse = true },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("is YOUR OWN", prompt);              // branch 1 (in-view)
+        Assert.DoesNotContain("your own corpse is ~", prompt); // branch 2 (bearing) skipped
+    }
+
+    [Fact]
     public void BuildUserPrompt_UnspentXpCapsule_RestatesEvadeToAccuracyLeverMapping_NoTrainedSkill()
     {
         // cp2924: live the bot read its own evade-heavy split yet poured XP into
