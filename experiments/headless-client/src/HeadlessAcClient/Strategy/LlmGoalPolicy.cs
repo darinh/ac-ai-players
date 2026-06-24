@@ -1318,6 +1318,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
         => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
+    // True when a bare world-object Use (the kind the world-Use churn guards own)
+    // targets the vendor whose trade panel is currently OPEN. Re-Using an
+    // already-open vendor is a transactional no-op (the panel stays open), NOT a
+    // dead interior-door tour — so the world-Use churn egress must not FLEE it
+    // (a committed Explore-away abandons the transactable panel before the bot
+    // can Buy/Sell at the open offerings). Matches the open vendor by the
+    // selector's guid, or by the LLM's name selector against the visible object
+    // carrying the open vendor's guid. Open-panel wire fact + selector match
+    // only; the LLM still decides whether/what to Buy or Sell.
+    internal static bool LoopedUseTargetsOpenVendor(Goal goal, WorldStateProjection world)
+    {
+        if (world.Vendor is not { } ven) return false;
+        if (goal.Kind != GoalKind.Use || goal.Item is not null) return false;
+        if (goal.Target.Guid is uint g) return g == ven.VendorGuid;
+        return world.Visible.Any(v => v.Guid == ven.VendorGuid
+            && VisibleMatchesSelector(goal.Target, v));
+    }
+
     // True iff there IS at least one attackable monster in view AND every such
     // monster is a kind the bot's own ledger marks LETHAL-beaten — the SAME
     // definition the veto and the ## Beaten kinds capsule use (a recorded DEATH
@@ -3246,6 +3264,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (which owns goal.Item Uses); this owns bare world-object Uses.
         if (IsStationaryWorldUseRepeat(goal, world, events))
         {
+            // Don't FLEE the currently-open vendor: re-Using an already-open
+            // vendor panel is a transactional no-op (the panel stays open), not a
+            // dead-end loop to escape; locking an Explore-away abandons the
+            // transactable panel before the bot can Buy/Sell. Drop the redundant
+            // Use and defer (no committed egress) so the next deliberation can
+            // transact at the open offerings.
+            if (LoopedUseTargetsOpenVendor(goal, world))
+            {
+                Console.WriteLine(
+                    $"[llm-dedup] dropping LLM Use target={goal.Target}" +
+                    " — stationary re-Use of the OPEN vendor; deferring (no flee) so the bot can Buy/Sell.");
+                _training?.RecordParseError(decisionId,
+                    "dropped-by-dedup: stationary re-Use of open vendor (no flee)");
+                return _fallback.ProposeGoal(world, events, currentGoal);
+            }
             Console.WriteLine(
                 $"[llm-dedup] dropping LLM Use target={goal.Target}" +
                 " — stationary world-object Use repeated with no progress; deferring to fallback.");
@@ -3264,6 +3297,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // a legitimate multi-door exit (each DISTINCT door Used once) from firing.
         if (IsLandblockWorldUseChurn(goal, world, events))
         {
+            // Same open-vendor exception as above: a vendor is a transactable
+            // station, not an interior door to tour past — don't flee it.
+            if (LoopedUseTargetsOpenVendor(goal, world))
+            {
+                Console.WriteLine(
+                    $"[llm-dedup] dropping LLM Use target={goal.Target}" +
+                    " — re-Use churn on the OPEN vendor; deferring (no flee) so the bot can Buy/Sell.");
+                _training?.RecordParseError(decisionId,
+                    "dropped-by-dedup: re-Use churn on open vendor (no flee)");
+                return _fallback.ProposeGoal(world, events, currentGoal);
+            }
             Console.WriteLine(
                 $"[llm-dedup] dropping LLM Use target={goal.Target}" +
                 " — world-object Use churn within one landblock (same target re-Used, or too many distinct" +
