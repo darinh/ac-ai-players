@@ -2848,6 +2848,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void RepeatedUnresolvedAttackTarget_AccumulatesRoleSuffixedAndBareUnderBareName()
+    {
+        // A model that alternates `The Chicken` and the rendered `The Chicken "Hen"` label
+        // for the SAME departed target must accumulate under one bare key: 2 bare + 1
+        // role-suffixed = 3 >= threshold, so the loop cue fires (previously the suffixed
+        // spelling keyed a separate bucket and neither bucket reached the threshold).
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Drudge", 5f)); // not the looped name
+        var es = new EventStream();
+        foreach (var nm in new[] { "The Chicken", "The Chicken", "The Chicken \"Hen\"" })
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = $"Attack target=name=\"{nm}\" item= source=llm:test",
+            });
+        Assert.Equal("The Chicken", LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
     public void RepeatedUnresolvedAttackTarget_NullWhenNameMatchesVisibleObject()
     {
         // A visible object DOES match the name -> it is in range; normal nav / picker handles it.
@@ -22587,6 +22606,32 @@ public class LlmGoalPolicyTests
             ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"),
             ("Talk", "Greeter"), ("Talk", "Greeter"), ("Talk", "Greeter"));
         Assert.Equal("Greeter", LlmGoalPolicy.ProvenTalkFixationNameFromHistory(es));
+    }
+
+    [Fact]
+    public void ProvenTalkFixationNameFromHistory_RoleSuffixedTargets_ReturnsBareName()
+    {
+        // A model that copies the rendered `Name "role"` label into the target
+        // selector must still register as a fixation on the bare name (the Motor
+        // resolves it that way; the history count must too — previously the
+        // role-suffixed emissions keyed a different bucket and never crossed the
+        // threshold).
+        var es = Cp069Stream(
+            ("Talk", "Greeter \"Society\""), ("Talk", "Greeter \"Society\""),
+            ("Talk", "Greeter \"Society\""), ("Talk", "Greeter \"Society\""),
+            ("Talk", "Greeter \"Society\""), ("Talk", "Greeter \"Society\""));
+        Assert.Equal("Greeter", LlmGoalPolicy.ProvenTalkFixationNameFromHistory(es));
+    }
+
+    [Fact]
+    public void CountTalkGoalsToNameInLastN_RoleSuffixedAndBare_CountTogether()
+    {
+        // Mixed bare + role-suffixed emissions to the same NPC accumulate under the
+        // bare name (previously the role-suffixed ones matched 0).
+        var es = Cp069Stream(
+            ("Talk", "Greeter"), ("Talk", "Greeter \"Society\""),
+            ("Talk", "Greeter \"Society\""));
+        Assert.Equal(3, LlmGoalPolicy.CountTalkGoalsToNameInLastN(es, "Greeter", 10));
     }
 
     [Fact]

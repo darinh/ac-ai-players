@@ -6163,6 +6163,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 if (name is null) continue;
             }
 
+            // Normalize a rendered role-title suffix off the emitted name (the same
+            // SelectorResolver.StripTrailingQuotedRoleTitle the Motor resolves with), so a
+            // model that alternates `Foo` and `Foo "role"` for the SAME target accumulates
+            // under one bare key instead of splitting the count. The placeholder tokens
+            // below ("anywhere"/"self"/"<your-name>") carry no role suffix and normalize to
+            // themselves, so their guards are unaffected.
+            name = NormalizeEmittedTargetName(name);
             if (string.IsNullOrWhiteSpace(name)
                 || string.Equals(name, "anywhere", StringComparison.OrdinalIgnoreCase)
                 || (preferItemName
@@ -6528,6 +6535,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
+    // Normalize a target NAME for goal-emission counting so the bot's OWN recorded
+    // emission matches the bare object/NPC name the fixation/refresh counters key
+    // on. The prompt renders an object as `<Name> "<role>"` and a model frequently
+    // copies that whole label into the target selector; the recorded
+    // `name="<Name> "<role>""` truncates at the inner quote to `<Name> ` here (and a
+    // model may also emit the full `<Name> "<role>"`). Strip a trailing rendered
+    // role-title and trim — the SAME normalization the Motor's
+    // SelectorResolver.StripTrailingQuotedRoleTitle uses to RESOLVE such a target —
+    // so a role-suffixed emission still counts against the bare name (otherwise the
+    // counters silently read 0 for a model that suffixes its targets, and the
+    // fixation/settled-turn-in/refresh guards keyed on them never fire). Pure string
+    // normalization; no game knowledge.
+    internal static string NormalizeEmittedTargetName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        return (HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(raw) ?? raw).Trim();
+    }
+
     // Count the bot's OWN recent Talk goals aimed at a given NPC NAME that were
     // emitted at or after `since` (the time the contract became stage-3). A
     // purely structural read of GoalEmitted history (the "VERB target=...
@@ -6539,6 +6564,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int CountRecentTalkGoalsToName(EventStream events, string npcName, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(npcName)) return 0;
+        var target = NormalizeEmittedTargetName(npcName);
         var n = 0;
         // Read from the DEDICATED durable goal-emission window, NOT the
         // perception-dominated ring: re-talks to a turn-in NPC spread across
@@ -6562,7 +6588,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(
                 txt.Substring(ti), "name=\"([^\"]+)\"");
             if (!nm.Success) continue;
-            if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
+            if (string.Equals(NormalizeEmittedTargetName(nm.Groups[1].Value), target, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
     }
@@ -6578,6 +6604,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int CountTalkGoalsToNameInLastN(EventStream events, string npcName, int lastN)
     {
         if (string.IsNullOrWhiteSpace(npcName) || lastN <= 0) return 0;
+        var target = NormalizeEmittedTargetName(npcName);
         var n = 0;
         foreach (var ge in events.RecentGoalEmissions()
                      .Where(e => !string.IsNullOrEmpty(e.Text))
@@ -6590,7 +6617,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(
                 txt.Substring(ti), "name=\"([^\"]+)\"");
             if (!nm.Success) continue;
-            if (string.Equals(nm.Groups[1].Value, npcName, StringComparison.OrdinalIgnoreCase)) n++;
+            if (string.Equals(NormalizeEmittedTargetName(nm.Groups[1].Value), target, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
     }
@@ -6617,7 +6644,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(
                 txt.Substring(ti), "name=\"([^\"]+)\"");
             if (!nm.Success) continue;
-            var name = nm.Groups[1].Value;
+            var name = NormalizeEmittedTargetName(nm.Groups[1].Value);
+            if (name.Length == 0) continue;
             counts[name] = counts.GetValueOrDefault(name) + 1;
         }
         foreach (var kv in counts)
@@ -6637,6 +6665,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int CountRecentExploreGoalsToName(EventStream events, string name, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(name)) return 0;
+        var target = NormalizeEmittedTargetName(name);
         var n = 0;
         foreach (var ge in events.RecentGoalEmissions()
                      .Where(e => !string.IsNullOrEmpty(e.Text)))
@@ -6649,7 +6678,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(
                 txt.Substring(ti), "name=\"([^\"]+)\"");
             if (!nm.Success) continue;
-            if (string.Equals(nm.Groups[1].Value, name, StringComparison.OrdinalIgnoreCase)) n++;
+            if (string.Equals(NormalizeEmittedTargetName(nm.Groups[1].Value), target, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
     }
@@ -6664,6 +6693,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int CountRecentEngageGoalsToName(EventStream events, string name, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(name)) return 0;
+        var target = NormalizeEmittedTargetName(name);
         var n = 0;
         foreach (var ge in events.RecentGoalEmissions()
                      .Where(e => !string.IsNullOrEmpty(e.Text)))
@@ -6677,7 +6707,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var nm = System.Text.RegularExpressions.Regex.Match(
                 txt.Substring(ti), "name=\"([^\"]+)\"");
             if (!nm.Success) continue;
-            if (string.Equals(nm.Groups[1].Value, name, StringComparison.OrdinalIgnoreCase)) n++;
+            if (string.Equals(NormalizeEmittedTargetName(nm.Groups[1].Value), target, StringComparison.OrdinalIgnoreCase)) n++;
         }
         return n;
     }
