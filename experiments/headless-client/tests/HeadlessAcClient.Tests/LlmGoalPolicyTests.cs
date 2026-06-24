@@ -6542,6 +6542,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SelfArmRule_DirectsLootToArmHuntWhenNoWeaponAvailable()
+    {
+        // The no-weapon fallback must direct the bot to HUNT the weakest monsters and LOOT a
+        // weapon/coin (the bootstrap out of a weaponless+broke deadlock) rather than idling
+        // among vendors — live: even gpt-4.1 toured vendors for 30+ decisions, 0 XP/kills.
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()), new EventStream(), null);
+        Assert.Contains("loot-to-arm hunt", p);
+        Assert.Contains("WEAKEST monsters", p);
+        // The exception is authoritative: getting coin outranks more NPC-talk/vendor-browsing.
+        Assert.Contains("getting coin is your TOP priority", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NoWeapon_VendorInView_LootToArmGuidanceIsCoherent()
+    {
+        // Combined deadlock state: unarmed (empty inventory) + a vendor in view (panel not
+        // open). BOTH the SELF-ARM override AND the `vendor nearby` cue must point at the
+        // SAME loot-to-arm hunt (not back into vendor touring) — the coherence fix.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection { Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u, CellId = 0x86020001u,
+                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[] { new VisibleObjectProjection { Guid = 0x90001234u, Name = "Test Vendor", Distance = 10f, IsVendor = true } },
+        };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("getting coin is your TOP priority", p);            // SELF-ARM override
+        Assert.Contains("rather than re-Using it or touring more vendors", p); // aligned vendor cue
+        Assert.Contains("WEAKEST monsters", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SelfArmRule_OmittedWhenMeleeWielded()
     {
         var inv = new[]
