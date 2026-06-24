@@ -6266,10 +6266,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // back-to-back while no longer in view). Surfaced as the `## Use loop` informational cue
     // — NOT a hard drop, so a legitimate close-in toward a target just out of the visible
     // radius is never overridden. Corpses are NOT excluded (a corpse IS a valid Use/loot
-    // target, so a visible corpse named X binds the Use). Same audit posture as the others.
+    // target, so a visible corpse named X binds the Use). The MISFILE shape (empty target +
+    // a name in the `item` field — a model naming the object to Use in the wrong field) is
+    // ALSO counted via itemNameWhenTargetEmpty, so a departed-NPC item-field Use loop surfaces
+    // too; a genuine two-object Use (both target AND item populated) stays ambiguous and is
+    // skipped. Same audit posture as the others.
     internal static string? RepeatedUnresolvedUseTarget(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
-        => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, excludeItemGoals: true);
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, itemNameWhenTargetEmpty: true);
 
     // Shared detector for a repeated goal-VERB emission toward a target NAME that NO
     // currently-visible object would bind. Counts the bot's own recent goal emissions
@@ -6284,14 +6288,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // perception; no game knowledge, no priority, no source-side target choice.
     private static string? MostRepeatedUnresolvedTargetName(
         WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold,
-        bool excludeCorpses, bool excludeItemGoals = false)
+        bool excludeCorpses, bool excludeItemGoals = false, bool itemNameWhenTargetEmpty = false)
     {
-        foreach (var kv in CountRecentEmittedTargetNames(events, since, verb, excludeItemGoals)
+        foreach (var kv in CountRecentEmittedTargetNames(events, since, verb, excludeItemGoals, itemNameWhenTargetEmpty: itemNameWhenTargetEmpty)
                      .OrderByDescending(k => k.Value))
         {
             if (kv.Value < threshold) break;
             if (world?.Visible is not null && VisibleResolvesName(world.Visible, kv.Key, excludeCorpses))
                 continue; // a visible object the resolver could still bind — normal nav / picker handles it
+            if (itemNameWhenTargetEmpty && world?.Inventory is not null
+                && InventoryResolvesName(world.Inventory, kv.Key))
+                continue; // a name the bot OWNS — the empty-target+item shape is a legit self-Use
+                          // of an inventory item (mirrors TryResolveUseWorldObjectInItemField), not a
+                          // departed-world-target loop, so do not surface the "not in view" cue.
             return kv.Key;
         }
         return null;
@@ -6325,13 +6334,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // <paramref name="preferItemName"/>, the NAME in the `item=` field is used when present,
     // falling back to the target name — for Wield, whose weapon is carried in the item field
     // (target is the self-placeholder); the "self" / "&lt;your-name&gt;" placeholders are then
-    // ignored. The untargeted "anywhere" token is always ignored. When
-    // <paramref name="excludeItemGoals"/>, an emission carrying a populated `item=` field is
-    // skipped (two-object ambiguity; mirrors IsUnreachableTargetRepeat). The default
-    // (preferItemName=false) path is the original single-target parse, unchanged. Pure: own
-    // emission history only; no game knowledge.
+    // ignored. With <paramref name="itemNameWhenTargetEmpty"/> (Use), the target name is used
+    // when present, the ITEM name when the target is empty (the misfile shape), and a
+    // BOTH-populated two-object emission is skipped as ambiguous. The untargeted "anywhere"
+    // token is always ignored. When <paramref name="excludeItemGoals"/>, an emission carrying
+    // a populated `item=` field is skipped (two-object ambiguity; mirrors
+    // IsUnreachableTargetRepeat). The default (all flags false) path is the original
+    // single-target parse, unchanged. Pure: own emission history only; no game knowledge.
     private static Dictionary<string, int> CountRecentEmittedTargetNames(
-        EventStream events, DateTimeOffset since, string verb, bool excludeItemGoals, bool preferItemName = false)
+        EventStream events, DateTimeOffset since, string verb, bool excludeItemGoals, bool preferItemName = false,
+        bool itemNameWhenTargetEmpty = false)
     {
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         if (events is null) return counts;
@@ -6345,7 +6357,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (ti < 0) continue;
 
             string? name;
-            if (!preferItemName)
+            if (itemNameWhenTargetEmpty)
+            {
+                // Use: the target name normally, but for the MISFILE shape (empty target +
+                // populated item) the ITEM name (the de-facto target — a model names the
+                // object it wants to Use in the item field with no target). A genuine
+                // two-object Use (BOTH a target AND an item selector populated) stays ambiguous
+                // (either the world target or the held item could have failed to resolve) and
+                // is skipped — the same posture excludeItemGoals took for all item-Uses.
+                if (EmissionHasPopulatedItem(txt) && EmissionHasPopulatedTarget(txt)) continue;
+                var (tName, iName) = ParseTargetAndItemNames(txt, ti);
+                name = tName ?? iName;
+                if (name is null) continue;
+            }
+            else if (!preferItemName)
             {
                 // Single-target verbs: the first name= from `target=` onward is the target's
                 // (item is empty), the original behavior.
@@ -6358,16 +6383,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 // Wield: parse the target and item segments separately and PREFER the item
                 // name (the weapon), since the canonical shape is target="self" item=weapon.
-                var ii = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
-                var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
-                int tEnd = ii >= 0 ? ii : (srcIdx >= 0 ? srcIdx : txt.Length);
-                var tName = NameInSegment(txt.Substring(ti, tEnd - ti));
-                string? iName = null;
-                if (ii >= 0)
-                {
-                    int iEnd = srcIdx > ii ? srcIdx : txt.Length;
-                    iName = NameInSegment(txt.Substring(ii, iEnd - ii));
-                }
+                var (tName, iName) = ParseTargetAndItemNames(txt, ti);
                 name = iName ?? tName;
                 if (name is null) continue;
             }
@@ -6394,6 +6410,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         var m = System.Text.RegularExpressions.Regex.Match(segment, "name=\"([^\"]+)\"");
         return m.Success ? m.Groups[1].Value : null;
+    }
+
+    // Parse the target-segment name and the item-segment name from a goal-emission text,
+    // starting at the `target=` index `ti`. The target segment runs from `target=` to the
+    // next ` item=` (or ` source=` / end); the item segment from ` item=` to ` source=` /
+    // end. Either name may be null (the segment is absent or carries no name="..."). Shared
+    // by the Wield loop (prefers the item name) and the Use loop (uses the item name only
+    // when the target is empty). Pure string parsing.
+    private static (string? TargetName, string? ItemName) ParseTargetAndItemNames(string txt, int ti)
+    {
+        var ii = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
+        var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
+        int tEnd = ii >= 0 ? ii : (srcIdx >= 0 ? srcIdx : txt.Length);
+        var tName = NameInSegment(txt.Substring(ti, tEnd - ti));
+        string? iName = null;
+        if (ii >= 0)
+        {
+            int iEnd = srcIdx > ii ? srcIdx : txt.Length;
+            iName = NameInSegment(txt.Substring(ii, iEnd - ii));
+        }
+        return (tName, iName);
     }
 
     // True when the bot OWNS an item that could be wielded under that name: equippable
@@ -6430,6 +6467,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int end = src >= 0 ? src : txt.Length;
         var itemVal = (s < end ? txt.Substring(s, end - s) : string.Empty).Trim();
         return itemVal.Length > 0 && !string.Equals(itemVal, "<empty>", StringComparison.Ordinal);
+    }
+
+    // True when a goal-emission text carries a populated `target=` field (NOT the `<empty>`
+    // sentinel). The target segment runs from `target=` to the next ` item=` (or ` source=` /
+    // end). Mirrors EmissionHasPopulatedItem for the target selector, so a NAMED or GUID
+    // target both count as populated (used to tell a single-object/misfile Use apart from a
+    // genuine two-object Use). Pure string parse of the bot's own emitted text.
+    private static bool EmissionHasPopulatedTarget(string txt)
+    {
+        var t = txt.IndexOf("target=", StringComparison.Ordinal);
+        if (t < 0) return false;
+        int s = t + "target=".Length;
+        int itemIdx = txt.IndexOf(" item=", s, StringComparison.Ordinal);
+        int srcIdx = txt.IndexOf(" source=", s, StringComparison.Ordinal);
+        int end = itemIdx >= 0 ? itemIdx : (srcIdx >= 0 ? srcIdx : txt.Length);
+        var tgtVal = (s < end ? txt.Substring(s, end - s) : string.Empty).Trim();
+        return tgtVal.Length > 0 && !string.Equals(tgtVal, "<empty>", StringComparison.Ordinal);
     }
 
     // True when `name` is the bot's OWN corpse name ("Corpse of <selfName>", ordinal

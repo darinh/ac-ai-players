@@ -3284,6 +3284,103 @@ public class LlmGoalPolicyTests
         Assert.Equal("Woodsman", LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
+    private static EventStream UseItemFieldEmissions(string itemName, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                // The MISFILE shape: empty target, the object-to-Use name in the item field.
+                Text = $"Use target=<empty> item=name=\"{itemName}\" source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_FiresForItemFieldMisfile_EmptyTarget()
+    {
+        // A model mis-files the object-to-Use into the item field with an empty target
+        // (Use{target=<empty>, item=name="X"}). The de-facto target X is NOT visible -> the
+        // Use loops on MISS; surface it like a target-field Use loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // a different object, not X
+        var es = UseItemFieldEmissions("Pawn Shopkeep", 3, now);
+        Assert.Equal("Pawn Shopkeep", LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_ItemFieldMisfile_NullWhenItemNameVisible()
+    {
+        // The mis-filed item name IS a visible object -> in range; the use-item-world-object
+        // rewrite / picker handles it, no dead loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Woodsman", 5f));
+        var es = UseItemFieldEmissions("Woodsman", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_ItemFieldSelfUseOfOwnedItem_ReturnsNull()
+    {
+        // The empty-target + item-name shape is ALSO the valid self-Use of an OWNED inventory
+        // item (read a letter, consume a charge). The item is in inventory, NOT visible, so a
+        // repeated self-Use must NOT trip the "target not in view" loop cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld() with
+        {
+            Inventory = new[] { new InventoryItemProjection { Guid = 0xA01u, Name = "Letter From Home", Wcid = 1u } },
+        };
+        var es = UseItemFieldEmissions("Letter From Home", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_ItemFieldName_OwnedItemFuzzyMatch_SuppressesCue_ByDesign()
+    {
+        // Documents an intentional tradeoff: the owned-item suppression uses the SAME lenient
+        // InventoryResolvesName (exact / role-strip / unique word-subsequence) that the
+        // use-item-world-object rewrite (TryResolveUseWorldObjectInItemField) uses to treat a
+        // name as a self-Use of an owned item. So an owned "Contract Broker Token" makes a
+        // repeated Use{item="Contract Broker"} read as a (fuzzy) self-Use and suppresses the
+        // informational cue — consistent with the rewrite (which would likewise NOT treat it as
+        // a departed world target). The cue is informational, so the rare name-collision only
+        // costs observability, never forces behavior.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld() with
+        {
+            Inventory = new[] { new InventoryItemProjection { Guid = 0xA02u, Name = "Contract Broker Token", Wcid = 1u } },
+        };
+        var es = UseItemFieldEmissions("Contract Broker", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_TwoObjectGuidTargetNamedItem_Ignored()
+    {
+        // Robustness: a GUID target + a named item is still a two-object Use (both selectors
+        // populated) -> ambiguous -> skipped, even though the guid target carries no name.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Use target=guid=0x7A9B4027 item=name=\"Brass Key\" source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseLoopCapsule_RendersForItemFieldMisfile()
+    {
+        // The Use-loop capsule renders for an item-field misfile loop just like a target loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseItemFieldEmissions("Pawn Shopkeep", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Use loop (target not in view)", prompt);
+        Assert.Contains("Pawn Shopkeep", prompt);
+    }
     [Theory]
     [InlineData("Corpse of Headless", "Headless", true)]
     [InlineData("corpse of headless", "Headless", true)]
