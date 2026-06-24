@@ -925,6 +925,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     public Goal? ProposeGoal(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
+        // Enforce durable goal-history (emission/failure) retention against the CURRENT
+        // time at the single decision entry, BEFORE any durable-history read this tick
+        // (the run-summary diagnostic below, ProposeGoalCore's loop-break/fixation reads,
+        // and the hunt-egress override). Append-time pruning alone would leave stale
+        // entries alive on a wall-clock stuck-timeout re-deliberation that re-reads history
+        // with no intervening append.
+        events.PruneGoalHistory(DateTimeOffset.UtcNow);
         // One run-summary emit per tick at most: the time-based fallback (below) and
         // the every-15-kickoffs trigger (in ProposeGoalCore) can both come due on the
         // same tick; this flag, reset each tick, lets the kickoff path skip a
@@ -3927,13 +3934,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // un-equippable Wield. The inventory gate keeps a legitimate swap to a
         // just-acquired weapon flowing: the LLM Wield path can dequip the blocker,
         // but the mechanical fallback deliberately will not, so dropping the Wield
-        // while a real weapon is in the bag would strand it. Self-limiting: once an
-        // equippable weapon is held (or the failures age out of the window) Wield
-        // flows again. Own Wield-failure history + own equip-slot bits only; no item
-        // preference, no game knowledge.
+        // while a real weapon is in the bag would strand it. The wielded-weapon gate
+        // additionally withholds the drop whenever a main-hand weapon is ALREADY
+        // wielded — the bot is armed (the loop-break exists to move an UN-armed bot
+        // toward acquiring a weapon), and a valid ammo reload / shield equip (which
+        // the main-weapon-slot inventory test does not see) must still flow while a
+        // launcher/weapon is wielded. Self-limiting: once an equippable weapon is held
+        // (or the failures age out of the window) Wield flows again. Own Wield-failure
+        // history + own equip-slot bits only; no item preference, no game knowledge.
         if (goal.Kind == GoalKind.Wield
             && IsWieldNoWeaponRepeat(events)
-            && !HasEquippableInventoryWeapon(world))
+            && !HasEquippableInventoryWeapon(world)
+            && !HasWieldedMainWeapon(world))
         {
             Console.WriteLine(
                 $"[llm-dedup] dropping LLM Wield item={goal.Item}" +
@@ -4282,22 +4294,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     /// <summary>
     /// True iff the Motor has REPEATEDLY (>= threshold) rejected a Wield with the
-    /// "no equippable inventory weapon" reason in the recent event window — a model
-    /// keeps re-emitting a Wield the wield path cannot satisfy, burning a
+    /// "no equippable inventory weapon" reason — a model keeps re-emitting a Wield the
+    /// wield path cannot satisfy (a selector that resolves to no equippable in-bag
+    /// weapon, INCLUDING a generic <c>name_contains="weapon"</c> type-descriptor that
+    /// matches no item NAME and so fails at selector resolution), burning a
     /// no-current-goal LLM call each cycle with no equip and no progress. The caller
-    /// pairs this with <see cref="HasEquippableInventoryWeapon"/> and, only when
-    /// nothing equippable is held, drops the Wield and defers to the fallback. Pure
-    /// read of the bot's OWN GoalFailed history — no item preference, no game
-    /// knowledge.
+    /// pairs this with <see cref="HasEquippableInventoryWeapon"/> and, only when nothing
+    /// equippable is held, drops the Wield and defers to the fallback (which MOVES the
+    /// bot toward acquiring a weapon). Reads the DURABLE GoalFailed window, not the
+    /// perception-dominated ring: the futile Wields recur ACROSS decisions with heavy
+    /// perception/motion traffic between them, which evicted the prior failure from the
+    /// ring before the count reached the threshold (so the loop-break previously fired
+    /// ONLY when two failures were adjacent). Keyed on the SPECIFIC no-weapon failure
+    /// reason — a SUCCESSFUL Wild (e.g. a valid ammo reload or shield equip) produces no
+    /// such failure and is never counted. Pure read of the bot's OWN GoalFailed history;
+    /// no item preference, no game knowledge.
     /// </summary>
     internal static bool IsWieldNoWeaponRepeat(EventStream events)
     {
-        const int LookbackEvents = 30;
         const int WieldNoWeaponRepeatThreshold = 2;
         var rejects = 0;
-        foreach (var ev in events.Recent(LookbackEvents))
+        foreach (var ev in events.RecentGoalFailures())
         {
-            if (ev.Kind != EventKind.GoalFailed) continue;
             if (ev.Text is null ||
                 ev.Text.IndexOf(WieldNoWeaponFailMarker, StringComparison.Ordinal) < 0)
                 continue;
@@ -4307,16 +4325,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
-    /// True if the bag holds an un-wielded item the wield path could equip into a
+    /// True if the bag holds an un-wielded WEAPON the wield path could equip into a
     /// primary-weapon slot — its ValidLocations intersects
     /// <see cref="WeaponSwap.MainWeaponSlotMask"/> (the melee/missile/held/two-handed
-    /// slots). Pure equip-slot-bit projection: the dedicated ammo slot and the
-    /// armor/jewelry slots are NOT weapon slots, so a bag holding only those (or only
-    /// an already-wielded weapon) reads as "no weapon". Mirrors the Motor's own
-    /// arm-from-inventory test; no item preference, no game knowledge. The Wield
-    /// loop-break is withheld whenever this is true, so a legitimate swap to a
-    /// just-acquired weapon (which the LLM Wield path can actuate but the mechanical
-    /// fallback will not) is never dropped.
+    /// slots) AND its ItemType is a weapon (<see cref="WeaponSwap.WeaponItemTypeMask"/>:
+    /// melee/missile/caster). Requiring the weapon ItemType means a non-weapon main-slot
+    /// item (e.g. a torch sitting in the bag with a Held ValidLocations) does NOT read as
+    /// "a weapon is available". Pure equip-slot/ItemType-bit projection: the dedicated
+    /// ammo slot and the armor/jewelry slots are NOT weapon slots, so a bag holding only
+    /// those (or only an already-wielded weapon) reads as "no weapon"; no item
+    /// preference, no game knowledge. The Wield loop-break is withheld whenever this is
+    /// true, so a legitimate swap to a just-acquired weapon (which the LLM Wield path can
+    /// actuate but the mechanical fallback will not) is never dropped.
     /// </summary>
     internal static bool HasEquippableInventoryWeapon(WorldStateProjection world)
     {
@@ -4325,9 +4345,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         foreach (var it in inventory)
         {
             if (it.WieldedAt is uint w && w != 0) continue;
-            if (it.ValidLocations is uint vl && (vl & WeaponSwap.MainWeaponSlotMask) != 0)
+            if (it.ValidLocations is uint vl && (vl & WeaponSwap.MainWeaponSlotMask) != 0
+                && it.ItemType is uint t && (t & WeaponSwap.WeaponItemTypeMask) != 0)
                 return true;
         }
+        return false;
+    }
+
+    /// <summary>
+    /// True if the bot already has a WEAPON wielded in a main-hand weapon slot — i.e.
+    /// the canonical <see cref="WeaponSwap.IsWieldedWeapon"/> (WieldedAt intersects
+    /// <see cref="WeaponSwap.MainWeaponSlotMask"/> AND the ItemType is a weapon, so a
+    /// wielded non-weapon held item such as a torch does NOT qualify). The bot is armed,
+    /// so the no-weapon Wield loop-break (which exists to move an UN-armed bot toward
+    /// acquiring a weapon) must be withheld: a model wielding a missile launcher then
+    /// loading ammo, or adding a shield, emits a VALID Wield that the main-weapon-slot
+    /// inventory test (<see cref="HasEquippableInventoryWeapon"/>, which ignores the
+    /// ammo/shield slots) does not register, and dropping it would strand a legitimate
+    /// reload/equip. Pure equip-slot/ItemType-bit projection; no item preference, no
+    /// game knowledge.
+    /// </summary>
+    internal static bool HasWieldedMainWeapon(WorldStateProjection world)
+    {
+        var inventory = world.Inventory;
+        if (inventory is null) return false;
+        foreach (var it in inventory)
+            if (WeaponSwap.IsWieldedWeapon(
+                    new WeaponSwap.ItemFacts(it.Guid, it.ItemType, it.ValidLocations, it.WieldedAt)))
+                return true;
         return false;
     }
 

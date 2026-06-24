@@ -350,6 +350,14 @@ internal sealed class EventStream
     private const int MaxRecentGoalEmissions = 512;
     private readonly List<StreamEvent> _recentGoalEmissions = new();
 
+    // Durable GoalFailed window — the same durability pattern as
+    // _recentGoalEmissions, for the same reason: a GoalFailed (e.g. a repeated
+    // "no equippable inventory weapon" Wield rejection) can be evicted from the
+    // perception-dominated ring within seconds, so a recurrence count that scans
+    // only the ring under-counts failures spread across decisions. Shares the
+    // emission window's retention/cap bounds. Pure bookkeeping; no text parsing.
+    private readonly List<StreamEvent> _recentGoalFailures = new();
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -448,21 +456,48 @@ internal sealed class EventStream
             }
         }
 
-        // Durable goal-emission window (see _recentGoalEmissions): retain recent
-        // GoalEmitted events independent of the ring so a goal is not lost to
-        // perception eviction within seconds. Evict by TIME (older than the
-        // retention window), then a generous hard count cap as a memory bound.
+        // Durable goal-history windows (see _recentGoalEmissions / _recentGoalFailures):
+        // retain recent GoalEmitted / GoalFailed events independent of the ring so a goal
+        // or failure is not lost to perception eviction within seconds. ADD on the matching
+        // kind, then PRUNE BOTH by TIME on EVERY append (independent of this event's kind)
+        // plus a hard count cap. Pruning on every append — not only when a same-kind event
+        // arrives — is what lets a stale entry age out when only perception traffic follows
+        // (failures are rare, so a failure-kind-gated prune could otherwise keep a stale
+        // no-weapon failure alive indefinitely past its retention).
         if (stamped.Kind == EventKind.GoalEmitted)
-        {
             _recentGoalEmissions.Add(stamped);
-            var cutoff = stamped.Utc - GoalEmissionRetention;
-            while (_recentGoalEmissions.Count > 0
-                && (_recentGoalEmissions[0].Utc < cutoff
-                    || _recentGoalEmissions.Count > MaxRecentGoalEmissions))
-                _recentGoalEmissions.RemoveAt(0);
-        }
+        if (stamped.Kind == EventKind.GoalFailed)
+            _recentGoalFailures.Add(stamped);
+        var goalHistoryCutoff = stamped.Utc - GoalEmissionRetention;
+        PruneGoalHistoryWindow(_recentGoalEmissions, goalHistoryCutoff);
+        PruneGoalHistoryWindow(_recentGoalFailures, goalHistoryCutoff);
 
         return stamped;
+    }
+
+    // Evict entries older than the cutoff from a durable goal-history window, then a
+    // generous hard count cap as a memory bound against a pathological burst. Both
+    // windows share the same retention/cap.
+    private static void PruneGoalHistoryWindow(List<StreamEvent> window, DateTimeOffset cutoff)
+    {
+        while (window.Count > 0
+            && (window[0].Utc < cutoff || window.Count > MaxRecentGoalEmissions))
+            window.RemoveAt(0);
+    }
+
+    /// <summary>
+    /// Enforce the durable goal-history retention against the CURRENT time, independent
+    /// of whether a new event was just appended. Append-time pruning advances the cutoff
+    /// only when an event arrives; a decision driven by a wall-clock stuck timeout can
+    /// re-read history with NO intervening append, so a consumer must call this first so
+    /// stale (beyond-retention) entries are dropped before the durable windows are read.
+    /// Idempotent; bounded work.
+    /// </summary>
+    public void PruneGoalHistory(DateTimeOffset nowUtc)
+    {
+        var cutoff = nowUtc - GoalEmissionRetention;
+        PruneGoalHistoryWindow(_recentGoalEmissions, cutoff);
+        PruneGoalHistoryWindow(_recentGoalFailures, cutoff);
     }
 
     /// <summary>
@@ -511,6 +546,20 @@ internal sealed class EventStream
         var result = new List<StreamEvent>(_recentGoalEmissions.Count);
         for (int i = _recentGoalEmissions.Count - 1; i >= 0; i--)
             result.Add(_recentGoalEmissions[i]);
+        return result;
+    }
+
+    /// <summary>
+    /// Newest-first GoalFailed events from the DEDICATED durable window, which
+    /// outlives the perception-dominated ring. Use this (not the ring) when
+    /// counting recent goal FAILURES so high-volume perception traffic cannot evict
+    /// a failure before it is counted (mirrors <see cref="RecentGoalEmissions"/>).
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentGoalFailures()
+    {
+        var result = new List<StreamEvent>(_recentGoalFailures.Count);
+        for (int i = _recentGoalFailures.Count - 1; i >= 0; i--)
+            result.Add(_recentGoalFailures[i]);
         return result;
     }
 
