@@ -166,4 +166,79 @@ public class DurableGoalEmissionTests
         es.Append(TalkGoal("Npc", T0.AddSeconds(2)));
         Assert.True(LlmGoalPolicy.HasRecentRepeatedGoalOfKinds(es, "Talk"));
     }
+
+    // --- Role-title-suffix normalization (the prompt renders objects as
+    // `Name "role"`, and a model frequently copies that whole label into the
+    // target selector; the Motor RESOLVES such a target by stripping the suffix,
+    // but the fixation/settled-turn-in/refresh counters read the bot's OWN
+    // emission text and previously matched only an EXACT bare name, so a
+    // role-suffixed emission silently counted 0 and the guards keyed on it never
+    // fired). These pin that the counters now match a role-suffixed emission
+    // against the bare name, consistent with the resolver. ---
+
+    [Fact]
+    public void CountRecentExploreGoalsToName_CountsRoleSuffixedTargetAsBareName()
+    {
+        // Live wedge: a model emitted Explore target=name="Buckminster "Bartender
+        // Greeter"" repeatedly; the settled-stage-3 turn-in guard counts Explore
+        // pursuits to the bare contract NPC name, so the suffixed emissions must
+        // count against "Buckminster".
+        var es = new EventStream();
+        es.Append(ExploreGoal("Buckminster \"Bartender Greeter\"", T0.AddSeconds(1)));
+        es.Append(ExploreGoal("Buckminster \"Bartender Greeter\"", T0.AddSeconds(2)));
+        es.Append(ExploreGoal("Buckminster \"Bartender Greeter\"", T0.AddSeconds(3)));
+        Assert.Equal(3, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Buckminster", T0));
+    }
+
+    [Fact]
+    public void CountRecentTalkGoalsToName_CountsRoleSuffixedTargetAsBareName()
+    {
+        var es = new EventStream();
+        es.Append(TalkGoal("Wilomine \"Barkeeper\"", T0.AddSeconds(1)));
+        es.Append(TalkGoal("Wilomine", T0.AddSeconds(2)));            // bare also counts
+        Assert.Equal(2, LlmGoalPolicy.CountRecentTalkGoalsToName(es, "Wilomine", T0));
+    }
+
+    [Fact]
+    public void CountRecentExploreGoalsToName_BareNameStillMatchesExactly_NoRegression()
+    {
+        // A plain (no role-title) emission keeps matching exactly.
+        var es = new EventStream();
+        es.Append(ExploreGoal("Npc", T0.AddSeconds(1)));
+        es.Append(ExploreGoal("Npc", T0.AddSeconds(2)));
+        Assert.Equal(2, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Npc", T0));
+        Assert.Equal(0, LlmGoalPolicy.CountRecentExploreGoalsToName(es, "Other", T0));
+    }
+
+    [Fact]
+    public void CountRecentEngageGoalsToName_CountsRoleSuffixedTalkAndUseAsBareName()
+    {
+        var es = new EventStream();
+        es.Append(TalkGoal("Renald \"Shopkeeper\"", T0.AddSeconds(1)));
+        es.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = T0.AddSeconds(2),
+            Kind = EventKind.GoalEmitted,
+            Text = "Use target=name=\"Renald \"Shopkeeper\"\" item= source=llm",
+        });
+        Assert.Equal(2, LlmGoalPolicy.CountRecentEngageGoalsToName(es, "Renald", T0));
+    }
+
+    [Theory]
+    [InlineData("Buckminster \"Bartender Greeter\"", "Buckminster")] // full rendered label
+    [InlineData("Buckminster ", "Buckminster")]                        // regex-truncated capture
+    [InlineData("Buckminster", "Buckminster")]                         // already bare
+    [InlineData("Foo\"Bar\"", "Foo\"Bar\"")]                           // no space before quote -> preserved
+    [InlineData("  ", "")]                                              // whitespace-only -> empty
+    public void NormalizeEmittedTargetName_StripsRenderedRoleTitle(string raw, string expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.NormalizeEmittedTargetName(raw));
+    }
+
+    [Fact]
+    public void NormalizeEmittedTargetName_Null_ReturnsEmpty()
+    {
+        Assert.Equal(string.Empty, LlmGoalPolicy.NormalizeEmittedTargetName(null));
+    }
 }
