@@ -2619,6 +2619,164 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Use loop (target not in view)", prompt);
     }
 
+    // ── Wield-loop (you do not own that weapon) ──
+
+    private static EventStream WieldEmissions(string name, int count, System.DateTimeOffset utc, bool inItemField = false)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = inItemField
+                    ? $"Wield target=<empty> item=name=\"{name}\" source=llm:test"
+                    : $"Wield target=name=\"{name}\" item=<empty> source=llm:test",
+            });
+        return es;
+    }
+
+    // The canonical self-arm shape: target is the self placeholder, weapon is in the item.
+    private static EventStream WieldSelfArmEmissions(string weapon, int count, System.DateTimeOffset utc, string targetName = "self")
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Wield target=name=\"{targetName}\" item=name=\"{weapon}\" source=llm:test",
+            });
+        return es;
+    }
+
+    private static InventoryItemProjection OwnedEquippable(string name, uint guid = 0x4900u) =>
+        new() { Guid = guid, Name = name, Wcid = 1u, ValidLocations = 1u };
+
+    private static WorldStateProjection BuildInventoryWorld(params InventoryItemProjection[] inventory) => new()
+    {
+        Self = new SelfProjection { Guid = SelfGuid, Name = "Headless", Landblock = 0x8602u, CellId = 0x86020001u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f },
+        Inventory = inventory,
+        Visible = Array.Empty<VisibleObjectProjection>(),
+    };
+
+    [Fact]
+    public void RepeatedUnownedWieldName_ReturnsNameWhenNotOwned()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldEmissions("Shortbow", 3, now);
+        Assert.Equal("Shortbow", LlmGoalPolicy.RepeatedUnownedWieldName(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_NullWhenOwnedEquippable()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(OwnedEquippable("Hand Axe"));
+        var es = WieldEmissions("Hand Axe", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnownedWieldName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_NullWhenOwnedFuzzyEquippable()
+    {
+        // Emitted partial "Axe" uniquely subsequence-matches the owned "Hand Axe" -> owned.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(OwnedEquippable("Hand Axe"));
+        var es = WieldEmissions("Axe", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnownedWieldName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_FiresWhenOwnedItemNotEquippable()
+    {
+        // The bot owns an item named X but it is NOT equippable (ValidLocations 0) -> it
+        // cannot be wielded, so the loop cue still fires.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(new InventoryItemProjection { Guid = 0x4901u, Name = "Trophy", Wcid = 2u, ValidLocations = 0u });
+        var es = WieldEmissions("Trophy", 3, now);
+        Assert.Equal("Trophy", LlmGoalPolicy.RepeatedUnownedWieldName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_DetectsWeaponNamedInItemField()
+    {
+        // The canonical Wield shape carries the weapon in the item field; the detector
+        // parses the first name= after target=, covering both fields.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldEmissions("Shortbow", 3, now, inItemField: true);
+        Assert.Equal("Shortbow", LlmGoalPolicy.RepeatedUnownedWieldName(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_PrefersItemWeaponOverSelfTarget()
+    {
+        // Canonical self-arm shape: target=name="self" item=name="<weapon>". The detector
+        // must report the WEAPON (item), not the "self" placeholder target.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldSelfArmEmissions("Shortbow", 3, now);
+        Assert.Equal("Shortbow", LlmGoalPolicy.RepeatedUnownedWieldName(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_BothFieldsPopulated_PrefersItem()
+    {
+        // When both target and item carry a name, the WEAPON (item) is preferred.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldSelfArmEmissions("Shortbow", 3, now, targetName: "Some Target");
+        Assert.Equal("Shortbow", LlmGoalPolicy.RepeatedUnownedWieldName(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_NullWhenAlreadyWielded()
+    {
+        // The weapon is already wielded (WieldedAt != 0) even if a sparse projection reports
+        // ValidLocations 0 -> the bot is armed with it, so the loop cue must not fire.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(new InventoryItemProjection { Guid = 0x4903u, Name = "Hand Axe", Wcid = 3u, ValidLocations = 0u, WieldedAt = 1u });
+        var es = WieldEmissions("Hand Axe", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnownedWieldName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnownedWieldName_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldEmissions("Shortbow", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnownedWieldName(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_DoesNotSkipSelfPlaceholder_VisiblePathUnchanged()
+    {
+        // The "self"/"<your-name>" skip is gated to the Wield (preferItemName) path; the
+        // visible-based detectors keep the original parse, so a (degenerate) self-named
+        // Attack target is still counted exactly as before this change.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("self", 3, now);
+        Assert.Equal("self", LlmGoalPolicy.RepeatedUnresolvedAttackTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WieldLoopCapsule_RendersForRepeatedUnownedWield()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldEmissions("Shortbow", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
+        Assert.Contains("## Wield loop (you do not own that weapon)", prompt);
+        Assert.Contains("Shortbow", prompt);
+        Assert.Contains("`Buy` it FIRST", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WieldLoopCapsule_OmittedWhenWeaponOwned()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(OwnedEquippable("Hand Axe"));
+        var es = WieldEmissions("Hand Axe", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Wield loop (you do not own that weapon)", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {
