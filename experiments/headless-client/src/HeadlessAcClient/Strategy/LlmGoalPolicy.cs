@@ -5801,6 +5801,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // is one the Use goal would resolve to MISS (the bot walked out of range of it).
     private static readonly TimeSpan RepeatedUnresolvedUseWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedUnresolvedUseThreshold = 3;
+    // Sibling: repeated-Wield-of-an-UNOWNED-item window + threshold. A Wield only equips an
+    // item in the bot's OWN inventory; re-Wielding a weapon it does not own (e.g. a vendor's
+    // or a ground item) fails every time, leaving the bot unarmed.
+    private static readonly TimeSpan RepeatedUnownedWieldWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnownedWieldThreshold = 3;
 
     // cp067: the NAME the bot has Explored toward >= threshold times within the recent
     // window that resolves to NO visible object (a reached area / unresolved name), or
@@ -5861,8 +5866,55 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold,
         bool excludeCorpses, bool excludeItemGoals = false)
     {
-        if (events is null) return null;
+        foreach (var kv in CountRecentEmittedTargetNames(events, since, verb, excludeItemGoals)
+                     .OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < threshold) break;
+            if (world?.Visible is not null && VisibleResolvesName(world.Visible, kv.Key, excludeCorpses))
+                continue; // a visible object the resolver could still bind — normal nav / picker handles it
+            return kv.Key;
+        }
+        return null;
+    }
+
+    // Sibling for Wield: the NAME the bot has tried to `Wield` >= threshold times within
+    // the window that is NOT an equippable weapon in its OWN `## Inventory` — it does not
+    // own that item (it may be in a vendor's shop or on the ground), so the Wield fails
+    // (the dispatch can only equip an in-bag item) and a fresh no-current-goal call
+    // re-emits the SAME Wield (live: a vendor's weapon re-Wielded many times, the bot left
+    // unarmed). The weapon NAME is taken from the ITEM field when present (the canonical
+    // Wield shape is target=name="self" item=name="<weapon>"), else from the target field
+    // (some models emit the weapon as the target). Surfaced as the `## Wield loop` cue.
+    // Own emission history + own inventory only; no game knowledge.
+    internal static string? RepeatedUnownedWieldName(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        foreach (var kv in CountRecentEmittedTargetNames(events, since, "Wield", excludeItemGoals: false, preferItemName: true)
+                     .OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < RepeatedUnownedWieldThreshold) break;
+            if (world?.Inventory is not null && InventoryResolvesWieldable(world.Inventory, kv.Key))
+                continue; // an equippable item the bot OWNS — the Wield dispatch handles it
+            return kv.Key;
+        }
+        return null;
+    }
+
+    // Count the bot's own recent goal emissions of `verb` (within the window) by the
+    // target NAME parsed from the echoed `target=...name="..."`. With
+    // <paramref name="preferItemName"/>, the NAME in the `item=` field is used when present,
+    // falling back to the target name — for Wield, whose weapon is carried in the item field
+    // (target is the self-placeholder); the "self" / "&lt;your-name&gt;" placeholders are then
+    // ignored. The untargeted "anywhere" token is always ignored. When
+    // <paramref name="excludeItemGoals"/>, an emission carrying a populated `item=` field is
+    // skipped (two-object ambiguity; mirrors IsUnreachableTargetRepeat). The default
+    // (preferItemName=false) path is the original single-target parse, unchanged. Pure: own
+    // emission history only; no game knowledge.
+    private static Dictionary<string, int> CountRecentEmittedTargetNames(
+        EventStream events, DateTimeOffset since, string verb, bool excludeItemGoals, bool preferItemName = false)
+    {
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (events is null) return counts;
         foreach (var ge in events.RecentGoalEmissions().Where(e => !string.IsNullOrEmpty(e.Text)))
         {
             if (ge.Utc < since) continue;
@@ -5871,22 +5923,70 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (excludeItemGoals && EmissionHasPopulatedItem(txt)) continue;
             var ti = txt.IndexOf("target=", StringComparison.Ordinal);
             if (ti < 0) continue;
-            var nm = System.Text.RegularExpressions.Regex.Match(
-                txt.Substring(ti), "name=\"([^\"]+)\"");
-            if (!nm.Success) continue;
-            var name = nm.Groups[1].Value;
+
+            string? name;
+            if (!preferItemName)
+            {
+                // Single-target verbs: the first name= from `target=` onward is the target's
+                // (item is empty), the original behavior.
+                var nm = System.Text.RegularExpressions.Regex.Match(
+                    txt.Substring(ti), "name=\"([^\"]+)\"");
+                if (!nm.Success) continue;
+                name = nm.Groups[1].Value;
+            }
+            else
+            {
+                // Wield: parse the target and item segments separately and PREFER the item
+                // name (the weapon), since the canonical shape is target="self" item=weapon.
+                var ii = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
+                var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
+                int tEnd = ii >= 0 ? ii : (srcIdx >= 0 ? srcIdx : txt.Length);
+                var tName = NameInSegment(txt.Substring(ti, tEnd - ti));
+                string? iName = null;
+                if (ii >= 0)
+                {
+                    int iEnd = srcIdx > ii ? srcIdx : txt.Length;
+                    iName = NameInSegment(txt.Substring(ii, iEnd - ii));
+                }
+                name = iName ?? tName;
+                if (name is null) continue;
+            }
+
             if (string.IsNullOrWhiteSpace(name)
-                || string.Equals(name, "anywhere", StringComparison.OrdinalIgnoreCase)) continue;
+                || string.Equals(name, "anywhere", StringComparison.OrdinalIgnoreCase)
+                || (preferItemName
+                    && (string.Equals(name, "self", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(name, "<your-name>", StringComparison.OrdinalIgnoreCase)))) continue;
             counts[name] = counts.TryGetValue(name, out var c) ? c + 1 : 1;
         }
-        foreach (var kv in counts.OrderByDescending(k => k.Value))
-        {
-            if (kv.Value < threshold) break;
-            if (world?.Visible is not null && VisibleResolvesName(world.Visible, kv.Key, excludeCorpses))
-                continue; // a visible object the resolver could still bind — normal nav / picker handles it
-            return kv.Key;
-        }
-        return null;
+        return counts;
+    }
+
+    // The first `name="..."` value within a single emission segment, or null.
+    private static string? NameInSegment(string segment)
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(segment, "name=\"([^\"]+)\"");
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
+    // True when the bot OWNS an item that could be wielded under that name: equippable
+    // (ValidLocations != 0) OR already wielded (WieldedAt != 0), whose name binds `name`
+    // under the resolver's name semantics (exact / quoted-role-strip / unique whole-word
+    // subsequence). Used by the Wield-loop detector so a weapon the bot already owns (and
+    // could wield, or is already wielding) is NOT counted as an unowned-Wield loop. Pure
+    // string/flag comparison on owned inventory; no game knowledge.
+    private static bool InventoryResolvesWieldable(IReadOnlyList<InventoryItemProjection> inventory, string name)
+    {
+        var wieldable = inventory
+            .Where(i => (i.ValidLocations is uint vl && vl != 0) || (i.WieldedAt is uint wa && wa != 0))
+            .ToList();
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        if (wieldable.Any(i => i.Name is not null
+                && (string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(i.Name, bare, StringComparison.OrdinalIgnoreCase))))
+            return true;
+        return wieldable.Count(i =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(i.Name, name)) == 1;
     }
 
     // True when a goal-emission text carries a populated `item=` field — i.e. a
@@ -9962,6 +10062,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
                 "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
                 $"re-`Use`-ing `{loopedUseDisplay}`.");
+        }
+
+        // ── ## Wield loop (you do not own that weapon) — sibling of the other loop cues ──
+        // The bot re-emits `Wield` for a weapon NAME it does NOT own (it is in a vendor's
+        // shop or on the ground, not in `## Inventory`). The Wield dispatch can only equip
+        // an item already in the bot's bag, so it fails every time and the bot stays
+        // unarmed. Surface it as an informational CUE keyed on the bot's OWN repeated
+        // emissions + owned inventory — NOT a hard drop; the LLM still decides. No game
+        // knowledge (the looped name is the bot's own emitted goal text, echoed back), no
+        // priority, no source-side target choice.
+        if (RepeatedUnownedWieldName(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnownedWieldWindow) is string loopedWieldName
+            && OneLine(loopedWieldName) is string loopedWieldDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Wield loop (you do not own that weapon)");
+            sb.AppendLine(
+                $"- you have tried to `Wield` `{loopedWieldDisplay}` several times but it is NOT an equippable " +
+                "weapon in your `## Inventory` — you can only `Wield` a weapon you already OWN. If " +
+                $"`{loopedWieldDisplay}` is for sale at a vendor, `Buy` it FIRST; if it is on the ground, " +
+                "`Pickup` it FIRST. Otherwise `Wield` a weapon that IS listed in your `## Inventory`, or acquire " +
+                $"one, instead of re-`Wield`-ing `{loopedWieldDisplay}`.");
         }
 
         // ── ## Un-equipped gear (protected-tail equip cue) ──
