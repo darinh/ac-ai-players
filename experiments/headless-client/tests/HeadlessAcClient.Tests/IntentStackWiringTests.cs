@@ -307,6 +307,38 @@ public class IntentStackWiringTests
     }
 
     [Fact]
+    public void Applier_TryApply_FullStackAllActive_EvictOn_AdmitsPushViaEviction()
+    {
+        // With overflow eviction enabled, the dry-run mirror and the real TryPush
+        // both delegate to IntentStackReclaim, so an all-Active full stack admits a
+        // new push by evicting the oldest non-root frame — and they agree (no
+        // mirror/real divergence: the batch applies and the stack ends at maxDepth).
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, DateTime.UtcNow);
+        var alloc = new IntentIdAllocator();
+        var stack = new IntentStack(maxDepth: 3, evictNonTerminalOnOverflow: true);
+        stack.TryPush(new Intent { Id = "i-001", Kind = "root",  Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-002", Kind = "sub-1", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+        stack.TryPush(new Intent { Id = "i-003", Kind = "sub-2", Status = IntentLifecycle.Active,
+            Completion = new AlwaysFalsePredicate(), Baseline = b });
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf(kind: "new-top"), Reason = "x" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, DateTime.UtcNow);
+
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(3, stack.Depth);
+        Assert.Equal("root",    stack.Root!.Kind);
+        Assert.Equal("new-top", stack.Top!.Kind);
+        Assert.DoesNotContain("sub-1", stack.Frames.Select(f => f.Kind)); // oldest non-root evicted
+    }
+
+    [Fact]
     public void Applier_TryApply_PushOnlyBatch_ToleratesStaleRevision_FromRootDeadlineBlock()
     {
         // Faithfully reproduce the ONLY stale-revision source that reaches the
@@ -521,6 +553,35 @@ public class IntentStackWiringTests
         Assert.Equal(1, outcome.SuppressedCount);
         Assert.Equal(1, stack.Depth);            // not pushed
         Assert.Equal(preRev, stack.Revision);    // no mutation
+    }
+
+    [Fact]
+    public void Applier_TryApply_StaleBuriedActivePastDeadline_StillSuppressed_NoDuplicate()
+    {
+        // A same-key re-push is suppressed even when the buried matching frame's own
+        // deadline has elapsed: the overflow policy cannot be guaranteed to evict
+        // THIS exact frame (it may be the root, or tier-1 terminal reclaim may free
+        // room first), so allowing the push through would create a duplicate. The
+        // stale frame is instead reclaimed by a later push of a DIFFERENT key.
+        var now = new DateTime(2026, 6, 24, 0, 0, 0, DateTimeKind.Utc);
+        var world = BuildWorld();
+        var events = new EventStream();
+        var b = IntentBaseline.Capture(world, events, now);
+        var alloc = new IntentIdAllocator();
+        var stack = new IntentStack(maxDepth: 4, evictNonTerminalOnOverflow: true);
+        stack.TryPush(NewIntent("i-001", "root", b), utcNow: now);
+        stack.TryPush(NewIntent("i-002", "quest:recover", b, deadline: now.AddSeconds(-1)), utcNow: now); // buried, expired
+
+        var ops = new IntentStackOp[]
+        {
+            new() { Op = IntentStackOpKind.Push, Intent = SpecOf("quest:recover"), Reason = "re-derived" },
+        };
+        var outcome = IntentStackOpsApplier.TryApply(stack, alloc, ops, stack.Revision, world, events, now);
+
+        Assert.Equal(BatchApplyResult.Ok, outcome.Result);
+        Assert.Equal(1, outcome.SuppressedCount);   // suppressed -> no duplicate
+        Assert.Equal(2, stack.Depth);
+        Assert.Equal(1, stack.Frames.Count(f => f.Kind == "quest:recover")); // exactly one
     }
 
     [Fact]

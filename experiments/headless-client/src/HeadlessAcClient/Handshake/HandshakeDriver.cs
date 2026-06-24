@@ -1123,7 +1123,9 @@ internal sealed class HandshakeDriver : IDisposable
         // monotonic counter feeding the stats-based predicates
         // (kill_count_total_at_least, levels_gained_total_at_least,
         // units_traveled_since_push_at_least, etc.).
-        var intentStack = new IntentStack();
+        var intentStack = new IntentStack(
+            evictNonTerminalOnOverflow: IntentStack.ResolveEvictOnOverflow(
+                Environment.GetEnvironmentVariable("AC_BOTS_INTENT_STACK_EVICT_ON_OVERFLOW")));
         var intentIds   = new IntentIdAllocator();
         var botStats    = new BotStatistics();
 
