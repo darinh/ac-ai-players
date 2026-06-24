@@ -3001,7 +3001,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
-            world.Self.AvailableExperience));
+            world.Self.AvailableExperience, RecentGoalFailureCount(events)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3037,12 +3037,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int? ComputeRunDeaths(int? currentNumDeaths, int? baseline)
         => currentNumDeaths is int cur && baseline is int b ? cur - b : (int?)null;
 
+    // Count of ALL recent terminal goal failures in the durable GoalFailed window
+    // (EventStream.RecentGoalFailures — ~30 min, capped, survives perception eviction). A
+    // failure is a goal the Motor could not complete: a selector that resolved to no live
+    // object (a dispatch-MISS), plus deferred/validation Fails. Surfaced as fails= in
+    // [run-summary] so a run self-reports its recent failure load (not a pure churn count).
+    // Pure read of the bot's OWN failure history; no behavior change, no game knowledge.
+    internal static int RecentGoalFailureCount(EventStream? events)
+        => events?.RecentGoalFailures().Count ?? 0;
+
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
-        bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null)
+        bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
+        int recentFails = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3065,6 +3075,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // emission history; no behavior change, no game knowledge.
         if (!string.IsNullOrEmpty(topEmit))
             line += $" top-emit={topEmit}";
+        // Recent failure-load signal: count of ALL recent terminal goal failures in the
+        // durable GoalFailed window (~30 min) — a goal the Motor could not complete (a
+        // selector that resolved to no live object, plus deferred/validation Fails). A compact
+        // gauge of how many goals are failing that no other field shows: top-emit= surfaces
+        // only the SINGLE most-repeated emission, and the trigger histogram shows WHY
+        // deliberation happened, not how many goals failed — so a multi-target churn (failures
+        // spread across several targets) shows up here even when top-emit's #1 is small. NOTE
+        // the windows differ (top-emit= reads the last N emissions, this is ~30 min), so read
+        // it as a load gauge, not a per-interval or pure-churn count. Shown only when >0. Pure
+        // observability; no behavior change.
+        if (recentFails > 0)
+            line += $" fails={recentFails}";
         // Criterion-2/3 contract throughput: tracked contracts with the
         // in-progress/done breakdown (shown only when any are tracked). Lets a run
         // self-report whether contract batches advance to done and then refresh, or
