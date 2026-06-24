@@ -2752,7 +2752,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.Self.Landblock, world.Self.Level, world.Self.TotalExperience, _client.Model,
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
-            world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun));
+            world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
+            IsCombatCapable(world.Inventory)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2792,7 +2793,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
-        int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null)
+        int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
+        bool armed = true)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2847,6 +2849,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // baseline), shown only when >0. Pure observability; no behavior change.
         if (deathsThisRun is int dr && dr > 0)
             line += $" deaths={dr}";
+        // Append armed=no when the bot has NO combat-capable wielded weapon
+        // (IsCombatCapable over the bot's OWN wielded inventory returns false).
+        // Shown only in that state, mirroring the deaths= field. Pure
+        // observability over wielded-inventory wire state; no behavior change.
+        if (!armed)
+            line += " armed=no";
         return line;
     }
 

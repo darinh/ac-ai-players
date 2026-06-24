@@ -781,6 +781,22 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_ShowsArmedNo_OnlyWhenUnarmed()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 1 };
+        // armed -> no marker (the line stays quiet in the non-problem state).
+        var armedLine = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 13, totalXp: 100L, model: "m", armed: true);
+        Assert.DoesNotContain("armed=no", armedLine);
+        // unarmed -> the #1 hidden combat limiter is surfaced.
+        var unarmedLine = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 13, totalXp: 100L, model: "m", armed: false);
+        Assert.Contains("armed=no", unarmedLine);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_NullsRenderAsQuestionMarks()
     {
         var line = LlmGoalPolicy.BuildRunSummaryLine(
