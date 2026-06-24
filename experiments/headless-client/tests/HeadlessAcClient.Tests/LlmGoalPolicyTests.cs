@@ -5357,6 +5357,72 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void SpendBeforeWander_TrueWhenWanderSituation()
+    {
+        // No active objective (empty stack) + unspent XP + no monster to defeat + no recent
+        // death = the XP-hoarding wander situation -> the gate fires.
+        Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 5475), secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_FalseWhenNoUnspentXp()
+    {
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 0), secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_FalseWhenWinnableMonsterInView()
+    {
+        // A winnable (non-corpse) monster in view -> there IS a fight here -> not the no-fight
+        // wander situation (engage it per the NON-HOSTILE rule).
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            Visible = new[] { new VisibleObjectProjection { Guid = 0x80001001u, Name = "Drudge", IsMonster = true } },
+        };
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(new IntentStack(), world, secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_FalseWhenRecentDeath_SurvivabilityCueOwnsIt()
+    {
+        // A recent death is owned by SURVIVABILITY-FIRST CHECK; this gate is mutually exclusive.
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 5475), secondsSinceLastDeath: 30));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_TrueWhenDeathIsStale()
+    {
+        // Past the recency window the survivability cue stops owning it -> the wander gate fires.
+        Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 5475), secondsSinceLastDeath: 301));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_FalseWhenNoStack()
+    {
+        // No IntentStack at all (null) -> StackHasNoActiveObjective is false (matches the
+        // `## No active objective` capsule, which also needs a non-null stack).
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, BuildXpWorld(69296, 5475), secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_CueTextRenders_InProtectedTail()
+    {
+        // End-to-end at the DEFAULT prompt ceiling (no override): the cue now lives in the
+        // protected tail (after `## No active objective`), so it survives the dense-body
+        // hard-cut that the non-null stack's stack-ops schema triggers — proving the cue
+        // actually reaches the model when its gate fires.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), new EventStream(), null, new IntentStack(), null, null,
+            secondsSinceLastDeath: null);
+        Assert.Contains("## Spend before wandering", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {
         // Deliberation-race regression guard. A fresh L1 bot in an

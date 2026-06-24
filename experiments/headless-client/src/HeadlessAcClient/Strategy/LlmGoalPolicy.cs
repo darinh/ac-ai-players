@@ -5955,6 +5955,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool StackHasNoActiveObjective(IntentStack? stack) =>
         stack is not null && (stack.Top is null || stack.Top.Status != IntentLifecycle.Active);
 
+    // Gate for the SPEND-BEFORE-WANDER salience cue: the bot has NO active objective, NO recent
+    // death (the recent-death case is owned by SURVIVABILITY-FIRST CHECK, so the two never
+    // double-fire), meaningful unspent XP, and NO monster in view it can currently defeat (none
+    // attackable, or only lethal-beaten kinds). That is the XP-hoarding wander situation — a
+    // weak model defaults to Explore "anywhere" for ever-weaker foes instead of spending XP to
+    // make nearby monsters winnable. Pure predicate over own self/stack/perception facts; the
+    // cue it gates only POINTS at the SPEND XP option, it never spends or picks a target.
+    internal static bool ShouldSurfaceSpendBeforeWander(
+        IntentStack? stack, WorldStateProjection world, int? secondsSinceLastDeath)
+        => StackHasNoActiveObjective(stack)
+           && (secondsSinceLastDeath is not int rd || rd > RecentDeathSalienceWindowSeconds)
+           && world.Self.AvailableExperience is long wxp
+           && ShouldSurfaceUnspentXp(wxp, MinMeaningfulUnspentXp)
+           && (!AnyAttackableMonsterInView(world) || OnlyBeatenMonstersInView(world));
+
     // Shared FRESHNESS guard for the reduce-llm-call-volume SKIP gates
     // (skip-fixated-talk and skip-empty-explore). Skipping the LLM call is safe
     // ONLY when nothing decision-worthy has changed since the last LLM look:
@@ -9151,6 +9166,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- raw fact, not a recommendation: whether to set a persistent objective, what kind/target/" +
                 "completion to use, and what per-tick goal to emit are your strategic choices from the facts above.");
+        }
+
+        // ── ## Spend before wandering (XP-hoarding wander salience, protected tail) ─
+        // Sibling of the body SURVIVABILITY-FIRST CHECK but for a DIFFERENT trigger and placed
+        // in the PROTECTED TAIL so it survives the dense-scene body hard-cut: the bot has NO
+        // active objective, unspent XP, NO recent death (the death case is owned by
+        // SURVIVABILITY-FIRST — mutually exclusive), and NO monster in view it can defeat (none
+        // here, or only kinds that have already beaten it). A weak model then defaults to
+        // wandering (`Explore` "anywhere") for ever-weaker foes while HOARDING the XP that would
+        // make nearby monsters winnable. Elevate the SPEND option as a salient pointer for that
+        // exact situation. Balance-preserving (spend OR travel-to-easier, but spend either way);
+        // names no stat build / monster / number; the LLM still decides.
+        if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Spend before wandering");
+            sb.AppendLine(
+                "- you have no active objective and unspent XP, and no monster in view you can currently defeat " +
+                "(none here, or only kinds that have already beaten you). Rather than only wandering (`Explore` " +
+                "\"anywhere\") to find ever-weaker foes, INVEST that unspent XP now (raise a stat per SPEND XP — " +
+                "endurance/health to survive tougher monsters, or coordination/weapon-skill to land + hurt them) so " +
+                "the monsters around you become winnable: getting stronger IS progress. (If this area is genuinely " +
+                "far above your level, traveling toward a known easier area is also valid — but spend your hoarded " +
+                "XP either way.)");
         }
 
         // ── ## Persistent objectives (intent stack re-surfaced, protected tail) ─
