@@ -12515,6 +12515,76 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsWieldNoWeaponRepeat_TwoRejects_AcrossPerceptionEviction_True()
+    {
+        // The futile Wields recur ACROSS decisions with heavy perception traffic between,
+        // which evicts the first rejection from the perception-dominated ring. The DURABLE
+        // GoalFailed window still holds both, so the loop-break can fire (it previously
+        // fired only when two rejections were adjacent in the ring).
+        var es = new EventStream();
+        AppendWieldNoWeaponFail(es);
+        // Flood well past the ring capacity so the first rejection is evicted from it.
+        for (int i = 0; i < 400; i++)
+            es.Append(new StreamEvent
+            { Sequence = 0, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+        AppendWieldNoWeaponFail(es);
+        Assert.True(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_SuccessfulWieldEmissionsDoNotCount()
+    {
+        // Counting must be on FAILURE semantics, not raw Wield emissions: a valid ammo
+        // reload / shield equip is a SUCCESSFUL Wield (no no-weapon failure), so even many
+        // Wield emissions with zero no-weapon rejections must NOT trip the loop-break.
+        var es = new EventStream();
+        for (int i = 0; i < 5; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Wield target=<empty> item=name=\"Lead Pea\" source=llm:test",
+            });
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void IsWieldNoWeaponRepeat_StaleFailuresAgeOut_WithOnlyPerceptionTraffic_False()
+    {
+        // The durable failure window must age out by TIME even when only non-failure
+        // (perception) traffic follows -- otherwise two stale no-weapon failures would keep
+        // the loop-break armed indefinitely and drop a later Wield on its first retry.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed, Text = "Wield: wield: no equippable inventory weapon" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed, Text = "Wield: wield: no equippable inventory weapon" });
+        Assert.True(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+        // Advance time past the 30-min retention with ONLY perception traffic (no new
+        // failures); the stale failures must be pruned on this append.
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = t0.AddMinutes(31), Kind = EventKind.HealthChanged });
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
+    public void PruneGoalHistory_AgesOutStaleFailures_WithoutAnyAppend_False()
+    {
+        // The wall-clock stuck-timeout re-deliberation re-reads history with NO intervening
+        // append, so retention must also be enforceable on demand: PruneGoalHistory(now)
+        // drops the stale failures without needing a new event.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed, Text = "Wield: wield: no equippable inventory weapon" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed, Text = "Wield: wield: no equippable inventory weapon" });
+        Assert.True(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+        es.PruneGoalHistory(t0.AddMinutes(31)); // no append — just the on-demand prune
+        Assert.False(LlmGoalPolicy.IsWieldNoWeaponRepeat(es));
+    }
+
+    [Fact]
     public void HasEquippableInventoryWeapon_UnwieldedWeaponInBag_True()
     {
         // An un-wielded item whose ValidLocations names a primary-weapon slot
@@ -12550,6 +12620,23 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void HasEquippableInventoryWeapon_UnwieldedNonWeaponHeldItem_False()
+    {
+        // A non-weapon item sitting un-wielded in the bag with a main-slot (Held) location
+        // but a non-weapon ItemType (e.g. a torch) is NOT a weapon to swap to, so it must
+        // not suppress the loop-break for an unarmed bot.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x5005u, Name = "Bag Torch", Wcid = 5u,
+                ItemType = 0x2u, ValidLocations = 0x01000000u, WieldedAt = null,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
+    [Fact]
     public void HasEquippableInventoryWeapon_OnlyWieldedWeapon_False()
     {
         // A weapon already wielded in its slot is nothing to swap TO — there is no
@@ -12570,6 +12657,94 @@ public class LlmGoalPolicyTests
     {
         var world = BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>());
         Assert.False(LlmGoalPolicy.HasEquippableInventoryWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_WieldedMainWeapon_True()
+    {
+        // A launcher/weapon wielded in a main-hand slot -> the bot is armed; the no-weapon
+        // loop-break must be withheld so a valid ammo reload / shield equip still flows.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x6001u, Name = "Wielded Launcher", Wcid = 1u,
+                ItemType = 0x1u, ValidLocations = 0x00100000u, WieldedAt = 0x00100000u,
+            },
+        });
+        Assert.True(LlmGoalPolicy.HasWieldedMainWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_WieldedLauncher_True()
+    {
+        // The launcher+ammo scenario: a missile LAUNCHER (ItemType missile 0x100) wielded
+        // in the missile slot (0x00400000) is a wielded main weapon, so the loop-break is
+        // withheld and a subsequent ammo-load Wield is preserved.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x6005u, Name = "Wielded Bow", Wcid = 5u,
+                ItemType = 0x100u, ValidLocations = 0x00400000u, WieldedAt = 0x00400000u,
+            },
+        });
+        Assert.True(LlmGoalPolicy.HasWieldedMainWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_OnlyUnwieldedWeapon_False()
+    {
+        // A weapon sitting UN-wielded in the bag is not "already wielded".
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x6002u, Name = "Bag Weapon", Wcid = 2u,
+                ItemType = 0x1u, ValidLocations = 0x00100000u, WieldedAt = null,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasWieldedMainWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_OnlyWieldedAmmo_False()
+    {
+        // Loaded ammo sits in the ammo slot (0x00800000, outside MainWeaponSlotMask), so
+        // ammo alone does not read as a wielded MAIN weapon.
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x6003u, Name = "Loaded Ammo", Wcid = 3u,
+                ItemType = 0x1u, ValidLocations = 0x00800000u, WieldedAt = 0x00800000u,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasWieldedMainWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_WieldedNonWeaponHeldItem_False()
+    {
+        // A non-weapon held in a main-hand slot (e.g. a torch: Held slot 0x01000000 but a
+        // non-weapon ItemType) is NOT a wielded weapon, so an unarmed bot holding it still
+        // gets the loop-break (matches WeaponSwap.IsWieldedWeapon's ItemType requirement).
+        var world = BuildInventoryWorld(new[]
+        {
+            new InventoryItemProjection
+            {
+                Guid = 0x6004u, Name = "Torch", Wcid = 4u,
+                ItemType = 0x2u, ValidLocations = 0x01000000u, WieldedAt = 0x01000000u,
+            },
+        });
+        Assert.False(LlmGoalPolicy.HasWieldedMainWeapon(world));
+    }
+
+    [Fact]
+    public void HasWieldedMainWeapon_EmptyBag_False()
+    {
+        var world = BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>());
+        Assert.False(LlmGoalPolicy.HasWieldedMainWeapon(world));
     }
 
     // ---- IsWieldOfUnusableLauncher (cp061): Wield of a bag missile launcher
