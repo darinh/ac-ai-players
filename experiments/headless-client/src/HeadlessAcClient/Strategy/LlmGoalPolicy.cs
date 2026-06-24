@@ -7036,7 +7036,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (((vendorInView && world.Vendor is null) || untalkedNpcInView || doneBatchSourceToRefresh)
             && noActionableContract
             && (monsterInView || heldBatchAllDone))
-        sb.AppendLine("- FIND A KILL-TASK SOURCE (vendor or task-giver npc): a `vendor`-tagged object OR a dialog `npc` in `Visible nearby` may offer task contracts — a kill-task you accept, complete, and turn in for a reward. You CANNOT see what a `vendor` offers until you `Use` it to reveal its wares in `## Vendor offerings`; a task-giver looks like any other `npc` — you only learn it offers a task by `Talk`ing it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` OR an un-talked `npc` is in view, it is worth ONE `Use{target: name=\"<vendor>\"}` on a vendor (or ONE `Talk{target: name=\"<npc>\"}` on an un-talked npc) to check for a task — DIRECTED progression that OUTRANKS open monster-grinding for XP. So with NO actionable tracked contract, `Talk` each un-talked `npc` in view ONCE (an npc whose quoted `role`/title is shown — e.g. a faction role — is especially likely to give a quest, directions, or the way forward) BEFORE grinding monsters for XP: open grinding is the FALLBACK once every nearby un-talked `npc` has been Talked and no directive remains. Checking is not itself quest progress, and you still decide whether anything offered is worth pursuing (a `HOSTILE` attacker on you, low `health`, or an explicit server/quest directive still takes priority over an optional npc check). Talk each un-talked npc only ONCE — re-talking an already-talked npc is not progress. ONE EXCEPTION — REFRESH A FINISHED BATCH: when every tracked contract is DONE (stage 3, a finished batch) and the `npc`/`vendor` your batch CAME FROM is in view (its `start NPC`/`turn-in NPC` shown in `## Contracts` matches a `Visible nearby` name), re-engaging THAT specific source — `Use` it if it is a `vendor`, `Talk` it if it is a dialog `npc` — to request a FRESH batch IS progress, EVEN though you have engaged it before: a finished batch has earned its reward and lets you take new work. This is NOT re-handing-in the settled contracts (those need no further hand-in) — it is asking for a NEW batch to keep earning, which OUTRANKS grinding monsters. If re-engaging that source brings no new contract after a try or two, it is tapped — move on and hunt/explore.");
+        {
+            // The finished-batch refresh action depends on panel state: when a
+            // vendor's trade panel is ALREADY open (world.Vendor set), the
+            // productive way to refresh at a vendor source is to Buy a contract
+            // from its already-shown offerings — a fresh Use only re-opens the open
+            // panel. Route the refresh wording by panel state so the rule never
+            // tells the bot to re-Use an already-open vendor (which would
+            // contradict the open-panel `## Vendor offerings` cue).
+            var refreshSourceAction = world.Vendor is null
+                ? "re-engaging THAT specific source — `Use` it if it is a `vendor`, `Talk` it if it is a dialog `npc`"
+                : "re-engaging THAT specific source — if it is the `vendor` whose panel you ALREADY have open, `Buy` a contract from its `## Vendor offerings` (a fresh `Use` only re-opens the open panel); `Use` a different in-view `vendor` whose panel is not open, or `Talk` it if it is a dialog `npc`";
+            sb.AppendLine("- FIND A KILL-TASK SOURCE (vendor or task-giver npc): a `vendor`-tagged object OR a dialog `npc` in `Visible nearby` may offer task contracts — a kill-task you accept, complete, and turn in for a reward. You CANNOT see what a `vendor` offers until you `Use` it to reveal its wares in `## Vendor offerings`; a task-giver looks like any other `npc` — you only learn it offers a task by `Talk`ing it. When you hold NO actionable tracked contract — `## Contracts` is empty/absent, OR every tracked contract is DONE (stage 3, so the current batch is finished and you need a fresh one to keep earning) — and an unbrowsed `vendor` OR an un-talked `npc` is in view, it is worth ONE `Use{target: name=\"<vendor>\"}` on a vendor (or ONE `Talk{target: name=\"<npc>\"}` on an un-talked npc) to check for a task — DIRECTED progression that OUTRANKS open monster-grinding for XP. So with NO actionable tracked contract, `Talk` each un-talked `npc` in view ONCE (an npc whose quoted `role`/title is shown — e.g. a faction role — is especially likely to give a quest, directions, or the way forward) BEFORE grinding monsters for XP: open grinding is the FALLBACK once every nearby un-talked `npc` has been Talked and no directive remains. Checking is not itself quest progress, and you still decide whether anything offered is worth pursuing (a `HOSTILE` attacker on you, low `health`, or an explicit server/quest directive still takes priority over an optional npc check). Talk each un-talked npc only ONCE — re-talking an already-talked npc is not progress. ONE EXCEPTION — REFRESH A FINISHED BATCH: when every tracked contract is DONE (stage 3, a finished batch) and the `npc`/`vendor` your batch CAME FROM is in view (its `start NPC`/`turn-in NPC` shown in `## Contracts` matches a `Visible nearby` name), " + refreshSourceAction + " — to request a FRESH batch IS progress, EVEN though you have engaged it before: a finished batch has earned its reward and lets you take new work. This is NOT re-handing-in the settled contracts (those need no further hand-in) — it is asking for a NEW batch to keep earning, which OUTRANKS grinding monsters. If re-engaging that source brings no new contract after a try or two, it is tapped — move on and hunt/explore.");
+        }
         // RETURN-TO-A-CONTRACT-SOURCE nudge (cp035): the FIND-A-KILL-TASK-SOURCE
         // rule above only fires when a source is IN VIEW. Live cp034-diag: holding
         // a FINISHED batch, the bot drifted into open country with NO npc/source in
@@ -8664,15 +8676,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (contractsShown < world.Contracts.Count)
                 sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
             // Decision-proximate REFRESH cue: when EVERY tracked contract is DONE
-            // (stage 3 — the batch is finished and earns no more) AND a `vendor` is
-            // in `## Visible nearby`, surface the refresh ACTION right here beside the
-            // done states (the body's FIND-A-KILL-TASK-SOURCE rule states the same
-            // mechanic, but a model can miss it buried in the rules — this places it
-            // where the done states are SEEN). A fresh contract is BOUGHT at a vendor,
-            // not received by Talking. Wire facts only (all-stage-3 + vendor-in-view)
-            // + the generic buy mechanic already stated elsewhere; the LLM decides
-            // whether to pursue it. No NPC/contract name, no priority verb.
-            if (HeldBatchAllDone(world) && world.Visible.Any(v => v.IsVendor))
+            // (stage 3 — the batch is finished and earns no more), a `vendor` is
+            // in `## Visible nearby`, AND no vendor panel is open yet (world.Vendor
+            // is null), surface the OPEN-the-vendor refresh action. When a panel IS
+            // already open, the open-panel cue below routes the refresh to `Buy`
+            // (re-`Use` would be a no-op), so this closed-panel variant is gated
+            // off to avoid telling the bot to `Use` an already-open vendor. Wire
+            // facts only (all-stage-3 + vendor-in-view + panel-closed) + the
+            // generic buy mechanic; the LLM decides. No NPC/contract name.
+            if (HeldBatchAllDone(world) && world.Vendor is null
+                && world.Visible.Any(v => v.IsVendor))
                 sb.AppendLine(
                     "- a fresh contract to keep earning is BOUGHT at a `vendor`, not received by " +
                     "`Talk`ing: a `vendor` is in `## Visible nearby`, so `Use` it to reveal its " +
@@ -8786,6 +8799,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "what, is your call. To buy one, emit a Buy goal with " +
                 "target.name set to an item's exact name above (it works only " +
                 "while you have this vendor open; quantity defaults to 1).");
+            // This capsule renders ONLY while the vendor's trade panel is OPEN
+            // (world.Vendor is set), so a fresh Use of the SAME vendor is a no-op
+            // — the panel is already open and its list does not change. State that
+            // so the LLM acts via Buy/Sell instead of re-emitting Use on the open
+            // vendor. Buy targets a name from the list above; Sell targets a name
+            // from ## Inventory. A recovery clause covers the case where the panel
+            // is no longer live. Prompt text only; the LLM still decides.
+            sb.AppendLine(
+                "- the items above are the live offering of the vendor whose panel is OPEN. Act here with " +
+                "`Buy` (an item by its exact name from the list ABOVE — a task contract counts, Buying it " +
+                "takes new work) or `Sell` (an item by its exact name from your `## Inventory`). A fresh " +
+                "`Use` on this same vendor only re-opens the already-open panel and shows nothing new, so " +
+                "reach for `Buy`/`Sell` to make progress. (If a `Buy`/`Sell` reports no live panel, a single " +
+                "`Use` re-opens it.)");
             sb.AppendLine(
                 "- some for-sale items are TASK CONTRACTS: a directed task " +
                 "(often a hunting/kill task — clearing a den or area of " +
