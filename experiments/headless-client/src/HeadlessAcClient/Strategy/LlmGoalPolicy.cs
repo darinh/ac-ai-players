@@ -6582,7 +6582,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -6600,7 +6600,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -8742,17 +8742,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "## Inventory). Accepting one gives a concrete directed " +
                 "objective plus a reward on turn-in. Raw fact, not a " +
                 "recommendation: whether to is your call.");
-            // Bridge the FIND-A-KILL-TASK REFRESH rule (re-ENGAGE the source when
-            // your batch is finished) to the concrete BUY action: a contract
-            // broker dispenses NEW work by SELLING a fresh contract, not by being
-            // re-Talked. Surfaced only when the bot has NO actionable tracked
-            // contract (none held, or every one already stage-3 DONE) AND a
-            // contract-selling vendor is OPEN right now — the exact "finished
-            // batch, broker open, but the bot re-Talks instead of buying" state
-            // observed live. Gated on the bot's OWN contract state + OWN
-            // open-vendor perception; names no specific contract (the LLM picks
-            // which, if any). Decision-proximate re-statement of existing
-            // guidance; no source-side decision to buy, no game knowledge.
+            // Renders a Buy-the-contract bridge prompt line. Gated on the bot's
+            // OWN contract state (no tracked contract, or all tracked at the
+            // terminal stage) AND an open vendor in perception; names no specific
+            // contract (the LLM picks which, if any). Prompt text only; no
+            // source-side decision to buy.
             if (world.Contracts.Count == 0 || heldBatchAllDone)
                 sb.AppendLine(
                     "- you have NO unfinished task contract right now and this vendor is OPEN: if any offering " +
@@ -8762,6 +8756,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "this broker does. If you have ALREADY bought a task contract and it is sitting in your " +
                     "`## Inventory` unaccepted, `Use` it to accept the task INSTEAD of buying another. (Whether and " +
                     "which to buy is your call; health-critical safety and any active server/quest directive come first.)");
+
+            // Renders the Sell-goal capability + its exact goal shape as an
+            // LLM-facing prompt line, in the open-vendor slot beside the Buy
+            // guidance. Emitted whenever a vendor panel is open; names no item —
+            // the LLM selects any item from its own ## Inventory. No source-side
+            // decision to sell.
+            sb.AppendLine(
+                "- to RAISE COIN, you can SELL bagged items to this OPEN vendor: emit " +
+                "`Sell{target: {name: \"<an exact item name from ## Inventory>\"}}` (works only while this " +
+                "vendor is open; quantity defaults to 1). Selling ALWAYS pays you in coin (even at a vendor " +
+                "that charges an alternate currency to buy), and removes that item from your pack. Use this " +
+                "when you cannot AFFORD a coin-priced offering you want — e.g. a Buy keeps failing because you " +
+                "lack the coin: sell spare/unneeded items to build up coin, then Buy. A vendor only buys " +
+                "certain item types, so if a Sell is refused, sell that item at a different vendor. Raw " +
+                "mechanic, not a recommendation — WHAT (if anything) to sell is your call; do not sell gear " +
+                "you are using or an item a directive/quest needs.");
         }
 
         // ── ## Monsters in view (end-of-prompt salience capsule) ─────────

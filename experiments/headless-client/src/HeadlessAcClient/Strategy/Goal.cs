@@ -101,6 +101,20 @@ internal enum GoalKind
     /// vendor (Use/Talk) first. No game-content knowledge lives here.
     /// </summary>
     Buy = 14,
+
+    /// <summary>
+    /// Sell an item from the bot's OWN inventory to the vendor whose trade panel
+    /// is currently open. The LLM names a held item in <see cref="Goal.Target"/>
+    /// (name = an item from the <c>## Inventory</c> prompt section) and MAY set
+    /// <see cref="Goal.Amount"/> to a quantity (default 1). The motor resolves the
+    /// name to the matching inventory item guid and sends the Sell (0x0060)
+    /// GameAction to that vendor; the server credits the bot with the item's sell
+    /// value and removes it from the pack. The motor makes NO decision about WHAT
+    /// or WHETHER to sell (Strategy owns that) and never opens a vendor on its own
+    /// — a Sell with no vendor panel open fails so the LLM approaches the vendor
+    /// (Use/Talk) first. No game-content knowledge lives here.
+    /// </summary>
+    Sell = 15,
 }
 
 /// <summary>
