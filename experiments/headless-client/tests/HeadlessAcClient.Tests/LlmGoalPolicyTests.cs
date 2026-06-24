@@ -875,6 +875,32 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("deaths=", unknown);
     }
 
+    [Fact]
+    public void BuildRunSummaryLine_MaxHp_ShownOnlyWhenKnownAndPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        // Known + positive -> rendered.
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            maxHpProxy: 5);
+        Assert.Contains("hppeak=5", with);
+
+        // Unknown (no health reading yet) -> omitted.
+        var unknown = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            maxHpProxy: null);
+        Assert.DoesNotContain("hppeak=", unknown);
+
+        // Zero/non-positive -> omitted (no noise).
+        var zero = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            maxHpProxy: 0);
+        Assert.DoesNotContain("hppeak=", zero);
+    }
+
     [Theory]
     [InlineData(null, null, null)]   // both unknown -> null
     [InlineData(5, null, null)]      // baseline unknown -> null
