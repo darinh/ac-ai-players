@@ -1959,7 +1959,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // The recent-window + repeat threshold for the looped-Explore-toward-a-vendor rewrite.
-    private const int ExploreLoopedVendorThreshold = 3;
+    // The number of recent Explore emissions naming the SAME visible vendor that marks a
+    // loop (vs a single legitimate approach), at/above which ProposeGoalCore converts the
+    // looped Explore into a `Use` of that vendor. Env-configurable via
+    // AC_BOTS_EXPLORE_VENDOR_LOOP_THRESHOLD (default 3, clamp [2, 10]); read once at
+    // type-load. Lowering it converts a vendor-Explore loop one LLM kickoff sooner
+    // (reduce-llm-call-volume) at the cost of a slightly higher transit false-positive (a
+    // target named twice while passing it -> a one-step `Use` that self-corrects). The floor
+    // is 2 so a single approach emission is never preempted (a re-emission is still required).
+    // The match count is over emissions in the recent ExploreLoopedVendorWindow (not strictly
+    // consecutive), so a still-visible vendor named >= threshold times within that window —
+    // while the CURRENT goal re-Explores it — converts; at floor 2 that is a quick revisit.
+    internal static readonly int ExploreLoopedVendorThreshold =
+        ResolveExploreLoopedVendorThreshold(
+            Environment.GetEnvironmentVariable("AC_BOTS_EXPLORE_VENDOR_LOOP_THRESHOLD"));
+
+    // Parse AC_BOTS_EXPLORE_VENDOR_LOOP_THRESHOLD. A positive integer >= 2 is used (clamped
+    // to [2, 10]); anything else (unset/blank/unparseable/<2) falls back to 3.
+    internal static int ResolveExploreLoopedVendorThreshold(string? envValue)
+    {
+        const int Default = 3;
+        const int Min = 2;
+        const int Max = 10;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
     private static readonly TimeSpan ExploreLoopedVendorWindow = TimeSpan.FromMinutes(5);
 
     // Returns the guid of a visible VENDOR the bot has repeatedly Explored TOWARD (>=
