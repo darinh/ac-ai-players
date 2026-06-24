@@ -2074,6 +2074,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return world.Visible is null ? null : ResolveUniqueVisibleUseTargetByName(world.Visible, itemName);
     }
 
+    // Returns the EXACT open-vendor offering name to Buy when a Use goal mis-files an
+    // open-vendor FOR-SALE item into its `item` field with no world target, or null. The
+    // self-Use shape Use{item=X, no target} is for activating an OWNED inventory item; a
+    // model sometimes names a vendor-PANEL offering it wants to acquire there instead, but
+    // the Motor's self-Use only resolves an in-bag item, so a panel offering resolves to
+    // MISS and the bot loops the wrong shape. The mechanically-correct verb to acquire a
+    // panel item is Buy. Fires only when (a) a vendor trade panel is open (world.Vendor),
+    // (b) the item-field name is NOT a plausible owned item (so a genuine self-Use is never
+    // hijacked) and NOT a visible vendor/NPC (Use-item-world-object handles those), and
+    // (c) the name matches one of the open vendor's offerings EXACTLY (case-insensitive,
+    // trimmed — the SAME semantics the Motor's Buy resolves with). Pure string comparison
+    // over the wire-decoded offer list; no game knowledge, no source-side target choice
+    // (the LLM named the item).
+    internal static string? TryResolveUseItemVendorOffering(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Use) return null;
+        if (goal.Target is { IsEmpty: false }) return null;
+        var itemName = goal.Item?.Name;
+        if (string.IsNullOrWhiteSpace(itemName)) return null;
+        if (world.Vendor?.Offers is not { Count: > 0 } offers) return null;
+        if (world.Inventory is not null && InventoryResolvesName(world.Inventory, itemName)) return null;
+        if (world.Visible is not null && ResolveUniqueVisibleUseTargetByName(world.Visible, itemName) is not null)
+            return null;
+        var trimmed = itemName.Trim();
+        foreach (var o in offers)
+            if (!string.IsNullOrWhiteSpace(o.Name)
+                && string.Equals(o.Name.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+                return o.Name;
+        return null;
+    }
+
     // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
     // vendor-panel item rather than a takeable ground object, or null. A Pickup takes
     // only ground items, so a Pickup whose target is one of the open vendor's for-sale
@@ -3919,6 +3950,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = useWorldObjGuid },
+                Item = null,
+            };
+        }
+
+        // Use{item=<open-vendor offering>, no target} -> Buy{that offering} (mechanical verb
+        // correction, reduce-llm-call-volume). The self-Use shape Use{item=X, no target} is for
+        // activating an OWNED inventory item; a model at an open vendor sometimes names a PANEL
+        // offering it wants to acquire in that item field, but the Motor's self-Use only resolves
+        // an in-bag item, so the panel offering MISSes and the bot loops the wrong shape. The
+        // mechanically-correct verb to acquire a panel item is Buy. When the item-field name is
+        // NOT a plausible owned item AND NOT a visible vendor/NPC (handled above) AND matches an
+        // open-vendor offering exactly, rewrite to a Buy of that SAME offering. The LLM chose WHICH
+        // item; the Motor only substitutes the verb (like the Pickup-vendor-item->Buy rewrite; no
+        // autonomous target pick, no game knowledge — keyed on the open-vendor offer list).
+        if (TryResolveUseItemVendorOffering(goal, world) is { } useVendorOfferName)
+        {
+            Console.WriteLine(
+                $"[llm-override] use-item-vendor-offering -> buy: item={goal.Item}" +
+                " — a for-sale vendor-panel item was mis-filed into the Use item field; acquiring" +
+                " it with Buy (self-Use only acts on an in-bag item).");
+            return goal with
+            {
+                Kind = GoalKind.Buy,
+                Target = new Selector { Name = useVendorOfferName },
                 Item = null,
             };
         }

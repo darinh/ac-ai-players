@@ -1589,6 +1589,71 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(noItem, world));
     }
 
+    // ---- TryResolveUseItemVendorOffering (Use{item=<open-vendor offering>, no target} -> Buy) ----
+
+    [Fact]
+    public void UseItemVendorOffering_NamedOffering_AtOpenVendor_ResolvesToOfferName()
+    {
+        // A model at an open vendor names a for-sale offering in the Use item field; the
+        // self-Use MISSes (it is not in the bag), so acquire it with Buy.
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Healing Kit", "Bread Loaf");
+        Assert.Equal("Healing Kit",
+            LlmGoalPolicy.TryResolveUseItemVendorOffering(UseItemGoal("Healing Kit"), world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_NoVendorOpen_ReturnsNull()
+    {
+        // No open trade panel -> no offerings to match.
+        var world = WorldWithVisible(VendorVisible(0x7A9B5101u, "Merchant"));
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(UseItemGoal("Healing Kit"), world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_OwnedInventoryItem_ReturnsNull()
+    {
+        // The named item is in the bag -> a legitimate self-Use; do not hijack to Buy even
+        // when a same-named offering is also for sale.
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Bread Loaf") with
+        {
+            Inventory = new[] { new InventoryItemProjection { Guid = 0xDEFu, Name = "Bread Loaf", Wcid = 1u } },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(UseItemGoal("Bread Loaf"), world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_NameIsVisibleVendorNpc_ReturnsNull()
+    {
+        // The name binds a visible vendor/NPC -> the use-item-world-object rewrite owns it.
+        var world = WorldWithVendorOffers(new[] { VendorVisible(0x7A9B5102u, "Merchant") }, "Merchant");
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(UseItemGoal("Merchant"), world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_NonOfferingName_ReturnsNull()
+    {
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Healing Kit");
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(UseItemGoal("Plate Armor"), world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_NonUseGoal_ReturnsNull()
+    {
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Healing Kit");
+        var pickup = new Goal { Kind = GoalKind.Pickup, Target = new Selector(), Item = new Selector { Name = "Healing Kit" } };
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(pickup, world));
+    }
+
+    [Fact]
+    public void UseItemVendorOffering_NonEmptyTarget_ReturnsNull()
+    {
+        // A two-object Use{target=container, item=key} carries a real target -> not the misfile.
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Healing Kit");
+        var twoObj = new Goal
+        { Kind = GoalKind.Use, Target = new Selector { Name = "Chest" }, Item = new Selector { Name = "Healing Kit" } };
+        Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(twoObj, world));
+    }
+
     // ---- TryResolvePickupVendorItemName (Pickup-of-a-vendor-panel-item -> Buy) ----
 
     private static WorldStateProjection WorldWithVendorOffers(
