@@ -3415,6 +3415,134 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Use loop (target not in view)", prompt);
         Assert.Contains("Pawn Shopkeep", prompt);
     }
+
+    // ---- CountDistinctUnresolvedInteractionTargets / ## Engagement churn cue ----
+
+    // Appends a GoalEmitted for each goal, plus (when failed) a matching GoalFailed — the
+    // canvass shape (the bot emits an interaction then it fails to resolve). With failed:false
+    // the goals are emitted but never fail (a PRODUCTIVE visit), so the churn detector — which
+    // requires failure evidence — must NOT count them.
+    private static EventStream MultiTargetEmissions(
+        (string verb, string name)[] goals, System.DateTimeOffset utc, bool failed = true)
+    {
+        var es = new EventStream();
+        foreach (var (verb, name) in goals)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"{verb} target=name=\"{name}\" item=<empty> source=llm:test",
+            });
+            if (failed)
+                es.Append(new StreamEvent
+                { Sequence = -1, Utc = utc, Kind = EventKind.GoalFailed, Name = name });
+        }
+        return es;
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_CountsDistinctUnresolvableTalkUse()
+    {
+        // Three distinct NPCs interacted via Talk/Use, each FAILED, NONE visible -> 3 distinct.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Talk", "Apprentice Scrivener"), ("Use", "Journeyman Scrivener"),
+            ("Talk", "Pawn Shopkeep"), ("Use", "Apprentice Scrivener"),
+        }, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // none of the 3 are visible
+        Assert.Equal(3, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_ProductiveChain_NoFailures_NotCounted()
+    {
+        // Three distinct Talk/Use targets emitted and NEVER failed (each reached + interacted),
+        // then walked past so none is visible now. With no failure evidence -> 0 (no false churn).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Talk", "Apprentice Scrivener"), ("Use", "Journeyman Scrivener"), ("Talk", "Pawn Shopkeep"),
+        }, now, failed: false);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // none visible, but none failed
+        Assert.Equal(0, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_OwnedInventoryItem_NotCounted()
+    {
+        // A failing Use of an OWNED item name is a legit self-Use, not out-of-view churn -> excluded.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Use", "Healing Kit"), ("Talk", "Apprentice Scrivener"), ("Use", "Pawn Shopkeep"),
+        }, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)) with
+        {
+            Inventory = new[] { new InventoryItemProjection { Guid = 0xA03u, Name = "Healing Kit", Wcid = 1u } },
+        };
+        // "Healing Kit" excluded (owned) -> only the 2 NPC names count (below threshold).
+        Assert.Equal(2, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_ZeroWhenTargetsVisible()
+    {
+        // The named targets ARE visible -> resolvable -> not a churn (the bot can walk up).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[] { ("Talk", "Woodsman"), ("Use", "Grocer") }, now);
+        var world = BuildVisibleWorld(NamedVisible("Woodsman", 5f), NamedVisible("Grocer", 6f));
+        Assert.Equal(0, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_ExcludesAttackAndExplore()
+    {
+        // Attack/Explore are NOT interaction verbs -> their loop cues handle them; not counted here.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Attack", "Mob A"), ("Attack", "Mob B"), ("Explore", "Place C"),
+        }, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f));
+        Assert.Equal(0, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_ExcludesOwnCorpse()
+    {
+        // The bot's OWN corpse (self name "Headless" in BuildVisibleWorld) has a dedicated
+        // recovery cue -> excluded; only the other 2 distinct names count (below threshold).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Use", "Corpse of Headless"), ("Talk", "Apprentice Scrivener"), ("Use", "Pawn Shopkeep"),
+        }, now);
+        Assert.Equal(2,
+            LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(BuildVisibleWorld(NamedVisible("Grocer", 5f)), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EngagementChurn_RendersWhenManyDistinctUnresolved()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[]
+        {
+            ("Talk", "Apprentice Scrivener"), ("Use", "Journeyman Scrivener"), ("Talk", "Pawn Shopkeep"),
+        }, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(NamedVisible("Grocer", 5f)), es, null);
+        Assert.Contains("## Engagement churn", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EngagementChurn_OmittedBelowThreshold()
+    {
+        // Only 2 distinct unresolvable interaction targets -> below the threshold (3) -> no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = MultiTargetEmissions(new[] { ("Talk", "Apprentice Scrivener"), ("Use", "Pawn Shopkeep") }, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(NamedVisible("Grocer", 5f)), es, null);
+        Assert.DoesNotContain("## Engagement churn", prompt);
+    }
     [Theory]
     [InlineData("Corpse of Headless", "Headless", true)]
     [InlineData("corpse of headless", "Headless", true)]
