@@ -1959,6 +1959,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return $"tapped out: level {lvl}, {dm:F0} min in this area with +0 levels gained since arriving";
     }
 
+    // Pure predicate for the stuck-timer suppression below. Returns true only when
+    // currentGoal.Kind == Attack, currentFight is non-null with SwingsLanded > 0 or
+    // DamageDealt > 0, and the fight's target matches the goal's selector: an exact
+    // guid match when Target.Guid is set (non-zero), else a case-insensitive
+    // Target.Name == TargetName match. Reads only the goal selector and combat
+    // telemetry; selects no target.
+    internal static bool ShouldContinueActiveMeleeOnStuck(Goal? currentGoal, CombatFightStatus? currentFight)
+    {
+        if (currentGoal is not { Kind: GoalKind.Attack }) return false;
+        if (currentFight is not { } f) return false;
+        if (f.SwingsLanded <= 0 && f.DamageDealt == 0) return false;
+        // guid match when the goal is guid-pinned (non-zero), else name match.
+        if (currentGoal.Target.Guid is uint goalGuid && goalGuid != 0)
+            return f.TargetGuid == goalGuid;
+        return f.TargetName is { Length: > 0 } fightName
+            && string.Equals(currentGoal.Target.Name, fightName, StringComparison.OrdinalIgnoreCase);
+    }
+
     private Goal? ProposeGoalCore(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var nowUtc = DateTimeOffset.UtcNow;
@@ -2229,6 +2247,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         var anyWake = hasNonPickerSalient || pickerArrived || pickerStartWake;
         if (currentGoal is not null && !anyWake && !stuck) return currentGoal;
+        // reduce-llm-call: when ShouldContinueActiveMeleeOnStuck holds and there is
+        // no salient/picker wake, return the current goal on a stuck-timer instead
+        // of falling through to re-deliberation. Affects only the stuck-timer LLM
+        // re-invocation; the per-tick Motor handling and the salient-event (anyWake)
+        // wake path are unchanged.
+        if (!anyWake && stuck && ShouldContinueActiveMeleeOnStuck(currentGoal, world.CurrentFight))
+            return currentGoal;
         // Non-picker salient events still respect the coalesce window; the
         // picker arrival + new-target picker-start paths bypass it. The `&& !stuck`
         // guard ensures the stuck-timer re-deliberation backstop always punches
