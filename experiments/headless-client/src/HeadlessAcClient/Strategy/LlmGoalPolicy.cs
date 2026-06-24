@@ -101,6 +101,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return Default;
     }
 
+    // Recency window (seconds) for the survivability-spend salience cue: it fires only
+    // when the bot's most-recent in-session death was within this many seconds (it is
+    // ACTIVELY dying, matching the SPEND XP rule's "dying fast" current bottleneck) — NOT
+    // for a single stale death from earlier this session, since secondsSinceLastDeath
+    // stays non-null all session once any death is observed. Mechanical timer; no game
+    // knowledge.
+    private const int RecentDeathSalienceWindowSeconds = 300;
+
     // Returns true when unspent XP is positive and at or above the configured floor.
     // At the default floor (0) this is exactly the prior `unspent > 0` check.
     internal static bool ShouldSurfaceUnspentXp(long unspent, long minMeaningful)
@@ -7585,6 +7593,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     : $", {axp} unspent")
                 : string.Empty;
             sb.AppendLine($"- experience: {txp} total{avail}");
+            // Survivability-spend salience: a capable model that DOES spend XP can still
+            // pour it ALL into offense (accuracy/damage) while dropping in a hit or two to
+            // even WEAK monsters because its max HP is tiny — the SPEND XP rule's "when
+            // DYING, max HP is the binding limit" tiebreaker is buried deep in that rule.
+            // Elevate it to a salient CONDITIONAL pointer ONLY when the bot died RECENTLY
+            // (within RecentDeathSalienceWindowSeconds — i.e. actively DYING, matching the
+            // rule's "dying fast" current bottleneck, NOT one stale death from earlier this
+            // session, since secondsSinceLastDeath stays non-null all session) AND has
+            // unspent XP to invest. Reasons from the deaths telemetry + the unspent-XP gate
+            // (same gate as the SPEND XP cues); names no attribute build / monster / number.
+            // Balance-preserving: it restates the rule's both-options so it cannot
+            // over-steer to endurance; the LLM still decides.
+            if (secondsSinceLastDeath is int dsd
+                && dsd <= RecentDeathSalienceWindowSeconds
+                && world.Self.AvailableExperience is long sxp
+                && ShouldSurfaceUnspentXp(sxp, MinMeaningfulUnspentXp))
+                sb.AppendLine(
+                    $"- SURVIVABILITY-FIRST CHECK: you DIED ~{dsd}s ago and have unspent XP. " +
+                    "Per the SPEND XP rule, when DEATHS are the problem — you drop in a hit or " +
+                    "two, even to weak monsters — the binding limit is your MAX HP, not accuracy or damage (a " +
+                    "dead character lands no swings): invest in ENDURANCE/health to raise max HP FIRST, before " +
+                    "pouring more XP into offense. (If instead you SURVIVE your fights but cannot KILL — swings " +
+                    "miss or barely hurt, with NO recent deaths — then offense is the limit per SPEND XP.)");
         }
         // Attributes, raisable skills, health, and deaths — the compact,
         // decision-critical self facts, rendered via the shared helper so the
