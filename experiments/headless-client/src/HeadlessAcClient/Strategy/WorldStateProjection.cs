@@ -131,6 +131,15 @@ internal sealed record VisibleObjectProjection
     [JsonPropertyName("is_chest")] public bool IsChest { get; init; }
 
     /// <summary>
+    /// True if the object is STUCK (ObjectDescriptionFlag.Stuck) — fixed in the
+    /// world, so it cannot be picked up / carried off (a treasure chest, a sign).
+    /// Used to tell a non-takeable world container (Use to open in place) from a
+    /// TAKEABLE container item (a pack/sack picked up to inventory) — both can read
+    /// as a container, but only a STUCK one must be opened with Use. Pure wire bit.
+    /// </summary>
+    [JsonPropertyName("is_stuck")] public bool IsStuck { get; init; }
+
+    /// <summary>
     /// Slice U — true if this is a pickup-able Writable (a book on a
     /// table, a scroll on the floor). ItemType.Writable (0x2000) AND NOT
     /// ObjectDescriptionFlag.Stuck (0x4). Surfaced so the LLM knows to
@@ -727,6 +736,7 @@ internal sealed record WorldStateProjection
                     IsOpenable = isOpenable,
                     IsDoorOpen = isDoorOpen,
                     IsChest = isChest,
+                    IsStuck = isStuck,
                     IsBook = isBook,
                     IsSign = isSign,
                     IsAttackable = isAttackable,
