@@ -10139,11 +10139,11 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void WieldedWeaponUntrainedAccuracyNote_StuckUnarmed_SteersCoordination()
+    public void WieldedWeaponUntrainedAccuracyNote_StuckUnarmed_SteersStrength()
     {
         // cp063: nothing wielded + only an ammoless bag launcher (no loadable ammo) =
-        // genuinely fighting unarmed (the cp060-dequipped state). The note steers the
-        // bot at coordination for fist accuracy, NOT the wielded-weapon variant.
+        // genuinely fighting unarmed (the cp060-dequipped state). For unarmed, STRENGTH is
+        // the better lever (raises both fist accuracy and damage), NOT the wielded variant.
         var world = BuildInventoryWorld(new[]
         {
             new InventoryItemProjection
@@ -10155,19 +10155,19 @@ public class LlmGoalPolicyTests
         var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(world);
         Assert.NotNull(note);
         Assert.Contains("unarmed accuracy", note);
-        Assert.Contains("raise COORDINATION", note);
+        Assert.Contains("STRENGTH", note);
         Assert.DoesNotContain("wielded-weapon accuracy", note);
     }
 
     [Fact]
-    public void WieldedWeaponUntrainedAccuracyNote_EmptyInventory_SteersCoordination()
+    public void WieldedWeaponUntrainedAccuracyNote_EmptyInventory_SteersStrength()
     {
         // Totally weaponless (empty inventory) -> Case 2 fires.
         var note = LlmGoalPolicy.WieldedWeaponUntrainedAccuracyNote(
             BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()));
         Assert.NotNull(note);
         Assert.Contains("unarmed accuracy", note);
-        Assert.Contains("raise COORDINATION", note);
+        Assert.Contains("STRENGTH", note);
     }
 
     [Fact]
@@ -18435,14 +18435,21 @@ public class LlmGoalPolicyTests
     // naming the recipient, so a dialogue-requested give is not wrongly abandoned).
     // Keyed on observed NPC dialogue + the item's server description. Static-floor only;
     // does not move the runtime 413 risk (per-tick WORLD/visible sections).
+    // Bumped 18600 -> 19000 (unarmed-strength-lever) for the corrected `unarmed accuracy`
+    // note: the prior one-line note steered only COORDINATION, but unarmed `UnarmedCombat`
+    // to-hit is half STRENGTH + half COORDINATION AND unarmed DAMAGE is STRENGTH-based, so
+    // the note now explains that mechanic and favours STRENGTH (it raises both accuracy and
+    // damage). The note renders in the body and the protected tail, so the few-line expansion
+    // lands ~twice. Static-floor only; does not move the runtime 413 risk (per-tick WORLD/
+    // visible sections), and the ceiling is a regression guard, not a runtime size.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 18600,
-            $"static prompt floor grew to {prompt.Length} chars (budget 18600)");
+        Assert.True(prompt.Length <= 19000,
+            $"static prompt floor grew to {prompt.Length} chars (budget 19000)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
@@ -18530,10 +18537,11 @@ public class LlmGoalPolicyTests
         Assert.Contains("invest unspent XP", prompt);                // priority band
         Assert.Contains("available to invest NOW", prompt);          // ## Self cue
         // Three combat-embedded clauses (gated via inline fragments — byte-identity
-        // at the default floor).
+        // at the default floor). The COMBAT SAFETY fragment is unarmed-aware; this
+        // world is stuck-unarmed (empty inventory), so it renders the STRENGTH variant.
         Assert.Contains("Then raise that trained weapon skill with spare XP", prompt);
         Assert.Contains("(and `Raise...` any `unspent` XP between fights)", prompt);
-        Assert.Contains("so SPEND XP on coordination", prompt);
+        Assert.Contains("so SPEND XP on STRENGTH or coordination", prompt);
     }
 
     [Fact]
@@ -18599,8 +18607,16 @@ public class LlmGoalPolicyTests
         // symptom->lever mapping AT the spend decision (cp-2336/2387 salience;
         // cp2920 precedent). With NO trained skills (BuildXpWorld), the mapping
         // must NOT advise RaiseSkill (the server rejects it) — coordination leads.
+        // A usable bag weapon is present so this exercises the NON-unarmed
+        // no-trained-skills branch (unarmed-strength-lever routes the weaponless
+        // case to the STRENGTH branch instead — see the dedicated unarmed tests).
         var world = BuildXpWorld(69296, 5475) with
         {
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x333u, Name = "Bag Sword", Wcid = 3u, ItemType = 0x1u, WieldedAt = null, ValidLocations = 0x2000000u },
+            },
             CumulativeSwingsLanded = 4,
             CumulativeSwingsEvaded = 7,
         };
@@ -18613,6 +18629,9 @@ public class LlmGoalPolicyTests
         // No trained skills -> must not advise raising a (server-rejected) skill.
         Assert.DoesNotContain("the main accuracy lever, raised via `RaiseSkill`", cap);
         Assert.Contains("`RaiseSkill` is unavailable", cap);
+        // A usable bag weapon means NOT stuck-unarmed, so it must stay on the last
+        // branch and NOT slip into the unarmed STRENGTH branch.
+        Assert.DoesNotContain("you have NO weapon wielded — your unarmed", cap);
     }
 
     [Fact]
@@ -18659,7 +18678,7 @@ public class LlmGoalPolicyTests
         // gpt-5.4 fix + cp064: when the bot WIELDS a weapon governed by a trained
         // skill, that weapon skill is the main accuracy lever and RaiseSkill is valid
         // -> the mapping names it. (cp064: the weapon must be WIELDED — a trained skill
-        // with NO weapon wielded is the unarmed case, which points at coordination.)
+        // with NO weapon wielded is the unarmed case, which points at STRENGTH/coordination.)
         var world = BuildWorldWithTrainedSkill() with
         {
             Inventory = new[]
@@ -18674,6 +18693,9 @@ public class LlmGoalPolicyTests
 
         var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
         Assert.Contains("trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill`", cap);
+        // For a WIELDED weapon, strength does not drive accuracy, so the caveat is preserved
+        // (only the unarmed branch drops it).
+        Assert.Contains("strength is the wrong lever", cap);
     }
 
     [Fact]
@@ -18712,12 +18734,13 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_CoordinationWhenStuckUnarmed()
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_StrengthOrCoordinationWhenStuckUnarmed()
     {
         // cp064: the bot is fighting UNARMED (no weapon wielded, none usable anywhere)
         // while trained only in TwoHandedCombat. Raising TwoHandedCombat does nothing
-        // for fist accuracy, so the SPEND-XP accuracy mapping must point at COORDINATION
-        // and NOT name the (irrelevant) trained weapon skill as "the main accuracy lever".
+        // for fist accuracy; unarmed to-hit is half STRENGTH + half coordination, so the
+        // SPEND-XP accuracy mapping must name STRENGTH (favoured, it also adds damage) and
+        // NOT name the (irrelevant) trained weapon skill as "the main accuracy lever".
         var baseWorld = BuildXpWorld(69296, 5475);
         var world = baseWorld with
         {
@@ -18732,8 +18755,72 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
-        Assert.Contains("you have NO weapon wielded — your swings are unarmed/fists", cap);
+        Assert.Contains("you have NO weapon wielded — your unarmed", cap);
+        Assert.Contains("half STRENGTH", cap);
         Assert.DoesNotContain("trained WEAPON SKILL (the main accuracy lever", cap);
+        // The "strength is the wrong lever for accuracy" caveat is for WIELDED weapons;
+        // for unarmed, strength IS half the fist to-hit, so the caveat must be dropped.
+        Assert.DoesNotContain("strength is the wrong lever", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UnspentXpCapsule_AccuracyMapping_StrengthWhenStuckUnarmedAndNoTrainedSkills()
+    {
+        // unarmed-strength-lever (gpt-5.4 blocking fix): a weaponless bot with NO trained
+        // skills must STILL get the STRENGTH-favoured unarmed steer, not the generic
+        // coordination-only "no trained skills" text — otherwise the capsule would
+        // contradict the always-on `unarmed accuracy` note (which favours STRENGTH).
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = System.Array.Empty<SelfSkillProjection>(),
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
+        Assert.Contains("you have NO weapon wielded — your unarmed", cap);
+        Assert.Contains("half STRENGTH", cap);
+        Assert.DoesNotContain("strength is the wrong lever", cap);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_UnarmedException_RendersWhenStuckUnarmed()
+    {
+        // unarmed-strength-lever: the broad SPEND XP rule's accuracy guidance is for a
+        // WIELDED weapon; for an unarmed bot it must carry the UNARMED EXCEPTION (fist
+        // to-hit is half STRENGTH) so it does not contradict the `unarmed accuracy` note.
+        // BuildXpWorld has unspent XP + empty inventory (stuck unarmed) -> exception renders.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildXpWorld(69296, 5475), new EventStream(), null);
+        Assert.Contains("UNARMED EXCEPTION", prompt);
+        Assert.Contains("favor STRENGTH for unarmed misses", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_SpendXpRule_UnarmedException_AbsentWhenArmed()
+    {
+        // When a weapon is wielded the bot is NOT stuck-unarmed, so the UNARMED EXCEPTION
+        // must NOT render (the WIELDED accuracy guidance is correct as-is).
+        var baseWorld = BuildXpWorld(69296, 5475);
+        var world = baseWorld with
+        {
+            Self = baseWorld.Self with
+            {
+                TrainedSkills = new[]
+                { new SelfSkillProjection { Name = "TwoHandedCombat", Advancement = "trained", RaisedRanks = 0 } },
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                { Guid = 0x222u, Name = "Trained Weapon", Wcid = 5u, ItemType = 0x1u, WieldedAt = 0x2000000u, GoverningSkill = "two handed combat" },
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("UNARMED EXCEPTION", prompt);
     }
 
     [Fact]
@@ -18760,7 +18847,7 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         var cap = prompt.Substring(prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal));
-        Assert.DoesNotContain("your swings are unarmed/fists", cap);
+        Assert.DoesNotContain("you have NO weapon wielded — your unarmed", cap);
         Assert.Contains("trained WEAPON SKILL (the main accuracy lever", cap);
     }
 
