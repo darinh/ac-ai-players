@@ -94,6 +94,48 @@ public class PlayerDescriptionDecodeTests
     }
 
     [Fact]
+    public void Decode_Int32Section_ExtractsCoinValue()
+    {
+        // CoinValue (PropertyInt 20) sits in the same Int32 table as Level (25);
+        // both must be captured (keys are sorted, so 20 precedes 25).
+        var body = BuildBody(
+            int32: new (uint, int)[] { (20u, 137), (24u, 9), (25u, 10) }); // CoinValue=20
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription);
+
+        Assert.NotNull(p?.PlayerDescription);
+        Assert.Equal(137, p!.PlayerDescription!.CoinValue);
+        Assert.Equal(10, p.PlayerDescription.Level);
+    }
+
+    [Fact]
+    public void Decode_NoCoinValueInBundle_LeavesCoinNull()
+    {
+        // A bundle whose Int32 table omits CoinValue (id 20) -> CoinValue null
+        // (the genuine "server reported no coin" case); Level still captured.
+        var body = BuildBody(
+            int32: new (uint, int)[] { (24u, 9), (25u, 10) });
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription);
+
+        Assert.Null(p!.PlayerDescription!.CoinValue);
+        Assert.Equal(10, p.PlayerDescription.Level);
+    }
+
+    [Fact]
+    public void Decode_CoinPresentLevelAbsent_CapturesCoinOnly()
+    {
+        // The two int32 captures are independent: a bundle with CoinValue (20)
+        // but no Level (25) yields coin set, level null.
+        var body = BuildBody(int32: new (uint, int)[] { (20u, 250), (24u, 9) });
+
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription);
+
+        Assert.Equal(250, p!.PlayerDescription!.CoinValue);
+        Assert.Null(p.PlayerDescription.Level);
+    }
+
+    [Fact]
     public void Decode_Int32WithoutLevelKey_LeavesLevelNull_StillReadsXp()
     {
         var body = BuildBody(
@@ -220,6 +262,7 @@ public class PlayerDescriptionSeedTests
 {
     private const uint Self = 0x5000005Cu;
     private const uint LevelId = 25u;
+    private const uint CoinId = 20u;
     private const uint TotalId = PrivateUpdatePropertyInt64Message.TotalExperienceId;       // 1
     private const uint AvailId = PrivateUpdatePropertyInt64Message.AvailableExperienceId;   // 2
 
@@ -237,6 +280,39 @@ public class PlayerDescriptionSeedTests
         Assert.Equal(6, snap.PropertyInts![LevelId]);
         Assert.Equal(12345L, snap.PropertyInt64s![TotalId]);
         Assert.Equal(678L, snap.PropertyInt64s[AvailId]);
+    }
+
+    [Fact]
+    public void Seed_WritesCoinValue_IntoSelfSnapshot()
+    {
+        // CoinValue (PropertyInt 20) is seeded from the login bundle like Level,
+        // so the bot perceives its coin from login (the projection reads
+        // PropertyInt 20 -> Self.CoinValue).
+        var ws = new WorldState();
+        ws.SetSelf(Self);
+
+        Assert.True(ws.SeedSelfPropertyInt(CoinId, 137));
+
+        Assert.Equal(137, ws.TryGet(Self)!.PropertyInts![CoinId]);
+    }
+
+    [Fact]
+    public void SeededCoin_OverwrittenByDiscreteSeqZeroUpdate()
+    {
+        // Load-bearing invariant: the coin bundle-seed must NOT advance the
+        // per-property byte-seq high-water for CoinValue, so the FIRST real
+        // discrete CoinValue update (which starts at its own low seq, often 0)
+        // is still accepted and overwrites the seed. (The existing stale-gate
+        // test only covered the Int64 seed path.)
+        var ws = new WorldState();
+        ws.SetSelf(Self);
+        ws.SeedSelfPropertyInt(CoinId, 500);
+
+        var applied = ws.Apply(new PrivateUpdatePropertyIntMessage(
+            Sequence: 0, Property: CoinId, Value: 480));
+
+        Assert.True(applied);
+        Assert.Equal(480, ws.TryGet(Self)!.PropertyInts![CoinId]);
     }
 
     [Fact]
