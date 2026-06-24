@@ -1191,7 +1191,7 @@ public class LlmGoalPolicyTests
             WieldGoalTo("Training Spadone"), world, es));
     }
 
-    // ---- TryResolvePickupCorpse (pickup-of-corpse -> Use) ----
+    // ---- TryResolvePickupUseContainer (pickup-of-corpse-or-chest -> Use) ----
 
     private static VisibleObjectProjection CorpseObj(uint guid, string name)
         => new() { Guid = guid, Name = name, IsCorpse = true, IsMonster = false, ObservedHostile = false };
@@ -1203,7 +1203,7 @@ public class LlmGoalPolicyTests
     public void PickupCorpse_NamedUnopenedCorpse_ResolvesToUseGuid()
     {
         var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken"));
-        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupCorpse(
+        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupUseContainer(
             PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
     }
 
@@ -1214,7 +1214,7 @@ public class LlmGoalPolicyTests
         var apple = new VisibleObjectProjection
         { Guid = 0xAAAu, Name = "Apple", IsCorpse = false, IsMonster = false };
         var world = WorldWithVisible(apple);
-        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
             PickupGoalTo("Apple"), world, new EventStream()));
     }
 
@@ -1223,7 +1223,7 @@ public class LlmGoalPolicyTests
     {
         var world = WorldWithVisible(CorpseObj(0xC0FFEEu, "Corpse of Chicken"));
         var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Corpse of Chicken" } };
-        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(use, world, new EventStream()));
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(use, world, new EventStream()));
     }
 
     [Fact]
@@ -1238,7 +1238,7 @@ public class LlmGoalPolicyTests
         {
             OpenedCorpseGuids = new HashSet<uint> { 0xC0FFEEu },
         };
-        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupCorpse(
+        Assert.Equal(0xC0FFEEu, LlmGoalPolicy.TryResolvePickupUseContainer(
             PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
     }
 
@@ -1249,7 +1249,7 @@ public class LlmGoalPolicyTests
         var world = WorldWithVisible(
             CorpseObj(0xC1u, "Corpse of Chicken"),
             CorpseObj(0xC2u, "Corpse of Chicken"));
-        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
             PickupGoalTo("Corpse of Chicken"), world, new EventStream()));
     }
 
@@ -1263,8 +1263,115 @@ public class LlmGoalPolicyTests
             Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
             ItemGuid = 0xC0FFEEu, ErrorCode = 0x0001u, // not a transport code
         });
-        Assert.Null(LlmGoalPolicy.TryResolvePickupCorpse(
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
             PickupGoalTo("Corpse of Chicken"), world, es));
+    }
+
+    [Fact]
+    public void PickupChest_NamedWorldChest_ResolvesToUseGuid()
+    {
+        // A Pickup of a STUCK container (IsChest + IsStuck wire bits) rewrites to Use —
+        // a fixed container is opened in place, not taken. (Stuck-bit branch.)
+        var chest = new VisibleObjectProjection { Guid = 0x80000CE5u, Name = "Chest", IsChest = true, IsStuck = true, IsMonster = false };
+        var world = WorldWithVisible(chest);
+        Assert.Equal(0x80000CE5u, LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Chest"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_StaticWorldChest_NoStuckFlag_ResolvesToUseGuid()
+    {
+        // THE LIVE CASE: a world-static container (guid in the static range
+        // 0x70000000-0x7FFFFFFF, NOT flagged Stuck) is still non-takeable — the server
+        // refuses a Pickup of a non-dynamic guid — so a Pickup of it rewrites to Use.
+        var chest = new VisibleObjectProjection { Guid = 0x7A9B4014u, Name = "Chest", IsChest = true, IsStuck = false, IsMonster = false };
+        var world = WorldWithVisible(chest);
+        Assert.Equal(0x7A9B4014u, LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Chest"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_TakeableContainerNotChest_ReturnsNull()
+    {
+        // An item that does not read as a container at all (not IsChest) is left as a
+        // Pickup so the bot can TAKE it.
+        var pack = new VisibleObjectProjection { Guid = 0x8000BA9u, Name = "Pack", IsChest = false, IsCorpse = false, IsMonster = false };
+        var world = WorldWithVisible(pack);
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Pack"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_DynamicNonStuckContainer_ReturnsNull()
+    {
+        // A TAKEABLE container item reads as a chest (ACE sets Openable on WeenieType.Container
+        // too) but has a DYNAMIC guid (>= 0x80000000) and is NOT stuck -> the server lets the
+        // bot take it, so it is NOT rewritten to Use.
+        var sack = new VisibleObjectProjection { Guid = 0x800005ACu, Name = "Sack", IsChest = true, IsStuck = false, IsMonster = false };
+        var world = WorldWithVisible(sack);
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Sack"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_DynamicStuckContainer_ResolvesToUseGuid()
+    {
+        // The rare dynamic-but-stuck container (guid in the dynamic range yet flagged Stuck):
+        // the server still refuses the Pickup, so the Stuck-bit branch rewrites it to Use.
+        var chest = new VisibleObjectProjection { Guid = 0x8A9B0003u, Name = "Coffer", IsChest = true, IsStuck = true, IsMonster = false };
+        var world = WorldWithVisible(chest);
+        Assert.Equal(0x8A9B0003u, LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Coffer"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_CreatureFlaggedContainer_ReturnsNull()
+    {
+        // Exact server mirror: the pickup gate also refuses a Creature. An IsChest object
+        // that is also flagged IsMonster is not rewritten (defensive — a live creature is
+        // not a container, but the discriminator excludes it to match the server arm).
+        var chest = new VisibleObjectProjection { Guid = 0x7A9B5001u, Name = "Chest", IsChest = true, IsStuck = true, IsMonster = true };
+        var world = WorldWithVisible(chest);
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Chest"), world, new EventStream()));
+    }
+
+    [Fact]
+    public void PickupChest_SemanticRefusal_ReturnsNull()
+    {
+        // A static world chest the bot already got a non-transport ActionRejected for
+        // (e.g. a Use refused as locked/too-far) is excluded from the rewrite, so the
+        // Motor does not blindly re-convert a future Pickup back into the known-bad Use.
+        var chest = new VisibleObjectProjection { Guid = 0x7A9B4014u, Name = "Chest", IsChest = true, IsStuck = false, IsMonster = false };
+        var world = WorldWithVisible(chest);
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ItemGuid = 0x7A9B4014u, ErrorCode = 0x0001u, // not a transport code
+        });
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Chest"), world, es));
+    }
+
+    [Theory]
+    [InlineData(0x50000001u, false)]   // player range
+    [InlineData(0x7A9B4014u, false)]   // world-static (the live chest)
+    [InlineData(0x7FFFFFFFu, false)]   // static max
+    [InlineData(0x80000000u, true)]    // dynamic min
+    [InlineData(0xFFFFFFFEu, true)]    // dynamic max
+    [InlineData(0xFFFFFFFFu, false)]   // reserved "invalid"
+    public void IsDynamicGuid_MatchesServerRange(uint guid, bool expected)
+        => Assert.Equal(expected, LlmGoalPolicy.IsDynamicGuid(guid));
+
+    [Fact]
+    public void PickupChest_AmbiguousTwoChests_ReturnsNull()
+    {
+        var world = WorldWithVisible(
+            new VisibleObjectProjection { Guid = 0x7A9B0001u, Name = "Chest", IsChest = true, IsStuck = true },
+            new VisibleObjectProjection { Guid = 0x7A9B0002u, Name = "Chest", IsChest = true, IsStuck = true });
+        Assert.Null(LlmGoalPolicy.TryResolvePickupUseContainer(
+            PickupGoalTo("Chest"), world, new EventStream()));
     }
 
     [Fact]

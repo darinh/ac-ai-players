@@ -1913,17 +1913,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return matches.Count == 1 ? matches[0].Guid : (uint?)null;
     }
 
-    // True (returns the corpse guid) iff this Pickup goal names a visible CORPSE.
-    // A corpse is a Use-container, not a takeable item, so a Pickup targeting the
-    // corpse object resolves to MISS and the bot loops the wrong verb without
-    // looting. The mechanical prerequisite the LLM's own choice requires is to Use
-    // the corpse — the Motor's Use handler opens it and pulls its items, so a Use of
-    // an already-looted corpse is a harmless no-op (no stale-state gate needed).
-    // Mirrors TryResolveWieldGroundWeapon: matched by the goal's OWN selector against
-    // visible corpses (UNIQUE match; server-refused excluded). The LLM chose WHICH
-    // corpse — the Motor only substitutes the mechanically-correct verb; no
-    // autonomous target pick, no game knowledge.
-    internal static uint? TryResolvePickupCorpse(Goal goal, WorldStateProjection world, EventStream events)
+    // True (returns the object guid) iff this Pickup goal uniquely names a visible
+    // Use-container: a CORPSE, or an OPENABLE container the server will NOT let the
+    // bot take. Such an object is actuated with `Use` (the Motor's Use handler opens
+    // it and transfers its contents), not taken: a Pickup of it resolves to MISS and
+    // the bot loops the wrong verb. The takeability test mirrors the server's pickup
+    // gate exactly (PutItemInContainer refuses a non-dynamic, stuck, or creature
+    // object): an IsChest object that is not a creature is a Use-container when its
+    // guid is below the dynamic range (world-static, IsDynamicGuid == false) OR it
+    // carries the Stuck wire bit. A genuinely takeable container item (dynamic guid,
+    // not stuck) reads as IsChest too (the Openable bit is set on WeenieType.Container)
+    // but is left as a Pickup. Unique match only; server-refused guids excluded. The
+    // LLM chose WHICH object — the Motor only substitutes the mechanically-correct verb
+    // (no autonomous target pick, no game knowledge; keyed on the IsCorpse/IsChest/
+    // IsStuck/IsMonster wire bits + the wire guid range). Mirrors TryResolveWieldGroundWeapon.
+    internal static uint? TryResolvePickupUseContainer(Goal goal, WorldStateProjection world, EventStream events)
     {
         if (goal.Kind != GoalKind.Pickup) return null;
         if (goal.Target.IsEmpty) return null;
@@ -1933,11 +1937,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .Select(e => e.ItemGuid!.Value)
             .ToHashSet();
         var matches = world.Visible.Where(v =>
-            v.IsCorpse &&
+            (v.IsCorpse || (v.IsChest && !v.IsMonster && (v.IsStuck || !IsDynamicGuid(v.Guid)))) &&
             !refused.Contains(v.Guid) &&
             VisibleMatchesSelector(goal.Target, v)).ToList();
         return matches.Count == 1 ? matches[0].Guid : (uint?)null;
     }
+
+    // True iff the guid is in the server's DYNAMIC range (0x80000000-0xFFFFFFFE):
+    // world-generated, takeable objects. Guids below this range are world-static
+    // (StaticObjectMin 0x70000000+, landblock-organized) and a Pickup of them is
+    // refused server-side. Mirrors ACE.Entity ObjectGuid.IsDynamic (wire-protocol
+    // guid-range constant).
+    internal static bool IsDynamicGuid(uint guid) => guid >= 0x80000000u && guid <= 0xFFFFFFFEu;
 
     // True iff this RaiseSkill goal's target skill is NOT present in the bot's
     // loaded raisable-skills list (`world.Self.TrainedSkills`, already filtered to
@@ -3599,25 +3610,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             };
         }
 
-        // Pickup-of-a-corpse -> Use (mechanical prerequisite, reduce-llm-call-volume +
-        // loot progress). A model sometimes emits Pickup for a CORPSE, but a corpse is
-        // a Use-container (not a takeable item), so the Pickup selector resolves to
-        // MISS and the bot loops the wrong verb without looting. Perform the
-        // prerequisite the LLM's choice requires: rewrite the Pickup of a resolved,
-        // not-yet-opened corpse into a Use of that SAME corpse (opening it so its items
-        // become pickable). The LLM chose WHICH corpse — the Motor only substitutes the
-        // correct verb (mechanical execution, like the Wield->Pickup rewrite above; no
-        // autonomous target pick, no game knowledge).
-        if (TryResolvePickupCorpse(goal, world, events) is uint pickupCorpseGuid)
+        // Pickup-of-a-Use-container -> Use (mechanical prerequisite, reduce-llm-call-volume).
+        // A model sometimes emits Pickup for a CORPSE or an openable world-static container,
+        // but such an object is a Use-container (the server refuses to take it), so the Pickup
+        // selector resolves to MISS and the bot loops the wrong verb. Perform the prerequisite
+        // the LLM's choice requires: rewrite the Pickup of a resolved Use-container into a Use
+        // of that SAME object (the Use handler opens it). The LLM chose WHICH object — the Motor
+        // only substitutes the correct verb (mechanical execution, like the Wield->Pickup rewrite
+        // above; no autonomous target pick, no game knowledge — keyed on the IsCorpse/IsChest/
+        // IsStuck wire bits + the wire guid range).
+        if (TryResolvePickupUseContainer(goal, world, events) is uint pickupContainerGuid)
         {
             Console.WriteLine(
-                $"[llm-override] pickup-corpse -> use: target={goal.Target}" +
-                $" guid=0x{pickupCorpseGuid:X8} — a corpse is a Use-container, not a" +
-                " takeable item; Use it to open it for loot.");
+                $"[llm-override] pickup-container -> use: target={goal.Target}" +
+                $" guid=0x{pickupContainerGuid:X8} — a corpse or non-takeable container is" +
+                " actuated with Use, not Pickup.");
             return goal with
             {
                 Kind = GoalKind.Use,
-                Target = new Selector { Guid = pickupCorpseGuid },
+                Target = new Selector { Guid = pickupContainerGuid },
                 Item = null,
             };
         }
