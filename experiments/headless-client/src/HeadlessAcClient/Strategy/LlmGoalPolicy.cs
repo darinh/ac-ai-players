@@ -2764,7 +2764,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
-            IsCombatCapable(world.Inventory)));
+            IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2805,7 +2805,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
-        bool armed = true)
+        bool armed = true, int? maxHpProxy = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2860,6 +2860,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // baseline), shown only when >0. Pure observability; no behavior change.
         if (deathsThisRun is int dr && dr > 0)
             line += $" deaths={dr}";
+        // Peak current HP observed this run (HealthObservedPeak, a max-HP proxy).
+        // Pairs with swings= and deaths= as a combat-effectiveness diagnostic. Shown
+        // only when known + positive. Pure observability; no behavior change, no game
+        // knowledge.
+        if (maxHpProxy is int mhp && mhp > 0)
+            line += $" hppeak={mhp}";
         // Append armed=no when the bot has NO combat-capable wielded weapon
         // (IsCombatCapable over the bot's OWN wielded inventory returns false).
         // Shown only in that state, mirroring the deaths= field. Pure
