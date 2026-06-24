@@ -251,6 +251,86 @@ public class VendorPerceptionTests
     }
 
     [Fact]
+    public void Vendor_Capsule_StatesPanelIsOpen_AndPointsAtBuySell()
+    {
+        // The capsule renders only while the vendor's trade panel is OPEN. It
+        // informs the LLM the panel is open + points at Buy (from offerings) /
+        // Sell (from ## Inventory), notes a fresh Use just re-opens the already-
+        // open panel (no new info), and offers a recovery Use if no live panel.
+        // Informational, NOT a "do not Use" prohibition (which would contradict
+        // the general re-engage-the-source-via-Use refresh guidance).
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                VendorProj(Offers(1.0f, ("Plain Trade Good", 50u, -1))),
+                new EventStream(), null),
+            "## Vendor offerings");
+
+        Assert.Contains("panel is OPEN", cap);
+        Assert.Contains("reach for `Buy`/`Sell` to make progress", cap);
+        // Sell selector source is ## Inventory, not the offerings list (a Sell of
+        // an offering name would target an item the bot does not own).
+        Assert.Contains("by its exact name from your `## Inventory`", cap);
+        // Informational, not prohibitive: a fresh Use just re-opens the open panel.
+        Assert.Contains("only re-opens the already-open panel", cap);
+        // Recovery clause for a no-longer-live panel.
+        Assert.Contains("re-opens it", cap);
+    }
+
+    [Fact]
+    public void Vendor_OpenPanel_DoneBatchSource_RoutesFindRefreshToBuy_NotUse()
+    {
+        // done batch whose SOURCE (NpcEnd) matches a visible vendor + that vendor's
+        // panel ALREADY open: the FIND-A-KILL-TASK refresh exception must route the
+        // refresh to Buy from the open offerings, NOT "re-Use the vendor" (which
+        // would contradict the open-panel cue). The closed-panel decision-proximate
+        // refresh cue is also gated off.
+        var world = DoneBatchAtSource(panelOpen: true);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        // FIND refresh routes to Buy when the source vendor's panel is open.
+        Assert.Contains("`Buy` a contract from its `## Vendor offerings`", prompt);
+        // The closed-panel "Use it if a vendor" refresh wording is NOT present.
+        Assert.DoesNotContain("re-engaging THAT specific source — `Use` it if it is a `vendor`", prompt);
+        // The decision-proximate closed-panel refresh cue is gated off too.
+        Assert.DoesNotContain("a fresh contract to keep earning is BOUGHT at a", prompt);
+        // The open-panel cue is present.
+        Assert.Contains("panel is OPEN", prompt);
+    }
+
+    [Fact]
+    public void ClosedPanel_DoneBatchSource_FindRefreshSaysUse()
+    {
+        // Same done-batch source in view but NO panel open: the FIND refresh
+        // exception still says Use the vendor / Talk the npc (the closed-panel
+        // path is unchanged).
+        var world = DoneBatchAtSource(panelOpen: false);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+
+        Assert.Contains("re-engaging THAT specific source — `Use` it if it is a `vendor`", prompt);
+    }
+
+    private static WorldStateProjection DoneBatchAtSource(bool panelOpen) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+            PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = new[]
+        {
+            new VisibleObjectProjection
+            { Guid = VendorGuid, Name = "Provisioner", IsVendor = true, IsCreature = true, Distance = 2f },
+        },
+        Vendor = panelOpen ? Offers(1.0f, ("Contract for Assault", 100u, -1)) : null,
+        // All contracts done (stage 3); the source NPC name matches the visible vendor.
+        Contracts = new[]
+        {
+            new ContractProjection { ContractId = 1u, Stage = 3u, NpcEnd = "Provisioner", NpcStart = "Provisioner" },
+        },
+    };
+
+    [Fact]
     public void Vendor_RealFailureState_OffersBuyOptionAndDoneContractEgress()
     {
         // The adversarial criterion-2 state behind this slice: the bot stands at
