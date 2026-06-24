@@ -5796,6 +5796,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Attack goal would resolve to MISS (it left view/range, died, or the bot moved past it).
     private static readonly TimeSpan RepeatedUnresolvedAttackWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedUnresolvedAttackThreshold = 3;
+    // Sibling: repeated-Use-toward-a-departed-target window + threshold. A `Use` target
+    // (vendor/NPC/door/container/corpse/item) absent from the distance-bounded `## Visible`
+    // is one the Use goal would resolve to MISS (the bot walked out of range of it).
+    private static readonly TimeSpan RepeatedUnresolvedUseWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnresolvedUseThreshold = 3;
 
     // cp067: the NAME the bot has Explored toward >= threshold times within the recent
     // window that resolves to NO visible object (a reached area / unresolved name), or
@@ -5829,16 +5834,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         WorldStateProjection world, EventStream events, DateTimeOffset since)
         => MostRepeatedUnresolvedTargetName(world, events, since, "Attack", RepeatedUnresolvedAttackThreshold, excludeCorpses: true);
 
+    // Sibling for Use: the NAME the bot has tried to `Use` >= threshold times within the
+    // window that NO currently-visible object would bind — the vendor/NPC/door/container/
+    // corpse/item has left view/range, so the Use would resolve to MISS and a fresh
+    // no-current-goal call re-emits the SAME Use (live: a vendor/NPC re-Used many times
+    // back-to-back while no longer in view). Surfaced as the `## Use loop` informational cue
+    // — NOT a hard drop, so a legitimate close-in toward a target just out of the visible
+    // radius is never overridden. Corpses are NOT excluded (a corpse IS a valid Use/loot
+    // target, so a visible corpse named X binds the Use). Same audit posture as the others.
+    internal static string? RepeatedUnresolvedUseTarget(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, excludeItemGoals: true);
+
     // Shared detector for a repeated goal-VERB emission toward a target NAME that NO
     // currently-visible object would bind. Counts the bot's own recent goal emissions
     // of `verb` within the window (parsing the echoed `target=...name="..."`) and
     // returns the most-repeated such name at/above `threshold` for which `## Visible`
     // holds no resolver-bindable object (see VisibleResolvesName — exact / quoted-role /
-    // unique fuzzy), else null. The untargeted "anywhere" token is ignored. Pure: own
-    // emission history + perception; no game knowledge, no priority, no source-side
-    // target choice.
+    // unique fuzzy), else null. The untargeted "anywhere" token is ignored. When
+    // <paramref name="excludeItemGoals"/>, an emission carrying a populated `item=` field
+    // is skipped: a two-object item-Use (an inventory item ON a target) fails with the
+    // same "no live object" outcome whether the ITEM or the world TARGET did not resolve,
+    // so it is ambiguous (mirrors IsUnreachableTargetRepeat). Pure: own emission history +
+    // perception; no game knowledge, no priority, no source-side target choice.
     private static string? MostRepeatedUnresolvedTargetName(
-        WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold, bool excludeCorpses)
+        WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold,
+        bool excludeCorpses, bool excludeItemGoals = false)
     {
         if (events is null) return null;
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -5847,6 +5868,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (ge.Utc < since) continue;
             var txt = ge.Text!;
             if (!txt.StartsWith(verb, StringComparison.Ordinal)) continue;
+            if (excludeItemGoals && EmissionHasPopulatedItem(txt)) continue;
             var ti = txt.IndexOf("target=", StringComparison.Ordinal);
             if (ti < 0) continue;
             var nm = System.Text.RegularExpressions.Regex.Match(
@@ -5866,6 +5888,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         return null;
     }
+
+    // True when a goal-emission text carries a populated `item=` field — i.e. a
+    // two-object goal (an inventory item ON a target). Emission shape is
+    // `<Kind> target=<sel> item=<sel> source=<src>`; an EMPTY item selector renders as
+    // the sentinel `<empty>` (Selector.ToString) — treated here as NOT populated, the
+    // same as a blank field. Pure string parse of the bot's own emitted text.
+    private static bool EmissionHasPopulatedItem(string txt)
+    {
+        var i = txt.IndexOf(" item=", StringComparison.Ordinal);
+        if (i < 0) return false;
+        int s = i + " item=".Length;
+        int src = txt.IndexOf(" source=", s, StringComparison.Ordinal);
+        int end = src >= 0 ? src : txt.Length;
+        var itemVal = (s < end ? txt.Substring(s, end - s) : string.Empty).Trim();
+        return itemVal.Length > 0 && !string.Equals(itemVal, "<empty>", StringComparison.Ordinal);
+    }
+
+    // True when `name` is the bot's OWN corpse name ("Corpse of <selfName>", ordinal
+    // case-insensitive). The bot's own corpse has a dedicated `## Corpse` retrieval cue,
+    // so the generic loop cues exempt it to avoid contradictory guidance. Pure
+    // self-identity string match; no game knowledge.
+    internal static bool IsOwnCorpseName(string? name, string? selfName)
+        => !string.IsNullOrWhiteSpace(name)
+           && !string.IsNullOrWhiteSpace(selfName)
+           && string.Equals(name, "Corpse of " + selfName, StringComparison.OrdinalIgnoreCase);
 
     // True when a visible object would bind the selector NAME under the SAME name
     // semantics SelectorResolver uses: exact (case-insensitive), exact after stripping
@@ -9887,6 +9934,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"NOT changing, or `{loopedAttackDisplay}` has died or you have travelled PAST it, re-`Attack`-ing " +
                 "makes no progress: `Attack` a DIFFERENT monster that IS visible in `## Nearest objects`, or pursue " +
                 $"a DIFFERENT objective, instead of re-`Attack`-ing `{loopedAttackDisplay}`.");
+        }
+
+        // ── ## Use loop (target not in view) — sibling of the Attack/Explore loops ──
+        // The bot re-emits `Use` toward a named object (vendor/NPC/door/container/corpse/
+        // item) that is no longer within the visible radius (it walked out of range), so the
+        // goal resolves to MISS, clears, and a fresh no-current-goal call re-emits the SAME
+        // Use. Surface it as an informational CUE keyed on the bot's OWN repeated emissions +
+        // perception — NOT a hard drop, so a close-in toward a target just out of view is
+        // never overridden; the LLM still decides. The bot's OWN corpse is exempt: its
+        // dedicated `## Corpse` cue already guides retrieval (Explore back + Use), so the
+        // generic "Use a different object" wording would contradict it. No game knowledge
+        // (the looped name is the bot's own emitted goal text, echoed back), no priority,
+        // no source-side target choice.
+        if (RepeatedUnresolvedUseTarget(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedUseWindow) is string loopedUseName
+            && !IsOwnCorpseName(loopedUseName, world.Self.Name)
+            && OneLine(loopedUseName) is string loopedUseDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Use loop (target not in view)");
+            sb.AppendLine(
+                $"- you have tried to `Use` `{loopedUseDisplay}` several times recently but NO object named " +
+                $"`{loopedUseDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING toward " +
+                $"`{loopedUseDisplay}` and closing in (your `landblock`/position is changing as you go), keep going " +
+                "— `Use` walks you to a target, and it will come into view. But if your position is NOT changing, or " +
+                $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
+                "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
+                $"re-`Use`-ing `{loopedUseDisplay}`.");
         }
 
         // ── ## Un-equipped gear (protected-tail equip cue) ──

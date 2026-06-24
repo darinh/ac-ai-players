@@ -2478,6 +2478,147 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Attack loop (target not in view)", prompt);
     }
 
+    private static EventStream UseEmissions(string name, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                // Real bare-Use emission shape: an empty item selector renders as `<empty>`.
+                Text = $"Use target=name=\"{name}\" item=<empty> source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_ReturnsNameForRepeatedNoVisibleMatch()
+    {
+        // 3 recent Use emissions toward a vendor/NPC name with NO matching visible object
+        // (the bot walked out of range of it) -> the looped target.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // some other object, NOT the name
+        var es = UseEmissions("Woodsman", 3, now);
+        Assert.Equal("Woodsman", LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_NullWhenNameMatchesVisibleObject()
+    {
+        // The named object IS visible -> in range; normal nav / picker handles it.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Woodsman", 5f));
+        var es = UseEmissions("Woodsman", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_NullWhenVisibleCorpseMatches_CorpsesAreValidUseTargets()
+    {
+        // Unlike Attack, a corpse IS a valid Use (loot) target, so a visible corpse named X
+        // binds the Use -> NOT a dead loop, no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var corpse = new VisibleObjectProjection { Guid = 0x800000C2u, Name = "Corpse of Bob", Distance = 5f, IsCorpse = true };
+        var world = BuildVisibleWorld(corpse);
+        var es = UseEmissions("Corpse of Bob", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Woodsman", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_IgnoresAttackEmissionsOfSameName()
+    {
+        // The detector keys on the USE verb only: repeated Attack emissions of the same name
+        // must not trigger the Use-loop cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("Woodsman", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseLoopCapsule_RendersForRepeatedUnresolvedUse()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Woodsman", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Use loop (target not in view)", prompt);
+        Assert.Contains("Woodsman", prompt);
+        Assert.Contains("Use` a DIFFERENT", prompt);
+        Assert.Contains("keep going", prompt); // balanced wording (allows still-approaching)
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseLoopCapsule_OmittedWhenNoLoop()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Woodsman", 1, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Use loop (target not in view)", prompt);
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_IgnoresTwoObjectItemUse()
+    {
+        // A two-object item-Use (an inventory item ON a target) is ambiguous (item-miss vs
+        // target-miss), so it is excluded from the Use-loop detector (mirrors
+        // IsUnreachableTargetRepeat). 3 such emissions -> no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Use target=name=\"Locked Door\" item=name=\"Brass Key\" source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedUseTarget_FiresForBareUseWithEmptyItemSentinel()
+    {
+        // A BARE Use (no item) renders the item field as the `<empty>` sentinel — it must
+        // NOT be treated as a two-object Use, so the loop cue still fires.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Use target=name=\"Woodsman\" item=<empty> source=llm:test",
+            });
+        Assert.Equal("Woodsman", LlmGoalPolicy.RepeatedUnresolvedUseTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Theory]
+    [InlineData("Corpse of Headless", "Headless", true)]
+    [InlineData("corpse of headless", "Headless", true)]
+    [InlineData("Corpse of Bob", "Headless", false)]
+    [InlineData("Headless", "Headless", false)]
+    [InlineData("Corpse of Headless", null, false)]
+    [InlineData(null, "Headless", false)]
+    public void IsOwnCorpseName_MatchesOnlyTheBotsOwnCorpse(string? name, string? selfName, bool expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.IsOwnCorpseName(name, selfName));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseLoopCapsule_SuppressedForOwnCorpse()
+    {
+        // The bot's OWN corpse ("Corpse of <self>") has the dedicated `## Corpse` retrieval
+        // cue, so the generic Use-loop cue must not fire for it (avoids contradictory advice).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Corpse of Headless", 3, now); // BuildVisibleWorld self.Name = "Headless"
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Use loop (target not in view)", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {
