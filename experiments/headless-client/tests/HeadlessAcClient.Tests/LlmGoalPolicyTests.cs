@@ -1468,6 +1468,127 @@ public class LlmGoalPolicyTests
             PickupGoalTo("Chest"), world, new EventStream()));
     }
 
+    // ---- TryResolveUseWorldObjectInItemField (Use{item=<visible vendor/NPC>, no target} -> Use{target}) ----
+
+    private static VisibleObjectProjection VendorVisible(uint guid, string name)
+        => new() { Guid = guid, Name = name, IsVendor = true, IsCreature = true, IsMonster = false, IsCorpse = false };
+
+    private static VisibleObjectProjection NpcVisible(uint guid, string name)
+        => new() { Guid = guid, Name = name, IsVendor = false, IsCreature = true, IsMonster = false, IsCorpse = false };
+
+    private static Goal UseItemGoal(string itemName)
+        => new() { Kind = GoalKind.Use, Target = new Selector(), Item = new Selector { Name = itemName } };
+
+    [Fact]
+    public void UseItemWorldObject_VisibleVendorMisfiledInItemField_ResolvesToGuid()
+    {
+        // The live gap: a model emits Use{item="Merchant", no target}; "Merchant" is a visible
+        // vendor, not an inventory item, so the self-Use MISSes. Move it to the target field.
+        var world = WorldWithVisible(VendorVisible(0x7A9B5001u, "Merchant"));
+        Assert.Equal(0x7A9B5001u,
+            LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Merchant"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_VisibleNpcMisfiledInItemField_ResolvesToGuid()
+    {
+        var world = WorldWithVisible(NpcVisible(0x7A9B5002u, "Scribe Renald the Younger"));
+        Assert.Equal(0x7A9B5002u,
+            LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Scribe Renald the Younger"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_RoleSuffixedItemName_ResolvesViaStrip()
+    {
+        // A model that copies the rendered `Name "role"` label into the item field still resolves.
+        var world = WorldWithVisible(VendorVisible(0x7A9B5003u, "Merchant"));
+        Assert.Equal(0x7A9B5003u,
+            LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Merchant \"Trader\""), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_OwnedInventoryItem_ReturnsNull()
+    {
+        // The item IS in inventory -> a legitimate self-Use (read/activate); the rewrite must NOT
+        // hijack it (even though a same-name vendor is also in view).
+        var world = WorldWithVisible(VendorVisible(0x7A9B5004u, "Letter From Home")) with
+        {
+            Inventory = new[]
+            {
+                new InventoryItemProjection { Guid = 0xDEFu, Name = "Letter From Home", Wcid = 1u },
+            },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Letter From Home"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_TwoObjectUse_NonEmptyTarget_ReturnsNull()
+    {
+        // Use{target=container, item=key} carries a real world target -> not the misfile shape.
+        var world = WorldWithVisible(VendorVisible(0x7A9B5005u, "Merchant"));
+        var twoObject = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Chest" },
+            Item = new Selector { Name = "Merchant" },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(twoObject, world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_NonUseGoal_ReturnsNull()
+    {
+        var world = WorldWithVisible(VendorVisible(0x7A9B5006u, "Merchant"));
+        var give = new Goal { Kind = GoalKind.Give, Target = new Selector(), Item = new Selector { Name = "Merchant" } };
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(give, world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_NoVisibleMatch_ReturnsNull()
+    {
+        var world = WorldWithVisible(VendorVisible(0x7A9B5007u, "Merchant"));
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Bookseller"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_AmbiguousTwoVendors_ReturnsNull()
+    {
+        var world = WorldWithVisible(
+            VendorVisible(0x7A9B5008u, "Merchant"),
+            VendorVisible(0x7A9B5009u, "Merchant"));
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Merchant"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_VisibleMonster_ReturnsNull()
+    {
+        // A monster is excluded (Attack path); the Use-misfile rewrite only targets vendors/NPCs.
+        var monster = new VisibleObjectProjection
+        { Guid = 0x80008064u, Name = "Drudge", IsMonster = true, IsCreature = true };
+        var world = WorldWithVisible(monster);
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Drudge"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_VisibleCorpse_ReturnsNull()
+    {
+        // A corpse is excluded (corpse-loot path handles it). A creature corpse carries BOTH
+        // IsCreature and IsCorpse in production, so set IsCreature here to actually exercise the
+        // !IsCorpse clause (not the IsVendor||IsCreature gate that would exclude it anyway).
+        var corpse = new VisibleObjectProjection
+        { Guid = 0x800000C1u, Name = "Corpse of Chicken", IsCreature = true, IsCorpse = true };
+        var world = WorldWithVisible(corpse);
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Corpse of Chicken"), world));
+    }
+
+    [Fact]
+    public void UseItemWorldObject_EmptyItem_ReturnsNull()
+    {
+        var world = WorldWithVisible(VendorVisible(0x7A9B500Au, "Merchant"));
+        var noItem = new Goal { Kind = GoalKind.Use, Target = new Selector(), Item = new Selector() };
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(noItem, world));
+    }
+
     // ---- TryResolvePickupVendorItemName (Pickup-of-a-vendor-panel-item -> Buy) ----
 
     private static WorldStateProjection WorldWithVendorOffers(

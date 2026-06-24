@@ -2009,6 +2009,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
     }
 
+    // Does NAME plausibly resolve to an item the bot OWNS (in its own inventory)? LENIENT
+    // (ANY exact / role-stripped / whole-word-subsequence match — not a unique match), used
+    // only to SUPPRESS the Use-item-world-object rewrite below: when the name could be an
+    // owned item, the Use is a legitimate self-Use (read/activate) the Motor dispatches, so
+    // the rewrite must not fire. Erring toward "matches" keeps a genuine self-Use from being
+    // hijacked. Mirrors SelectorResolver name semantics; own inventory only; no game knowledge.
+    private static bool InventoryResolvesName(IReadOnlyList<InventoryItemProjection> inventory, string name)
+    {
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        return inventory.Any(i => i.Name is not null
+            && (string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(i.Name, bare, StringComparison.OrdinalIgnoreCase)
+                || HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(i.Name, name)));
+    }
+
+    // The GUID of the unique visible vendor/NPC whose name resolves to NAME (exact /
+    // role-stripped / unique whole-word subsequence — the SAME SelectorResolver semantics the
+    // Motor's Use target resolves with). Monsters and corpses are excluded (they have their own
+    // Attack / corpse-loot paths). Returns null when 0 or >1 candidates match (an ambiguous
+    // partial stays unresolved so the LLM re-decides). Used to move a world object a model
+    // mis-filed into a Use goal's ITEM field back into the TARGET field. Pure name resolution
+    // over perception; no game knowledge, no autonomous target choice.
+    private static uint? ResolveUniqueVisibleUseTargetByName(
+        IReadOnlyList<VisibleObjectProjection> visible, string name)
+    {
+        var pool = visible.Where(v =>
+            (v.IsVendor || v.IsCreature) && !v.IsMonster && !v.IsCorpse && v.Name is not null).ToList();
+        if (pool.Count == 0) return null;
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        var exact = pool.Where(v =>
+            string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count == 1) return exact[0].Guid;
+        if (exact.Count > 1) return null;
+        var fuzzy = pool.Where(v =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name)).ToList();
+        return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
+    }
+
+    // Use{item=<world object>, no world target} -> the GUID of that visible vendor/NPC, so the
+    // misfiled name can be moved into the TARGET field. The self-Use shape Use{item=X, no
+    // target} is for activating an OWNED inventory item on yourself; a model sometimes mis-files
+    // a VISIBLE vendor/NPC into that item field with no target (expecting it to open/engage the
+    // object), but the Motor's self-Use only dispatches an in-bag item, so it resolves to MISS
+    // and the bot loops the wrong shape. Fire ONLY when the item-field name is NOT a plausible
+    // owned item (so a true self-Use is never hijacked) AND uniquely resolves to a visible
+    // vendor/NPC. The LLM chose WHICH object; the Motor only corrects the field. A two-object
+    // Use{target=container, item=key} carries a non-empty target and is excluded. No game knowledge.
+    internal static uint? TryResolveUseWorldObjectInItemField(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Use) return null;
+        if (goal.Target is { IsEmpty: false }) return null;
+        var itemName = goal.Item?.Name;
+        if (string.IsNullOrWhiteSpace(itemName)) return null;
+        if (world.Inventory is not null && InventoryResolvesName(world.Inventory, itemName)) return null;
+        return world.Visible is null ? null : ResolveUniqueVisibleUseTargetByName(world.Visible, itemName);
+    }
+
     // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
     // vendor-panel item rather than a takeable ground object, or null. A Pickup takes
     // only ground items, so a Pickup whose target is one of the open vendor's for-sale
@@ -3829,6 +3887,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = exploreVendorGuid },
+                Item = null,
+            };
+        }
+
+        // Use{item=<world object>, no target} -> Use{target=<that object>} (mechanical field
+        // correction, reduce-llm-call-volume). The self-Use shape Use{item=X, no target} is for
+        // activating an OWNED inventory item on yourself; a model sometimes mis-files a VISIBLE
+        // vendor/NPC into that item field with no target (expecting it to open/engage the object),
+        // but the Motor's self-Use only resolves an in-bag item, so the goal MISSes and the bot
+        // loops the wrong shape. When the item-field name is NOT a plausible owned item AND uniquely
+        // resolves to a visible vendor/NPC, move it into the TARGET field (the standard
+        // Use-a-world-object shape the Motor engages). The LLM chose WHICH object; the Motor only
+        // corrects the field (like the Pickup->Use / Wield->Pickup rewrites above; no autonomous
+        // target pick, no game knowledge — keyed on the inventory-vs-visible resolution of the
+        // bot's OWN named item).
+        if (TryResolveUseWorldObjectInItemField(goal, world) is uint useWorldObjGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] use-item-world-object -> target: item={goal.Item}" +
+                $" guid=0x{useWorldObjGuid:X8} — a visible world object was mis-filed into the Use" +
+                " item field; engaging it as the target (self-Use only acts on an in-bag item).");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = useWorldObjGuid },
                 Item = null,
             };
         }
