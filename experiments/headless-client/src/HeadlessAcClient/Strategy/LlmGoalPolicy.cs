@@ -2598,10 +2598,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Reduce-llm-call-volume (default ON; opt OUT via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=0/false/off).
         // When the bot is on a sustained UNTARGETED Explore (its last emitted goal was
         // `Explore{anywhere}` — pure Motor-owned travel with nothing to interact with),
-        // with NOTHING in view to engage (no attackable monster, no vendor, no un-talked
-        // NPC) and NO decision-worthy change since the last LLM look, re-deliberating just
+        // with NOTHING WINNABLE in view to engage (no attackable monster, OR only
+        // non-hostile beaten-kind monsters the Attack veto already rejects — re-asking
+        // re-picks the SAME vetoed Attack; no vendor; no un-talked NPC) and NO
+        // decision-worthy change since the last LLM look, re-deliberating just
         // reproduces the SAME untargeted Explore — so skip the redundant call and continue
-        // traveling. The freshness gates are a SUPERSET of the Talk-fixation skip's:
+        // traveling. The beaten-only arm reuses OnlyBeatenMonstersInView (the same
+        // lethal-beaten ledger predicate the stalemate egress uses): a winnable
+        // (not-beaten) monster OR an actively-hostile one in view makes it false, so the
+        // skip never hides a fresh XP target or a live threat (those re-wake the LLM). The freshness gates are a SUPERSET of the Talk-fixation skip's:
         //   - !hasNonPickerExternal: a fresh dialog / inventory change / zone change /
         //     rejection / damage BLOCKS the skip (the LLM sees it);
         //   - !pickerArrived && !pickerStartWake: the autonomous picker discovering or
@@ -2619,7 +2624,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (SkipEmptyExploreCallEnabled
             && SkipGateFreshnessAllows(hasNonPickerExternal, pickerArrived, pickerStartWake, events)
             && _emptyExploreSkips < MaxEmptyExploreSkips
-            && !AnyAttackableMonsterInView(world)
+            && (!AnyAttackableMonsterInView(world) || OnlyBeatenMonstersInView(world))
             && !world.Visible.Any(v => v.IsVendor)
             && CountUntalkedNpcsInView(world, _talkedNpcGuids, _talkedNpcNames, excludeVendors: true) == 0
             && LastEmitWasUntargetedExplore(events))
@@ -2627,9 +2632,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _emptyExploreSkips++;
             _summarySkips++;
             Console.WriteLine(
-                "[llm-skip] sustained empty-space Explore travel: nothing in view to engage and no new event " +
-                $"since the last look — skipping the redundant LLM call and continuing to Explore " +
-                $"({_emptyExploreSkips}/{MaxEmptyExploreSkips}).");
+                "[llm-skip] sustained Explore travel: nothing winnable in view to engage (no monster, or " +
+                "only non-hostile beaten kinds) and no new event since the last look — skipping the redundant " +
+                $"LLM call and continuing to Explore ({_emptyExploreSkips}/{MaxEmptyExploreSkips}).");
             return MakeEgressExploreGoal(
                 nowUtc, "skip:empty-explore",
                 "continuing an untargeted Explore through empty space without a redundant LLM call");
