@@ -3001,7 +3001,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
-            world.Self.AvailableExperience, RecentGoalFailureCount(events)));
+            world.Self.AvailableExperience, RecentGoalFailureCount(events),
+            FormatCombatAttributes(world.Self.Attributes)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3046,13 +3047,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static int RecentGoalFailureCount(EventStream? events)
         => events?.RecentGoalFailures().Count ?? 0;
 
+    // The bot's key COMBAT attribute base values (endurance -> max HP / survival, coordination
+    // -> accuracy, strength -> damage) for [run-summary], e.g. "end:13 coord:10 str:47". Surfaces
+    // the allocation STATE behind hppeak= / swings= (the EFFECTS): e.g. a rising endurance whose
+    // max-HP gain is masked by death-vitae, or a low coordination capping accuracy, are visible
+    // here when the effect fields alone are ambiguous. Shown only when at least one of the three
+    // is known. Pure read of the bot's OWN live attribute projection; no behavior, no game knowledge.
+    internal static string? FormatCombatAttributes(IReadOnlyList<SelfAttributeProjection>? attrs)
+    {
+        if (attrs is null || attrs.Count == 0) return null;
+        uint? Get(string n) =>
+            attrs.FirstOrDefault(a => string.Equals(a.Name, n, StringComparison.OrdinalIgnoreCase))?.Base;
+        var parts = new List<string>(3);
+        if (Get("endurance") is uint e) parts.Add($"end:{e}");
+        if (Get("coordination") is uint c) parts.Add($"coord:{c}");
+        if (Get("strength") is uint s) parts.Add($"str:{s}");
+        return parts.Count > 0 ? string.Join(" ", parts) : null;
+    }
+
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
-        int recentFails = 0)
+        int recentFails = 0, string? combatAttrs = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3138,6 +3157,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // knowledge.
         if (maxHpProxy is int mhp && mhp > 0)
             line += $" hppeak={mhp}";
+        // Combat-attribute STATE behind the survival/accuracy EFFECT fields (hppeak=/swings=):
+        // endurance/coordination/strength base values, shown when known. Lets a run self-report
+        // whether the bot's XP-allocation is actually moving the right stat (e.g. endurance
+        // rising while hppeak stays low = death-vitae masking the gain). Pure observability.
+        if (!string.IsNullOrEmpty(combatAttrs))
+            line += $" attrs=[{combatAttrs}]";
         // Append armed=no when the bot has NO combat-capable wielded weapon
         // (IsCombatCapable over the bot's OWN wielded inventory returns false).
         // Shown only in that state, mirroring the deaths= field. Pure
