@@ -978,6 +978,53 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FormatCombatAttributes_FormatsKnownCombatAttributes()
+    {
+        var attrs = new[]
+        {
+            new SelfAttributeProjection { Name = "endurance", Base = 13u },
+            new SelfAttributeProjection { Name = "coordination", Base = 10u },
+            new SelfAttributeProjection { Name = "strength", Base = 47u },
+            new SelfAttributeProjection { Name = "focus", Base = 10u }, // not a surfaced combat lever
+        };
+        Assert.Equal("end:13 coord:10 str:47", LlmGoalPolicy.FormatCombatAttributes(attrs));
+    }
+
+    [Fact]
+    public void FormatCombatAttributes_NullOrEmpty_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.FormatCombatAttributes(null));
+        Assert.Null(LlmGoalPolicy.FormatCombatAttributes(System.Array.Empty<SelfAttributeProjection>()));
+    }
+
+    [Fact]
+    public void FormatCombatAttributes_PartialWhenSomeMissing_NullWhenNonePresent()
+    {
+        Assert.Equal("end:13",
+            LlmGoalPolicy.FormatCombatAttributes(new[] { new SelfAttributeProjection { Name = "endurance", Base = 13u } }));
+        // None of endurance/coordination/strength present -> null (focus is not surfaced).
+        Assert.Null(
+            LlmGoalPolicy.FormatCombatAttributes(new[] { new SelfAttributeProjection { Name = "focus", Base = 10u } }));
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_Attrs_ShownWhenKnown()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 14, totalXp: 277031L, model: "m",
+            combatAttrs: "end:13 coord:10 str:47");
+        Assert.Contains("attrs=[end:13 coord:10 str:47]", with);
+
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 14, totalXp: 277031L, model: "m",
+            combatAttrs: null);
+        Assert.DoesNotContain("attrs=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_MaxHp_ShownOnlyWhenKnownAndPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
