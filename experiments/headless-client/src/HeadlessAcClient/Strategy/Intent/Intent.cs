@@ -155,13 +155,33 @@ internal sealed class IntentStack
     private readonly List<Intent> _frames = new();
     private readonly List<Intent> _history = new();
     private readonly int _maxDepth;
+    private readonly bool _evictNonTerminalOnOverflow;
     private long _revision;
 
-    public IntentStack(int maxDepth = DefaultMaxDepth)
+    public IntentStack(int maxDepth = DefaultMaxDepth, bool evictNonTerminalOnOverflow = false)
     {
         if (maxDepth < 2) throw new ArgumentOutOfRangeException(nameof(maxDepth), "must be >= 2 (root + at least one nested)");
         _maxDepth = maxDepth;
+        _evictNonTerminalOnOverflow = evictNonTerminalOnOverflow;
     }
+
+    /// <summary>
+    /// When true, a push onto a FULL stack also reclaims buried deadline-elapsed and
+    /// (last-resort) oldest non-root frames, not just terminal ones, so a saturated
+    /// stack cannot permanently refuse a new top-level intent. See IntentStackReclaim.
+    /// Default false preserves the reclaim-terminal-then-refuse behavior.
+    /// </summary>
+    public bool EvictNonTerminalOnOverflow => _evictNonTerminalOnOverflow;
+
+    /// <summary>
+    /// Resolve the overflow-eviction flag from an env value. Default ON (the deployed
+    /// bot opts in); opt OUT with "0"/"false"/"off". Mirrors the project's other
+    /// default-ON env toggles.
+    /// </summary>
+    internal static bool ResolveEvictOnOverflow(string? envValue) =>
+        !(string.Equals(envValue, "0", StringComparison.Ordinal)
+          || string.Equals(envValue, "false", StringComparison.OrdinalIgnoreCase)
+          || string.Equals(envValue, "off", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Increments on every mutation. Surfaced to the LLM so stale responses can be detected.</summary>
     public long Revision => _revision;
@@ -188,13 +208,14 @@ internal sealed class IntentStack
     /// "uncaptured" instance from BuildBlank. Refuses on overflow
     /// (and if expectedRevision is supplied and doesn't match).
     /// </summary>
-    public StackOpResult TryPush(Intent intent, long? expectedRevision = null)
+    public StackOpResult TryPush(Intent intent, long? expectedRevision = null, DateTime? utcNow = null)
     {
         if (expectedRevision is long er && er != _revision) return StackOpResult.RefusedRevision;
-        // If the stack is full, first reclaim any buried terminal frames so a
-        // pile-up of FINISHED intents cannot permanently block a new push (for
-        // example compiling a fresh quest). See ReapTerminalFrames.
-        if (_frames.Count >= _maxDepth) ReapTerminalFrames();
+        // If the stack is full, reclaim room before refusing: buried terminal frames
+        // always, plus — when overflow eviction is enabled — buried deadline-elapsed
+        // and (last-resort) oldest non-root frames, so a saturated stack cannot
+        // permanently block a new top-level intent. See IntentStackReclaim / ReclaimForPush.
+        if (_frames.Count >= _maxDepth) ReclaimForPush(utcNow ?? DateTime.UtcNow);
         if (_frames.Count >= _maxDepth) return StackOpResult.RefusedOverflow;
 
         _frames.Add(intent);
@@ -203,20 +224,52 @@ internal sealed class IntentStack
     }
 
     /// <summary>
+    /// Reclaim room on a full stack via IntentStackReclaim. Terminal frames are
+    /// dropped silently (as ReapTerminalFrames always has); a NON-terminal frame
+    /// evicted to make room is archived to History so it stays visible and the
+    /// caller can re-place it. Bumps the revision only when the frame set changes.
+    /// </summary>
+    private void ReclaimForPush(DateTime utcNow)
+    {
+        var views = new IntentStackReclaim.FrameView[_frames.Count];
+        for (int i = 0; i < _frames.Count; i++)
+            views[i] = new IntentStackReclaim.FrameView(_frames[i].Status, _frames[i].DeadlineUtc);
+
+        var keep = IntentStackReclaim.SurvivorsForPush(views, _maxDepth, utcNow, _evictNonTerminalOnOverflow);
+        if (keep.Count == _frames.Count) return; // nothing reclaimed
+
+        var keepSet = new HashSet<int>(keep);
+        for (int i = 0; i < _frames.Count; i++)
+        {
+            if (keepSet.Contains(i)) continue;
+            var dropped = _frames[i];
+            if (dropped.Status is IntentLifecycle.Completed or IntentLifecycle.Expired) continue;
+            _history.Insert(0, dropped with
+            {
+                Status = IntentLifecycle.Expired,
+                LastFailure = "evicted to admit a new intent (stack at capacity)",
+            });
+            if (_history.Count > 32) _history.RemoveAt(_history.Count - 1);
+        }
+
+        var kept = new List<Intent>(keep.Count);
+        foreach (var idx in keep) kept.Add(_frames[idx]);
+        _frames.Clear();
+        _frames.AddRange(kept);
+        _revision++;
+    }
+
+    /// <summary>
     /// Reclaim buried terminal frames. Only the TOP auto-pops on completion
     /// (<see cref="CheckTopForCompletion"/>), and a Completed/Expired ROOT is
-    /// marked in place, so a finished intent that ends up BELOW a newer frame is
-    /// never reclaimed. Over a long session those accumulate until the stack
-    /// reaches <see cref="MaxDepth"/> and EVERY subsequent push is
-    /// <see cref="StackOpResult.RefusedOverflow"/> — which blocks the LLM from
-    /// compiling a new objective (live-observed: a sustained grind saturated the
-    /// stack at depth 8, then 7+ consecutive overflow-rejected pushes). Drop
-    /// every Completed/Expired frame; <see cref="IntentLifecycle.Blocked"/>
-    /// frames are deliberate durable markers and are KEPT, as is any Active
-    /// frame. The stack is NEVER emptied: if every frame is terminal the newest
-    /// is retained so a later push/replace can supersede it (this is the only
-    /// case that removes the root, and only because it too is finished). Pure
-    /// mechanical stack hygiene — no game knowledge. Returns the count removed.
+    /// marked in place, so a terminal frame below a newer frame is never reclaimed
+    /// by the per-tick path and can accumulate up to <see cref="MaxDepth"/>. Drop
+    /// every Completed/Expired frame; <see cref="IntentLifecycle.Blocked"/> frames
+    /// are durable markers and are KEPT, as is any Active frame. The stack is NEVER
+    /// emptied: if every frame is terminal the newest is retained so a later
+    /// push/replace can supersede it (the only case that removes the root, and only
+    /// because it too is terminal). Pure mechanical stack hygiene — no game
+    /// knowledge. Returns the count removed.
     /// </summary>
     public int ReapTerminalFrames()
     {

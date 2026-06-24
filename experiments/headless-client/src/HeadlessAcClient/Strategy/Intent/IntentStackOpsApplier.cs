@@ -126,7 +126,7 @@ internal static class IntentStackOpsApplier
         var maxDepth = stack.MaxDepth;
         var mirror = new List<MirrorFrame>(stack.Frames.Count + ops.Count);
         foreach (var f in stack.Frames)
-            mirror.Add(new MirrorFrame(SemanticKey(f.Kind, f.TargetName), f.Status));
+            mirror.Add(new MirrorFrame(SemanticKey(f.Kind, f.TargetName), f.Status, f.DeadlineUtc));
         var suppressed = new bool[ops.Count];
 
         for (int i = 0; i < ops.Count; i++)
@@ -149,34 +149,41 @@ internal static class IntentStackOpsApplier
                     // (not just the top): re-pushing a commitment already on
                     // the stack is redundant and would otherwise stack a
                     // duplicate. A Blocked/Completed/Expired frame does not
-                    // suppress, so a legitimate retry is still allowed.
+                    // suppress, so a legitimate retry is still allowed. A
+                    // deadline-elapsed Active frame DOES still suppress: it is
+                    // reclaimed by the overflow policy on the next push of a
+                    // DIFFERENT key when full, so allowing a same-key re-push
+                    // through here would merely create a duplicate (the reclaim
+                    // cannot be guaranteed to remove this exact frame).
                     if (mirror.Any(m => m.Status == IntentLifecycle.Active && string.Equals(m.Key, pushKey, StringComparison.Ordinal)))
                     {
                         // Redundant with a live Active intent — idempotent no-op.
                         suppressed[i] = true;
                         break;
                     }
-                    // Mirror IntentStack.TryPush: when the stack is full, reclaim
-                    // buried terminal frames (Completed/Expired) BEFORE refusing,
-                    // so a pile-up of finished intents can't permanently block a
-                    // new push. Kept in lockstep with IntentStack.ReapTerminalFrames
-                    // (Blocked is durable and kept; never empty — keep the newest
-                    // when all are terminal) so the dry-run matches the real apply.
+                    // Mirror IntentStack.ReclaimForPush: when the stack is full,
+                    // reclaim buried frames BEFORE refusing so a pile-up can't
+                    // permanently block a new push. Delegates to the SAME pure
+                    // policy the real TryPush uses (IntentStackReclaim), so the
+                    // dry-run and the real apply always agree on the survivor set.
                     if (mirror.Count >= maxDepth)
                     {
-                        var kept = mirror
-                            .Where(m => m.Status is not (IntentLifecycle.Completed or IntentLifecycle.Expired))
-                            .ToList();
-                        if (kept.Count == 0) kept.Add(mirror[^1]);
-                        if (kept.Count < mirror.Count)
+                        var views = new IntentStackReclaim.FrameView[mirror.Count];
+                        for (int m = 0; m < mirror.Count; m++)
+                            views[m] = new IntentStackReclaim.FrameView(mirror[m].Status, mirror[m].DeadlineUtc);
+                        var survivors = IntentStackReclaim.SurvivorsForPush(
+                            views, maxDepth, utcNow, stack.EvictNonTerminalOnOverflow);
+                        if (survivors.Count < mirror.Count)
                         {
+                            var rebuilt = new List<MirrorFrame>(survivors.Count);
+                            foreach (var idx in survivors) rebuilt.Add(mirror[idx]);
                             mirror.Clear();
-                            mirror.AddRange(kept);
+                            mirror.AddRange(rebuilt);
                         }
                     }
                     if (mirror.Count >= maxDepth)
                         return Reject(BatchApplyResult.RejectedOverflow, $"op[{i}] push: would exceed max depth {maxDepth}");
-                    mirror.Add(new MirrorFrame(pushKey, IntentLifecycle.Active));
+                    mirror.Add(new MirrorFrame(pushKey, IntentLifecycle.Active, DeadlineFor(op.Intent!, utcNow)));
                     break;
 
                 case IntentStackOpKind.PopTop:
@@ -194,7 +201,7 @@ internal static class IntentStackOpsApplier
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing intent");
                     if (op.Intent.Completion is null)
                         return Reject(BatchApplyResult.RejectedInvalid, $"op[{i}] replace_top: missing completion predicate");
-                    mirror[^1] = new MirrorFrame(SemanticKey(op.Intent.Kind, op.Intent.TargetName), IntentLifecycle.Active);
+                    mirror[^1] = new MirrorFrame(SemanticKey(op.Intent.Kind, op.Intent.TargetName), IntentLifecycle.Active, DeadlineFor(op.Intent, utcNow));
                     break;
 
                 case IntentStackOpKind.MarkTopBlocked:
@@ -235,7 +242,7 @@ internal static class IntentStackOpsApplier
                     var id = ResolveUniqueId(op.Intent!.Id, liveIds, allocator);
                     liveIds.Add(id);
                     var intent = BuildIntent(op.Intent!, id, world, events, utcNow);
-                    var r = stack.TryPush(intent);
+                    var r = stack.TryPush(intent, utcNow: utcNow);
                     log.Add($"push id={intent.Id} kind={intent.Kind} reason=\"{op.Reason}\" -> {r}");
                     break;
                 }
@@ -280,6 +287,14 @@ internal static class IntentStackOpsApplier
             new(result, reason, Array.Empty<string>());
     }
 
+    /// <summary>
+    /// Deadline for a pushed/replaced intent: utcNow + DeadlineSeconds when a
+    /// positive value is supplied, else null (no deadline). Single source of truth
+    /// so the dry-run mirror and the real BuildIntent compute identical deadlines.
+    /// </summary>
+    private static DateTime? DeadlineFor(IntentSpec spec, DateTime utcNow)
+        => spec.DeadlineSeconds is int s && s > 0 ? utcNow.AddSeconds(s) : null;
+
     private static Intent BuildIntent(
         IntentSpec spec,
         string id,
@@ -288,9 +303,7 @@ internal static class IntentStackOpsApplier
         DateTime utcNow)
     {
         var baseline = IntentBaseline.Capture(world, events, utcNow);
-        DateTime? deadline = spec.DeadlineSeconds is int s && s > 0
-            ? utcNow.AddSeconds(s)
-            : null;
+        DateTime? deadline = DeadlineFor(spec, utcNow);
         return new Intent
         {
             Id = id,
@@ -337,7 +350,7 @@ internal static class IntentStackOpsApplier
         + (target ?? string.Empty).Trim().ToLowerInvariant();
 
     /// <summary>Logical batch-validation mirror entry: a frame's semantic key and whether it is still Active.</summary>
-    private readonly record struct MirrorFrame(string Key, IntentLifecycle Status);
+    private readonly record struct MirrorFrame(string Key, IntentLifecycle Status, DateTime? DeadlineUtc);
 
     /// <summary>
     /// Build the human-readable "## Intent stack" block surfaced to

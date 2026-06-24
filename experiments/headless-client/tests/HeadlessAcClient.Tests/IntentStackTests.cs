@@ -150,6 +150,57 @@ public class IntentStackTests
         Assert.Equal(rev, s.Revision);
     }
 
+    // ---- overflow eviction (evictNonTerminalOnOverflow: true) ----
+
+    [Fact]
+    public void TryPush_EvictOn_AllActiveFull_EvictsOldestNonRoot_AdmitsPush()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack(maxDepth: 3, evictNonTerminalOnOverflow: true);
+        s.TryPush(Framed("i-001", "root",  IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-002", "sub-1", IntentLifecycle.Active, b)); // oldest non-root
+        s.TryPush(Framed("i-003", "sub-2", IntentLifecycle.Active, b));
+
+        Assert.Equal(StackOpResult.Ok, s.TryPush(Framed("i-004", "new-top", IntentLifecycle.Active, b)));
+
+        Assert.Equal(3, s.Depth);
+        Assert.Equal("root",    s.Root!.Kind);   // root preserved
+        Assert.Equal("new-top", s.Top!.Kind);    // new intent admitted
+        Assert.Equal(new[] { "root", "sub-2", "new-top" }, s.Frames.Select(f => f.Kind));
+        // the evicted non-terminal frame is archived (visible), not silently lost
+        Assert.Contains(s.History, h => h.Kind == "sub-1");
+    }
+
+    [Fact]
+    public void TryPush_EvictOn_BuriedDeadlineElapsed_EvictedBeforeOldest()
+    {
+        var b = BuildBaseline();
+        var now = new DateTime(2026, 6, 24, 0, 0, 0, DateTimeKind.Utc);
+        var s = new IntentStack(maxDepth: 3, evictNonTerminalOnOverflow: true);
+        s.TryPush(Framed("i-001", "root",    IntentLifecycle.Active, b), utcNow: now);
+        s.TryPush(Framed("i-002", "expired", IntentLifecycle.Active, b) with { DeadlineUtc = now.AddSeconds(-1) }, utcNow: now);
+        s.TryPush(Framed("i-003", "live",    IntentLifecycle.Active, b), utcNow: now);
+
+        Assert.Equal(StackOpResult.Ok, s.TryPush(Framed("i-004", "new-top", IntentLifecycle.Active, b), utcNow: now));
+
+        // The buried deadline-elapsed frame is dropped; the no-deadline sub survives.
+        Assert.Equal(new[] { "root", "live", "new-top" }, s.Frames.Select(f => f.Kind));
+        Assert.DoesNotContain("expired", s.Frames.Select(f => f.Kind));
+    }
+
+    [Fact]
+    public void TryPush_EvictOff_Default_StillRefusesOverflow()
+    {
+        var b = BuildBaseline();
+        var s = new IntentStack(maxDepth: 3); // default: eviction OFF
+        s.TryPush(Framed("i-001", "a", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-002", "b", IntentLifecycle.Active, b));
+        s.TryPush(Framed("i-003", "c", IntentLifecycle.Active, b));
+
+        Assert.Equal(StackOpResult.RefusedOverflow, s.TryPush(Framed("i-004", "d", IntentLifecycle.Active, b)));
+        Assert.Equal(3, s.Depth);
+    }
+
     [Fact]
     public void PopTop_NeverPopsRoot()
     {
