@@ -2197,6 +2197,14 @@ internal sealed class HandshakeDriver : IDisposable
                             {
                                 bool seededLvl = pdesc.Level is int pdLvl &&
                                     worldState.SeedSelfPropertyInt(25u, pdLvl);
+                                // CoinValue (PropertyInt 20) is in the same int32 login
+                                // bundle as Level; seed it so the bot perceives its coin
+                                // from login. Without this, CoinValue stays null until the
+                                // first in-session coin CHANGE (a discrete update), so a
+                                // funded character would read "no coin" at run start and
+                                // the affordability marker would not render.
+                                bool seededCoin = pdesc.CoinValue is int pdCoin &&
+                                    worldState.SeedSelfPropertyInt(20u, pdCoin);
                                 bool seededTot = pdesc.TotalExperience is long pdTot &&
                                     worldState.SeedSelfPropertyInt64(
                                         PrivateUpdatePropertyInt64Message.TotalExperienceId, pdTot);
@@ -2220,6 +2228,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 Console.WriteLine(
                                     $"[playerdesc] login bundle: level={pdesc.Level?.ToString() ?? "?"}" +
                                     $"{(seededLvl ? "" : "(skip)")} " +
+                                    $"coin={pdesc.CoinValue?.ToString() ?? "?"}" +
+                                    $"{(seededCoin ? "" : "(skip)")} " +
                                     $"totalXp={pdesc.TotalExperience?.ToString() ?? "?"}" +
                                     $"{(seededTot ? "" : "(skip)")} " +
                                     $"unspentXp={pdesc.AvailableExperience?.ToString() ?? "?"}" +

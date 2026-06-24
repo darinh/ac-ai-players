@@ -528,17 +528,19 @@ internal sealed record EvasionDefenderNotificationPayload(string AttackerName)
 
 /// <summary>
 /// Partial decode of the PlayerDescription (0x0013) login bundle.
-/// Extracts the initial Level (PropertyInt 25), experience totals
-/// (PropertyInt64 TotalExperience=1, AvailableExperience=2), and the
-/// character sheet's attribute ranks (<see cref="PdAttribute"/>) and
-/// skills (<see cref="PdSkill"/>). The later spell/enchantment/option/
-/// inventory sections are not parsed. Any field is null when its
-/// property/section is absent (or the bundle was truncated before it).
+/// Extracts the initial Level (PropertyInt 25), CoinValue (PropertyInt 20, the
+/// coin amount), experience totals (PropertyInt64 TotalExperience=1,
+/// AvailableExperience=2), and the character sheet's attribute ranks
+/// (<see cref="PdAttribute"/>) and skills (<see cref="PdSkill"/>). The later
+/// spell/enchantment/option/inventory sections are not parsed. Any field is
+/// null when its property/section is absent (or the bundle was truncated
+/// before it).
 /// </summary>
 internal sealed record PlayerDescriptionPayload(
     int? Level,
     long? TotalExperience,
     long? AvailableExperience,
+    int? CoinValue = null,
     IReadOnlyList<PdAttribute>? Attributes = null,
     IReadOnlyList<PdSkill>? Skills = null)
 {
@@ -546,9 +548,10 @@ internal sealed record PlayerDescriptionPayload(
     {
         var attrPart = Attributes is null ? "" : $" attrs={Attributes.Count}";
         var skillPart = Skills is null ? "" : $" skills={Skills.Count}";
+        var coinPart = CoinValue is null ? "" : $" coin={CoinValue}";
         return $"PlayerDescription(level={Level?.ToString() ?? "?"} " +
                $"totalXp={TotalExperience?.ToString() ?? "?"} " +
-               $"unspentXp={AvailableExperience?.ToString() ?? "?"}{attrPart}{skillPart})";
+               $"unspentXp={AvailableExperience?.ToString() ?? "?"}{coinPart}{attrPart}{skillPart})";
     }
 }
 
@@ -891,6 +894,7 @@ internal static class GameEventPayloadDecoder
     private const uint DescFlagPropertyIid    = 0x0040;
     private const uint DescFlagPropertyInt64  = 0x0080;
     private const uint LevelPropertyIntId = 25;
+    private const uint CoinValuePropertyIntId = 20;
     private const uint TotalExperienceInt64Id = 1;
     private const uint AvailableExperienceInt64Id = 2;
 
@@ -925,13 +929,14 @@ internal static class GameEventPayloadDecoder
     private static PlayerDescriptionPayload DecodePlayerDescription(ReadOnlySpan<byte> body)
     {
         int? level = null;
+        int? coin = null;
         long? totalXp = null;
         long? availXp = null;
         List<PdAttribute>? attributes = null;
         List<PdSkill>? skills = null;
 
         PlayerDescriptionPayload Result() =>
-            new(level, totalXp, availXp, attributes, skills);
+            new(level, totalXp, availXp, coin, attributes, skills);
 
         // u32 propertyFlags + u32 weenieType
         if (body.Length < 8)
@@ -949,7 +954,7 @@ internal static class GameEventPayloadDecoder
         // attrs/skills null, so a corrupt count can never desync the cursor
         // and make us decode garbage as attributes/skills.
         if ((flags & DescFlagPropertyInt32) != 0 &&
-            !TryReadInt32Section(body, ref cursor, ref level))
+            !TryReadInt32Section(body, ref cursor, ref level, ref coin))
             return Result();
         if ((flags & DescFlagPropertyInt64) != 0 &&
             !TryReadInt64Section(body, ref cursor, ref totalXp, ref availXp))
@@ -994,8 +999,10 @@ internal static class GameEventPayloadDecoder
         return Result();
     }
 
-    // Reads the PropertyInt32 PackableHashTable, capturing Level (id 25).
-    private static bool TryReadInt32Section(ReadOnlySpan<byte> body, ref int cursor, ref int? level)
+    // Reads the PropertyInt32 PackableHashTable, capturing Level (id 25) and
+    // CoinValue (id 20). Other ids are skipped.
+    private static bool TryReadInt32Section(
+        ReadOnlySpan<byte> body, ref int cursor, ref int? level, ref int? coin)
     {
         if (cursor + 4 > body.Length)
         {
@@ -1016,6 +1023,8 @@ internal static class GameEventPayloadDecoder
             cursor += 8;
             if (key == LevelPropertyIntId)
                 level = val;
+            else if (key == CoinValuePropertyIntId)
+                coin = val;
         }
         return true;
     }
