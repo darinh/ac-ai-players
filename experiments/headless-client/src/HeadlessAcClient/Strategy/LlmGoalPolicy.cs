@@ -10542,7 +10542,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
         var objective = OneLine(c.Description);
         if (objective is not null)
-            entry.AppendLine($"      objective: {objective}");
+            // A stage-3 (DoneOrPendingRepeat) contract's objective is ALREADY
+            // satisfied — mark the objective line complete immediately so the LLM
+            // does not pursue it as an active task. Mechanical: keys on the
+            // c.Stage==3u wire value; the objective text itself is server data
+            // rendered as-is. Kept short to limit its char cost against the
+            // capsule budget. (The separate DONE note below still fires once the
+            // bot has over-pursued the turn-in/locate NPC; this qualifier is the
+            // earlier, no-pursuit-needed signal so a satisfied objective is never
+            // chased even once.)
+            entry.AppendLine(c.Stage == 3u
+                ? $"      objective: {objective}  (stage 3 done; objective already satisfied, do not pursue it)"
+                : $"      objective: {objective}");
         var progress = OneLine(c.DescriptionProgress);
         if (progress is not null)
             entry.AppendLine($"      in progress: {progress}");

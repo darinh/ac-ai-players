@@ -637,4 +637,81 @@ public class ContractLocationTests
         var es = WithTalkGoals("Broker", 2, t1.AddMinutes(1)); // 2 Talks AFTER full settle
         Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(WorldWithContracts(a, b), es, "Broker"));
     }
+
+    // ── stage-3 objective is rendered ALREADY-SATISFIED immediately ───────
+
+    [Fact]
+    public void Capsule_Stage3Objective_MarkedAlreadySatisfied_WithoutPriorPursuit()
+    {
+        // A stage-3 (DoneOrPendingRepeat) contract's objective is complete the
+        // moment it reaches stage 3 — the qualifier must appear even in a fresh
+        // world with NO prior turn-in/locate pursuit (the separate DONE note is
+        // gated on over-pursuit; this one is not).
+        var contract = new ContractProjection
+        {
+            ContractId = 800u, Stage = 3u, Name = "Locate", Description = "Locate the contact in the tavern.",
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWith(contract), new EventStream(), null),
+            "## Contracts");
+
+        Assert.Contains("objective: Locate the contact in the tavern.", cap);
+        Assert.Contains("objective already satisfied", cap);
+        Assert.Contains("do not pursue it", cap);
+    }
+
+    [Fact]
+    public void Capsule_InProgressObjective_NotMarkedSatisfied()
+    {
+        // A non-stage-3 (still active) contract's objective must NOT carry the
+        // satisfied qualifier — the bot should still pursue it.
+        var contract = new ContractProjection
+        {
+            ContractId = 801u, Stage = 2u, Name = "Locate", Description = "Locate the contact in the tavern.",
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWith(contract), new EventStream(), null),
+            "## Contracts");
+
+        Assert.Contains("objective: Locate the contact in the tavern.", cap);
+        Assert.DoesNotContain("already satisfied", cap);
+    }
+
+    [Fact]
+    public void Capsule_MixedBatch_ActiveRowSurvivesAlongsideStage3Markers()
+    {
+        // Budget guard: a couple of stage-3 rows (each gaining the satisfied
+        // qualifier) followed by a still-active row — the active objective must
+        // still render (the short marker must not crowd it out of the capsule's
+        // char budget for a small everyday batch).
+        var done1 = new ContractProjection
+        { ContractId = 810u, Stage = 3u, Name = "Locate", Description = "Locate the contact in the tavern." };
+        var done2 = new ContractProjection
+        { ContractId = 811u, Stage = 3u, Name = "Patrol", Description = "Patrol the eastern road for raiders." };
+        var active = new ContractProjection
+        { ContractId = 812u, Stage = 2u, Name = "Slay", Description = "Slay six marauders in the lowlands." };
+
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = SelfCell,
+                PositionX = SelfPos.X, PositionY = SelfPos.Y, PositionZ = SelfPos.Z, HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = Array.Empty<VisibleObjectProjection>(),
+            Contracts = new[] { done1, done2, active },
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null),
+            "## Contracts");
+
+        // Both done rows carry the qualifier; the active row survives and is unmarked.
+        Assert.Contains("objective: Locate the contact in the tavern.  (stage 3 done", cap);
+        Assert.Contains("objective: Slay six marauders in the lowlands.", cap);
+        Assert.DoesNotContain("Slay six marauders in the lowlands.  (stage 3 done", cap);
+    }
 }
