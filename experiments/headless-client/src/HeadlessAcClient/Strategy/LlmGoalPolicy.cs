@@ -1967,6 +1967,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             || (SkillRaise.TryResolveSkillId(ts.Name, out var trainedId) && trainedId == raiseSkillId));
     }
 
+    // True iff this is a Raise* goal (attribute/skill/vital) with NO SPENDABLE unspent
+    // XP. Unknown balance is treated as NOT droppable (don't assume futile before the
+    // projection has loaded it). "Spendable" uses the SAME meaningful-floor predicate
+    // (ShouldSurfaceUnspentXp) that gates the SPEND XP prompt cues, so the drop is
+    // consistent with the prompt: below the floor the cues are suppressed AND a raise is
+    // dropped (at the default floor of 0 this fires only at unspent<=0). Own self-XP wire
+    // state + own goal kind; no game knowledge.
+    internal static bool IsRaiseGoalWithNoSpendableXp(Goal goal, WorldStateProjection world, long minMeaningful)
+        => goal.Kind is GoalKind.RaiseAttribute or GoalKind.RaiseSkill or GoalKind.RaiseVital
+           && world.Self.AvailableExperience is long unspent
+           && !ShouldSurfaceUnspentXp(unspent, minMeaningful);
+
     // Pure "hunt tapped out" perception signal. Returns a raw self-progress
     // fact string to surface to the LLM when the bot, combat-ready, has
     // dwelled in its current landblock past the threshold WITHOUT gaining a
@@ -3594,6 +3606,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-override: RaiseSkill of a skill not in trained skills");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "untrained-raiseskill");
+        }
+
+        // Unactuatable/below-floor Raise drop (reduce-llm-call-volume). A Raise* goal
+        // (attribute, skill, or vital) with unspent XP below the meaningful spend floor
+        // is dropped and deferred to the fallback: at the default floor (0) this is the
+        // Motor's own refusal at unspent<=0 — a model otherwise re-emits the raise every
+        // cycle, looping — while above 0 it also drops sub-floor balances, staying
+        // consistent with the SPEND XP cue-suppression gated on the SAME floor (those
+        // tiny balances are not worth a raise turn). Defer so the bot does productive
+        // work and re-deliberates once it has meaningful XP again. The LLM still owns
+        // WHICH target to raise — like the untrained-raiseskill / Wield-no-weapon drops.
+        if (IsRaiseGoalWithNoSpendableXp(goal, world, MinMeaningfulUnspentXp))
+        {
+            Console.WriteLine(
+                $"[llm-override] raise-no-xp drop: {goal.Kind} target={goal.Target}" +
+                " — no spendable unspent XP; deferring to fallback.");
+            _training?.RecordParseError(decisionId,
+                "dropped-by-override: Raise with no spendable unspent XP");
+            return EscapeOrFallback(world, events, currentGoal, nowUtc, "raise-no-xp");
         }
 
         // Wield-of-a-ground-weapon -> Pickup (mechanical prerequisite,

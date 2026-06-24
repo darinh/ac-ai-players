@@ -1501,6 +1501,72 @@ public class LlmGoalPolicyTests
             RaiseSkillGoalTo("NotASkillName"), world));
     }
 
+    // ---- IsRaiseGoalWithNoSpendableXp (drop a Raise* with no spendable unspent XP) ----
+
+    private static WorldStateProjection WorldWithUnspentXp(long? unspent)
+        => new()
+        {
+            Self = new SelfProjection
+            { Guid = 0x500u, Name = "H", HealthFraction = 1.0f, AvailableExperience = unspent },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+    private static Goal RaiseGoal(GoalKind kind, string target)
+        => new() { Kind = kind, Target = new Selector { Name = target } };
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_ZeroUnspent_True_ForAllRaiseKinds()
+    {
+        // The live loop: a Raise* with unspent=0 cannot be actuated (the Motor refuses).
+        var zero = WorldWithUnspentXp(0);
+        Assert.True(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseAttribute, "coordination"), zero, 0));
+        Assert.True(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseSkill, "TwoHandedCombat"), zero, 0));
+        Assert.True(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseVital, "health"), zero, 0));
+    }
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_PositiveUnspentAtDefaultFloor_False()
+    {
+        Assert.False(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseAttribute, "coordination"), WorldWithUnspentXp(100), 0));
+    }
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_BelowMeaningfulFloor_True()
+    {
+        // Sub-floor unspent: the SPEND XP cues are suppressed AND the raise is dropped
+        // (consistent with the min-meaningful-unspent-xp floor).
+        Assert.True(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseAttribute, "coordination"), WorldWithUnspentXp(30), 50));
+    }
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_AtOrAboveFloor_False()
+    {
+        Assert.False(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseAttribute, "coordination"), WorldWithUnspentXp(60), 50));
+    }
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_NonRaiseGoal_False()
+    {
+        // A non-Raise goal is never dropped by this guard even with no XP.
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Rabbit" } };
+        Assert.False(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(attack, WorldWithUnspentXp(0), 0));
+    }
+
+    [Fact]
+    public void IsRaiseGoalWithNoSpendableXp_UnknownUnspent_False()
+    {
+        // Balance not loaded yet -> do NOT drop (never assume futile on an unknown).
+        Assert.False(LlmGoalPolicy.IsRaiseGoalWithNoSpendableXp(
+            RaiseGoal(GoalKind.RaiseAttribute, "coordination"), WorldWithUnspentXp(null), 0));
+    }
+
     [Fact]
     public void FormatContractCounts_CountsInProgressAndDoneByStage()
     {
