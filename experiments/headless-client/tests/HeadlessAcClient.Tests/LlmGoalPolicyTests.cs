@@ -1400,6 +1400,93 @@ public class LlmGoalPolicyTests
             PickupGoalTo("Chest"), world, new EventStream()));
     }
 
+    // ---- TryResolvePickupVendorItemName (Pickup-of-a-vendor-panel-item -> Buy) ----
+
+    private static WorldStateProjection WorldWithVendorOffers(
+        VisibleObjectProjection[] visible, params string[] offerNames)
+        => BuildExitTokenWorld() with
+        {
+            Visible = visible,
+            Vendor = new VendorProjection
+            {
+                VendorGuid = 0x7A9B4024u,
+                Offers = offerNames
+                    .Select(n => new VendorOfferProjection
+                    { Name = n, Value = 5u, StackSize = -1, ItemType = 0u })
+                    .ToArray(),
+            },
+        };
+
+    [Fact]
+    public void PickupVendorItem_NamedOffering_NoVisibleObject_ResolvesToOfferName()
+    {
+        // Pickup of a name that is one of the open vendor's offerings (and binds no
+        // visible object) -> the offering name the Motor's Buy resolves.
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Bread");
+        Assert.Equal("Bread", LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("Bread"), world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_NoVendorPanel_ReturnsNull()
+    {
+        // No vendor panel open -> not rewritten (BuildExitTokenWorld has Vendor = null).
+        var world = WorldWithVisible(System.Array.Empty<VisibleObjectProjection>());
+        Assert.Null(LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("Bread"), world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_NameNotOffered_ReturnsNull()
+    {
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Bread");
+        Assert.Null(LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("Cheese"), world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_NameBindsVisibleObject_ReturnsNull()
+    {
+        // A visible takeable object also binds the name -> do NOT hijack a real ground
+        // pickup (leave the Pickup alone even though the vendor offers the same name).
+        var ground = new VisibleObjectProjection
+        { Guid = 0xAAAu, Name = "Bread", IsCorpse = false, IsMonster = false };
+        var world = WorldWithVendorOffers(new[] { ground }, "Bread");
+        Assert.Null(LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("Bread"), world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_NonPickupGoal_ReturnsNull()
+    {
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Bread");
+        var buy = new Goal { Kind = GoalKind.Buy, Target = new Selector { Name = "Bread" } };
+        Assert.Null(LlmGoalPolicy.TryResolvePickupVendorItemName(buy, world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_CaseInsensitiveTrimmed_ResolvesToExactOfferName()
+    {
+        // The match is case-insensitive + trimmed, and returns the OFFER's exact name
+        // (so the Motor's exact-match Buy resolves it).
+        var world = WorldWithVendorOffers(System.Array.Empty<VisibleObjectProjection>(), "Carving Knife");
+        Assert.Equal("Carving Knife", LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("  carving knife "), world));
+    }
+
+    [Fact]
+    public void PickupVendorItem_SameNamedVisibleCorpse_StillRewrites()
+    {
+        // A visible CORPSE sharing the name does NOT suppress the rewrite: the real
+        // Pickup resolver excludes corpses (a corpse Pickup is handled by the earlier
+        // Pickup->Use rewrite), so a same-named corpse must not block acquiring the
+        // vendor offering.
+        var corpse = CorpseObj(0xC0FFEEu, "Bread");
+        var world = WorldWithVendorOffers(new[] { corpse }, "Bread");
+        Assert.Equal("Bread", LlmGoalPolicy.TryResolvePickupVendorItemName(
+            PickupGoalTo("Bread"), world));
+    }
+
     // ---- TryResolveExploreLoopedVendor (Explore-toward-a-visible-vendor loop -> Use) ----
 
     private static EventStream ExploreEmissionsTo(string name, int count)
