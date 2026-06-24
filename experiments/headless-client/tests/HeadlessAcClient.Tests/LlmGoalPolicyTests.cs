@@ -866,6 +866,34 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_Unspent_ShownOnlyWhenPositive()
+    {
+        // Unspent XP is the combat-effectiveness lever; shown when known + >0 (the
+        // hoarding signal). Also pins the tail (coin then unspent) with a distinct value.
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            coin: 1, unspent: 2400L);
+        Assert.Contains("coin=1", with);
+        Assert.Contains("unspent=2400", with);
+
+        // 0 unspent (spent it all) -> omitted; not the hoarding signal.
+        var zero = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            unspent: 0L);
+        Assert.DoesNotContain("unspent=", zero);
+
+        // Unknown (null) -> omitted.
+        var unknown = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            unspent: null);
+        Assert.DoesNotContain("unspent=", unknown);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Swings_ShownOnlyWhenAnyResolved()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
