@@ -944,6 +944,40 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_Fails_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 11, totalXp: 80000L, model: "m",
+            recentFails: 12);
+        Assert.Contains("fails=12", with);
+
+        // Zero recent failures -> omitted (no noise on a healthy run).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 11, totalXp: 80000L, model: "m",
+            recentFails: 0);
+        Assert.DoesNotContain("fails=", none);
+    }
+
+    [Fact]
+    public void RecentGoalFailureCount_CountsDurableFailures_NullSafe()
+    {
+        // Null/empty -> 0; each appended GoalFailed adds to the durable window count.
+        Assert.Equal(0, LlmGoalPolicy.RecentGoalFailureCount(null));
+        var es = new EventStream();
+        Assert.Equal(0, LlmGoalPolicy.RecentGoalFailureCount(es));
+        for (int i = 0; i < 4; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = System.DateTimeOffset.UtcNow, Kind = EventKind.GoalFailed,
+                Name = "Some NPC",
+            });
+        Assert.Equal(4, LlmGoalPolicy.RecentGoalFailureCount(es));
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_MaxHp_ShownOnlyWhenKnownAndPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
