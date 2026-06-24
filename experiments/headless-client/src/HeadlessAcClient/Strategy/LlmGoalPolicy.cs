@@ -5791,6 +5791,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // cp067 repeated-Explore-to-unresolved-name window + threshold.
     private static readonly TimeSpan RepeatedUnresolvedExploreWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedUnresolvedExploreThreshold = 3;
+    // Sibling: repeated-Attack-toward-a-departed-target window + threshold. `## Visible`
+    // is distance-bounded (visible radius), so a target absent from it is exactly one the
+    // Attack goal would resolve to MISS (it left view/range, died, or the bot moved past it).
+    private static readonly TimeSpan RepeatedUnresolvedAttackWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnresolvedAttackThreshold = 3;
 
     // cp067: the NAME the bot has Explored toward >= threshold times within the recent
     // window that resolves to NO visible object (a reached area / unresolved name), or
@@ -5810,6 +5815,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // knowledge, no priority, no source-side target choice.
     internal static string? RepeatedUnresolvedExploreName(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Explore", RepeatedUnresolvedExploreThreshold, excludeCorpses: false);
+
+    // Sibling for Attack: the NAME the bot has tried to `Attack` >= threshold times within
+    // the window that matches NO currently-visible object — the monster has left view/range,
+    // died, or the bot travelled past it, so the Attack would resolve to MISS and a fresh
+    // no-current-goal call re-emits the SAME Attack (live: a named mob re-Attacked many times
+    // back-to-back while no longer in view). Surfaced to the LLM as the `## Attack loop`
+    // informational cue — NOT a hard drop, so a legitimate close-in toward a target just out
+    // of the visible radius is never overridden. Same mechanics + audit posture as the
+    // Explore loop: bot's OWN emission history + perception only.
+    internal static string? RepeatedUnresolvedAttackTarget(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Attack", RepeatedUnresolvedAttackThreshold, excludeCorpses: true);
+
+    // Shared detector for a repeated goal-VERB emission toward a target NAME that NO
+    // currently-visible object would bind. Counts the bot's own recent goal emissions
+    // of `verb` within the window (parsing the echoed `target=...name="..."`) and
+    // returns the most-repeated such name at/above `threshold` for which `## Visible`
+    // holds no resolver-bindable object (see VisibleResolvesName — exact / quoted-role /
+    // unique fuzzy), else null. The untargeted "anywhere" token is ignored. Pure: own
+    // emission history + perception; no game knowledge, no priority, no source-side
+    // target choice.
+    private static string? MostRepeatedUnresolvedTargetName(
+        WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold, bool excludeCorpses)
     {
         if (events is null) return null;
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -5817,7 +5846,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             if (ge.Utc < since) continue;
             var txt = ge.Text!;
-            if (!txt.StartsWith("Explore", StringComparison.Ordinal)) continue;
+            if (!txt.StartsWith(verb, StringComparison.Ordinal)) continue;
             var ti = txt.IndexOf("target=", StringComparison.Ordinal);
             if (ti < 0) continue;
             var nm = System.Text.RegularExpressions.Regex.Match(
@@ -5830,13 +5859,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         foreach (var kv in counts.OrderByDescending(k => k.Value))
         {
-            if (kv.Value < RepeatedUnresolvedExploreThreshold) break;
-            if (world?.Visible is not null
-                && world.Visible.Any(v => string.Equals(v.Name, kv.Key, StringComparison.OrdinalIgnoreCase)))
-                continue; // a matching visible object exists — cp022 / normal nav handles it
+            if (kv.Value < threshold) break;
+            if (world?.Visible is not null && VisibleResolvesName(world.Visible, kv.Key, excludeCorpses))
+                continue; // a visible object the resolver could still bind — normal nav / picker handles it
             return kv.Key;
         }
         return null;
+    }
+
+    // True when a visible object would bind the selector NAME under the SAME name
+    // semantics SelectorResolver uses: exact (case-insensitive), exact after stripping
+    // a trailing quoted-role suffix from the emitted name, OR a UNIQUE whole-word
+    // subsequence fuzzy match. When <paramref name="excludeCorpses"/>, corpse entries are
+    // ignored (an Attack resolver excludes corpses, so a corpse named X does NOT make an
+    // Attack loop resolvable). Used by the unresolved-loop detectors so a name the
+    // resolver could still resolve is NOT counted as a dead loop. Pure string comparison
+    // on observed names; no game knowledge.
+    private static bool VisibleResolvesName(
+        IReadOnlyList<VisibleObjectProjection> visible, string name, bool excludeCorpses)
+    {
+        var pool = (excludeCorpses ? visible.Where(v => !v.IsCorpse) : visible).ToList();
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        if (pool.Any(v => v.Name is not null
+                && (string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase))))
+            return true;
+        return pool.Count(v =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name)) == 1;
     }
     // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
     // last LLM look whose identity is selector-compatible with the spatial
@@ -9812,6 +9861,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "CANNOT interact with a PLACE. In that case, to ADVANCE, interact with a VISIBLE object — a " +
                 "portal/NPC/door/sign in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`) — or pursue a " +
                 $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
+        }
+
+        // ── ## Attack loop (target not in view) — sibling of the Explore loop ──
+        // The bot re-emits `Attack` toward a named monster that is no longer within the
+        // visible radius (it moved away / died / the bot travelled past it), so the goal
+        // resolves to MISS, clears, and a fresh no-current-goal call re-emits the SAME
+        // Attack — a call storm in place (live: a named mob re-Attacked many times while
+        // not in view). Surface it as an informational CUE keyed on the bot's OWN repeated
+        // emissions + perception — NOT a hard drop, so a close-in toward a target just out
+        // of view is never overridden; the LLM still decides. No game knowledge (the looped
+        // name is the bot's own emitted goal text, echoed back), no priority, no source-side
+        // target choice.
+        if (RepeatedUnresolvedAttackTarget(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedAttackWindow) is string loopedAttackName
+            && OneLine(loopedAttackName) is string loopedAttackDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Attack loop (target not in view)");
+            sb.AppendLine(
+                $"- you have tried to `Attack` `{loopedAttackDisplay}` several times recently but NO monster " +
+                $"named `{loopedAttackDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING " +
+                $"toward `{loopedAttackDisplay}` and closing in (your `landblock`/position is changing as you go), " +
+                "keep going — `Attack` walks you to a target, and it will come into view. But if your position is " +
+                $"NOT changing, or `{loopedAttackDisplay}` has died or you have travelled PAST it, re-`Attack`-ing " +
+                "makes no progress: `Attack` a DIFFERENT monster that IS visible in `## Nearest objects`, or pursue " +
+                $"a DIFFERENT objective, instead of re-`Attack`-ing `{loopedAttackDisplay}`.");
         }
 
         // ── ## Un-equipped gear (protected-tail equip cue) ──
