@@ -6297,6 +6297,50 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         WorldStateProjection world, EventStream events, DateTimeOffset since)
         => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, itemNameWhenTargetEmpty: true);
 
+    private static readonly TimeSpan EngagementChurnWindow = TimeSpan.FromMinutes(3);
+    private const int EngagementChurnDistinctThreshold = 3;
+
+    // The number of DISTINCT interaction-target NAMES (Talk or Use) the bot recently emitted
+    // toward AND that actually FAILED (a GoalFailed in the window) AND that NO currently-visible
+    // object would bind — i.e. it is cycling through several DIFFERENT out-of-view/unreachable
+    // targets, each failing to resolve. The single-target loop cues (## Use loop, the
+    // Talk-fixation guards) each key on ONE repeated name and so never fire on a churn SPREAD
+    // across several targets (each below its own threshold), the multi-target canvass case.
+    // Requiring a corroborating FAILURE (not just "not visible now") is what excludes a
+    // PRODUCTIVE visit to several targets in sequence — each reached + interacted successfully,
+    // then walked past (no failure) is never counted. Names that bind a visible object (the bot
+    // could still walk up), resolve to an OWNED inventory item (a legit self-Use, mirroring the
+    // ## Use loop), or are the bot's OWN corpse (dedicated recovery cue) are all excluded. Pure:
+    // own emission + failure history + perception; no game knowledge, no priority, no
+    // source-side target choice.
+    internal static int CountDistinctUnresolvedInteractionTargets(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (world?.Visible is null || events is null) return 0;
+        // Names that actually FAILED recently (a terminal GoalFailed carrying that target name,
+        // role-normalized to match the emitted-name keys).
+        var failedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var f in events.RecentGoalFailures())
+        {
+            if (f.Utc < since || string.IsNullOrWhiteSpace(f.Name)) continue;
+            failedNames.Add(NormalizeEmittedTargetName(f.Name));
+        }
+        if (failedNames.Count == 0) return 0;
+        var selfName = world.Self?.Name;
+        var distinct = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (verb, itemFieldMode) in new[] { ("Talk", false), ("Use", true) })
+            foreach (var kv in CountRecentEmittedTargetNames(
+                         events, since, verb, excludeItemGoals: false, itemNameWhenTargetEmpty: itemFieldMode))
+            {
+                if (!failedNames.Contains(kv.Key)) continue; // only names that ACTUALLY failed
+                if (IsOwnCorpseName(kv.Key, selfName)) continue;
+                if (VisibleResolvesName(world.Visible, kv.Key, excludeCorpses: false)) continue;
+                if (world.Inventory is not null && InventoryResolvesName(world.Inventory, kv.Key)) continue;
+                distinct.Add(kv.Key);
+            }
+        return distinct.Count;
+    }
+
     // Shared detector for a repeated goal-VERB emission toward a target NAME that NO
     // currently-visible object would bind. Counts the bot's own recent goal emissions
     // of `verb` within the window (parsing the echoed `target=...name="..."`) and
@@ -10632,6 +10676,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
                 "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
                 $"re-`Use`-ing `{loopedUseDisplay}`.");
+        }
+
+        // ── ## Engagement churn — multi-target unresolved-interaction loop-break ──
+        // Each single-target loop cue above fires on ONE repeated name; a model that cycles
+        // through SEVERAL different nearby targets (Talk/Use), each going out of view/range
+        // so each emission fails to resolve, trips NONE of them (each stays below its own
+        // repeat threshold). Surface that multi-target canvass as an informational CUE keyed
+        // on the bot's OWN recent emissions + perception — NOT a hard drop, so a legitimate
+        // visit to several DISTANT not-yet-reached targets is never overridden (those resolve
+        // once reached; this counts only names NO visible object binds). The LLM still
+        // decides. No game knowledge, no priority, no source-side target choice.
+        if (CountDistinctUnresolvedInteractionTargets(
+                world, events, DateTimeOffset.UtcNow - EngagementChurnWindow) >= EngagementChurnDistinctThreshold)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Engagement churn (several targets not in view)");
+            sb.AppendLine(
+                "- you have recently tried to `Talk`/`Use` SEVERAL different targets that are NOT visible " +
+                "here — each interaction is failing to resolve. If you are CANVASSING nearby NPCs hoping one " +
+                "helps, that is not progress: pick ONE target, walk right up to it (it must be visible + close " +
+                "in `## Nearest objects` to `Talk`/`Use`), or stop interacting and pursue DIFFERENT progress " +
+                "(hunt a monster, `Explore` to a new area, or act on a held objective). Do NOT keep cycling " +
+                "`Talk`/`Use` across targets that never resolve.");
         }
 
         // ── ## Wield loop (you do not own that weapon) — sibling of the other loop cues ──
