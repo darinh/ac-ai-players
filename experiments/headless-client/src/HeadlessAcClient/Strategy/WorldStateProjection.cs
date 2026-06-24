@@ -910,7 +910,9 @@ internal sealed record WorldStateProjection
 
         // corpse-bearing-recovery: carry the last death location (coords + age)
         // only while ShouldSurfaceCorpse passes (fresh AND self not yet within the
-        // visible radius of it); null otherwise.
+        // tight "reached" radius of it — so the bearing keeps directing the bot
+        // toward an out-of-view corpse across the approach, and the in-view cue
+        // takes over once the corpse enters perception); null otherwise.
         float? corpseWorldX = null, corpseWorldY = null;
         int? corpseAgeSeconds = null;
         if (world.LastDeathLocation is { } deathLoc)
@@ -921,7 +923,7 @@ internal sealed record WorldStateProjection
                 : null;
             if (CorpseRecovery.ShouldSurfaceCorpse(
                     world.LastDeathLocation, currentXY, corpseAge, CorpseRecovery.CorpseTtl,
-                    DefaultVisibleRadiusUnits))
+                    CorpseRecovery.CorpseReachedRadiusUnits))
             {
                 corpseWorldX = deathLoc.WorldX;
                 corpseWorldY = deathLoc.WorldY;

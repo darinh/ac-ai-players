@@ -54,6 +54,32 @@ public class CorpseRecoveryTests
     }
 
     [Fact]
+    public void CorpseReachedRadius_IsTighterThanPerception()
+    {
+        // The reached radius gates the bearing-suppression + the death-location
+        // clear; it must be much tighter than the 120u perception radius so the
+        // bearing keeps directing the bot toward an out-of-view corpse.
+        Assert.True(CorpseRecovery.CorpseReachedRadiusUnits > 0f);
+        Assert.True(CorpseRecovery.CorpseReachedRadiusUnits
+            < WorldStateProjection.DefaultVisibleRadiusUnits);
+    }
+
+    [Fact]
+    public void ShouldSurfaceCorpse_TightReachedRadius_SurfacesWithinPerceptionButBeyondReach()
+    {
+        // Production passes the TIGHT reached radius (not 120u). A bot 50u from the
+        // death loc is within the old perception radius but well beyond the reached
+        // radius -> the bearing SURFACES (previously suppressed -> the handoff gap
+        // where the bot lost the bearing while the corpse was not yet in view).
+        var reached = CorpseRecovery.CorpseReachedRadiusUnits;
+        Assert.True(CorpseRecovery.ShouldSurfaceCorpse(
+            FreshDeath(), (150f, 200f), TimeSpan.FromSeconds(30), Ttl, reached));
+        // At the corpse (within the reached radius) -> suppressed.
+        Assert.False(CorpseRecovery.ShouldSurfaceCorpse(
+            FreshDeath(), (104f, 200f), TimeSpan.FromSeconds(30), Ttl, reached));
+    }
+
+    [Fact]
     public void ShouldSurfaceCorpse_AgedPastTtl_False()
     {
         Assert.False(CorpseRecovery.ShouldSurfaceCorpse(FreshDeath(), (5000f, 5000f), TimeSpan.FromSeconds(601), Ttl, Radius));

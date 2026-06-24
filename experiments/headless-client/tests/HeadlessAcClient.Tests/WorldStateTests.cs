@@ -260,6 +260,49 @@ public class WorldStateTests
     }
 
     [Fact]
+    public void UpdatePosition_SelfWithinReachedRadius_ClearsDeathLocation()
+    {
+        // corpse-bearing-persist: reaching the corpse (within the tight
+        // CorpseReachedRadiusUnits of the recorded death loc) clears the record.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        var cell = 0xA9B40001u;
+        var local = new Vector3(50f, 50f, 0f);
+        var (gx, gy) = HeadlessAcClient.Strategy.AcCoords.ToGlobalXY(cell, local);
+        ws.LastDeathLocation = new HeadlessAcClient.Strategy.DeathLocation(
+            gx, gy, 0xA9B4u, DateTimeOffset.UtcNow);
+
+        Assert.True(ws.Apply(new UpdatePositionMessage(
+            Guid: TestGuid, Flags: 0, CellId: cell, Position: local,
+            Rotation: Quaternion.Identity, Velocity: null, PlacementId: null,
+            InstanceSequence: 0, PositionSequence: 0,
+            TeleportSequence: 0, ForcePositionSequence: 0)));
+        Assert.Null(ws.LastDeathLocation);
+    }
+
+    [Fact]
+    public void UpdatePosition_SelfBeyondReachedButWithinPerception_KeepsDeathLocation()
+    {
+        // A pass within the OLD 120u perception radius but beyond the tight reached
+        // radius must NOT clear the record -> the return bearing persists (the fix
+        // for the transient-pass / nearby-respawn permanent loss).
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        var cell = 0xA9B40001u;
+        var (gx, gy) = HeadlessAcClient.Strategy.AcCoords.ToGlobalXY(cell, new Vector3(50f, 50f, 0f));
+        ws.LastDeathLocation = new HeadlessAcClient.Strategy.DeathLocation(
+            gx, gy, 0xA9B4u, DateTimeOffset.UtcNow);
+
+        // 50u away in local X (beyond reached 10u, within perception 120u).
+        Assert.True(ws.Apply(new UpdatePositionMessage(
+            Guid: TestGuid, Flags: 0, CellId: cell, Position: new Vector3(100f, 50f, 0f),
+            Rotation: Quaternion.Identity, Velocity: null, PlacementId: null,
+            InstanceSequence: 0, PositionSequence: 0,
+            TeleportSequence: 0, ForcePositionSequence: 0)));
+        Assert.NotNull(ws.LastDeathLocation);
+    }
+
+    [Fact]
     public void UpdatePosition_StaleInstanceSequence_Dropped()
     {
         var ws = new WorldState();

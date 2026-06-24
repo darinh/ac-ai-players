@@ -905,14 +905,16 @@ internal sealed class WorldState
         snap.CellId = up.CellId;
         snap.Position = up.Position;
         snap.Rotation = up.Rotation;
-        // Clear the recorded death location once SELF is within perception range
-        // of it. Distance, not landblock equality: a landblock is far wider than
-        // the visible radius.
+        // Clear the recorded death location once SELF has REACHED the corpse — a
+        // tight radius, NOT the wide perception radius: clearing on mere perception
+        // proximity (or a transient pass / nearby respawn) would destroy the death
+        // location before the bot reached the corpse, leaving it with no return
+        // bearing. Distance, not landblock equality.
         if (up.Guid == SelfGuid && LastDeathLocation is { } dloc)
         {
             var (sgx, sgy) = Strategy.AcCoords.ToGlobalXY(up.CellId, up.Position);
             if (Strategy.CorpseRecovery.WithinReach(
-                    (sgx, sgy), dloc, Strategy.WorldStateProjection.DefaultVisibleRadiusUnits))
+                    (sgx, sgy), dloc, Strategy.CorpseRecovery.CorpseReachedRadiusUnits))
                 LastDeathLocation = null;
         }
         if (up.Velocity is { } v) snap.Velocity = v;
