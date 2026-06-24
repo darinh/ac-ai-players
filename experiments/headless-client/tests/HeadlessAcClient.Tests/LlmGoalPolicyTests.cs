@@ -2310,6 +2310,28 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void RepeatedUnresolvedExploreName_NullWhenNameUniquelyFuzzyMatchesVisibleObject()
+    {
+        // Shared-helper behavior: an explored partial name that UNIQUELY subsequence-matches
+        // a visible object would still bind via the resolver -> not a dead loop, no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 5f));
+        var es = ExploreEmissions("Courtyard", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedExploreName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedExploreName_ReturnsNameWhenFuzzyMatchIsAmbiguous()
+    {
+        // Two visible objects both subsequence-match the explored partial -> AMBIGUOUS, so
+        // the resolver would leave it unresolved -> the loop cue still fires.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 5f), NamedVisible("East Courtyard", 8f));
+        var es = ExploreEmissions("Courtyard", 3, now);
+        Assert.Equal("Courtyard", LlmGoalPolicy.RepeatedUnresolvedExploreName(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
     public void BuildUserPrompt_ExploreLoopCapsule_RendersForRepeatedUnresolvedExplore()
     {
         // The cue surfaces in the prompt (a protected-tail capsule), naming the looped
@@ -2333,6 +2355,127 @@ public class LlmGoalPolicyTests
         var es = ExploreEmissions("Central Courtyard", 1, now);
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
         Assert.DoesNotContain("## Explore loop (unresolved target)", prompt);
+    }
+
+    private static EventStream AttackEmissions(string name, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Attack target=name=\"{name}\" item= source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_ReturnsNameForRepeatedNoVisibleMatch()
+    {
+        // 3 recent Attack emissions toward a name with NO matching visible object -> the
+        // looped target (a monster the bot has travelled past / that died). The capsule
+        // cues the LLM; it does NOT drop the goal.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Drudge", 5f)); // some other monster, NOT the name
+        var es = AttackEmissions("The Chicken", 3, now);
+        Assert.Equal("The Chicken", LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_NullWhenNameMatchesVisibleObject()
+    {
+        // A visible object DOES match the name -> it is in range; normal nav / picker handles it.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("The Chicken", 5f));
+        var es = AttackEmissions("The Chicken", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_NullWhenNameUniquelyFuzzyMatchesVisibleObject()
+    {
+        // The emitted partial name uniquely subsequence-matches a visible object's fuller
+        // wire name (the resolver would still bind it) -> NOT a dead loop, no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Drudge Skulker", 5f));
+        var es = AttackEmissions("Drudge", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_ReturnsNameWhenLongerThanVisibleObject()
+    {
+        // Emitted "The Chicken" while only a different shorter-named "Chicken" is visible:
+        // the selector is NOT a subsequence of the visible name (longer), so it does not
+        // bind -> the loop cue still fires (they are distinct mobs).
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Chicken", 5f));
+        var es = AttackEmissions("The Chicken", 3, now);
+        Assert.Equal("The Chicken", LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_FiresWhenOnlyACorpseWithThatNameIsVisible()
+    {
+        // Attack resolution excludes corpses, so a corpse named X does NOT make the Attack
+        // resolvable -> the loop cue must still fire (the bot keeps MISS-ing the dead mob).
+        var now = System.DateTimeOffset.UtcNow;
+        var corpse = new VisibleObjectProjection { Guid = 0x800000C1u, Name = "The Chicken", Distance = 5f, IsCorpse = true };
+        var world = BuildVisibleWorld(corpse);
+        var es = AttackEmissions("The Chicken", 3, now);
+        Assert.Equal("The Chicken", LlmGoalPolicy.RepeatedUnresolvedAttackTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_NullBelowThreshold()
+    {
+        // Only 2 recent emissions -> below the repeat threshold (no loop cue yet).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("The Chicken", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedAttackTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_NullForOldEmissionsOutsideWindow()
+    {
+        // 3 emissions but all OLDER than `since` -> not a RECENT loop, not counted.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("The Chicken", 3, now.AddMinutes(-10));
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedAttackTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedAttackTarget_IgnoresExploreEmissionsOfSameName()
+    {
+        // The detector keys on the ATTACK verb only: repeated Explore emissions toward the
+        // same name must not trigger the Attack-loop cue (the two loops are distinct).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("The Chicken", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedAttackTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AttackLoopCapsule_RendersForRepeatedUnresolvedAttack()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("The Chicken", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Attack loop (target not in view)", prompt);
+        Assert.Contains("The Chicken", prompt);
+        Assert.Contains("Attack` a DIFFERENT monster that IS visible", prompt);
+        // Balanced wording (mirrors the Explore cue): it must NOT falsely claim the target
+        // is unreachable — it allows continuing toward a target still being travelled to.
+        Assert.Contains("keep going", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AttackLoopCapsule_OmittedWhenNoLoop()
+    {
+        // A single Attack is a normal engage -> no capsule.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("The Chicken", 1, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Attack loop (target not in view)", prompt);
     }
 
     [Fact]
