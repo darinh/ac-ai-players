@@ -2001,6 +2001,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
     }
 
+    // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
+    // vendor-panel item rather than a takeable ground object, or null. A Pickup takes
+    // only ground items, so a Pickup whose target is one of the open vendor's for-sale
+    // offerings resolves to MISS; the mechanically-correct verb to acquire a panel item
+    // is Buy. Fires only when (a) a vendor trade panel is open (world.Vendor), (b) the
+    // goal name matches one of its offerings EXACTLY (case-insensitive, trimmed — the
+    // SAME exact semantics the Motor's Buy uses via ResolveVendorItemExact, so the
+    // rewritten Buy resolves), and (c) NO visible world object binds the name (so the
+    // Pickup is not a legitimate ground pickup the rewrite would hijack). Pure string
+    // comparison over the wire-decoded offer list + observed visible names; no game
+    // knowledge, no source-side target choice (the LLM named the item).
+    internal static string? TryResolvePickupVendorItemName(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Pickup) return null;
+        if (goal.Target?.Name is not string name || string.IsNullOrWhiteSpace(name)) return null;
+        if (world.Vendor?.Offers is not { Count: > 0 } offers) return null;
+        // If a visible NON-CORPSE object resolves the name, leave the Pickup alone (do
+        // not hijack a real ground pickup of a same-named object). Corpses are excluded
+        // to mirror the real Pickup resolver, which never binds a corpse — a corpse Pickup
+        // is handled earlier by the Pickup->Use rewrite, so a same-named corpse must not
+        // suppress this vendor rewrite.
+        if (world.Visible is not null && VisibleResolvesName(world.Visible, name, excludeCorpses: true))
+            return null;
+        var trimmed = name.Trim();
+        foreach (var o in offers)
+            if (!string.IsNullOrWhiteSpace(o.Name)
+                && string.Equals(o.Name.Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+                return o.Name;
+        return null;
+    }
+
     // True iff the guid is in the server's DYNAMIC range (0x80000000-0xFFFFFFFE):
     // world-generated, takeable objects. Guids below this range are world-static
     // (StaticObjectMin 0x70000000+, landblock-organized) and a Pickup of them is
@@ -3729,6 +3760,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = pickupContainerGuid },
+                Item = null,
+            };
+        }
+
+        // Pickup-of-a-vendor-panel-item -> Buy (mechanical verb correction,
+        // reduce-llm-call-volume). At an open vendor a model sometimes emits Pickup for an
+        // item that is in the vendor's PANEL (for sale), not on the ground; Pickup takes
+        // only ground items, so it resolves to MISS and the bot loops the wrong verb. The
+        // mechanically-correct way to acquire a panel item is Buy. Rewrite the Pickup of a
+        // name that exactly matches an open-vendor offering (and binds no visible world
+        // object, so it is not a ground pickup) into a Buy of that SAME offering. The LLM
+        // chose WHICH item; the Motor only substitutes the verb (like the Pickup->Use /
+        // Wield->Pickup rewrites above; no autonomous target pick, keyed on the open-vendor
+        // offer list + the bot's named target).
+        if (TryResolvePickupVendorItemName(goal, world) is { } vendorOfferName)
+        {
+            Console.WriteLine(
+                $"[llm-override] pickup-vendor-item -> buy: target={goal.Target}" +
+                " — a vendor-panel item is acquired with Buy, not Pickup.");
+            return goal with
+            {
+                Kind = GoalKind.Buy,
+                Target = new Selector { Name = vendorOfferName },
                 Item = null,
             };
         }
