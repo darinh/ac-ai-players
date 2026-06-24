@@ -134,6 +134,16 @@ internal static class CombatRetry
     public const uint AttackDoneActionCancelled = 0x0036u;
 
     /// <summary>
+    /// WeenieError.YoureTooBusy (0x001D) — the server's rejection of a re-sent attack
+    /// that collided with its OWN still-alive auto-repeat swing loop. Like
+    /// <see cref="AttackDoneActionCancelled"/> this is a TRANSIENT, self-induced
+    /// loop-keeper collision that occurs in normal/winnable fights and is recovered by
+    /// letting the loop run — it is NOT evidence the target cannot be reached or damaged,
+    /// so <see cref="IsSemanticAttackRefusal"/> excludes it.
+    /// </summary>
+    public const uint YoureTooBusy = 0x001Du;
+
+    /// <summary>
     /// Motor-reserved ActionRejected code stamped on the SURFACED combat
     /// swing-loop cancel event in place of the ambiguous raw wire code
     /// <see cref="AttackDoneActionCancelled"/> (0x0036). Mirrors the
@@ -192,6 +202,25 @@ internal static class CombatRetry
             return false;
         return true;
     }
+
+    /// <summary>
+    /// True when an AttackDone error code is a SEMANTIC swing refusal — the server
+    /// rejected the swing for a reason that will NOT resolve by simply re-sending the
+    /// attack or letting the server's swing loop run (e.g. out-of-range against a target
+    /// the bot cannot reach, cannot-attack). This is ANY non-zero code EXCEPT the two
+    /// TRANSIENT, self-induced loop-keeper collisions — <see cref="AttackDoneActionCancelled"/>
+    /// (0x0036, the swing loop dropping, recovered by a re-send) and
+    /// <see cref="YoureTooBusy"/> (0x001D, a re-sent attack colliding with the still-alive
+    /// loop) — both of which occur in NORMAL, winnable fights and must NOT be read as
+    /// "cannot connect". Used to count "the bot cannot connect with this target at all"
+    /// toward the unwinnable-flee evidence, distinct from an evaded swing (which DID reach
+    /// the target). Mechanical: keys only on the wire code — no object identity, no target
+    /// choice, no game-content knowledge.
+    /// </summary>
+    public static bool IsSemanticAttackRefusal(uint attackDoneErrorCode)
+        => attackDoneErrorCode != 0u
+           && attackDoneErrorCode != AttackDoneActionCancelled
+           && attackDoneErrorCode != YoureTooBusy;
 
     /// <summary>
     /// Decide whether to abandon the current melee target EARLY because the

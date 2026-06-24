@@ -143,13 +143,14 @@ public class CombatDisengageTests
     // ---- ShouldDisengageUnwinnableLosing (early flee) ----
 
     private const int MinEvaded = 6;
+    private const int MinRefused = 3;
     private const double LostFrac = 0.25;
 
     private static bool Unwinnable(
         int landed, uint dmg, int evaded, uint hc, uint hm, double? peak,
-        bool inCombat = true)
+        bool inCombat = true, int refused = 0)
         => CombatDisengage.ShouldDisengageUnwinnableLosing(
-            inCombat, landed, dmg, evaded, MinEvaded, hc, hm, peak, LostFrac);
+            inCombat, landed, dmg, evaded, MinEvaded, refused, MinRefused, hc, hm, peak, LostFrac);
 
     [Fact]
     public void Unwinnable_NotInCombat_NeverFires()
@@ -225,15 +226,45 @@ public class CombatDisengageTests
         // 30-max char: peak 1.0, current 21/30 = 0.70 (lost 0.30 >= 0.25).
         => Assert.True(Unwinnable(0, 0u, 6, 21u, 30u, 1.0));
 
+    // ---- ShouldDisengageUnwinnableLosing — REFUSED-swing path (unreachable foe) ----
+
+    [Fact]
+    public void Unwinnable_ZeroLanded_ZeroDamage_EnoughRefused_AndLosing_Fires()
+        // 0 landed, 0 damage, 0 evaded, but 3 SERVER-REFUSED swings (cannot connect at
+        // all — e.g. an unreachable/flying foe) + health fell 100%→75% (lost 25%).
+        => Assert.True(Unwinnable(0, 0u, 0, 75u, 100u, 1.0, refused: 3));
+
+    [Fact]
+    public void Unwinnable_RefusedBelowThreshold_DoesNotFire()
+        // 2 refused (< MinRefused 3), 0 evaded → not yet conclusive.
+        => Assert.False(Unwinnable(0, 0u, 0, 75u, 100u, 1.0, refused: 2));
+
+    [Fact]
+    public void Unwinnable_EnoughRefused_ButNotLosing_DoesNotFire()
+        // Refused enough but no health loss — a harmless can't-reach stalemate is a tempo
+        // concern (no-damage watchdog), not a death risk.
+        => Assert.False(Unwinnable(0, 0u, 0, 100u, 100u, 1.0, refused: 5));
+
+    [Fact]
+    public void Unwinnable_RefusedButSomeLanded_DoesNotFire()
+        // Landed a hit → the target IS reachable/damageable; refusals are moot.
+        => Assert.False(Unwinnable(1, 5u, 0, 50u, 100u, 1.0, refused: 9));
+
+    [Fact]
+    public void Unwinnable_LowMaxHealth_FewRefused_Fires()
+        // A fragile 30-max char: 3 refused + lost 30% (21/30) → flee an unreachable foe
+        // before dying mid-swing.
+        => Assert.True(Unwinnable(0, 0u, 0, 21u, 30u, 1.0, refused: 3));
+
     // ---- DisengageReason (combined decision + reason tag) ----
 
     private static string? Reason(
         uint hc, uint hm, int landed, uint dmg, int evaded, double? peak,
         bool inCombat = true,
-        double? tgtStart = null, double? tgtNow = null)
+        double? tgtStart = null, double? tgtNow = null, int refused = 0)
         => CombatDisengage.DisengageReason(
             hc, hm, inCombat, DisengageFrac, CriticalFloor,
-            landed, dmg, evaded, MinEvaded, peak, LostFrac,
+            landed, dmg, evaded, MinEvaded, refused, MinRefused, peak, LostFrac,
             LxMinSwings, LxSelfLost, tgtStart, tgtNow, LxMaxTgtLost);
 
     [Fact]
@@ -245,6 +276,12 @@ public class CombatDisengageTests
     public void Reason_UnwinnableLosing_ReturnsUnwinnableLosing()
         // 75/100 is above critical, but 0 landed + 6 evaded + lost 25%.
         => Assert.Equal("unwinnable-losing", Reason(75u, 100u, 0, 0u, 6, 1.0));
+
+    [Fact]
+    public void Reason_UnwinnableRefused_ReturnsUnwinnableLosing()
+        // 75/100 above critical, 0 landed + 0 evaded but 3 server-refused + lost 25%
+        // (an unreachable foe still damaging us) → same unwinnable-losing reason tag.
+        => Assert.Equal("unwinnable-losing", Reason(75u, 100u, 0, 0u, 0, 1.0, refused: 3));
 
     [Fact]
     public void Reason_BothConditionsTrue_LowHealthTakesPrecedence()

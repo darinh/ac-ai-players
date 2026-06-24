@@ -236,6 +236,40 @@ public class CombatRetryTests
         Assert.Equal(0x0036u, CombatRetry.AttackDoneActionCancelled);
     }
 
+    // IsSemanticAttackRefusal — a non-cancel AttackDone error (the bot cannot
+    // connect with this target) vs the benign auto-repeat-loop cancel.
+
+    [Fact]
+    public void SemanticRefusal_OutOfRange_True()
+        // A real "cannot connect" refusal (e.g. OutOfRange 0x0030).
+        => Assert.True(CombatRetry.IsSemanticAttackRefusal(0x0030u));
+
+    [Fact]
+    public void SemanticRefusal_ActionCancelled_False()
+        // The auto-repeat-loop cancel is recovered by a re-send, not a "cannot connect".
+        => Assert.False(CombatRetry.IsSemanticAttackRefusal(CombatRetry.AttackDoneActionCancelled));
+
+    [Fact]
+    public void SemanticRefusal_NoError_False()
+        // Error code 0 = the normal between-swings AttackDone (loop alive).
+        => Assert.False(CombatRetry.IsSemanticAttackRefusal(0u));
+
+    [Fact]
+    public void SemanticRefusal_YoureTooBusy_False()
+        // The transient self-induced loop-keeper collision (a re-sent attack hitting the
+        // still-alive swing loop) recovers on its own — it is NOT "cannot connect", and
+        // counting it would false-flee a winnable fight where the bot re-sends fast.
+        => Assert.False(CombatRetry.IsSemanticAttackRefusal(CombatRetry.YoureTooBusy));
+
+    [Fact]
+    public void SemanticRefusal_NonTransientRefusalCodes_True()
+    {
+        // Real "cannot connect / cannot damage this target" codes count.
+        Assert.True(CombatRetry.IsSemanticAttackRefusal(0x0406u)); // MagicTargetOutOfRange
+        Assert.True(CombatRetry.IsSemanticAttackRefusal(0x0468u)); // SkillTooLow
+        Assert.True(CombatRetry.IsSemanticAttackRefusal(0x0550u)); // MissileOutOfRange
+    }
+
     [Fact]
     public void SurfacedRejectionCode_RemapsCancelToReserved_PassesOthersThrough()
     {

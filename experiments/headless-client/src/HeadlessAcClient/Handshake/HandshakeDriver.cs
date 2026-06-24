@@ -851,6 +851,15 @@ internal sealed class HandshakeDriver : IDisposable
         // requires real inbound health loss, so it is conservative already.
         const int            EarlyFleeMinEvadedSwings    = 6;
         const double         EarlyFleeHealthLostFraction = 0.25;
+        // Refused-swing variant of the same unwinnable-and-losing flee: a target the
+        // server REFUSES every swing against (a non-cancel AttackDone error such as
+        // out-of-range — e.g. a foe the bot cannot reach) can never be damaged at all.
+        // A refusal is stronger "cannot connect" evidence than an evade (the swing never
+        // reached the target), so the threshold is LOWER than EarlyFleeMinEvadedSwings —
+        // and the reflex still ALSO requires real inbound health loss, so it stays
+        // conservative. Saves a fragile bot from stinging-itself-to-death against an
+        // unreachable foe before the critical reflex / no-damage watchdog fire.
+        const int            EarlyFleeMinRefusedSwings   = 3;
         // Losing-EXCHANGE early flee (cp-2405): catches a fight the bot lands
         // SOME hits in yet still bleeds out far faster than the target — break
         // off once it has lost >= half its max HP since the fight high-water
@@ -962,6 +971,15 @@ internal sealed class HandshakeDriver : IDisposable
         int                  combatSwingsLanded = 0;
         int                  combatSwingsEvaded = 0;
         uint                 combatDamageDealt = 0;
+        // Consecutive SEMANTIC swing refusals (server AttackDone errors that are
+        // NOT the benign auto-repeat-loop cancel — e.g. out-of-range / cannot-attack)
+        // against the active combat target, since the last swing that actually reached
+        // it (landed or evaded). A target that keeps refusing every swing cannot be
+        // connected with at all (e.g. one the bot cannot reach); fed to the
+        // unwinnable-and-losing early-flee so a fragile bot flees instead of dying
+        // mid-swing against a foe it can never touch. Reset on a landed/evaded swing and
+        // on a target change (with the other per-fight counters).
+        int                  combatAttacksRefused = 0;
         // Phase 7f.H — highest self health fraction observed during the
         // CURRENT engagement (its high-water mark). Updated each combat tick
         // and reset by ClearCombatFightStats at every fight start/clear. The
@@ -1757,6 +1775,7 @@ internal sealed class HandshakeDriver : IDisposable
             combatSwingsLanded = 0;
             combatSwingsEvaded = 0;
             combatDamageDealt = 0;
+            combatAttacksRefused = 0;
             combatPeakSelfHealthFraction = null;
             combatFeedbackSent = false;
             combatTargetName = null;
@@ -2818,6 +2837,18 @@ internal sealed class HandshakeDriver : IDisposable
                                         $"[combat] AttackDone error=0x{atkDone.ErrorCode:X4} " +
                                         $"({attackLabel})");
 
+                                    // Count a SEMANTIC refusal (a non-cancel AttackDone
+                                    // error the bot cannot recover by re-sending — e.g.
+                                    // out-of-range against a target it cannot reach)
+                                    // toward the unwinnable-and-losing early-flee, so a
+                                    // fragile bot that can NEVER connect (an out-of-reach
+                                    // foe still damaging it) flees instead of dying
+                                    // mid-swing. The benign auto-repeat-loop cancel
+                                    // (0x0036) is excluded.
+                                    if (combatTargetGuid is not null &&
+                                        CombatRetry.IsSemanticAttackRefusal(atkDone.ErrorCode))
+                                        combatAttacksRefused++;
+
                                     // ActionCancelled (0x0036) means the
                                     // server's auto-repeat swing loop
                                     // dropped. Request a fast re-send of the
@@ -2919,10 +2950,18 @@ internal sealed class HandshakeDriver : IDisposable
                                     combatSwingsLanded = 0;
                                     combatSwingsEvaded = 0;
                                     combatDamageDealt = 0;
+                                    combatAttacksRefused = 0;
                                     combatFeedbackSent = false;
                                     combatTargetName = null;
                                     combatStatsForGuid = cnTarget;
                                 }
+
+                                // A landed/evaded swing actually REACHED the target, so the
+                                // consecutive-refusal streak is broken — the target is
+                                // connectable (any earlier out-of-range refusals were
+                                // transient, e.g. while closing distance). Reset so only a
+                                // target the bot NEVER reaches accumulates refusals.
+                                combatAttacksRefused = 0;
 
                                 // A landed/evaded swing notification means the
                                 // server's auto-repeat loop just RESOLVED a swing
@@ -4040,7 +4079,9 @@ internal sealed class HandshakeDriver : IDisposable
                         dgHc, dgHm, inCombat: true,
                         CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor,
                         combatSwingsLanded, combatDamageDealt, combatSwingsEvaded,
-                        EarlyFleeMinEvadedSwings, combatPeakSelfHealthFraction,
+                        EarlyFleeMinEvadedSwings,
+                        combatAttacksRefused, EarlyFleeMinRefusedSwings,
+                        combatPeakSelfHealthFraction,
                         EarlyFleeHealthLostFraction,
                         LosingExchangeMinSwings, LosingExchangeSelfHealthLostFraction,
                         firstObservedTargetHealthFraction, lastObservedTargetHealthFraction,

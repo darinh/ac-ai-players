@@ -61,21 +61,25 @@ internal static class CombatDisengage
     /// <summary>
     /// True when the bot should break off NOW because the current engagement
     /// is BOTH unwinnable AND costing health: it has landed zero hits and
-    /// dealt zero damage across enough swings for "cannot damage" to be
-    /// conclusive (not an unlucky early streak), AND its own health has fallen
+    /// dealt zero damage across enough no-progress swings for "cannot damage" to
+    /// be conclusive (not an unlucky early streak), AND its own health has fallen
     /// at least <paramref name="healthLostFraction"/> of max below this
     /// engagement's high-water mark (it is taking inbound damage it cannot
-    /// answer). This trips well BEFORE the critical low-health reflex
-    /// (<see cref="ShouldDisengage"/>) so the bot flees while it still has a
-    /// safety margin, instead of dying mid-swing against a foe it cannot hurt.
+    /// answer). A no-progress swing is one the target EVADED (it reached the
+    /// target, which dodged) OR one the server REFUSED (the bot could not connect
+    /// at all — out of range / cannot-attack — e.g. a target it cannot reach);
+    /// either, in enough volume, proves "cannot damage". This trips well BEFORE
+    /// the critical low-health reflex (<see cref="ShouldDisengage"/>) so the bot
+    /// flees while it still has a safety margin, instead of dying mid-swing
+    /// against a foe it cannot hurt OR cannot reach.
     ///
     /// A fight in which the bot has landed ANY hit or dealt ANY damage never
     /// trips this (it is not unwinnable), and a fight in which the bot is
     /// taking no net damage never trips it either (a harmless 0-damage
     /// stalemate is a tempo concern owned by the no-damage watchdog, not a
-    /// death risk). Mechanical: keys ONLY on the bot's own swing outcomes and
-    /// its own health vital — no monster KIND, name, wcid, landblock, or
-    /// server text, and it never chooses a target.
+    /// death risk). Mechanical: keys ONLY on the bot's own swing outcomes
+    /// (landed / evaded / server-refused) and its own health vital — no monster
+    /// KIND, name, wcid, landblock, or server text, and it never chooses a target.
     /// </summary>
     /// <param name="inCombat">True when a combat target is locked.</param>
     /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
@@ -85,6 +89,18 @@ internal static class CombatDisengage
     /// Minimum all-evaded swing count (zero landed, zero damage) before
     /// "cannot damage" is conclusive. May be lower than the no-damage
     /// abandon's count because this reflex ALSO requires active health loss.
+    /// </param>
+    /// <param name="swingsRefused">
+    /// Swings the SERVER refused this fight (a semantic AttackDone error such as
+    /// out-of-range / cannot-attack — NOT the benign auto-repeat-loop cancel),
+    /// counting consecutive refusals since the last swing that actually reached
+    /// the target. A target that keeps refusing every swing cannot be connected
+    /// with at all.
+    /// </param>
+    /// <param name="minRefusedSwings">
+    /// Minimum refused-swing count before "cannot connect" is conclusive. May be
+    /// LOWER than <paramref name="minEvadedSwings"/> because a refusal is stronger
+    /// evidence than an evade (the swing never reached the target).
     /// </param>
     /// <param name="healthCurrent">Current health points.</param>
     /// <param name="healthMax">Maximum health points.</param>
@@ -100,15 +116,23 @@ internal static class CombatDisengage
     /// </param>
     public static bool ShouldDisengageUnwinnableLosing(
         bool inCombat,
-        int swingsLanded, uint damageDealt, int swingsEvaded, int minEvadedSwings,
+        int swingsLanded, uint damageDealt,
+        int swingsEvaded, int minEvadedSwings,
+        int swingsRefused, int minRefusedSwings,
         uint healthCurrent, uint healthMax,
         double? peakHealthFraction, double healthLostFraction)
     {
         if (!inCombat) return false;
         if (healthMax == 0u) return false;       // health not yet synced
         if (healthCurrent == 0u) return false;   // death/respawn path owns this
-        // Unwinnable: zero landed, zero damage, enough all-evaded swings.
-        if (swingsLanded != 0 || damageDealt != 0u || swingsEvaded < minEvadedSwings)
+        // Unwinnable: zero landed, zero damage, AND enough no-progress swings to be
+        // conclusive — either the target EVADED enough (it dodges every swing) OR the
+        // server REFUSED enough swings (the bot cannot connect at all, e.g. a target it
+        // cannot reach). A refused swing is even stronger "cannot damage" evidence than an
+        // evade (the swing never landed on the target to be dodged), so its threshold can
+        // be lower.
+        if (swingsLanded != 0 || damageDealt != 0u
+            || (swingsEvaded < minEvadedSwings && swingsRefused < minRefusedSwings))
             return false;
         // Losing: own health has dropped meaningfully below the fight's
         // high-water mark (taking inbound damage we cannot answer).
@@ -207,6 +231,7 @@ internal static class CombatDisengage
         uint healthCurrent, uint healthMax, bool inCombat,
         double disengageFraction, uint criticalHpFloor,
         int swingsLanded, uint damageDealt, int swingsEvaded, int minEvadedSwings,
+        int swingsRefused, int minRefusedSwings,
         double? peakHealthFraction, double healthLostFraction,
         int losingExchangeMinSwings, double losingExchangeSelfHealthLostFraction,
         double? targetHealthAtStart, double? targetHealthNow,
@@ -216,6 +241,7 @@ internal static class CombatDisengage
             return "low-health";
         if (ShouldDisengageUnwinnableLosing(
                 inCombat, swingsLanded, damageDealt, swingsEvaded, minEvadedSwings,
+                swingsRefused, minRefusedSwings,
                 healthCurrent, healthMax, peakHealthFraction, healthLostFraction))
             return "unwinnable-losing";
         if (ShouldDisengageLosingExchange(
