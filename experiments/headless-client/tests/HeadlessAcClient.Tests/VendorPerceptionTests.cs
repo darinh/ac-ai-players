@@ -309,14 +309,27 @@ public class VendorPerceptionTests
         Assert.Contains("re-engaging THAT specific source — `Use` it if it is a `vendor`", prompt);
     }
 
-    private static WorldStateProjection DoneBatchAtSource(bool panelOpen) => new()
+    [Fact]
+    public void Unarmed_DoneBatchSource_SuppressesFindRefresh()
+    {
+        // Combat-readiness gate: the FIND-A-KILL-TASK refresh exception is suppressed
+        // when UNARMED (arming via SELF-ARM precedes the contract cycle the bot can't
+        // yet complete). Same closed-panel done-batch source that fires it when armed.
+        var world = DoneBatchAtSource(panelOpen: false, armed: false);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("FIND A KILL-TASK SOURCE", prompt);
+    }
+
+    private static WorldStateProjection DoneBatchAtSource(bool panelOpen, bool armed = true) => new()
     {
         Self = new SelfProjection
         {
             Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
             PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
         },
-        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Inventory = armed
+            ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+            : System.Array.Empty<InventoryItemProjection>(),
         Visible = new[]
         {
             new VisibleObjectProjection

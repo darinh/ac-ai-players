@@ -33,7 +33,8 @@ public class RefreshFinishedBatchTests
         uint[] stages,
         string? npcEnd = Issuer, string? npcStart = null,
         bool issuerVisible = true, bool issuerIsVendor = false,
-        bool issuerAsPlainObject = false, DateTimeOffset? stage3Since = null)
+        bool issuerAsPlainObject = false, DateTimeOffset? stage3Since = null,
+        bool armed = true)
     {
         var visible = new List<VisibleObjectProjection>();
         if (issuerVisible)
@@ -66,7 +67,9 @@ public class RefreshFinishedBatchTests
                 Guid = 0x5000000Eu, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
                 PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
             },
-            Inventory = Array.Empty<InventoryItemProjection>(),
+            Inventory = armed
+                ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+                : Array.Empty<InventoryItemProjection>(),
             Visible = visible,
             Contracts = contracts,
         };
@@ -189,6 +192,20 @@ public class RefreshFinishedBatchTests
         Assert.Contains("FIND A KILL-TASK SOURCE", prompt);
         Assert.Contains("REFRESH A FINISHED BATCH", prompt);
         Assert.DoesNotContain("RETURN TO A CONTRACT SOURCE", prompt);
+    }
+
+    [Fact]
+    public void Nudge_FindAndRefresh_Absent_WhenUnarmed()
+    {
+        // Combat-readiness gate: the SAME finished-batch/issuer-in-view scene that
+        // renders FIND + the REFRESH exception when armed is suppressed when UNARMED
+        // (the bot cannot complete a kill-task; arming via SELF-ARM comes first).
+        var world = World(new uint[] { 3u }, armed: false);
+        var talked = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { Issuer };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), currentGoal: null, stack: null, pickerActivity: null,
+            explorationCandidates: null, talkedNpcNames: talked);
+        Assert.DoesNotContain("FIND A KILL-TASK SOURCE", prompt);
     }
 
     [Fact]

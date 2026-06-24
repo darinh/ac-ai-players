@@ -31,7 +31,7 @@ public class ReturnToContractSourceTests
         bool vendorPanelOpen = false, bool monsterVisible = false,
         bool selfCellKnown = true, bool coordsOnFirstContract = true,
         bool nameOnFirstContract = true, bool coordsOnlyOnLast = false,
-        bool padDescriptions = false)
+        bool padDescriptions = false, bool armed = true)
     {
         var visible = new System.Collections.Generic.List<VisibleObjectProjection>();
         if (npcVisible)
@@ -89,7 +89,9 @@ public class ReturnToContractSourceTests
                 CellId = selfCellKnown ? 0xAAB50003u : (uint?)null,
                 PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
             },
-            Inventory = Array.Empty<InventoryItemProjection>(),
+            Inventory = armed
+                ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+                : Array.Empty<InventoryItemProjection>(),
             Visible = visible,
             Vendor = vendorPanelOpen ? new VendorProjection { VendorGuid = 0x9001u } : null,
             Contracts = contracts,
@@ -120,6 +122,17 @@ public class ReturnToContractSourceTests
         // pull the bot back toward a source rather than grind it further away.
         Assert.Contains(Marker,
             Prompt(World(new uint[] { 3u, 3u }, withBearing: true, monsterVisible: true)));
+    }
+
+    [Fact]
+    public void Absent_WhenUnarmed()
+    {
+        // Combat-readiness gate: when UNARMED, traveling back to a contract source
+        // competes with the SELF-ARM loot-to-arm hunt, so the nudge is suppressed
+        // until the bot is armed. Same finished-batch/no-source scene that fires it
+        // when armed stays silent unarmed.
+        Assert.DoesNotContain(Marker,
+            Prompt(World(new uint[] { 3u, 3u }, withBearing: true, armed: false)));
     }
 
     [Fact]

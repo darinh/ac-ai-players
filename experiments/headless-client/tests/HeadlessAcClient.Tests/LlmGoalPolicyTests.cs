@@ -2050,7 +2050,12 @@ public class LlmGoalPolicyTests
             Guid = 0x91000001u, Name = "Mite", Wcid = 7u, ItemType = 0x10u,
             Distance = 5f, IsCreature = true, IsMonster = true, IsAttackable = true,
         };
-        var world = BuildVisibleWorld(new[] { npc, monster });
+        var world = BuildVisibleWorld(new[] { npc, monster }) with
+        {
+            // Armed: the FIND-A-KILL-TASK cue is combat-readiness gated, so the
+            // bot must be armed for the "OUTRANKS grinding" assertion to render.
+            Inventory = new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } },
+        };
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             world, new EventStream(), currentGoal: null, stack: null,
             pickerActivity: null, explorationCandidates: null,
@@ -8339,14 +8344,16 @@ public class LlmGoalPolicyTests
         Assert.Equal(2u, proj.Contracts[0].Stage);
     }
 
-    private static WorldStateProjection BuildVendorContractWorld(uint[] stages, bool vendorOpen) => new()
+    private static WorldStateProjection BuildVendorContractWorld(uint[] stages, bool vendorOpen, bool armed = true) => new()
     {
         Self = new SelfProjection
         {
             Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
             PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
         },
-        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Inventory = armed
+            ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+            : System.Array.Empty<InventoryItemProjection>(),
         Visible = System.Array.Empty<VisibleObjectProjection>(),
         Contracts = stages.Select((s, i) => new ContractProjection { ContractId = (uint)(100 + i), Stage = s }).ToArray(),
         Vendor = vendorOpen
@@ -8377,6 +8384,21 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             BuildVendorContractWorld(new[] { 3u, 3u }, vendorOpen: true), new EventStream(), null);
         Assert.Contains("BUY one here", prompt);
+    }
+
+    [Fact]
+    public void ContractBuyCue_SuppressedWhenUnarmed()
+    {
+        // Combat-readiness gate (cp gate-contract-cues-unarmed): the open-vendor BUY-
+        // a-contract bridge is suppressed when UNARMED — arming via the SELF-ARM loot-
+        // to-arm hunt precedes the contract cycle the bot cannot yet complete. Same
+        // open-vendor scenes that fire it when armed stay silent unarmed.
+        var noContracts = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(System.Array.Empty<uint>(), vendorOpen: true, armed: false), new EventStream(), null);
+        Assert.DoesNotContain("BUY one here", noContracts);
+        var doneBatch = LlmGoalPolicy.BuildUserPrompt(
+            BuildVendorContractWorld(new[] { 3u, 3u }, vendorOpen: true, armed: false), new EventStream(), null);
+        Assert.DoesNotContain("BUY one here", doneBatch);
     }
 
     [Fact]

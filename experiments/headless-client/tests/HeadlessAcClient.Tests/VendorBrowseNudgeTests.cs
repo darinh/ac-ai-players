@@ -27,7 +27,8 @@ public class VendorBrowseNudgeTests
     private static WorldStateProjection World(
         bool vendorVisible, bool monsterVisible = false,
         bool vendorPanelOpen = false, bool hasContract = false, uint contractStage = 2u,
-        uint[]? contractStages = null, bool npcVisible = false, bool vendorIsCreature = false)
+        uint[]? contractStages = null, bool npcVisible = false, bool vendorIsCreature = false,
+        bool armed = true)
     {
         var visible = new System.Collections.Generic.List<VisibleObjectProjection>();
         if (vendorVisible)
@@ -75,7 +76,9 @@ public class VendorBrowseNudgeTests
                 Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
                 PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
             },
-            Inventory = Array.Empty<InventoryItemProjection>(),
+            Inventory = armed
+                ? new[] { new InventoryItemProjection { Guid = 0x7E1u, Name = "Spadone", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x02000000u } }
+                : Array.Empty<InventoryItemProjection>(),
             Visible = visible,
             Vendor = vendorPanelOpen ? new VendorProjection { VendorGuid = 0x9001u } : null,
             Contracts = contracts,
@@ -102,6 +105,19 @@ public class VendorBrowseNudgeTests
         // suppressed, so this nudge surfaces the vendor opportunity the bot would
         // otherwise grind past.
         Assert.Contains(NudgeMarker, Prompt(World(vendorVisible: true, monsterVisible: true)));
+    }
+
+    [Fact]
+    public void Nudge_Absent_WhenUnarmed()
+    {
+        // Combat-readiness gate: an UNARMED bot cannot complete a kill-task, so the
+        // contract-source nudge is suppressed (arming via the SELF-ARM loot-to-arm
+        // hunt is the prompt's TOP priority when unarmed). Same scene that fires the
+        // nudge when armed (monster in view, finished batch) stays silent unarmed.
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: true, monsterVisible: true, armed: false)));
+        Assert.DoesNotContain(NudgeMarker,
+            Prompt(World(vendorVisible: true, hasContract: true, contractStage: 3u, armed: false)));
     }
 
     [Fact]
