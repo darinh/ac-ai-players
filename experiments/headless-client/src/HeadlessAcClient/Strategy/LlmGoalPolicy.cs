@@ -8756,6 +8756,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     var cost = Math.Max(1L,
                         (long)Math.Ceiling((double)(rate * val) - 0.1));
                     entry.Append($"  - {name}{weaponTag}: {cost} {vendorUnit} to buy (value {val})");
+                    // Affordability marker for a COIN vendor (AlternateCurrency
+                    // == 0u, so CoinValue is the currency): append it when the
+                    // item's cost exceeds the bot's server-tracked CoinValue, and
+                    // only when CoinValue is known. Pure wire-fact comparison (the
+                    // computed cost vs CoinValue); the LLM still decides.
+                    if (vendor.AlternateCurrency == 0u
+                        && world.Self.CoinValue is int coinHave && cost > coinHave)
+                        entry.Append($" — you have {coinHave} coin, CANNOT AFFORD");
                 }
                 else
                 {
