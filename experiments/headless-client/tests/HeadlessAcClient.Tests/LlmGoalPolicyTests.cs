@@ -4808,6 +4808,74 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void SurvivabilityCheck_RendersWhenDiedThisSession_AndUnspentXp()
+    {
+        // Survivability-spend salience: when the bot has died this session
+        // (secondsSinceLastDeath set) AND has unspent XP, `## Self` surfaces a pointer to
+        // raise ENDURANCE/health first — elevating the SPEND XP rule's dying->max-HP
+        // tiebreaker that a capable model buries while pouring XP into offense.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: 30);
+        Assert.Contains("SURVIVABILITY-FIRST CHECK", prompt);
+        Assert.Contains("ENDURANCE/health", prompt);
+        Assert.Contains("offense is the limit", prompt); // balance-preserving both-options clause
+    }
+
+    [Fact]
+    public void SurvivabilityCheck_AbsentWhenNoDeathThisSession()
+    {
+        // No in-session death (secondsSinceLastDeath null) -> no survivability cue.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: null);
+        Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
+    public void SurvivabilityCheck_AbsentWhenNoUnspentXp()
+    {
+        // Died this session but 0 unspent XP -> nothing to invest -> no cue.
+        var world = BuildXpWorld(69296, 0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: 30);
+        Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
+    public void SurvivabilityCheck_AbsentWhenDeathIsStale()
+    {
+        // secondsSinceLastDeath stays non-null all session once any death is observed; the
+        // cue must NOT latch for a stale death — it fires only for an ACTIVELY-dying
+        // (recent) death within the recency window, matching the rule's "dying fast".
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: 100000);
+        Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
+    public void SurvivabilityCheck_RendersAtRecencyWindowBoundary()
+    {
+        // Pin the inclusive boundary: a death exactly at the 300s window edge still fires
+        // (gate is `dsd <= RecentDeathSalienceWindowSeconds`).
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: 300);
+        Assert.Contains("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
+    public void SurvivabilityCheck_AbsentJustPastRecencyWindow()
+    {
+        // Pin the exclusive edge: one second past the 300s window no longer fires.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, secondsSinceLastDeath: 301);
+        Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {
         // Deliberation-race regression guard. A fresh L1 bot in an
