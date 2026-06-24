@@ -826,6 +826,46 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_Coin_ShownWhenKnown_IncludingZero()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        // coin is the economy-gating resource (arming + contract-refresh): shown when
+        // known, INCLUDING 0 (coin=0 is the meaningful coin-starvation signal).
+        var zero = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            coin: 0);
+        Assert.Contains("coin=0", zero);
+
+        var some = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            coin: 137);
+        Assert.Contains("coin=137", some);
+
+        // Unknown (null) -> omitted (no coin= token at all).
+        var unknown = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            coin: null);
+        Assert.DoesNotContain("coin=", unknown);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_HppeakAndCoin_BothTokensDistinct()
+    {
+        // Pin the adjacent int? tail (maxHpProxy then coin): set BOTH with DISTINCT
+        // values so a future positional swap would flip the tokens and fail this test.
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 250000L, model: "m",
+            maxHpProxy: 5, coin: 137);
+        Assert.Contains("hppeak=5", line);
+        Assert.Contains("coin=137", line);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Swings_ShownOnlyWhenAnyResolved()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };

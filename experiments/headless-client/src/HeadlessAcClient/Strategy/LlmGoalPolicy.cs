@@ -2870,7 +2870,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             TopRepeatedGoalEmitLabel(events, SummaryIntervalDecisions), _summarySkips,
             FormatContractCounts(world.Contracts), _stack?.Depth, _summaryRefreshVendorGuids.Count,
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
-            IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak));
+            IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -2911,7 +2911,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
-        bool armed = true, int? maxHpProxy = null)
+        bool armed = true, int? maxHpProxy = null, int? coin = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -2956,6 +2956,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // self-reports the buy-gap. Pure observability; no behavior change.
         if (refreshOpps > 0)
             line += $" refresh-opps={refreshOpps}";
+        // Economy resource: the bot's server-tracked coin balance (Self.CoinValue). The
+        // arming + contract-refresh economy is gated on coin (a contract/weapon costs
+        // coin the bot may not have). Shown when known (>=0). Read with refresh-opps= +
+        // armed=: coin near 0 while refresh-opps>0 / armed=no self-reports a
+        // coin-starvation wall vs a model-priority gap. Pure observability; no behavior
+        // change, no game knowledge.
+        if (coin is int cn && cn >= 0)
+            line += $" coin={cn}";
         // Combat-effectiveness signal: surface the session swing-outcome counters
         // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
         // only when at least one has incremented. Pure observability; no behavior
