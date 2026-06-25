@@ -7797,7 +7797,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -7815,7 +7815,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -13574,8 +13574,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 parsed = parsed with { Target = new Selector() };
             }
-            if (parsed.Kind != GoalKind.Recall && parsed.Target.IsEmpty)
+            if (parsed.Kind != GoalKind.Recall
+                && parsed.Kind != GoalKind.FellowshipCreate
+                && parsed.Kind != GoalKind.FellowshipQuit
+                && parsed.Target.IsEmpty)
             {
+                // Recall and the fellowship self/social actions (FellowshipCreate /
+                // FellowshipQuit) are SELF-actions with no world target — like Recall,
+                // they legitimately carry an empty target (FellowshipCreate's name
+                // rides in target.name when given, but an unnamed create falls back to
+                // a default; FellowshipQuit carries nothing). Accept them rather than
+                // discarding the LLM's decision to the heuristic fallback.
+                //
                 // Wield's wielded object is logically the `item`, not the
                 // `target`: the Motor's Wield dispatch reads goal.Item (or an
                 // in-bag target) and already tolerates an empty target. The

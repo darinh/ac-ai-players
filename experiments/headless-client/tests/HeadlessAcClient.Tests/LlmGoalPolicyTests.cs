@@ -61,6 +61,38 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_FellowshipQuitParsesWithoutTarget()
+    {
+        // FellowshipQuit is a self/social action with no world target — like Recall,
+        // it must parse with an empty/absent target (else the capability is dead).
+        var json = """{"kind":"FellowshipQuit","rationale":"leave the group","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.FellowshipQuit, g!.Kind);
+    }
+
+    [Fact]
+    public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
+    {
+        // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
+        // it is a self/social action, not a world-target verb.
+        var json = """{"kind":"FellowshipCreate","rationale":"form a group","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.FellowshipCreate, g!.Kind);
+    }
+
+    [Fact]
+    public void TryParseGoal_NamedFellowshipCreateCarriesName()
+    {
+        // A NAMED FellowshipCreate still parses and carries the name through to the
+        // dispatch (the empty-target exemption only skips rejection; a present name
+        // makes the target non-empty and flows through unchanged).
+        var json = """{"kind":"FellowshipCreate","target":{"name":"Alpha Squad"},"rationale":"team up","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.FellowshipCreate, g!.Kind);
+        Assert.Equal("Alpha Squad", g.Target.Name);
+    }
+
+    [Fact]
     public void TryParseGoal_AcceptsItemOnlySelfUse()
     {
         // Self-Use (read / activate an inventory item ON yourself) carries the
