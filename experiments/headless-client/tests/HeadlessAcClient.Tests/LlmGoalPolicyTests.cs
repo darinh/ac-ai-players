@@ -10359,6 +10359,110 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FellowshipGuidance_Solo_NoPlayerInView_Omitted()
+    {
+        // The common solo case (not in a fellowship, no player in view) renders no
+        // guidance cue -> zero static-floor cost.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(null), new EventStream(), null);
+        Assert.DoesNotContain("## Fellowship guidance", prompt);
+        Assert.DoesNotContain("you are NOT in a fellowship", prompt);
+    }
+
+    [Fact]
+    public void FellowshipGuidance_PlayerInView_NotInFellowship_SuggestsForm()
+    {
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x500000A1u, Name = "Otherbot", IsCreature = true, IsPlayer = true, Distance = 8f },
+            },
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Fellowship guidance", prompt);
+        Assert.Contains("you are NOT in a fellowship", prompt); // the form branch (unique to the cue)
+        // Mechanic accuracy: a fellowship only CAN share XP (settings/levels permitting),
+        // not an unconditional "levels everyone faster" guarantee.
+        Assert.Contains("CAN share kill", prompt);
+        Assert.DoesNotContain("levels everyone faster", prompt);
+        // The recruit uniqueness hedge must be present (recruit fails on 0/N matches).
+        Assert.Contains("only when exactly one visible", prompt);
+    }
+
+    [Fact]
+    public void FellowshipGuidance_InFellowship_SuggestsStayGrouped()
+    {
+        // ShareXp on, EvenShare off -> XP is split by level, NOT a "speeds everyone" claim.
+        var fellow = new FellowshipProjection
+        {
+            Name = "Crew", AmLeader = true, LeaderName = "Headless", MemberCount = 1,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Headless", Level = 10u, IsSelf = true, IsLeader = true },
+            },
+            ShareXp = true, EvenShare = false, Open = true, Locked = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Fellowship guidance", prompt);
+        Assert.Contains("You are grouped", prompt);     // the in-fellowship branch (unique to the cue)
+        Assert.Contains("split by level", prompt);       // ShareXp on, EvenShare off
+        Assert.DoesNotContain("speed everyone's leveling", prompt);
+        // Pin the uniqueness + priority hedges (the regressions the rewrite fixed).
+        Assert.Contains("only when exactly one visible", prompt);
+        Assert.Contains("more important immediate objective", prompt);
+    }
+
+    [Fact]
+    public void FellowshipGuidance_InFellowship_ShareXpOff_SaysNoBenefit()
+    {
+        // ShareXp off -> the cue must NOT claim XP sharing (it would mis-steer the LLM).
+        var fellow = new FellowshipProjection
+        {
+            Name = "Crew", AmLeader = true, LeaderName = "Headless", MemberCount = 2,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Headless", Level = 10u, IsSelf = true, IsLeader = true },
+                new FellowshipMemberProjection { Name = "Pal", Level = 50u, IsSelf = false, IsLeader = false },
+            },
+            ShareXp = false, EvenShare = false, Open = true, Locked = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Fellowship guidance", prompt);
+        Assert.Contains("NOT currently sharing XP", prompt);
+        Assert.Contains("no XP benefit right now", prompt);
+        // ShareXp off -> none of the XP-sharing/leveling-benefit phrasings may appear.
+        Assert.DoesNotContain("speed everyone's leveling", prompt);
+        Assert.DoesNotContain("spreads kill XP", prompt);
+    }
+
+    [Fact]
+    public void FellowshipGuidance_InFellowship_EvenShare_SaysSpeedsLeveling()
+    {
+        // ShareXp on + EvenShare on -> the even-share case may say it speeds leveling.
+        var fellow = new FellowshipProjection
+        {
+            Name = "Crew", AmLeader = true, LeaderName = "Headless", MemberCount = 2,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Headless", Level = 10u, IsSelf = true, IsLeader = true },
+                new FellowshipMemberProjection { Name = "Pal", Level = 11u, IsSelf = false, IsLeader = false },
+            },
+            ShareXp = true, EvenShare = true, Open = true, Locked = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Fellowship guidance", prompt);
+        Assert.Contains("speed everyone's leveling", prompt);
+    }
+
+    [Fact]
     public void Fellowship_FromWorldState_DerivesAmLeaderAndSelfFlags()
     {
         var ws = new HeadlessAcClient.World.WorldState();
