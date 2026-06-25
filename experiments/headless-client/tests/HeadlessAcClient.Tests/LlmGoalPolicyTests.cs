@@ -919,6 +919,32 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_BeatenVetoes_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
+            beatenVetoes: 18);
+        Assert.Contains("beaten-vetoes=18", with);
+
+        // beaten-vetoes renders AFTER kills (combat outcome, then the un-winnable churn).
+        var both = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
+            kills: 2, beatenVetoes: 18);
+        Assert.True(both.IndexOf("kills=", StringComparison.Ordinal)
+            < both.IndexOf("beaten-vetoes=", StringComparison.Ordinal));
+
+        // Zero vetoes -> omitted (the healthy norm; no noise).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
+            beatenVetoes: 0);
+        Assert.DoesNotContain("beaten-vetoes=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Kills_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
