@@ -1805,6 +1805,150 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.TryResolveUseItemVendorOffering(twoObj, world));
     }
 
+    // ---- TryResolveBuyVendorNoPanel (Buy{vendor} with no panel open -> Use{vendor}) ----
+
+    [Fact]
+    public void BuyVendorNoPanel_VendorInView_NoPanelOpen_ResolvesVendorGuid()
+    {
+        // Buy{Merchant} while no trade panel is open + the vendor is visible -> Use it to
+        // approach + open the panel (the dispatch fails such a Buy "no panel open").
+        var world = WorldWithVisible(VendorVisible(0x7A9B5200u, "Merchant"));
+        var buy = new Goal
+        { Kind = GoalKind.Buy, Target = new Selector { Name = "Merchant" }, Item = new Selector { Name = "weapon" } };
+        Assert.Equal(0x7A9B5200u, LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
+    }
+
+    [Fact]
+    public void BuyVendorNoPanel_PanelOpen_ReturnsNull()
+    {
+        // A panel IS open -> let the Buy run (no rewrite); this is the no-loop guard.
+        var world = WorldWithVendorOffers(new[] { VendorVisible(0x7A9B5201u, "Merchant") }, "Spear");
+        var buy = new Goal
+        { Kind = GoalKind.Buy, Target = new Selector { Name = "Merchant" }, Item = new Selector { Name = "Spear" } };
+        Assert.Null(LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
+    }
+
+    [Fact]
+    public void BuyVendorNoPanel_TargetNotAVisibleVendor_ReturnsNull()
+    {
+        // The Buy names something that does not bind a visible vendor (e.g. an item name) ->
+        // no rewrite (we cannot know which vendor to approach).
+        var world = WorldWithVisible(VendorVisible(0x7A9B5202u, "Merchant"));
+        var buy = new Goal
+        { Kind = GoalKind.Buy, Target = new Selector { Name = "Spear" }, Item = new Selector() };
+        Assert.Null(LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
+    }
+
+    [Fact]
+    public void BuyVendorNoPanel_NonBuyGoal_ReturnsNull()
+    {
+        var world = WorldWithVisible(VendorVisible(0x7A9B5203u, "Merchant"));
+        var use = new Goal
+        { Kind = GoalKind.Use, Target = new Selector { Name = "Merchant" }, Item = new Selector() };
+        Assert.Null(LlmGoalPolicy.TryResolveBuyVendorNoPanel(use, world));
+    }
+
+    [Fact]
+    public void BuyVendorNoPanel_EmptyTargetName_ReturnsNull()
+    {
+        var world = WorldWithVisible(VendorVisible(0x7A9B5204u, "Merchant"));
+        var buy = new Goal { Kind = GoalKind.Buy, Target = new Selector(), Item = new Selector { Name = "weapon" } };
+        Assert.Null(LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
+    }
+
+    [Fact]
+    public void BuyVendorNoPanel_TwoSameNamedVendors_DoesNotRewrite()
+    {
+        // Ambiguous: the named selector binds TWO visible vendors. The Motor must NOT
+        // autonomously pick one (no autonomous-pick) -- stay unresolved so the LLM re-decides.
+        var world = WorldWithVisible(
+            VendorVisible(0x7A9B5205u, "Merchant"),
+            VendorVisible(0x7A9B5206u, "Merchant"));
+        var buy = new Goal
+        { Kind = GoalKind.Buy, Target = new Selector { Name = "Merchant" }, Item = new Selector { Name = "weapon" } };
+        Assert.Null(LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
+    }
+
+    [Fact]
+    public async Task ProposeGoal_BuyVendorNoPanel_RewritesToUseTheVendor()
+    {
+        // End-to-end through ProposeGoalCore: the LLM emits a Buy{vendor-name}, no panel is
+        // open, the vendor is visible -> the proposed goal is rewritten to Use{vendor-guid}.
+        var goalJson = """
+        {
+          "goal_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "kind": "Buy",
+          "target": { "name": "Merchant" },
+          "item":   { "name": "weapon" },
+          "priority": 7,
+          "rationale": "arm up at the vendor"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler((req, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) })));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = WorldWithVisible(VendorVisible(0x7A9B5210u, "Merchant"));
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));   // kicks off the async call
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal(0x7A9B5210u, goal.Target?.Guid);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_BuyVendorPanelOpen_DoesNotRewrite()
+    {
+        // Counterpart: when a trade panel IS open, the Buy is NOT rewritten -- it runs as a Buy.
+        var goalJson = """
+        {
+          "goal_id": "11112222-3333-4444-5555-666677778888",
+          "kind": "Buy",
+          "target": { "name": "Merchant" },
+          "item":   { "name": "Spear" },
+          "priority": 7,
+          "rationale": "buy the spear"
+        }
+        """;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new AsyncStubHandler((req, ct) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) })));
+        var policy = new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+
+        var world = WorldWithVendorOffers(new[] { VendorVisible(0x7A9B5211u, "Merchant") }, "Spear");
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Buy, goal!.Kind);
+    }
+
     // ---- TryResolvePickupVendorItemName (Pickup-of-a-vendor-panel-item -> Buy) ----
 
     private static WorldStateProjection WorldWithVendorOffers(
