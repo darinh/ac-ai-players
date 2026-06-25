@@ -6245,6 +6245,39 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("sell dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.FellowshipCreate)
+                    {
+                        // Social self-action: form a fellowship led by the bot. The
+                        // LLM chose to create one and named it (goal.Target.name); the
+                        // motor only packs the FellowshipCreate (0x00A2) opcode and
+                        // sends it. It makes NO decision about WHETHER/WHEN to form a
+                        // fellowship. The server replies with a FellowshipFullUpdate
+                        // the client already decodes into FellowshipMembership.
+                        var fellowName = GameActionFellowshipCreateMessage.SanitizeName(goal.Target?.Name);
+                        const bool shareXpDefault = true; // cooperative default: share XP across members
+                        var fcPktSeq  = nextOutboundPacketSequence++;
+                        var fcFragSeq = nextOutboundFragmentSequence++;
+                        var fcBuf = new byte[GameActionFellowshipCreateMessage.MeasureSize(fellowName)];
+                        var fcLen = GameActionFellowshipCreateMessage.Pack(fcBuf, fellowName, shareXpDefault);
+                        var fcMsg = new OutboundPacket();
+                        if (lastReceivedSeq != 0)
+                            fcMsg.AddAckSequence(lastReceivedSeq);
+                        fcMsg.AddBlobFragment(
+                            fragSequence: fcFragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: fcBuf.AsSpan(0, fcLen));
+                        var fcSent = fcMsg.Pack(sendBuf, myClientId,
+                                                sequence: fcPktSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, fcSent),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                        Console.WriteLine(
+                            $"[strategy] LLM-GOAL FellowshipCreate: name='{fellowName}' shareXp={shareXpDefault} " +
+                            $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                            $"pktSeq={fcPktSeq} fragSeq={fcFragSeq} bytes={fcSent}");
+                        tactics.Clear("fellowship-create dispatched", eventStream);
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that
