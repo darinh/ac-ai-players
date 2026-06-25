@@ -3327,6 +3327,30 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_RejectionAwareSurvivesRingRollover()
+    {
+        // The transport-refused wording must survive a >256-event perception flood:
+        // the cue reads the DURABLE rejection window (not the 256-event ring), so a
+        // rejection one decision old still scopes the cue after the ring rolls over.
+        // On the old Recent(30) scan the flood evicted the rejection and the cue
+        // fell back to the misleading "keep Explore-ing" wording.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Name = "Central Courtyard",
+        });
+        for (int i = 0; i < 300; i++)   // > the 256-ring: the rejection rolls out of the ring
+            es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.HealthChanged });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.Contains("being REFUSED as unreachable", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_ExploreLoopCapsule_NonRejectedKeepsDistantTravelOut()
     {
         // Looped but NOT rejected -> the original variant stands (allowing a legitimate
