@@ -229,6 +229,15 @@ internal sealed record SelfProjection
     /// <summary>PropertyInt.NumDeaths (43). Total deaths this character has ever suffered. Persists across sessions.</summary>
     [JsonPropertyName("num_deaths")] public int? NumDeaths { get; init; }
 
+    /// <summary>
+    /// The bot's OWN death count in its CURRENT landblock this session (0 if it has
+    /// not died here). The spatial analogue of the per-mob-kind combat-feel ledger:
+    /// a raw own-outcome tally — NOT a hardcoded danger list, no value/danger label.
+    /// Lets Strategy recognise an area that has REPEATEDLY killed it (a death-spiral
+    /// driver the per-kind ledger misses when an area is lethal across many kinds).
+    /// </summary>
+    [JsonPropertyName("deaths_in_current_area")] public int CurrentLandblockDeaths { get; init; }
+
     /// <summary>PropertyInt.CoinValue (20). Pyreals in inventory (server-totaled).</summary>
     [JsonPropertyName("coin_value")] public int? CoinValue { get; init; }
 
@@ -970,6 +979,7 @@ internal sealed record WorldStateProjection
                 StaminaCurrent = stamCurOut,
                 StaminaObservedPeak = stamPeakOut,
                 NumDeaths = numDeaths,
+                CurrentLandblockDeaths = landblock is uint lbForDeaths ? world.DeathsInLandblock(lbForDeaths) : 0,
                 CoinValue = coinValue,
                 Attributes = attrProj,
                 TrainedSkills = skillProj,

@@ -2005,6 +2005,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         ResolveDeathSpiralMinDeaths(
             Environment.GetEnvironmentVariable("AC_BOTS_DEATH_SPIRAL_MIN_DEATHS"));
 
+    // area-death-memory: the bot's OWN death count IN its current landblock at or
+    // above which the "## Area danger" cue surfaces. 2 (not 1) so a single unlucky
+    // death does not flag an area — only an area that has killed the bot MORE THAN
+    // ONCE this session (a re-entered or stood-in deadly spot). Spatial complement
+    // of DeathSpiralMinDeaths (a death RATE anywhere); this is deaths in ONE place.
+    private const int AreaDeathSalienceThreshold = 2;
+
     // Parse AC_BOTS_DEATH_SPIRAL_MIN_DEATHS. A positive integer >= 2 is used
     // (clamped to [2, 10]); anything else (unset/blank/unparseable/<2) falls back to 3.
     internal static int ResolveDeathSpiralMinDeaths(string? envValue)
@@ -9493,6 +9500,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "this caution applies it OVERRIDES the optional-combat/hunt guidance and the 'dying -> raise max " +
                 "HP' XP tiebreaker above. (A `HOSTILE` already attacking you, or an explicit server/quest " +
                 "directive, still takes priority — defend or flee as needed.)");
+        }
+
+        // ── ## Area danger (spatial death memory, protected tail) ────────────
+        // Spatial complement of the RATE-based ## Survival caution: that one fires
+        // on the bot's recent death-RATE anywhere; this one fires when the bot is
+        // standing in a SPECIFIC area (its current landblock) it has died in MORE
+        // THAN ONCE this session. The per-mob-kind combat-feel ledger only steers
+        // the bot off KINDS that beat it; an area can stay lethal across SEVERAL
+        // kinds or its terrain, and the bot can keep returning to the same deadly
+        // hunting ground near its lifestone after each respawn. Surface the bot's
+        // OWN per-area death tally so it can leave THIS area specifically. Gated on
+        // the bot's own observed deaths-here; names no monster/place/stat/number
+        // (other than its own death count) and assigns no danger label by source —
+        // the LLM still decides where to go. Independent of the death-spiral gate,
+        // so a repeatedly-deadly area is flagged even below the spiral rate.
+        if (world.Self.CurrentLandblockDeaths >= AreaDeathSalienceThreshold)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Area danger");
+            sb.AppendLine(
+                $"- you have DIED {world.Self.CurrentLandblockDeaths} times in THIS exact area (your current " +
+                "location) this session — your OWN outcomes here, not a guess. This specific area has repeatedly " +
+                "proven too dangerous for your current strength (it can be lethal across SEVERAL kinds or its " +
+                "terrain, beyond any one beaten kind). LEAVE this area for a DIFFERENT one where you can survive " +
+                "and make progress, rather than dying here again. (A `HOSTILE` already on you, or an explicit " +
+                "server/quest directive, still takes priority — defend or flee as needed.)");
         }
 
         // ── ## Recent directive check (end-of-prompt salience capsule, cp-2346)

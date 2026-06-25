@@ -276,4 +276,55 @@ public class OutdoorSeamCellTests
         Assert.Equal(5f, canon.Value.LocalPos.Y, 3);
         Assert.Equal(StepZ, canon.Value.LocalPos.Z, 3);
     }
+
+    // ---- AcCoords.IsOnFootSelfMove (on-foot travel vs teleport, for the
+    //      death-location capture that must not record a respawn teleport) ----
+
+    [Fact]
+    public void IsOnFootSelfMove_SameLandblock_AnyDistance_IsOnFoot()
+    {
+        // A walk WITHIN one landblock is on-foot even corner-to-corner (the block
+        // is only 192m); same high-16 bits => on-foot regardless of in-block distance.
+        Assert.True(AcCoords.IsOnFootSelfMove(
+            0xAAB50001u, new Vector3(1f, 1f, 0f),
+            0xAAB50001u, new Vector3(180f, 180f, 0f), 48f));
+    }
+
+    [Fact]
+    public void IsOnFootSelfMove_SameLandblock_IndoorCellChange_IsOnFoot()
+    {
+        // An indoor cell change WITHIN the same landblock (a door) is on-foot.
+        Assert.True(AcCoords.IsOnFootSelfMove(
+            0xAAB50100u, new Vector3(5f, 5f, 0f),
+            0xAAB50105u, new Vector3(7f, 7f, 0f), 48f));
+    }
+
+    [Fact]
+    public void IsOnFootSelfMove_AdjacentBlock_ShortStep_IsOnFoot()
+    {
+        // Outdoor step across a landblock seam, physically ~4m apart -> on-foot.
+        // 0xAAB5 north edge (y=190) -> 0xAAB6 south edge (y=2): global Y differs by ~4m.
+        Assert.True(AcCoords.IsOnFootSelfMove(
+            0xAAB50005u, new Vector3(10f, 190f, 0f),
+            0xAAB60005u, new Vector3(10f, 2f, 0f), 48f));
+    }
+
+    [Fact]
+    public void IsOnFootSelfMove_DifferentBlock_FarJump_IsTeleport()
+    {
+        // Same axis but ~282m apart across the seam -> a teleport, NOT on-foot.
+        Assert.False(AcCoords.IsOnFootSelfMove(
+            0xAAB50005u, new Vector3(10f, 10f, 0f),
+            0xAAB60005u, new Vector3(10f, 100f, 0f), 48f));
+    }
+
+    [Fact]
+    public void IsOnFootSelfMove_CrossLandblockIndoorTransition_IsTeleport()
+    {
+        // An indoor cell in one landblock to an indoor cell in ANOTHER is a
+        // door/portal, never an on-foot surface seam.
+        Assert.False(AcCoords.IsOnFootSelfMove(
+            0xAAB50100u, new Vector3(5f, 5f, 0f),
+            0xAAB60100u, new Vector3(5f, 5f, 0f), 48f));
+    }
 }

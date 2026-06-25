@@ -756,4 +756,37 @@ public class WorldStateTests
             new ContractTrackerEntry(1u, 999u, 1u, 0.0, 0.0),
             DeleteContract: true, SetAsDisplayContract: false)));
     }
+
+    // ---- area-death-memory: per-landblock death ledger ----
+
+    [Fact]
+    public void DeathsByLandblock_RecordsPerLandblock_And_DefaultsZero()
+    {
+        var ws = new WorldState();
+        Assert.Equal(0, ws.DeathsInLandblock(0xAAB5u)); // never died here -> 0
+        ws.RecordDeathInLandblock(0xAAB5u);
+        ws.RecordDeathInLandblock(0xAAB5u);
+        ws.RecordDeathInLandblock(0xA9B4u);
+        Assert.Equal(2, ws.DeathsInLandblock(0xAAB5u)); // two deaths in this area
+        Assert.Equal(1, ws.DeathsInLandblock(0xA9B4u)); // separate area, counted apart
+        Assert.Equal(0, ws.DeathsInLandblock(0x1234u)); // an untouched area stays 0
+    }
+
+    [Fact]
+    public void FromWorldState_SurfacesCurrentLandblockDeaths()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        // Self is in cell 0xAAB50001 -> landblock 0xAAB5.
+        Assert.True(ws.Apply(BuildObjectCreate(
+            TestGuid, name: "Headless", wcid: 1,
+            position: new ObjectPosition(0xAAB50001u, 1f, 2f, 3f, 1f, 0, 0, 0))));
+        ws.RecordDeathInLandblock(0xAAB5u);
+        ws.RecordDeathInLandblock(0xAAB5u);
+        ws.RecordDeathInLandblock(0xA9B4u); // a DIFFERENT area must not bleed into the current one
+
+        var proj = HeadlessAcClient.Strategy.WorldStateProjection.FromWorldState(ws, weenies: null);
+        Assert.NotNull(proj);
+        Assert.Equal(2, proj!.Self.CurrentLandblockDeaths);
+    }
 }
