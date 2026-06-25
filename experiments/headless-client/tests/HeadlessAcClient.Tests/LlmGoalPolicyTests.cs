@@ -4344,11 +4344,12 @@ public class LlmGoalPolicyTests
     [Fact]
     public void RepeatedDescriptorPickup_ReturnsValueForRepeatedShortDescPickup()
     {
-        // 3 recent Pickup emissions carrying a short_desc~= type-descriptor (nothing in view
-        // matches it) -> the looped descriptor value. The capsule cues the LLM; no goal drop.
+        // 3 recent Pickup emissions carrying a short_desc~= type-descriptor with NO visible object
+        // matching it -> the looped descriptor value. The capsule cues the LLM; no goal drop.
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
-        Assert.Equal("throwable weapon", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Equal("throwable weapon",
+            LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4356,7 +4357,96 @@ public class LlmGoalPolicyTests
     {
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("name_contains=\"dagger\"", 3, now);
-        Assert.Equal("dagger", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Equal("dagger",
+            LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NullWhenVisibleObjectShortDescMatches()
+    {
+        // A VISIBLE object whose weenie ShortDesc CONTAINS the descriptor value -> the Pickup could
+        // still resolve to it (normal nav/picker owns it), so the no-match cue is suppressed.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x9101u, Name = "Atlatl", Distance = 4f,
+            ShortDesc = "A light throwable weapon used for hunting.",
+        });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NullWhenVisibleObjectNameMatchesNameContains()
+    {
+        // name_contains is matched against the visible object's NAME; a visible "Rusty Dagger" binds
+        // name_contains="dagger" -> suppressed.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name_contains=\"dagger\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x9102u, Name = "Rusty Dagger", Distance = 4f,
+        });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_FiresWhenVisibleShortDescDoesNotMatch()
+    {
+        // A visible object whose ShortDesc does NOT contain the value (and a name_contains-style
+        // value does not match its Name) does not suppress -> the loop still surfaces.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x9103u, Name = "Cow", Distance = 4f, ShortDesc = "A docile farm animal.",
+        });
+        Assert.Equal("throwable weapon",
+            LlmGoalPolicy.RepeatedDescriptorPickup(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_ShortDescValueSuppressedByVisibleNameMatch()
+    {
+        // A short_desc~= value is suppressed even when only the visible object's NAME (not its
+        // ShortDesc) contains it: both fields are checked, so the cue never asserts "no match" while
+        // a name-bindable object is visible. (Conservative: errs toward NOT firing.)
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"weapon\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x9104u, Name = "Iron Weapon", Distance = 4f, // ShortDesc null
+        });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NameContainsValueSuppressedByVisibleShortDescMatch()
+    {
+        // Symmetric: a name_contains value is suppressed when only the visible object's ShortDesc
+        // contains it.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name_contains=\"relic\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x9105u, Name = "Box", Distance = 4f, ShortDesc = "An ancient relic of the empire.",
+        });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_SameValueBothKindsCountsAsOneLoop()
+    {
+        // The SAME value emitted under BOTH descriptor kinds accumulates as one loop (counted by
+        // value), so a mixed-kind weapon-pickup loop still surfaces when nothing matches.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"gem\"", 2, now);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+            Text = "Pickup target=name_contains=\"gem\" item= source=llm:test",
+        });
+        Assert.Equal("gem", LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4366,7 +4456,7 @@ public class LlmGoalPolicyTests
         // rewrites + normal nav), so the descriptor detector ignores it.
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("name=\"Training Spadone\"", 3, now);
-        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4374,7 +4464,7 @@ public class LlmGoalPolicyTests
     {
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("short_desc~=\"throwable weapon\"", 2, now);
-        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4382,7 +4472,7 @@ public class LlmGoalPolicyTests
     {
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now.AddMinutes(-5));
-        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4397,7 +4487,7 @@ public class LlmGoalPolicyTests
                 Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
                 Text = "Use target=short_desc~=\"throwable weapon\" item= source=llm:test",
             });
-        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4413,7 +4503,7 @@ public class LlmGoalPolicyTests
                 Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
                 Text = "Pickup target= item=short_desc~=\"throwable weapon\" source=llm:test",
             });
-        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4428,7 +4518,8 @@ public class LlmGoalPolicyTests
                 Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
                 Text = "Pickup target=name_contains=\"shield\" item= source=llm:test",
             });
-        Assert.Equal("throwable weapon", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+        Assert.Equal("throwable weapon",
+            LlmGoalPolicy.RepeatedDescriptorPickup(BuildVisibleWorld(), es, now.AddMinutes(-3)));
     }
 
     [Fact]
@@ -4436,13 +4527,12 @@ public class LlmGoalPolicyTests
     {
         var now = System.DateTimeOffset.UtcNow;
         var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        // BuildInventoryWorld has an empty Visible list -> no object matches the descriptor.
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
         Assert.Contains("## Pickup loop (repeated item-description Pickup)", prompt);
         Assert.Contains("throwable weapon", prompt);
-        // Conditional wording (the detector cannot verify visibility of a short_desc match), so the
-        // cue must NOT assert nothing matches — it gives the LLM the success/failure conditional.
-        Assert.Contains("If those attempts are SUCCEEDING", prompt);
-        Assert.DoesNotContain("NO item in `## Nearest objects` matches it", prompt);
+        // The detector verified no visible object matches, so the cue asserts it.
+        Assert.Contains("NO item matching it is in view", prompt);
     }
 
     [Fact]
