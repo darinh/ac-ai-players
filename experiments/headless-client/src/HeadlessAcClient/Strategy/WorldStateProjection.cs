@@ -188,6 +188,17 @@ internal sealed record VisibleObjectProjection
     /// for combat without misfiring on civilians.
     /// </summary>
     [JsonPropertyName("is_monster")] public bool IsMonster { get; init; }
+
+    /// <summary>
+    /// True when this object is another PLAYER (a human/bot-controlled
+    /// character), classified purely by the AC player guid range
+    /// (<see cref="WorldStateProjection.IsPlayerGuid"/>); players occupy a
+    /// distinct guid band from static NPCs/monsters and dynamic items.
+    /// Surfaced as the `player` tag in Visible nearby so the LLM can tell a
+    /// fellow player apart from an NPC/monster (e.g. to team up). Pure wire-guid
+    /// classification; no name/weenie list.
+    /// </summary>
+    [JsonPropertyName("is_player")] public bool IsPlayer { get; init; }
 }
 
 internal sealed record SelfProjection
@@ -602,6 +613,15 @@ internal sealed record WorldStateProjection
     /// </summary>
     public const float DefaultVisibleRadiusUnits = 120f;
 
+    /// <summary>
+    /// True iff <paramref name="guid"/> is in the AC PLAYER guid band
+    /// (0x50000001..0x5FFFFFFF) — a human/bot-controlled character, distinct
+    /// from static NPCs/monsters (0x70000000..) and dynamic items
+    /// (0x80000000..). Mirrors ACE-bots ObjectGuid.IsPlayer. Pure wire-range
+    /// classification; no game-content knowledge.
+    /// </summary>
+    internal static bool IsPlayerGuid(uint guid) => guid >= 0x50000001u && guid <= 0x5FFFFFFFu;
+
     public static WorldStateProjection? FromWorldState(
         WorldState world,
         IWeenieRepository? weenies,
@@ -663,7 +683,9 @@ internal sealed record WorldStateProjection
         var visible = world.Objects.Values
             .Where(o => o.Guid != selfGuid)
             .Where(o => !string.IsNullOrEmpty(o.Name))
-            .Where(o => (o.Guid & 0xFF000000u) != 0x50000000u) // skip other players
+            // Other players ARE surfaced (tagged `player` via IsPlayer) so the LLM
+            // can tell a fellow player from an NPC/monster; only the bot's OWN
+            // object is excluded (above).
             .Where(o => o.ContainerGuid is null || o.ContainerGuid == 0u) // skip inventory'd items
             .Where(o => o.CellId is uint cc && cc != 0u)
             .Select(o =>
@@ -734,6 +756,11 @@ internal sealed record WorldStateProjection
                 // already covered by the Step 5b openable-Use path.
                 var isMonster = EntityClassifier.IsMonster(itemType, descFlags, weenieFlags);
 
+                // Another PLAYER (vs an NPC/monster/item): classified purely by the
+                // AC player guid band, mirroring the server's ObjectGuid.IsPlayer.
+                // Lets the LLM tell a fellow player apart from an NPC/monster.
+                var isPlayer = IsPlayerGuid(o.Guid);
+
                 // Role/title (weenie PropertyString.Quality) for role-based
                 // directive matching — preloaded on sighting (HandshakeDriver),
                 // so TryGet is a cache hit. Only NPCs typically carry one;
@@ -768,6 +795,7 @@ internal sealed record WorldStateProjection
                     IsAttackable = isAttackable,
                     HasRadarBlipColor = hasRadarBlipColor,
                     IsMonster = isMonster,
+                    IsPlayer = isPlayer,
                     ObservedHostile = observedHostile,
                 };
             })
