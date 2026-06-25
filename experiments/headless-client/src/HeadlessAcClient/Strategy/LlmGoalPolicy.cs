@@ -4339,16 +4339,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// avoid false positives on tokens like "the" embedded in a
     /// longer rejection message.
     /// </summary>
-    internal static bool IsGoalRecentlyRejected(Goal goal, EventStream events)
+    // Rejections age out of the dedup by TIME, not by event count. A server
+    // refusal blocks re-emitting the SAME (kind, target, item) for this window,
+    // then ages out so the bot can retry if the world may have changed. Matches
+    // the recency windows of the sibling repeat detectors (90s).
+    private static readonly TimeSpan RejectionDedupRecency = TimeSpan.FromSeconds(90);
+
+    internal static bool IsGoalRecentlyRejected(
+        Goal goal, EventStream events, DateTimeOffset? nowUtc = null)
     {
-        // Slice O — widened from 15 to 30 events. In one spike the LLM
-        // attempted Give(an NPC, a quest item) 3 times across
-        // ~7000 log lines while accumulating Unreachable + walk-tick
-        // events between attempts; the original 15-event window only
-        // caught the first repeat. 30 events ~= 10 LLM decisions of
-        // context which is enough to span an LLM
-        // observe/walk/timeout/retry cycle.
-        const int LookbackEvents = 30;
+        // Scan the DEDICATED durable ActionRejected window, not the bounded event
+        // ring. The ring is dominated by high-volume perception traffic
+        // (Motion/UpdatePosition/ObjectCreate); a single decision gap can exceed
+        // the ring capacity, so a rejection one decision old is evicted from the
+        // ring before the next decision and a ring scan misses it — the bot then
+        // re-emits the refused goal in a loop. RecentActionRejections() outlives
+        // the ring (mirrors RecentGoalFailures), and a TIME cutoff — not an event
+        // count — is what ages a rejection out so the bot can retry once it is old
+        // enough that the world may have changed.
+        var rejectionCutoff = (nowUtc ?? DateTimeOffset.UtcNow) - RejectionDedupRecency;
         var targetName = goal.Target?.Name;
         var itemName   = goal.Item?.Name;
         var itemWcid   = goal.Item?.Wcid;
@@ -4360,9 +4369,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return false;
         }
 
-        foreach (var ev in events.Recent(LookbackEvents))
+        foreach (var ev in events.RecentActionRejections())   // newest-first, durable
         {
-            if (ev.Kind != EventKind.ActionRejected) continue;
+            // Aged-out rejection: the world may have changed, so let the goal
+            // flow again (newest-first scan, but skip rather than break in case
+            // an out-of-order stamp follows).
+            if (ev.Utc < rejectionCutoff) continue;
 
             bool matched = false;
 
@@ -4935,13 +4947,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// the SAME target as <paramref name="rejection"/> occurred AFTER the
     /// rejection (strictly higher Sequence) — i.e. the bot has since
     /// reached the target it earlier failed to walk to. Matches by target
-    /// guid (ItemGuid) when both carry one; otherwise by Name.
+    /// guid (ItemGuid) when both carry one; otherwise by Name. Scans the
+    /// DEDICATED durable arrivals window (not the ring) so the arrival
+    /// evidence outlives a high-volume decision gap the same way the
+    /// rejection it clears does.
     /// </summary>
     internal static bool HasArrivedAtTargetSince(EventStream events, StreamEvent rejection)
     {
-        foreach (var ev in events.Recent())
+        foreach (var ev in events.RecentArrivals())   // newest-first, durable
         {
-            if (ev.Kind != EventKind.PickerArrivedNoAction) continue;
             if (ev.Sequence <= rejection.Sequence) continue;
 
             if (rejection.ItemGuid is uint rg && rg != 0 &&
@@ -4992,9 +5006,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// ServerMessage / GoalCompleted events. RecentOfKind is the
     /// semantically correct primitive — "have I used this item in
     /// the last 16 USE dispatches?" — and isolates the dedup from
-    /// noise in the event stream. The IsGoalRecentlyRejected mixed-
-    /// kind window stays at 30 because ActionRejected events are
-    /// frequent enough that a per-kind window would over-dedup.
+    /// noise in the event stream. (IsGoalRecentlyRejected solves the
+    /// same eviction problem with a dedicated durable rejection window
+    /// + a wall-clock recency cutoff.)
     ///
     /// For non-consumable inventory (notes, letters, tutorial
     /// items) this prevents the runaway loop. For consumables

@@ -358,6 +358,25 @@ internal sealed class EventStream
     // emission window's retention/cap bounds. Pure bookkeeping; no text parsing.
     private readonly List<StreamEvent> _recentGoalFailures = new();
 
+    // Durable ActionRejected window — same durability pattern as the goal
+    // windows above. A server rejection (the dedup signal for "do not re-emit
+    // this refused goal") is otherwise evicted from the perception-dominated
+    // ring within one decision gap (which can exceed the ring capacity), so a
+    // dedup that scans only the ring misses it and the bot re-emits the refused
+    // goal. Shares the goal windows' retention/cap; the consuming policy applies
+    // its own shorter recency window at read time. Pure bookkeeping; no parsing.
+    private readonly List<StreamEvent> _recentActionRejections = new();
+
+    // Durable PickerArrivedNoAction window — same durability pattern. The dedup
+    // clears a transport rejection (the bot could not WALK to a target) once the
+    // bot has SINCE arrived at that target. With rejections now durable (above),
+    // the ARRIVAL evidence must be durable too: otherwise a high-volume decision
+    // gap evicts the arrival from the ring while the rejection survives, and the
+    // stale-clear misses it — leaving the bot dedup-blocked from a target it is
+    // already standing next to. Shares the goal windows' retention/cap. Pure
+    // bookkeeping; no parsing.
+    private readonly List<StreamEvent> _recentArrivals = new();
+
     private readonly int _capacity;
     private readonly LinkedList<StreamEvent> _events = new();
     private long _nextSeq;
@@ -468,9 +487,15 @@ internal sealed class EventStream
             _recentGoalEmissions.Add(stamped);
         if (stamped.Kind == EventKind.GoalFailed)
             _recentGoalFailures.Add(stamped);
+        if (stamped.Kind == EventKind.ActionRejected)
+            _recentActionRejections.Add(stamped);
+        if (stamped.Kind == EventKind.PickerArrivedNoAction)
+            _recentArrivals.Add(stamped);
         var goalHistoryCutoff = stamped.Utc - GoalEmissionRetention;
         PruneGoalHistoryWindow(_recentGoalEmissions, goalHistoryCutoff);
         PruneGoalHistoryWindow(_recentGoalFailures, goalHistoryCutoff);
+        PruneGoalHistoryWindow(_recentActionRejections, goalHistoryCutoff);
+        PruneGoalHistoryWindow(_recentArrivals, goalHistoryCutoff);
 
         return stamped;
     }
@@ -498,6 +523,8 @@ internal sealed class EventStream
         var cutoff = nowUtc - GoalEmissionRetention;
         PruneGoalHistoryWindow(_recentGoalEmissions, cutoff);
         PruneGoalHistoryWindow(_recentGoalFailures, cutoff);
+        PruneGoalHistoryWindow(_recentActionRejections, cutoff);
+        PruneGoalHistoryWindow(_recentArrivals, cutoff);
     }
 
     /// <summary>
@@ -560,6 +587,36 @@ internal sealed class EventStream
         var result = new List<StreamEvent>(_recentGoalFailures.Count);
         for (int i = _recentGoalFailures.Count - 1; i >= 0; i--)
             result.Add(_recentGoalFailures[i]);
+        return result;
+    }
+
+    /// <summary>
+    /// Newest-first ActionRejected events from the DEDICATED durable window, which
+    /// outlives the perception-dominated ring. Use this (not the ring) when checking
+    /// whether a goal was recently server-refused so high-volume perception traffic
+    /// cannot evict the rejection before the dedup sees it (mirrors
+    /// <see cref="RecentGoalFailures"/>).
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentActionRejections()
+    {
+        var result = new List<StreamEvent>(_recentActionRejections.Count);
+        for (int i = _recentActionRejections.Count - 1; i >= 0; i--)
+            result.Add(_recentActionRejections[i]);
+        return result;
+    }
+
+    /// <summary>
+    /// Newest-first PickerArrivedNoAction events from the DEDICATED durable window,
+    /// which outlives the perception-dominated ring. Use this (not the ring) when
+    /// checking whether the bot has SINCE arrived at a target it earlier failed to
+    /// reach, so a high-volume decision gap cannot evict the arrival before the
+    /// transport-rejection stale-clear sees it (mirrors <see cref="RecentActionRejections"/>).
+    /// </summary>
+    public IReadOnlyList<StreamEvent> RecentArrivals()
+    {
+        var result = new List<StreamEvent>(_recentArrivals.Count);
+        for (int i = _recentArrivals.Count - 1; i >= 0; i--)
+            result.Add(_recentArrivals[i]);
         return result;
     }
 
