@@ -331,6 +331,33 @@ internal sealed class WorldState
     /// </summary>
     public Strategy.DeathLocation? LastDeathLocation { get; set; }
 
+    // area-death-memory: the bot's OWN observed death COUNT per landblock this
+    // session (landblock id -> times the bot has died there). The landblock ids
+    // are DISCOVERED from the bot's own deaths at the death site — this is NOT a
+    // hardcoded list of "dangerous" places, and source assigns NO value/danger
+    // label to any landblock. It is the spatial analogue of the per-mob-kind
+    // combat-feel ledger: a raw own-outcome tally the LLM reads to recognise an
+    // area that has REPEATEDLY killed it (a death-spiral driver the per-kind
+    // ledger misses, since an area can be lethal across several kinds or terrain).
+    // Session-scoped (resets on restart); the projection surfaces only the
+    // CURRENT landblock's tally.
+    private readonly Dictionary<uint, int> _deathsByLandblock = new();
+
+    /// <summary>
+    /// Record one of the bot's OWN deaths in the landblock it died IN (from its
+    /// last-alive position, not the respawn point). Dynamic own-outcome
+    /// bookkeeping; assigns no danger label and hardcodes no landblock.
+    /// </summary>
+    public void RecordDeathInLandblock(uint landblock)
+        => _deathsByLandblock[landblock] = _deathsByLandblock.GetValueOrDefault(landblock) + 1;
+
+    /// <summary>
+    /// How many times the bot has died in the given landblock this session
+    /// (0 if never). Raw own-outcome count; no interpretation.
+    /// </summary>
+    public int DeathsInLandblock(uint landblock)
+        => _deathsByLandblock.GetValueOrDefault(landblock);
+
     /// <summary>
     /// active-combat-telemetry: rolling-window summary of recent inbound
     /// damage the bot has TAKEN, set/cleared by HandshakeDriver before each

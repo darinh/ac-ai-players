@@ -6094,6 +6094,39 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Spend before wandering", prompt);
     }
 
+    // ---- area-death-memory: ## Area danger cue ----
+
+    [Fact]
+    public void AreaDanger_RendersWhenCurrentAreaHasKilledTwice()
+    {
+        var world = BuildXpWorld(69296, 5475);
+        world = world with { Self = world.Self with { CurrentLandblockDeaths = 2 } };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack(), null, null, secondsSinceLastDeath: null);
+        Assert.Contains("## Area danger", prompt);
+        Assert.Contains("DIED 2 times in THIS exact area", prompt);
+    }
+
+    [Fact]
+    public void AreaDanger_DoesNotRenderForSingleDeathHere()
+    {
+        // ONE death in an area is not a pattern -> below the threshold, no cue.
+        var world = BuildXpWorld(69296, 5475);
+        world = world with { Self = world.Self with { CurrentLandblockDeaths = 1 } };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack(), null, null, secondsSinceLastDeath: null);
+        Assert.DoesNotContain("## Area danger", prompt);
+    }
+
+    [Fact]
+    public void AreaDanger_DoesNotRenderWhenNeverDiedHere()
+    {
+        var world = BuildXpWorld(69296, 5475); // CurrentLandblockDeaths defaults to 0
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack(), null, null, secondsSinceLastDeath: null);
+        Assert.DoesNotContain("## Area danger", prompt);
+    }
+
     // ---- wander-streak path: spend cue fires under an Active-but-unactionable intent ----
 
     private static StreamEvent UntargetedExploreEmit(string targetSel) => new()

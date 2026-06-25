@@ -1995,6 +1995,20 @@ internal static class AcCoords
     }
 
     /// <summary>
+    /// Classify a self-position change between two consecutive WHILE-ALIVE
+    /// observations as ordinary ON-FOOT movement (true) vs a teleport (false).
+    /// On-foot = a walk within the SAME landblock (any distance inside the block,
+    /// incl. an indoor cell change like a door) OR a short outdoor seam crossing
+    /// into an adjacent landblock (<paramref name="maxMeters"/>). A teleport
+    /// (Recall, portal, the death respawn) is a far jump and/or a cross-landblock
+    /// indoor transition, which this returns false for. Purely geometric — no game
+    /// knowledge. Used to keep the cached last-alive location tracking real travel
+    /// without letting a teleport (which can precede the HP=0 packet) overwrite it.
+    /// </summary>
+    public static bool IsOnFootSelfMove(
+        uint fromCellId, Vector3 fromPos, uint toCellId, Vector3 toPos, float maxMeters)
+        => (fromCellId & 0xFFFF0000u) == (toCellId & 0xFFFF0000u)
+           || IsOnFootSeamCrossing(fromCellId, fromPos, toCellId, toPos, maxMeters);
     /// Returns (NS, EW) decimal map coordinates matching the in-game
     /// `/loc` display, or null for indoor cells (no surface-map
     /// position). NS positive = North, EW positive = East.

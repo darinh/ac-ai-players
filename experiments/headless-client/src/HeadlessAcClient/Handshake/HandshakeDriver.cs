@@ -1734,9 +1734,20 @@ internal sealed class HandshakeDriver : IDisposable
         // after each attributed death.
         (uint? Wcid, string? Name, DateTime At)? lastInboundDamager = null;
         var                  selfDeathAttributed = false;
-        // Last self position observed while alive (HP>0); the death-location
-        // capture reads it, so it is immune to the respawn teleport's arrival order.
+        // Last self position observed while alive (HP>0) via ORDINARY ON-FOOT
+        // movement; the death-location capture reads it. Refreshed off the
+        // self-position firehose (so it tracks travel between health ticks) but
+        // ONLY on on-foot moves — a teleport (the respawn teleport can arrive on
+        // its own channel BEFORE the HP=0 packet while HP still reads positive, and
+        // Recall/portal are deliberate jumps) must NOT overwrite the pre-death
+        // location. That keeps it immune to the respawn teleport's arrival order.
         (uint Cell, System.Numerics.Vector3 Pos)? lastAliveSelfPos = null;
+        // The previous WHILE-ALIVE self observation, used only to classify the next
+        // self move as on-foot (small step / outdoor seam crossing) vs a teleport
+        // (big jump). Tracks EVERY alive observation (including the post-teleport
+        // landing) so the first on-foot step after a legitimate portal re-anchors
+        // lastAliveSelfPos instead of getting stuck comparing to a stale spot.
+        (uint Cell, System.Numerics.Vector3 Pos)? lastObservedAlivePos = null;
         // Publish the prompt snapshot AND durably persist any new outcome.
         // Both run at the same outcome sites (kill / death / near-death /
         // ineffective), and SaveIfDirty is a no-op unless something changed.
@@ -1774,8 +1785,12 @@ internal sealed class HandshakeDriver : IDisposable
             if (lastAliveSelfPos is { } ap)
             {
                 var (dgx, dgy) = Strategy.AcCoords.ToGlobalXY(ap.Cell, ap.Pos);
+                var deathLandblock = ap.Cell >> 16;
                 worldState.LastDeathLocation = new Strategy.DeathLocation(
-                    dgx, dgy, ap.Cell >> 16, DateTimeOffset.UtcNow);
+                    dgx, dgy, deathLandblock, DateTimeOffset.UtcNow);
+                // area-death-memory: tally this death against the landblock the bot
+                // died IN (own outcome; the projection surfaces the current area's tally).
+                worldState.RecordDeathInLandblock(deathLandblock);
             }
             var deathFoe = CombatDeathAttribution.ChooseDeathFoe(
                 lastCombatFoe, lastInboundDamager,
@@ -1938,6 +1953,31 @@ internal sealed class HandshakeDriver : IDisposable
                     // ServerName, GameEvent envelopes, etc.) so it's
                     // safe to call unconditionally here.
                     var applied = worldState.Apply(decoded);
+
+                    // area-death-memory / death-location accuracy: keep the cached
+                    // last-alive self position fresh on ORDINARY ON-FOOT movement,
+                    // NOT only on positive-health ticks. Self-health updates fire on
+                    // damage/regen/death — NOT on movement — so a death after travel
+                    // would otherwise tally to a stale landblock. But a TELEPORT must
+                    // NOT refresh it: the RESPAWN teleport can arrive on its own
+                    // channel BEFORE the HP=0 packet (HP still positive), and
+                    // Recall/portal are deliberate jumps — either would overwrite the
+                    // pre-death location. Classify on-foot (same-landblock walk, incl.
+                    // indoor, OR a short outdoor seam crossing) vs teleport (big jump /
+                    // cross-landblock indoor transition) off the global-coord step size.
+                    // The HP=0 death packet leaves HealthCurrent==0, so it never refreshes.
+                    if (worldState.Self is { CellId: uint aliveCellNow, HealthCurrent: uint aliveHpNow } aliveSelfNow
+                        && aliveHpNow > 0)
+                    {
+                        var aliveNow = (aliveCellNow, aliveSelfNow.Position);
+                        var onFoot = lastObservedAlivePos is { } prevAlive
+                            && Strategy.AcCoords.IsOnFootSelfMove(
+                                prevAlive.Cell, prevAlive.Pos,
+                                aliveCellNow, aliveSelfNow.Position, OnFootSeamMaxMeters);
+                        if (onFoot || lastAliveSelfPos is null)
+                            lastAliveSelfPos = aliveNow;
+                        lastObservedAlivePos = aliveNow;
+                    }
 
                     // Track the most recent self-inventory ObjectCreate
                     // so the settle latch below can wait for the initial
