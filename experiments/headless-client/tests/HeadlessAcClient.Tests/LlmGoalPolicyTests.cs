@@ -4329,6 +4329,131 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Wield loop (you do not own that weapon)", prompt);
     }
 
+    private static EventStream PickupEmissions(string targetSeg, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Pickup target={targetSeg} item= source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_ReturnsValueForRepeatedShortDescPickup()
+    {
+        // 3 recent Pickup emissions carrying a short_desc~= type-descriptor (nothing in view
+        // matches it) -> the looped descriptor value. The capsule cues the LLM; no goal drop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        Assert.Equal("throwable weapon", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_ReturnsValueForRepeatedNameContainsPickup()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name_contains=\"dagger\"", 3, now);
+        Assert.Equal("dagger", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NullForConcreteNamePickup()
+    {
+        // A concrete name= Pickup is NOT a fuzzy descriptor (handled by the Motor's pickup
+        // rewrites + normal nav), so the descriptor detector ignores it.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name=\"Training Spadone\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_NullForOldEmissionsOutsideWindow()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now.AddMinutes(-5));
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_IgnoresNonPickupVerbWithSameDescriptor()
+    {
+        // Only Pickup emissions count; a Use carrying the same descriptor is not a Pickup loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Use target=short_desc~=\"throwable weapon\" item= source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_IgnoresDescriptorInItemField()
+    {
+        // A descriptor in the ITEM field (empty target) is not the Pickup TARGET -> the detector
+        // isolates the target segment and counts nothing.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Pickup target= item=short_desc~=\"throwable weapon\" source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorPickup_ReturnsMostRepeatedDescriptor()
+    {
+        // Two descriptors: one emitted 3x, another 2x -> the 3x descriptor wins.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        for (int i = 0; i < 2; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Pickup target=name_contains=\"shield\" item= source=llm:test",
+            });
+        Assert.Equal("throwable weapon", LlmGoalPolicy.RepeatedDescriptorPickup(es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickupLoopCapsule_RendersForRepeatedDescriptorPickup()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("short_desc~=\"throwable weapon\"", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
+        Assert.Contains("## Pickup loop (repeated item-description Pickup)", prompt);
+        Assert.Contains("throwable weapon", prompt);
+        // Conditional wording (the detector cannot verify visibility of a short_desc match), so the
+        // cue must NOT assert nothing matches — it gives the LLM the success/failure conditional.
+        Assert.Contains("If those attempts are SUCCEEDING", prompt);
+        Assert.DoesNotContain("NO item in `## Nearest objects` matches it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickupLoopCapsule_OmittedForConcreteNamePickup()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name=\"Training Spadone\"", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
+        Assert.DoesNotContain("## Pickup loop (repeated item-description Pickup)", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_UntalkedNpcsCapsule_OmittedWhenOnlyUntalkedNpcAlreadyInNearestObjects()
     {
