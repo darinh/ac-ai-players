@@ -13393,6 +13393,91 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsUnreachableTargetRepeat_SurvivesRingEvictionByPerceptionTraffic()
+    {
+        // Two same-name no-live-object failures land on separate decisions with heavy
+        // perception traffic between, so the first is evicted from the 256-event ring
+        // before the second — events.Recent(N) saw only ONE and the suppression never
+        // fired, so the bot looped an unreachable target. The durable read keeps both.
+        var es = new EventStream();
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        for (int i = 0; i < 400; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+        AppendNoLiveObjectFail(es, "Drudge Skulker");
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), BuildWorldWithVisible(), es));
+        // The first failure is evicted from the perception ring; the durable read carries it.
+        Assert.Equal(1, es.Recent(EventStream.DefaultCapacity).Count(e => e.Kind == EventKind.GoalFailed));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_StaleFailsOutsideRecency_NoAppend_AllowsRetry()
+    {
+        // Two failures, then the wall clock advances past the recency window with NO new
+        // event (a timer-driven re-deliberation). The durable window still holds them, but
+        // a once-unreachable name is retried after the bot has had time to reposition.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed,
+            Name = "Drudge Skulker", Text = "Attack: selector resolved to no live object",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed,
+            Name = "Drudge Skulker", Text = "Attack: selector resolved to no live object",
+        });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), BuildWorldWithVisible(), es, t0.AddSeconds(2)));   // current loop
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            AttackGoal("Drudge Skulker"), BuildWorldWithVisible(), es, t0.AddMinutes(3)));   // aged out -> retry
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_SurvivesRingEviction_DropsWhileInView()
+    {
+        // Same eviction fix for the out-of-reach counter, which fires EVEN while the item
+        // is IN VIEW: a Pickup of an out-of-reach world item must still be dropped after 2
+        // fails even with heavy perception traffic between them.
+        var es = new EventStream();
+        AppendOutOfReachFail(es, "Apple");
+        for (int i = 0; i < 400; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+        AppendOutOfReachFail(es, "Apple");
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        { Guid = MobGuid, Name = "Apple", Wcid = 7u, ItemType = 0x10u, Distance = 5f });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es));
+    }
+
+    [Fact]
+    public void IsUnreachableTargetRepeat_OutOfReach_StaleFailsOutsideRecency_NoAppend_AllowsRetry()
+    {
+        // Symmetric to the no-live-object recency test, for the out-of-reach (in-view)
+        // counter: two stale out-of-reach fails age out by wall clock (no append), so a
+        // once-unreachable visible item is retried after the bot has repositioned.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed, Name = "Apple",
+            Text = "Pickup: interaction target out of reach: server walked us toward 'Apple'",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed, Name = "Apple",
+            Text = "Pickup: interaction target out of reach: server walked us toward 'Apple'",
+        });
+        var world = BuildWorldWithVisible(new VisibleObjectProjection
+        { Guid = MobGuid, Name = "Apple", Wcid = 7u, ItemType = 0x10u, Distance = 5f });
+        Assert.True(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es, t0.AddSeconds(2)));    // current loop -> suppress
+        Assert.False(LlmGoalPolicy.IsUnreachableTargetRepeat(
+            PickupGoalNamed("Apple"), world, es, t0.AddMinutes(3)));    // aged out -> retry
+    }
+
+    [Fact]
     public void IsUnreachableTargetRepeat_OneFail_AllowsRetry()
     {
         var es = new EventStream();
