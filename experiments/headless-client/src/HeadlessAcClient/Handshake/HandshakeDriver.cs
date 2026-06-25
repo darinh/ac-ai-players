@@ -2205,6 +2205,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // label the recall prompt section surfaces.
                                 // Pure perception; assigns no priority.
                                 var sightedKind = EntityClassifier.ClassifySighting(
+                                    oc.Guid,
                                     oc.Weenie.ItemType,
                                     (uint)oc.Weenie.DescriptionFlags,
                                     (uint)oc.Weenie.Flags);
@@ -4552,6 +4553,7 @@ internal sealed class HandshakeDriver : IDisposable
                         var ldMonsterVisible = worldState.Objects.Values.Any(s =>
                             s.WielderGuid is null &&
                             EntityClassifier.IsMonster(
+                                s.Guid,
                                 s.ItemType ?? 0u,
                                 s.ObjectDescriptionFlags ?? 0u,
                                 s.WeenieFlags ?? 0u));
@@ -6741,6 +6743,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // so the recover-egress heads to a safe landmark/frontier.
                                 if (selfCombatSuppressed &&
                                     HeadlessAcClient.Strategy.EntityClassifier.IsMonster(
+                                        snap.Guid,
                                         snap.ItemType ?? 0u,
                                         snap.ObjectDescriptionFlags ?? 0u,
                                         snap.WeenieFlags ?? 0u)) continue;
@@ -8071,6 +8074,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // LLM tell a creature candidate from inert
                                 // scenery; no priority assigned here.
                                 Kind     = EntityClassifier.ClassifySighting(
+                                    t.snap.Guid,
                                     t.snap.ItemType ?? 0u,
                                     t.snap.ObjectDescriptionFlags ?? 0u,
                                     t.snap.WeenieFlags ?? 0u),

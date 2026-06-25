@@ -749,17 +749,22 @@ internal sealed record WorldStateProjection
                 // extracted from the wire, not from hardcoded weenie lists.
                 var weenieFlags = o.WeenieFlags ?? 0u;
                 var hasRadarBlipColor = (weenieFlags & (uint)WeenieHeaderFlag.RadarBlipColor) != 0;
+                // Another PLAYER (vs an NPC/monster/item): classified purely by the
+                // AC player guid band, mirroring the server's ObjectGuid.IsPlayer.
+                // Lets the LLM tell a fellow player apart from an NPC/monster.
+                var isPlayer = IsPlayerGuid(o.Guid);
+
                 // Slice 0 (Hunt) — exclude corpses from IsMonster. Corpses
                 // can carry Creature+Attackable bits in some captures (the
                 // server doesn't strip them on death); without this guard
                 // a Hunt-intent decomposer would target a dead body
                 // already covered by the Step 5b openable-Use path.
-                var isMonster = EntityClassifier.IsMonster(itemType, descFlags, weenieFlags);
-
-                // Another PLAYER (vs an NPC/monster/item): classified purely by the
-                // AC player guid band, mirroring the server's ObjectGuid.IsPlayer.
-                // Lets the LLM tell a fellow player apart from an NPC/monster.
-                var isPlayer = IsPlayerGuid(o.Guid);
+                // Another PLAYER also carries the Creature/Attackable wire bits a
+                // monster has (the flag-only classifier cannot tell them apart), so
+                // the guid-aware overload excludes a player-band guid here — a player
+                // is never a huntable monster (the LLM may still explicitly Attack a
+                // player by name/guid). Same definition the sighting memory uses.
+                var isMonster = EntityClassifier.IsMonster(o.Guid, itemType, descFlags, weenieFlags);
 
                 // Role/title (weenie PropertyString.Quality) for role-based
                 // directive matching — preloaded on sighting (HandshakeDriver),

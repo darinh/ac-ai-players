@@ -44,7 +44,61 @@ public class VisibleIsPlayerTests
         Assert.True(other!.IsPlayer);          // tagged player by guid band
         Assert.True(other.IsCreature);
         Assert.DoesNotContain(proj.Visible, v => v.Guid == selfGuid); // self still excluded
-    }    [Theory]
+    }
+
+    [Fact]
+    public void FromWorldState_OtherPlayer_WithAttackableFlags_NotClassifiedMonster()
+    {
+        // A player carries the Creature+Attackable wire bits a monster has (the
+        // classifier sees only flags, not the guid). Without the guid-band guard the
+        // player is classified IsMonster -> rendered in "Monsters in view" -> a hunting
+        // LLM attacks it (live multi-bot evidence). The projection must classify a
+        // player OUT of IsMonster (it stays a `player`; the LLM may still explicitly
+        // Attack it by name/guid).
+        const uint selfGuid = 0x500000E6u;
+        const uint otherPlayerGuid = 0x500000A1u;
+        const uint cell = 0xA9B40003u;
+        const uint attackable = 0x00000010u; // ObjectDescriptionFlag.Attackable
+        var ws = new WorldState();
+        ws.SetSelf(selfGuid);
+        SnapshotSeeding.Seed(ws, selfGuid, "Headless", 1u, ItemTypeCreature, cell, null,
+            position: new Vector3(5f, 5f, 0f));
+        SnapshotSeeding.Seed(ws, otherPlayerGuid, "Otherbot", 1u, ItemTypeCreature, cell, null,
+            objectDescriptionFlags: attackable, position: new Vector3(7f, 5f, 0f));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        var other = proj!.Visible.FirstOrDefault(v => v.Guid == otherPlayerGuid);
+        Assert.NotNull(other);
+        Assert.True(other!.IsPlayer);
+        Assert.False(other.IsMonster); // NOT a huntable monster
+    }
+
+    [Fact]
+    public void FromWorldState_RealMonster_WithAttackableFlags_StillMonster()
+    {
+        // Regression guard: the player exclusion must not suppress a real monster.
+        // A non-player (dynamic band) Creature+Attackable still classifies IsMonster.
+        const uint selfGuid = 0x500000E6u;
+        const uint monsterGuid = 0x80005D89u; // dynamic band, NOT a player
+        const uint cell = 0xA9B40003u;
+        const uint attackable = 0x00000010u;
+        var ws = new WorldState();
+        ws.SetSelf(selfGuid);
+        SnapshotSeeding.Seed(ws, selfGuid, "Headless", 1u, ItemTypeCreature, cell, null,
+            position: new Vector3(5f, 5f, 0f));
+        SnapshotSeeding.Seed(ws, monsterGuid, "Cow", 1u, ItemTypeCreature, cell, null,
+            objectDescriptionFlags: attackable, position: new Vector3(7f, 5f, 0f));
+
+        var proj = WorldStateProjection.FromWorldState(ws, weenies: null);
+
+        var mob = proj!.Visible.FirstOrDefault(v => v.Guid == monsterGuid);
+        Assert.NotNull(mob);
+        Assert.False(mob!.IsPlayer);
+        Assert.True(mob.IsMonster); // still a monster
+    }
+
+    [Theory]
     [InlineData(0x50000000u, false)] // one below PlayerMin
     [InlineData(0x50000001u, true)]  // PlayerMin
     [InlineData(0x500000E6u, true)]  // a real player guid

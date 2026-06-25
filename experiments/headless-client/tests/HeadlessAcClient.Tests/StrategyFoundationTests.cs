@@ -1427,6 +1427,24 @@ public class StrategyFoundationTests
         Assert.Equal("fallback:no-quest-knowledge", goal.Source);
     }
 
+    [Fact]
+    public void NoQuestKnowledgePolicy_DoesNotAttackHostilePlayer()
+    {
+        // A player is not an auto-attack target even if (hypothetically, on a PvP
+        // server) it read ObservedHostile: the autonomous hostile-attack picker
+        // excludes players, mirroring their exclusion from the monster/NPC paths.
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = FallbackWorldWith(new VisibleObjectProjection
+        {
+            Guid = 0x500000A1u, Name = "Otherbot", Wcid = 1u,
+            ItemType = 0x10u, Distance = 5f, IsCreature = true,
+            IsPlayer = true, ObservedHostile = true,
+        });
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        // May fall through to Explore/Wait, but must NOT Attack the player.
+        Assert.False(goal is { Kind: GoalKind.Attack } && goal.Target?.Guid == 0x500000A1u);
+    }
+
     private static WorldStateProjection FallbackWorldWith(params VisibleObjectProjection[] visible) =>
         new()
         {
