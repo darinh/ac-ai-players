@@ -21158,6 +21158,73 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_RecentGoalOutcomes_FailureSurvivesRingEviction()
+    {
+        // In a busy area the GoalFailed evicts from the 120-event ring before the next
+        // decision, so the "don't repeat failing goals" hint went BLANK exactly when the
+        // bot was looping a failing goal. Reading the DURABLE GoalFailed window keeps it.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.GoalFailed, Name = "Snowy Bunny", Text = "Attack: chase timed out",
+        });
+        for (int i = 0; i < 400; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("target=\"Snowy Bunny\"", prompt);
+        // The failure is gone from the perception ring (the old source) — the durable read carries it.
+        Assert.Equal(0, es.Recent(EventStream.DefaultCapacity).Count(e => e.Kind == EventKind.GoalFailed));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGoalOutcomes_StaleFailureAgesOutOfRecency()
+    {
+        // A failure older than the recency window is NOT a CURRENT signal — it must not
+        // keep latching the "## Recent goal outcomes" warning long after it is resolved.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(6),
+            Kind = EventKind.GoalFailed, Name = "Stale Foe", Text = "Attack: chase timed out",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+
+        Assert.DoesNotContain("Stale Foe", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_RecentGoalOutcomes_MixedSources_NewestEightDistinctInOrder()
+    {
+        // Mixed durable failures + ring completions: after merge + OrderByDescending(Utc)
+        // + dedup, the section shows the 8 NEWEST distinct outcomes newest-first; the 9th
+        // (oldest) is dropped by Take(8).
+        var now = DateTimeOffset.UtcNow;
+        StreamEvent Fail(string name, int secAgo) => new()
+        { Sequence = -1, Utc = now.AddSeconds(-secAgo), Kind = EventKind.GoalFailed, Name = name, Text = "Attack: chase timed out" };
+        StreamEvent Done(string name, int secAgo) => new()
+        { Sequence = -1, Utc = now.AddSeconds(-secAgo), Kind = EventKind.GoalCompleted, Name = name };
+
+        var es = new EventStream();
+        es.Append(Fail("F1", 1)); es.Append(Done("C1", 2)); es.Append(Fail("F2", 3));
+        es.Append(Done("C2", 4)); es.Append(Fail("F3", 5)); es.Append(Done("C3", 6));
+        es.Append(Fail("F4", 7)); es.Append(Done("C4", 8)); es.Append(Fail("F5", 9)); // F5 = oldest
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildExitTokenWorld(), es, null);
+        var section = prompt.Substring(prompt.IndexOf("## Recent goal outcomes", StringComparison.Ordinal));
+
+        Assert.DoesNotContain("F5", section);                    // 9th-newest dropped by Take(8)
+        foreach (var n in new[] { "F1", "C1", "F2", "C2", "F3", "C3", "F4", "C4" })
+            Assert.Contains(n, section);                         // the 8 newest distinct present
+        // Newest-first order across BOTH sources (failure F1 before completion C1 before F2...).
+        Assert.True(section.IndexOf("F1") < section.IndexOf("C1"));
+        Assert.True(section.IndexOf("C1") < section.IndexOf("F2"));
+        Assert.True(section.IndexOf("F4") < section.IndexOf("C4"));
+    }
+
+    [Fact]
     public void BuildUserPrompt_OmitsRecentGoalOutcomes_WhenNoLifecycleEvents()
     {
         // No GoalCompleted/GoalFailed events → section absent → zero
