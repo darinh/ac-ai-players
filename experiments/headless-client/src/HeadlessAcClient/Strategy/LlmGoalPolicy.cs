@@ -3875,7 +3875,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // failed to reach this exact target twice. Skipped the moment the target
         // re-enters PVS (let the real engagement proceed) and self-expiring as
         // the failures age out of the event window.
-        if (IsUnreachableTargetRepeat(goal, world, events))
+        if (IsUnreachableTargetRepeat(goal, world, events, nowUtc))
         {
             Console.WriteLine(
                 $"[llm-dedup] dropping LLM {goal.Kind} target={goal.Target}" +
@@ -4513,6 +4513,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const string InteractOutOfReachFailMarker =
         "interaction target out of reach";
 
+    // Recency window for the unreachable-target loop signals (out-of-reach + no-live-
+    // object). The durable GoalFailed window retains ~30 min; this bounds the name-keyed
+    // suppression to a CURRENT loop so a once-unreachable name is retried after the bot
+    // has had time to reposition, instead of being blacklisted for the whole retention.
+    private static readonly TimeSpan UnreachableRepeatRecency = TimeSpan.FromSeconds(90);
+
     // Marker substring of the Motor's Attack-defer GoalFailed reason
     // (HandshakeDriver: "{Kind}: combat deferred: self-health too low to re-engage —
     // recover before attacking"). The Motor emits this SHARED marker for BOTH defer
@@ -4676,8 +4682,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// toward it (a different elevation/footing the XY-only arrival check misread as
     /// "arrived"). This case is NOT skipped while in view — that is the whole point:
     /// re-emitting the same goal just re-walks to the visible-but-unreachable object
-    /// and re-fails (live: a weak model re-emitted Pickup of an out-of-reach world
-    /// item across many cycles, never dropped because it stayed in view).</item>
+    /// and re-fails (a weak model can re-emit a Pickup of an out-of-reach world item
+    /// across many cycles, never dropped because it stays in view).</item>
     /// </list>
     /// Either way, re-emitting just re-fails and wakes another no-current-goal LLM
     /// call, burning per-day quota; the caller drops the repeat and defers to
@@ -4690,13 +4696,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// ambiguity). Complements the world-object Use-churn guards
     /// (<see cref="IsStationaryWorldUseRepeat"/>/<see cref="IsLandblockWorldUseChurn"/>).
     ///
-    /// Pure, no policy state: the implicit cooldown is the recent-event window — once
-    /// the failures age out the goal flows again. Correlates by the failed goal's OWN
-    /// selector name (carried on the GoalFailed event) — no server dialogue text, no
-    /// hardcoded names/wcids/landblocks.
+    /// Pure, no policy state: the implicit cooldown is the RECENCY-scoped durable
+    /// GoalFailed window — once the failures age past <see cref="UnreachableRepeatRecency"/>
+    /// the goal flows again (so the bot retries a once-unreachable target after it has had
+    /// time to reposition). Correlates by the failed goal's OWN selector name (carried on
+    /// the GoalFailed event) — no server dialogue text, no hardcoded names/wcids/landblocks.
     /// </summary>
     internal static bool IsUnreachableTargetRepeat(
-        Goal goal, WorldStateProjection world, EventStream events)
+        Goal goal, WorldStateProjection world, EventStream events, DateTimeOffset? nowUtc = null)
     {
         if (goal.Kind is not (GoalKind.Attack or GoalKind.Pickup or GoalKind.Use)) return false;
         // A two-object Use (Use an inventory ITEM on/with a target — a key on a
@@ -4717,17 +4724,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var targetName = target?.Name;
         if (target is null || string.IsNullOrWhiteSpace(targetName)) return false;
 
-        const int OutOfReachLookbackEvents = 40;
+        // Recency-scoped read of the DURABLE GoalFailed window. The old events.Recent(N)
+        // read the perception-dominated ring: consecutive same-name failures land on
+        // SEPARATE decisions ~tens of seconds apart with hundreds of perception events
+        // between, so the prior failure was evicted before the count reached the threshold
+        // and the suppression fired only when two failures were adjacent in the ring
+        // (≈never), so an unreachable target looped unbroken. RecentGoalFailures() is
+        // durable (not ring-evicted); scope it to UnreachableRepeatRecency of nowUtc so a
+        // once-unreachable name is retried after the bot has had time to reposition. SAME
+        // eviction fix as IsLowHealthDeferredAttackRepeat / IsWieldNoWeaponRepeat.
         const int OutOfReachRepeatThreshold = 2;
+        var cutoff = (nowUtc ?? DateTimeOffset.UtcNow) - UnreachableRepeatRecency;
         // Visible-but-UNREACHABLE case: a target the server repeatedly refused as OUT
         // OF REACH (it walked the bot toward the object after the interaction instead
         // of completing it — a different elevation/footing) is dropped EVEN WHILE IN
         // VIEW. The in-view short-circuit below is for the despawn case (let the motor
         // re-resolve a live snapshot); it must NOT rescue a goal that keeps re-walking
         // to a visible object the server will not let it interact with — that just
-        // re-fails and wakes another no-current-goal LLM call every cycle (live: a weak
-        // model re-emitted Pickup of an out-of-reach world item across many cycles,
-        // each walking to it and failing, never dropped because it stayed in view).
+        // re-fails and wakes another no-current-goal LLM call every cycle.
         //
         // Drop the whole NAME (not just the failing guid). A nearer-but-suppressed
         // same-named object does NOT let the motor fall through to a farther reachable
@@ -4738,13 +4752,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // resolving and nulling that nearer guid. Dropping the name and deferring to
         // EscapeOrFallback (a real Explore that MOVES the bot) is the correct escape:
         // repositioning is what makes a different instance the nearest/reachable one.
-        // Same name-keyed, window-bounded, self-expiring shape as the no-live-object
+        // Same name-keyed, recency-bounded, self-expiring shape as the no-live-object
         // count; correlates by the failed goal's OWN selector name only.
         {
             var outOfReach = 0;
-            foreach (var ev in events.Recent(OutOfReachLookbackEvents))
+            foreach (var ev in events.RecentGoalFailures())   // newest-first
             {
-                if (ev.Kind != EventKind.GoalFailed) continue;
+                if (ev.Utc < cutoff) break;                   // older than the window; rest are older too
                 if (ev.Text is null ||
                     ev.Text.IndexOf(InteractOutOfReachFailMarker, StringComparison.Ordinal) < 0)
                     continue;
@@ -4760,12 +4774,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (world.Visible.Any(v => VisibleMatchesSelector(target, v)))
             return false;
 
-        const int LookbackEvents = 30;
         const int UnreachableRepeatThreshold = 2;
         int count = 0;
-        foreach (var ev in events.Recent(LookbackEvents))
+        foreach (var ev in events.RecentGoalFailures())   // newest-first
         {
-            if (ev.Kind != EventKind.GoalFailed) continue;
+            if (ev.Utc < cutoff) break;                   // older than the window; rest are older too
             if (ev.Text is null ||
                 !ev.Text.EndsWith(NoLiveObjectFailSuffix, StringComparison.Ordinal))
                 continue;
