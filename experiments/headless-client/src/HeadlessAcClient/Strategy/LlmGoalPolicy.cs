@@ -4450,14 +4450,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // for NO WALKABLE ROUTE, as distinct from a SEMANTIC server refusal (which
     // IsGoalRecentlyRejected also matches but which is NOT a path problem). Used to
     // scope the Explore-loop "being refused as unreachable" wording to genuine path
-    // failures so it never mislabels a semantic refusal. Mirrors the transport
-    // staleness-clearing in IsGoalRecentlyRejected; own rejection record only.
-    internal static bool IsExploreNameTransportRefused(string? name, EventStream events)
+    // failures so it never mislabels a semantic refusal. Reads the SAME durable
+    // rejection window + 90s recency as IsGoalRecentlyRejected (a raw ring scan
+    // under-detects after perception eviction / ring rollover); arrival-clearing is
+    // shared via HasArrivedAtTargetSince (also durable). Own rejection record only.
+    internal static bool IsExploreNameTransportRefused(
+        string? name, EventStream events, DateTimeOffset? nowUtc = null)
     {
         if (string.IsNullOrWhiteSpace(name)) return false;
-        const int LookbackEvents = 30;
-        foreach (var ev in events.Recent(LookbackEvents))
+        var rejectionCutoff = (nowUtc ?? DateTimeOffset.UtcNow) - RejectionDedupRecency;
+        foreach (var ev in events.RecentActionRejections())   // newest-first, durable
         {
+            if (ev.Utc < rejectionCutoff) continue;           // aged out of the recency window
             if (!IsTransportFailureRejection(ev)) continue;
             if (!RejectionEventMatchesTargetName(ev, name)) continue;
             if (HasArrivedAtTargetSince(events, ev)) continue;
