@@ -2775,6 +2775,12 @@ internal sealed class HandshakeDriver : IDisposable
                                             killSnap?.WeenieClassId ?? lastCombatFoe?.Wcid,
                                             killSnap?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
                                         combatFeel.RecordKill(killIdentity);
+                                        // Per-run combat-OUTCOME counter surfaced as
+                                        // kills= in [run-summary] (pairs with the swings=
+                                        // accuracy counters). Single combat-target-death
+                                        // site (the foe the bot was fighting dropped to 0
+                                        // health); no behavior, raw observed outcome.
+                                        worldState.CumulativeKills++;
                                         // loot-fresh-kills (cp-2357): remember the global-XY of
                                         // this kill SITE + time so the freshly-spawned corpse
                                         // (which replaces the creature in place) can be correlated

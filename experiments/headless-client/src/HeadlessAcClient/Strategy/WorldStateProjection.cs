@@ -445,6 +445,15 @@ internal sealed record WorldStateProjection
     public int CumulativeSwingsEvaded { get; init; }
 
     /// <summary>
+    /// Session-cumulative count of foes the bot was fighting that died this
+    /// run. Copied straight from <see cref="WorldState.CumulativeKills"/>.
+    /// Paired with <see cref="CumulativeSwingsLanded"/> it expresses combat
+    /// OUTCOME vs accuracy as raw perception; source draws no conclusion.
+    /// </summary>
+    [JsonPropertyName("cumulative_kills")]
+    public int CumulativeKills { get; init; }
+
+    /// <summary>
     /// Global-X of the bot's last death location, set only when
     /// <see cref="CorpseRecovery.ShouldSurfaceCorpse"/> passes; null otherwise.
     /// </summary>
@@ -962,6 +971,7 @@ internal sealed record WorldStateProjection
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
+            CumulativeKills = world.CumulativeKills,
             CorpseWorldX = corpseWorldX,
             CorpseWorldY = corpseWorldY,
             CorpseAgeSeconds = corpseAgeSeconds,
