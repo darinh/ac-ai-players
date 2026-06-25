@@ -3089,7 +3089,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
-            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes));
+            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
+            FormatTopIntent(_stack)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3152,13 +3153,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return parts.Count > 0 ? string.Join(" ", parts) : null;
     }
 
+    // Compact identity of the strategic stack's TOP intent (kind + target, with a
+    // status marker when not Active) for the run-summary. Reads the bot's OWN
+    // IntentStack; OneLine + quote-strip + truncate keep it a single safe log token.
+    // Null when the stack is empty. Pure structural read; no behavior, no game knowledge.
+    internal static string? FormatTopIntent(IntentStack? stack)
+    {
+        if (stack is not { Depth: > 0 } || stack.Top is not { } top) return null;
+        var name = string.IsNullOrEmpty(top.TargetName) ? "" : $" {top.TargetName}";
+        var status = top.Status == IntentLifecycle.Active ? "" : $" [{top.Status}]";
+        var label = SanitizeQuotedLogToken($"{top.Kind}{name}{status}");
+        return string.IsNullOrEmpty(label) ? null : Truncate(label, 56);
+    }
+
     internal static string BuildRunSummaryLine(
         int decisions, IReadOnlyDictionary<string, int> triggerCounts,
         int distinctLandblocks, uint? lastLandblock, int? level, long? totalXp, string model,
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
-        int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0)
+        int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
+        string? topIntent = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3208,6 +3223,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // behavior change, no game knowledge.
         if (intentDepth is int depth && depth >= 0)
             line += $" intents={depth}";
+        // Intent-wedge signal: a compact identity (kind + target, with a status
+        // marker when not Active) of the strategic stack's TOP intent. `intents=`
+        // shows only the DEPTH; this shows WHAT the top objective is, so a stale top
+        // intent that persists across summaries while total-xp is flat self-reports an
+        // intent-driven wedge (e.g. a settled turn-in the LLM won't drop) that the
+        // depth alone cannot. Shown only when a top intent exists. Pure structural read
+        // of the bot's OWN strategic state; no behavior change, no game knowledge.
+        if (!string.IsNullOrEmpty(topIntent))
+            line += $" top-intent=\"{topIntent}\"";
         // Criterion-2 contract-refresh opportunity count: distinct situations this
         // run where the bot held a finished contract batch AND a vendor was in view
         // (a chance to Buy a fresh contract). Shown only when >0. Read together with
@@ -4333,14 +4357,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // double-quotes so they cannot prematurely close the why="..." field. Pure
     // formatter over the LLM's own output (logging only; never read by
     // decision-making), so it carries no game knowledge.
+    // Make a free-form (LLM-authored) string safe inside a quoted log field: strip
+    // control chars, collapse whitespace to one line, and neutralize embedded double-
+    // quotes so they cannot poison the terminal/log or prematurely close the field.
+    // Does NOT truncate (each caller caps to its own width). Shared by the why="..."
+    // rationale preview and the run-summary top-intent field. Logging only; never read
+    // by decision-making, so no game knowledge.
+    internal static string SanitizeQuotedLogToken(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var cleaned = System.Text.RegularExpressions.Regex.Replace(
+            s, @"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "");
+        return System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ")
+            .Replace('"', '\'')
+            .Trim();
+    }
+
     internal static string RationaleLogPreview(string? rationale)
     {
         if (string.IsNullOrWhiteSpace(rationale)) return "";
-        var cleaned = System.Text.RegularExpressions.Regex.Replace(
-            rationale, @"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "");
-        var oneLine = System.Text.RegularExpressions.Regex.Replace(cleaned, @"\s+", " ")
-            .Replace('"', '\'')
-            .Trim();
+        var oneLine = SanitizeQuotedLogToken(rationale);
         const int Max = 160;
         if (oneLine.Length <= Max) return oneLine;
         // Avoid truncating in the middle of a UTF-16 surrogate pair.

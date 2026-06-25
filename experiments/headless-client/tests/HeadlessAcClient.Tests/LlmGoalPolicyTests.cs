@@ -2435,6 +2435,27 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_WithTopIntent_AppendsTopIntentField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int> { ["no-current-goal"] = 15 },
+            distinctLandblocks: 2, lastLandblock: 0xA9B4u, level: 14, totalXp: 315171L,
+            model: "m", topEmit: null, skips: 0, contracts: null, intentDepth: 1,
+            topIntent: "return-to-giver Buckminster");
+        Assert.Contains(" top-intent=\"return-to-giver Buckminster\"", line);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_NullTopIntent_OmitsField()
+    {
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 15, triggerCounts: new Dictionary<string, int>(), distinctLandblocks: 1,
+            lastLandblock: 0x8602u, level: 1, totalXp: 0L, model: "m",
+            topEmit: null, skips: 0, contracts: null, intentDepth: 0, topIntent: null);
+        Assert.DoesNotContain("top-intent=", line);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_NullIntentDepth_OmitsIntentsField()
     {
         var line = LlmGoalPolicy.BuildRunSummaryLine(
