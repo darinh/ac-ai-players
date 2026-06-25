@@ -255,6 +255,16 @@ internal static class CombatDisengage
     }
 
     /// <summary>
+    /// Default re-engage health fraction: the bot must NOT (re)start melee until
+    /// its health recovers to at least this fraction of max. Strictly higher than
+    /// the disengage fraction (anti-oscillation hysteresis). Shared so the Motor's
+    /// dispatch REFUSE and the Strategy layer's autonomous combat-chain gate use one
+    /// source of truth (a divergence would let the chain mint Attacks the Motor then
+    /// refuses, looping).
+    /// </summary>
+    public const double DefaultReengageHealthFraction = 0.70;
+
+    /// <summary>
     /// While true, the motor must NOT dispatch a new melee Attack — the
     /// bot is too hurt to safely (re)engage. Returns false once health
     /// has recovered to at least the re-engage fraction of max. The
