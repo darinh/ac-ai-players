@@ -3000,6 +3000,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-reports how many redundant calls the tempo gates saved (the standing
     // reduce-llm-call-volume goal's per-run effect). Pure observability.
     private int _summarySkips;
+    // Count of LLM-emitted Attacks the beaten-kind veto DROPPED this run (the bot
+    // ordered combat on a KIND its own ledger marks beaten/un-out-leveled). The
+    // dominant open-world override when the bot is in territory too tough for it;
+    // read against kills= it shows how many combat decisions land on un-winnable
+    // targets vs actual kills. Surfaced as beaten-vetoes=N in [run-summary]. Pure
+    // observability.
+    private int _summaryBeatenVetoes;
     // NumDeaths observed at the first decision of this run. [run-summary] reports
     // current NumDeaths minus this baseline = deaths THIS run. Null until first
     // observed.
@@ -3033,7 +3040,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
-            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills));
+            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3102,7 +3109,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
-        int recentFails = 0, string? combatAttrs = null, int kills = 0)
+        int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3180,6 +3187,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // behavior change, no game knowledge.
         if (kills > 0)
             line += $" kills={kills}";
+        // Beaten-kind veto count: LLM Attacks dropped this run because the target KIND
+        // is on the bot's own beaten ledger (too tough). Read against kills= it shows
+        // the combat-decision efficiency — a high beaten-vetoes with low kills means
+        // the bot is in territory too tough for it (choosing un-winnable targets) and
+        // should get stronger or relocate. Shown only when >0. Pure observability.
+        if (beatenVetoes > 0)
+            line += $" beaten-vetoes={beatenVetoes}";
         // Combat-effectiveness signal: surface the session swing-outcome counters
         // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
         // only when at least one has incremented. Pure observability; no behavior
@@ -4156,6 +4170,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // game knowledge.
         if (IsOptionalAttackOnBeatenKind(goal, world))
         {
+            _summaryBeatenVetoes++;
             Console.WriteLine(
                 $"[llm-override] beaten-kind veto: dropping LLM Attack target={goal.Target}" +
                 " — own combat ledger marks this kind beaten (losses, no kills); deferring to fallback.");
