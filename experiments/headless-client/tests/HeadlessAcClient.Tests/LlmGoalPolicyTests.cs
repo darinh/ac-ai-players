@@ -3107,6 +3107,86 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Explore loop (unresolved target)", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_RejectionAwareWhenTargetRefused()
+    {
+        // When the looped Explore target is ALSO being dropped as recently rejected
+        // (Unreachable / no walkable route — the Motor's dedup case), the bot is not
+        // travelling toward it at all, so the cue must say it is being REFUSED and must
+        // NOT give the misleading "keep going if it's distant" out.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Name = "Central Courtyard",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.Contains("Central Courtyard", prompt);
+        Assert.Contains("being REFUSED as unreachable", prompt);
+        // The misleading "keep going if distant" out must be GONE in the rejected case.
+        Assert.DoesNotContain("keep `Explore`-ing toward it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_NonRejectedKeepsDistantTravelOut()
+    {
+        // Looped but NOT rejected -> the original variant stands (allowing a legitimate
+        // travel-back toward a distant not-yet-reached place); no "REFUSED" wording.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.Contains("keep `Explore`-ing toward it", prompt);
+        Assert.DoesNotContain("being REFUSED as unreachable", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_SemanticRejectionDoesNotClaimUnreachable()
+    {
+        // gpt-5.4 fix: a SEMANTIC server refusal (a real WeenieError code, NOT a
+        // transport failure) matching the looped name must NOT trigger the "no walkable
+        // route / unreachable" wording — that would mislabel a non-path refusal. The
+        // original variant renders instead.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now, Kind = EventKind.ActionRejected,
+            ErrorCode = 0x0006u, ErrorLabel = "YouDoNotPassCraftingRequirements",
+            Name = "Central Courtyard",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.DoesNotContain("being REFUSED as unreachable", prompt);
+        Assert.Contains("keep `Explore`-ing toward it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoopCapsule_TransportRejectionClearedByArrival()
+    {
+        // A transport (Unreachable) rejection is STALE once the bot has since ARRIVED at
+        // the target (PickerArrivedNoAction). The cue must then fall back to the original
+        // "distant travel" variant, not claim the target is still unreachable.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now, Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable", Name = "Central Courtyard",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now.AddSeconds(1), Kind = EventKind.PickerArrivedNoAction,
+            Name = "Central Courtyard",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.DoesNotContain("being REFUSED as unreachable", prompt);
+        Assert.Contains("keep `Explore`-ing toward it", prompt);
+    }
+
     private static EventStream AttackEmissions(string name, int count, System.DateTimeOffset utc)
     {
         var es = new EventStream();

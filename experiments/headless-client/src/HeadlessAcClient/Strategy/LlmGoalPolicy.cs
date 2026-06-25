@@ -4305,26 +4305,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             // Target-name match: NPC name carried in Name (Unreachable)
             // or Text (WeenieErrorWithString puts the NPC name there).
-            else if (!string.IsNullOrWhiteSpace(targetName))
+            else if (!string.IsNullOrWhiteSpace(targetName) &&
+                RejectionEventMatchesTargetName(ev, targetName))
             {
-                if (!string.IsNullOrWhiteSpace(ev.Name) &&
-                    string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
-                {
-                    matched = true;
-                }
-                else if (!string.IsNullOrWhiteSpace(ev.Text))
-                {
-                    if (string.Equals(ev.Text, targetName, StringComparison.OrdinalIgnoreCase))
-                        matched = true;
-                    // Substring match (for "Unreachable: 'X' (walk timeout ...)")
-                    // gated on a minimum target-name length to avoid
-                    // false positives on short common substrings.
-                    else if (targetName.Length >= 4 &&
-                        ev.Text.Contains(targetName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        matched = true;
-                    }
-                }
+                matched = true;
             }
 
             if (!matched) continue;
@@ -4349,6 +4333,52 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return true;
         }
 
+        return false;
+    }
+
+    // Shared name-match for an ActionRejected event against a goal target NAME:
+    // the NPC/place name is carried in Name (synthetic Unreachable rejections) or
+    // in Text (WeenieErrorWithString puts the name there, sometimes as part of a
+    // longer "Unreachable: 'X' (walk timeout ...)" message). Substring matching on
+    // Text is gated on a minimum name length to avoid false positives on short
+    // common substrings. Extracted so IsGoalRecentlyRejected and the transport-only
+    // IsExploreNameTransportRefused below stay in lock-step. No game knowledge.
+    private static bool RejectionEventMatchesTargetName(StreamEvent ev, string targetName)
+    {
+        if (!string.IsNullOrWhiteSpace(ev.Name) &&
+            string.Equals(ev.Name, targetName, StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (!string.IsNullOrWhiteSpace(ev.Text))
+        {
+            if (string.Equals(ev.Text, targetName, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (targetName.Length >= 4 &&
+                ev.Text.Contains(targetName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    // True iff a recent ActionRejected naming `name` is a TRANSPORT failure
+    // (Unreachable / Blocked / NoIndoorPath — the bot could not WALK there) that is
+    // still live (the bot has NOT since arrived at the target). This is the precise
+    // condition under which a re-emitted Explore toward `name` keeps being dropped
+    // for NO WALKABLE ROUTE, as distinct from a SEMANTIC server refusal (which
+    // IsGoalRecentlyRejected also matches but which is NOT a path problem). Used to
+    // scope the Explore-loop "being refused as unreachable" wording to genuine path
+    // failures so it never mislabels a semantic refusal. Mirrors the transport
+    // staleness-clearing in IsGoalRecentlyRejected; own rejection record only.
+    internal static bool IsExploreNameTransportRefused(string? name, EventStream events)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        const int LookbackEvents = 30;
+        foreach (var ev in events.Recent(LookbackEvents))
+        {
+            if (!IsTransportFailureRejection(ev)) continue;
+            if (!RejectionEventMatchesTargetName(ev, name)) continue;
+            if (HasArrivedAtTargetSince(events, ev)) continue;
+            return true;
+        }
         return false;
     }
 
@@ -10803,16 +10833,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Explore loop (unresolved target)");
-            sb.AppendLine(
-                $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently but NO " +
-                $"object named `{loopedExploreDisplay}` is visible here. If `{loopedExploreDisplay}` is a " +
-                "DISTANT place you have NOT reached yet, keep `Explore`-ing toward it — that is normal " +
-                "travel (your `landblock`/position should be changing as you go). But if it is an area you " +
-                "have ALREADY reached (you keep ARRIVING with nothing here to act on, and your position is " +
-                "NOT changing), re-`Explore`-ing makes no progress: `Explore` only WALKS/discovers and " +
-                "CANNOT interact with a PLACE. In that case, to ADVANCE, interact with a VISIBLE object — a " +
-                "portal/NPC/door/sign in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`) — or pursue a " +
-                $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
+            // Rejection-aware variant: if this SAME Explore target is being DROPPED
+            // for a TRANSPORT failure — the bot could not WALK to the named place
+            // (Unreachable/Blocked/NoIndoorPath) and has not since arrived — then it
+            // is NOT actually travelling toward it: the goal is silently dropped to
+            // the fallback every tick, so the "keep going if it's distant" guidance
+            // below is WRONG (the position is NOT closing on the target). Scope this
+            // to genuine PATH failures (not semantic server refusals, which are not a
+            // "no route" problem) so the "unreachable" wording is always accurate.
+            // Own emission history + the Motor's own transport-rejection record; no
+            // game knowledge, no priority, no source-side target.
+            var loopedExploreRejected = IsExploreNameTransportRefused(loopedExploreName, events);
+            if (loopedExploreRejected)
+                sb.AppendLine(
+                    $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently and EACH attempt is " +
+                    "being REFUSED as unreachable (no walkable route to it from here) and DROPPED — so you are NOT " +
+                    $"travelling toward `{loopedExploreDisplay}` at all; re-emitting it just wastes this turn. " +
+                    $"`{loopedExploreDisplay}` is not a reachable destination from here. To make progress, emit " +
+                    "`Explore{target: {name: \"anywhere\"}}` to travel toward open ground, or interact with a VISIBLE " +
+                    "object in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`/`Attack`) — do NOT re-`Explore` " +
+                    $"`{loopedExploreDisplay}`.");
+            else
+                sb.AppendLine(
+                    $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently but NO " +
+                    $"object named `{loopedExploreDisplay}` is visible here. If `{loopedExploreDisplay}` is a " +
+                    "DISTANT place you have NOT reached yet, keep `Explore`-ing toward it — that is normal " +
+                    "travel (your `landblock`/position should be changing as you go). But if it is an area you " +
+                    "have ALREADY reached (you keep ARRIVING with nothing here to act on, and your position is " +
+                    "NOT changing), re-`Explore`-ing makes no progress: `Explore` only WALKS/discovers and " +
+                    "CANNOT interact with a PLACE. In that case, to ADVANCE, interact with a VISIBLE object — a " +
+                    "portal/NPC/door/sign in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`) — or pursue a " +
+                    $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
         }
 
         // ── ## Attack loop (target not in view) — sibling of the Explore loop ──
