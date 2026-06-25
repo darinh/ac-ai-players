@@ -767,6 +767,72 @@ public class IntentStackTests
         Assert.Equal(root.Summary(), rt!.Summary());
     }
 
+    // ---- FormatTopIntent (run-summary top-intent diagnostic) ----
+
+    [Fact]
+    public void FormatTopIntent_EmptyOrNullStack_ReturnsNull()
+    {
+        Assert.Null(LlmGoalPolicy.FormatTopIntent(new IntentStack()));
+        Assert.Null(LlmGoalPolicy.FormatTopIntent(null));
+    }
+
+    [Fact]
+    public void FormatTopIntent_TopWithTarget_FormatsKindAndTarget()
+    {
+        var s = new IntentStack();
+        s.TryPush(new Intent
+        {
+            Id = "i1", Kind = "hunt", TargetName = "Banderling",
+            Completion = new AlwaysFalsePredicate(), Baseline = BuildBaseline(),
+        });
+        Assert.Equal("hunt Banderling", LlmGoalPolicy.FormatTopIntent(s));
+    }
+
+    [Fact]
+    public void FormatTopIntent_NonActiveTop_IncludesStatusMarker()
+    {
+        var s = new IntentStack();
+        s.TryPush(new Intent
+        {
+            Id = "i1", Kind = "return-to-giver", TargetName = "Buckminster",
+            Completion = new AlwaysFalsePredicate(), Baseline = BuildBaseline(),
+            Status = IntentLifecycle.Blocked,
+        });
+        var label = LlmGoalPolicy.FormatTopIntent(s);
+        Assert.Contains("return-to-giver Buckminster", label);
+        Assert.Contains("[Blocked]", label);
+    }
+
+    [Fact]
+    public void FormatTopIntent_NullTargetName_KindOnly()
+    {
+        var s = new IntentStack();
+        s.TryPush(new Intent
+        {
+            Id = "i1", Kind = "explore", TargetName = null,
+            Completion = new AlwaysFalsePredicate(), Baseline = BuildBaseline(),
+        });
+        Assert.Equal("explore", LlmGoalPolicy.FormatTopIntent(s));
+    }
+
+    [Fact]
+    public void FormatTopIntent_SanitizesControlCharsQuotesAndNewlines()
+    {
+        // The sanitizer (shared with the rationale preview) makes an LLM-authored
+        // Kind/TargetName safe inside the quoted top-intent="..." log field: it strips
+        // control chars, collapses whitespace, and neutralizes embedded double-quotes.
+        var s = LlmGoalPolicy.SanitizeQuotedLogToken("talk Bar\u001bkeeper \"Wil\nomine\"\u0007");
+        Assert.Equal("talk Barkeeper 'Wil omine'", s);
+        // And the field itself is built through that sanitizer + never contains a raw quote.
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i1", Kind = "talk", TargetName = "Barkeeper",
+            Completion = new AlwaysFalsePredicate(), Baseline = BuildBaseline(),
+        });
+        Assert.DoesNotContain("\"", LlmGoalPolicy.FormatTopIntent(stack)!);
+    }
+
     // ---- Helpers ----
 
     private static Intent NewIntent(
