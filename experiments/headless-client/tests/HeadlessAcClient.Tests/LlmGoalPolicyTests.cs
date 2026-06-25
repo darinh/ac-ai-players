@@ -8123,6 +8123,24 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_SelfArmRule_UnarmedIsDisadvantageNotImpossible()
+    {
+        // The SELF-ARM opener must describe being UNARMED as a DISADVANTAGE (beat only the
+        // weakest, lose to anything tougher), NOT a categorical "you cannot win fights".
+        // The bot wins unarmed fights against weak monsters (live: 55 unarmed kills), and the
+        // false "cannot win" claim contradicts the unarmed-accuracy guidance and drives a
+        // wander-looking-for-a-weapon loop instead of hunting the winnable monsters in view.
+        var p = LlmGoalPolicy.BuildUserPrompt(
+            BuildInventoryWorld(System.Array.Empty<InventoryItemProjection>()), new EventStream(), null);
+        Assert.Contains("fight at a big DISADVANTAGE", p);
+        Assert.Contains("you CAN still fight unarmed", p);
+        // ...but the rule must still PREFER arming (don't under-prioritize getting a weapon).
+        Assert.Contains("Prefer to arm before OPTIONAL combat", p);
+        // The old categorical falsehood must not return.
+        Assert.DoesNotContain("you cannot win fights", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SelfArmRule_DirectsLootToArmHuntWhenNoWeaponAvailable()
     {
         // The no-weapon fallback must direct the bot to HUNT the weakest monsters and LOOT a
@@ -18995,14 +19013,23 @@ public class LlmGoalPolicyTests
     // damage). The note renders in the body and the protected tail, so the few-line expansion
     // lands ~twice. Static-floor only; does not move the runtime 413 risk (per-tick WORLD/
     // visible sections), and the ceiling is a regression guard, not a runtime size.
+    // Bumped 19000 -> 19200 (self-arm-unarmed-viable) for the corrected SELF-ARM opener:
+    // the prior text categorically said an UNARMED bot "cannot win fights", but the bot
+    // does win unarmed fights against the weakest monsters (live: 55 unarmed kills in one
+    // run) and that falsehood both contradicts the `unarmed accuracy` guidance and drove a
+    // wander-looking-for-a-weapon loop. The opener now frames UNARMED as a DISADVANTAGE
+    // (beat only the weakest, lose to tougher) and tells the bot it CAN still fight unarmed
+    // and should hunt the weak monsters it can beat rather than wander empty-handed. Static-
+    // floor only; does not move the runtime 413 risk (per-tick WORLD/visible sections), and
+    // the ceiling is a regression guard, not a runtime size.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 19000,
-            $"static prompt floor grew to {prompt.Length} chars (budget 19000)");
+        Assert.True(prompt.Length <= 19200,
+            $"static prompt floor grew to {prompt.Length} chars (budget 19200)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
