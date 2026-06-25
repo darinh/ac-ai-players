@@ -12376,8 +12376,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // blip color AND not Vendor/Healer. `npc` = any other
             // creature. Both signals come from the wire; we never
             // hardcode wcid lists or English-name matches.
-            if (v.IsMonster) sb.Append(" monster");
-            else             sb.Append(" npc");
+            // `player` = another player character (guid band), checked
+            // first so a fellow player is never mislabeled monster/npc.
+            if (v.IsPlayer)       sb.Append(" player");
+            else if (v.IsMonster) sb.Append(" monster");
+            else                  sb.Append(" npc");
         }
         if (v.IsPortal)   sb.Append(" portal");
         if (v.IsDoor)
