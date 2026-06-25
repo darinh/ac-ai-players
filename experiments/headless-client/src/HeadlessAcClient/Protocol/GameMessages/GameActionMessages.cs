@@ -56,6 +56,7 @@ internal enum GameActionType : uint
     Sell                = 0x0060,
     FellowshipCreate    = 0x00A2,
     FellowshipQuit      = 0x00A3,
+    FellowshipRecruit   = 0x00A5,
 }
 
 /// <summary>
@@ -456,6 +457,28 @@ internal static class GameActionFellowshipQuitMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipQuit, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), disband ? 1u : 0u); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// FellowshipRecruit (0x00A5): invite another player into the bot's fellowship.
+/// Mirrors ACE-bots GameActionFellowshipRecruit.Handle, which reads, after the
+/// GameAction header:
+///   u32 newMemberGuid   (the player to recruit)
+/// The LLM chose WHICH player to recruit; this only packs the wire bytes.
+/// </summary>
+internal static class GameActionFellowshipRecruitMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint newMemberGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipRecruit, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), newMemberGuid); cursor += 4;
         return cursor;
     }
 }

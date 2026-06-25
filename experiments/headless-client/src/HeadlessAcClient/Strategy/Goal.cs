@@ -133,6 +133,14 @@ internal enum GoalKind
     /// replies with a FellowshipFullUpdate/Quit the client already decodes.
     /// </summary>
     FellowshipQuit = 17,
+
+    /// <summary>
+    /// Invite another player (the LLM-named target, a `player` in Visible nearby)
+    /// into the bot's fellowship. The motor resolves the named target to its guid,
+    /// validates it is a player, and packs the FellowshipRecruit wire action; it
+    /// makes NO decision about WHO/WHETHER to recruit (Strategy owns that).
+    /// </summary>
+    FellowshipRecruit = 18,
 }
 
 /// <summary>
