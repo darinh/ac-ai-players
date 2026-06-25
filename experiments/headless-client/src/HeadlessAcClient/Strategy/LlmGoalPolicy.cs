@@ -9389,14 +9389,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // 25-event "## Recent events" tail, but in a busy area high-volume
         // observe noise (Motion/UpdatePosition/ObjectCreate) evicts them long
         // before the next decision — the same eviction problem that justified
-        // the "## Recent rejections" pull-out. Dedup by (kind, target) keeping
-        // the most recent of each (events are newest-first) so a repeatedly-
-        // failing engagement — e.g. an Attack on a fleeing/far mob that keeps
-        // timing out — surfaces once and clearly instead of either flooding
-        // the list or being lost. Pure echo of own bookkeeping the LLM
-        // generated; it decides whether to retry or pick a different target.
-        var goalOutcomes = events.Recent(120)
-            .Where(e => e.Kind == EventKind.GoalCompleted || e.Kind == EventKind.GoalFailed)
+        // the "## Recent rejections" pull-out. Read the FAILED outcomes from the
+        // DURABLE GoalFailed window (recency-scoped), not the 120-event ring: a
+        // GoalFailed evicts within a few seconds of busy traffic, so the
+        // "don't repeat failing goals" hint silently went BLANK exactly when the
+        // bot was looping a failing goal. Completions stay ring-based — an evicted
+        // "[done]" is only lost context, not a missed warning. Dedup by
+        // (kind, target) keeping the most recent of each (newest-first after the
+        // sort) so a repeatedly-failing engagement — e.g. an Attack on a
+        // fleeing/far mob that keeps timing out — surfaces once and clearly
+        // instead of either flooding the list or being lost. Pure echo of own
+        // bookkeeping the LLM generated; it decides whether to retry or pick a
+        // different target.
+        var outcomeCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
+        var goalOutcomes = events.RecentGoalFailures()
+            .Where(e => e.Utc >= outcomeCutoff)
+            .Concat(events.Recent(120).Where(e => e.Kind == EventKind.GoalCompleted))
+            .OrderByDescending(e => e.Utc)
             .GroupBy(e => (e.Kind, key: e.Name ?? e.Text ?? string.Empty))
             .Select(g => g.First())
             .Take(8)
