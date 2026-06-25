@@ -8745,6 +8745,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine($"- {crUntrainedNote}");
         if (FormatSelfHealth(world.Self.HealthCurrent, world.Self.HealthObservedPeak, world.Self.HealthFraction, world.Self.HealthRising) is string crHealthLine)
             sb.AppendLine(crHealthLine);
+        if (FormatSelfStaminaWhenLow(world.Self.StaminaCurrent, world.Self.StaminaObservedPeak) is string crStaminaLine)
+            sb.AppendLine(crStaminaLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
         // is combat-ready and has farmed this landblock past the dwell
         // threshold without leveling, so the LLM knows to travel for tougher
@@ -12632,6 +12634,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (rec is null) return "";
         return $" [your record: fights {rec.Fights}, kills {rec.Kills}, " +
                $"deaths {rec.Deaths}, near-deaths {rec.NearDeaths}, ineffective {rec.Ineffective}, last {rec.LastOutcome}]";
+    }
+
+    /// <summary>
+    /// Render a self-stamina line for the prompt ONLY when stamina is
+    /// MEANINGFULLY LOW (current at or below half the observed-peak max).
+    /// Stamina is the melee/run sustain pool: at low stamina swings weaken
+    /// and the bot cannot run, so surfacing it lets the LLM rest/recover
+    /// before an OPTIONAL fight (the way it already does for health). A
+    /// near-full reading (e.g. 99/100) is NOT surfaced — it is a SIGNAL, not
+    /// noise — which also keeps the static prompt floor unchanged AND makes
+    /// the observed-peak under-estimate conservative (an under-estimated max
+    /// reads as a HIGHER fraction, so it can only SUPPRESS, never false-fire).
+    /// Returns null when full/near-full/unknown.
+    /// </summary>
+    internal const float StaminaLowFraction = 0.5f;
+    internal static string? FormatSelfStaminaWhenLow(int? current, int? observedPeak)
+    {
+        if (current is not int cur || observedPeak is not int max || max <= 0) return null;
+        var pct = Math.Clamp((float)cur / max, 0f, 1f);
+        if (pct > StaminaLowFraction) return null;   // not meaningfully low -> no signal
+        return $"- stamina: {pct.ToString("P0")} ({cur}/{max} observed) — stamina is LOW, which weakens your swings and stops you running; let it recover before an OPTIONAL fight (a `HOSTILE` attacker still takes priority).";
     }
 
     /// <summary>

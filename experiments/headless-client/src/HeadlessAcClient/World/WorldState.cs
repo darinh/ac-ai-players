@@ -171,6 +171,13 @@ internal sealed class WorldState
     /// </summary>
     private byte? _selfHealthLevelByteSeq;
 
+    /// <summary>Highest byte-sequence seen for the STAMINA vital on the
+    /// 0x02E7 descriptor (keyed by MaxStamina) and the 0x02E9 current-level
+    /// (keyed by Stamina) — DISTINCT per-(type,vital) counters, mirroring
+    /// the health pair above. Nullable because 0 is a valid sequence.</summary>
+    private byte? _selfStaminaVitalByteSeq;
+    private byte? _selfStaminaLevelByteSeq;
+
     /// <summary>
     /// Per-(skill id) byte-sequence high-water marks for discrete
     /// PrivateUpdateSkill (0x02DD). The server keys this ByteSequence by
@@ -1325,17 +1332,31 @@ internal sealed class WorldState
         }
 
         // Only the health vital drives self-health state.
-        if (!v.IsHealth)
-            return false;
+        if (v.IsHealth)
+        {
+            // Per-(type,vital) byte-sequence gate — drop stale/reordered
+            // health updates. Separate counter from the property family.
+            if (!SequenceCompare.IsCurrentOrNewer(v.Sequence, _selfHealthVitalByteSeq))
+                return false;
+            _selfHealthVitalByteSeq = v.Sequence;
 
-        // Per-(type,vital) byte-sequence gate — drop stale/reordered
-        // health updates. Separate counter from the property family.
-        if (!SequenceCompare.IsCurrentOrNewer(v.Sequence, _selfHealthVitalByteSeq))
-            return false;
-        _selfHealthVitalByteSeq = v.Sequence;
+            WriteSelfHealth(selfGuid, v.Current);
+            return true;
+        }
 
-        WriteSelfHealth(selfGuid, v.Current);
-        return true;
+        // Stamina rides the same descriptor (keyed by MaxStamina) with its
+        // own sequence counter — track it for the melee/run sustain signal.
+        if (v.IsStamina)
+        {
+            if (!SequenceCompare.IsCurrentOrNewer(v.Sequence, _selfStaminaVitalByteSeq))
+                return false;
+            _selfStaminaVitalByteSeq = v.Sequence;
+
+            WriteSelfStamina(selfGuid, v.Current);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1356,15 +1377,29 @@ internal sealed class WorldState
             return false;
         }
 
-        if (!a.IsHealth)
-            return false;
+        if (a.IsHealth)
+        {
+            if (!SequenceCompare.IsCurrentOrNewer(a.Sequence, _selfHealthLevelByteSeq))
+                return false;
+            _selfHealthLevelByteSeq = a.Sequence;
 
-        if (!SequenceCompare.IsCurrentOrNewer(a.Sequence, _selfHealthLevelByteSeq))
-            return false;
-        _selfHealthLevelByteSeq = a.Sequence;
+            WriteSelfHealth(selfGuid, a.Current);
+            return true;
+        }
 
-        WriteSelfHealth(selfGuid, a.Current);
-        return true;
+        // Stamina current-level update (the timely per-tick source for the
+        // melee/run sustain pool), keyed by Stamina with its own counter.
+        if (a.IsStamina)
+        {
+            if (!SequenceCompare.IsCurrentOrNewer(a.Sequence, _selfStaminaLevelByteSeq))
+                return false;
+            _selfStaminaLevelByteSeq = a.Sequence;
+
+            WriteSelfStamina(selfGuid, a.Current);
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1403,6 +1438,24 @@ internal sealed class WorldState
         {
             snap.HealthRising = null;
         }
+        snap.Touch();
+    }
+
+    /// <summary>
+    /// Write the bot's current stamina onto the self snapshot and update
+    /// the peak-observed max. Mirrors <see cref="WriteSelfHealth"/> (the
+    /// wire vital messages carry only the current; the max is server-derived,
+    /// so the peak-observed Current stands in for it). Both stamina wire
+    /// sources (0x02E7 descriptor keyed by MaxStamina, 0x02E9 current-level
+    /// keyed by Stamina) feed through here.
+    /// </summary>
+    private void WriteSelfStamina(uint selfGuid, uint current)
+    {
+        var snap = GetOrCreateSnapshot(selfGuid);
+        snap.StaminaCurrent = current;
+        snap.StaminaMax = snap.StaminaMax is uint prevMax && prevMax >= current
+            ? prevMax
+            : current;
         snap.Touch();
     }
 
