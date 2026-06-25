@@ -740,6 +740,16 @@ internal sealed class HandshakeDriver : IDisposable
         // the item from the inventory-equip candidate set on the
         // next tick.
         var                  inventoryEquipSent = new HashSet<uint>();
+        // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
+        // server refuses (a non-takeable fixed object) returns a silent
+        // InventoryServerSaveFailed err=None whose queued auto-equip never fires
+        // (the pickup-ack never arrives), so the guid never reaches
+        // inventoryEquipSent and the failure would otherwise be suppressed —
+        // leaving the LLM to re-emit the same dead Pickup every cycle. Tracking
+        // the dispatched pickup guid lets ShouldSurfaceInventoryFailure surface
+        // that err=None as an ActionRejected so the policy's recently-rejected
+        // dedup breaks the loop. Pure own-dispatch bookkeeping; no game knowledge.
+        var                  pickupDispatchedGuids = new HashSet<uint>();
         // cp-2273 — distinguishes guids the SOURCE autonomously auto-equipped
         // (PHASE7F.4 below) from LLM-requested wields, so a server
         // InventoryServerSaveFailed for an autonomous auto-equip (e.g. a
@@ -3247,7 +3257,8 @@ internal sealed class HandshakeDriver : IDisposable
                             // give guid.)
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
                                 AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(
-                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryEquipSent))
+                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryEquipSent,
+                                    pickupDispatchedGuids))
                             {
                                 var invLabel = isf.ErrorType != 0
                                     ? WeenieErrorLabels.Label(isf.ErrorType)
@@ -9139,6 +9150,13 @@ internal sealed class HandshakeDriver : IDisposable
                                            encrypt: true, cryptoSend: cryptoSend);
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, sentLen),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    // Record the dispatched Pickup guid so a server refusal
+                    // (InventoryServerSaveFailed err=None for a non-takeable object)
+                    // surfaces as an ActionRejected learning signal — otherwise the
+                    // failed pickup's queued auto-equip never fires and the loop is
+                    // invisible to the policy. Own-dispatch bookkeeping only.
+                    if (isPickup)
+                        pickupDispatchedGuids.Add(motionTarget.Guid);
                     var equipNote = equipLoc is uint el
                         ? $" (queued EQUIP loc=0x{el:X} for after pickup-ack)"
                         : (isPickup ? " (not wearable; ValidLocations=null/0)" : "");

@@ -6429,6 +6429,31 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsGoalRecentlyRejected_RefusedPickupErrNone_DedupsRepeatPickupByName()
+    {
+        // surface-failed-pickup: a refused Pickup of a non-takeable object now
+        // surfaces as an ActionRejected with err=None (ErrorCode 0) plus the item
+        // Name+Wcid the handler looks up by guid. A re-emitted Pickup naming that
+        // item must be deduped so the LLM stops looping on it.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0u, ErrorLabel = "rejected by the server (the item was not accepted)",
+            Name = "Fixed Practice Weapon",
+            Wcid = 41512u,
+            ItemGuid = 0x80003FDFu,
+        });
+        var repeatPickup = new Goal
+        {
+            Kind = GoalKind.Pickup,
+            Target = new Selector { Name = "Fixed Practice Weapon" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(repeatPickup, es));
+    }
+
+    [Fact]
     public void IsGoalRecentlyRejected_InventoryServerSaveFailed_MatchesByItemWcid()
     {
         // Mirrors HandshakeDriver's Slice J rejection for unreachable
