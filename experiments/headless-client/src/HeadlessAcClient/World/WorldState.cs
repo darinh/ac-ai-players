@@ -305,6 +305,19 @@ internal sealed class WorldState
     public int CumulativeSwingsEvaded { get; set; }
 
     /// <summary>
+    /// Session-cumulative count of foes the bot was fighting that DIED (each
+    /// time the Motor records a kill — the current combat target dropped to 0
+    /// health), summed across every fight this run. Client-side per-process
+    /// counter (reset when a new run's WorldState is constructed), so it
+    /// already reads as "this run". Pairs with
+    /// <see cref="CumulativeSwingsLanded"/> (accuracy) to express combat
+    /// OUTCOME — landing swings without kills means the target
+    /// out-defends/out-heals you. Raw observed outcome; source draws no
+    /// conclusion from it.
+    /// </summary>
+    public int CumulativeKills { get; set; }
+
+    /// <summary>
     /// The bot's last death location (global meters + landblock + time), set on a
     /// detected self-death and cleared once self comes within the visible radius
     /// of it. Raw position bookkeeping.

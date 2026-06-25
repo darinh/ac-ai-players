@@ -919,6 +919,33 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_Kills_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            kills: 7);
+        Assert.Contains("kills=7", with);
+
+        // kills renders BEFORE swings (combat outcome then accuracy).
+        var both = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            swingsLanded: 12, swingsEvaded: 12, kills: 4);
+        Assert.Contains("kills=4", both);
+        Assert.True(both.IndexOf("kills=", StringComparison.Ordinal)
+            < both.IndexOf("swings=", StringComparison.Ordinal));
+
+        // Zero kills this run -> omitted (no noise; default keeps the line lean).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            kills: 0);
+        Assert.DoesNotContain("kills=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Deaths_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };

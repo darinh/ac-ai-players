@@ -3033,7 +3033,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
-            FormatCombatAttributes(world.Self.Attributes)));
+            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3102,7 +3102,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
-        int recentFails = 0, string? combatAttrs = null)
+        int recentFails = 0, string? combatAttrs = null, int kills = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3172,6 +3172,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // bot is not spending. Pure observability; no behavior change, no game knowledge.
         if (unspent is long ux && ux > 0)
             line += $" unspent={ux}";
+        // Combat OUTCOME: foes the bot was fighting that died this run
+        // (CumulativeKills). Pairs with swings= (accuracy attempts) — landing
+        // swings with kills=0 means the target out-defends/out-heals you; kills
+        // rising is the core open-world productivity signal that total-xp=
+        // reflects only indirectly. Shown only when >0. Pure observability; no
+        // behavior change, no game knowledge.
+        if (kills > 0)
+            line += $" kills={kills}";
         // Combat-effectiveness signal: surface the session swing-outcome counters
         // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
         // only when at least one has incremented. Pure observability; no behavior
