@@ -55,6 +55,7 @@ internal enum GameActionType : uint
     Buy                 = 0x005F,
     Sell                = 0x0060,
     FellowshipCreate    = 0x00A2,
+    FellowshipQuit      = 0x00A3,
 }
 
 /// <summary>
@@ -433,6 +434,28 @@ internal static class GameActionFellowshipCreateMessage
         var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipCreate, actionSequence);
         cursor += AcStrings.WriteString16L(dest.Slice(cursor), fellowshipName);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), shareXp ? 1u : 0u); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// FellowshipQuit (0x00A3): leave (or disband) the bot's current fellowship.
+/// Mirrors ACE-bots GameActionFellowshipQuit.Handle, which reads, after the
+/// GameAction header:
+///   u32 disbandFellowship   (0 = just leave, nonzero = disband the whole group)
+/// The LLM chose to leave; this only packs the wire bytes.
+/// </summary>
+internal static class GameActionFellowshipQuitMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, bool disband = false, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipQuit, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), disband ? 1u : 0u); cursor += 4;
         return cursor;
     }
 }

@@ -6278,6 +6278,36 @@ internal sealed class HandshakeDriver : IDisposable
                             $"pktSeq={fcPktSeq} fragSeq={fcFragSeq} bytes={fcSent}");
                         tactics.Clear("fellowship-create dispatched", eventStream);
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.FellowshipQuit)
+                    {
+                        // Social self-action: leave the bot's current fellowship. The
+                        // LLM chose to leave; the motor only packs the FellowshipQuit
+                        // (0x00A3) opcode (disband=false = just leave, not disband the
+                        // whole group) and sends it. The server replies with a
+                        // FellowshipFullUpdate/Quit the client already decodes.
+                        var fqPktSeq  = nextOutboundPacketSequence++;
+                        var fqFragSeq = nextOutboundFragmentSequence++;
+                        var fqBuf = new byte[GameActionFellowshipQuitMessage.PackedSize];
+                        var fqLen = GameActionFellowshipQuitMessage.Pack(fqBuf, disband: false);
+                        var fqMsg = new OutboundPacket();
+                        if (lastReceivedSeq != 0)
+                            fqMsg.AddAckSequence(lastReceivedSeq);
+                        fqMsg.AddBlobFragment(
+                            fragSequence: fqFragSeq,
+                            fragId: OutboundFragmentId,
+                            queue: (ushort)GameMessageGroup.UIQueue,
+                            gameMessagePayload: fqBuf.AsSpan(0, fqLen));
+                        var fqSent = fqMsg.Pack(sendBuf, myClientId,
+                                                sequence: fqPktSeq, iteration: 1,
+                                                encrypt: true, cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, fqSent),
+                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                        Console.WriteLine(
+                            $"[strategy] LLM-GOAL FellowshipQuit: disband=false " +
+                            $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                            $"pktSeq={fqPktSeq} fragSeq={fqFragSeq} bytes={fqSent}");
+                        tactics.Clear("fellowship-quit dispatched", eventStream);
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that

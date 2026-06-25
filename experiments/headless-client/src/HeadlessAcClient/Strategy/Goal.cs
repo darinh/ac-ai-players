@@ -125,6 +125,14 @@ internal enum GoalKind
     /// The server replies with a FellowshipFullUpdate the client already decodes.
     /// </summary>
     FellowshipCreate = 16,
+
+    /// <summary>
+    /// Leave (or disband) the bot's current fellowship. A self/social action with
+    /// no world target. The motor packs the FellowshipQuit wire action; it makes
+    /// NO decision about WHETHER/WHEN to leave (Strategy owns that). The server
+    /// replies with a FellowshipFullUpdate/Quit the client already decodes.
+    /// </summary>
+    FellowshipQuit = 17,
 }
 
 /// <summary>
