@@ -59,30 +59,38 @@ internal sealed class AutoEquipFailureFilter
     /// Decide whether an <c>InventoryServerSaveFailed</c> game event should be
     /// surfaced to the Strategy layer as an <c>ActionRejected</c> learning
     /// signal. A non-zero (specific) <paramref name="errorType"/> always
-    /// surfaces. A <c>None</c> (0) error surfaces ONLY when it names either the
-    /// item the bot is currently giving (<paramref name="pendingGiveItemGuid"/>)
-    /// or an item the bot has dispatched a wield for
-    /// (<paramref name="wieldDispatchedGuids"/>):
+    /// surfaces. A <c>None</c> (0) error surfaces ONLY when it names the
+    /// item the bot is currently giving (<paramref name="pendingGiveItemGuid"/>),
+    /// an item the bot has dispatched a wield/equip for
+    /// (<paramref name="wieldDispatchedGuids"/>), or an item the bot has dispatched
+    /// a <c>Pickup</c> for (<paramref name="pickupDispatchedGuids"/>):
     /// <list type="bullet">
-    /// <item>Give: the server refuses a Give it cannot complete (live: an
-    /// academy Calling Stone the bot believes it holds is not in the server's
-    /// inventory) with a transient string + err=None; dropping it left a failing
-    /// Give with no signal so the bot silently re-dispatched the same give.</item>
+    /// <item>Give: the server refuses a Give it cannot complete (a held quest
+    /// item the bot believes it holds is not in the server's inventory) with a
+    /// transient string + err=None; dropping it left a failing Give with no
+    /// signal so the bot silently re-dispatched the same give.</item>
     /// <item>Wield: the server's CheckWeaponCollision refuses to wield a weapon
-    /// while another is equipped with a silent err=None (live: gpt-4o re-emitted
-    /// Wield{Training Spadone} 33x because the refusal produced no signal).</item>
+    /// while another is equipped with a silent err=None; without a signal the bot
+    /// re-emitted the same wield many times.</item>
+    /// <item>Pickup: the server refuses a Pickup of a non-takeable item (a fixed
+    /// in-world object) with a silent err=None; the failed pickup's queued
+    /// auto-equip never fires (the pickup-ack never arrives) so the guid never
+    /// enters <paramref name="wieldDispatchedGuids"/>, and without this the bot
+    /// re-emitted the SAME Pickup every cycle with no learning signal.</item>
     /// </list>
     /// Other benign None failures (e.g. a source-autonomous auto-equip teardown)
-    /// match neither set and stay suppressed; an autonomous auto-equip whose guid
-    /// IS in the wield set still gets dropped one-shot by
+    /// match none of the sets and stay suppressed; an autonomous auto-equip whose
+    /// guid IS in the wield set still gets dropped one-shot by
     /// <see cref="TryConsumeAutonomous"/> downstream. Pure: keyed on the wire
-    /// error code + the in-flight give/wield guids; carries no item type, name,
-    /// wcid, or game knowledge.
+    /// error code + the in-flight give/wield/pickup guids; carries no item type,
+    /// name, wcid, or game knowledge.
     /// </summary>
     public static bool ShouldSurfaceInventoryFailure(
         uint errorType, uint itemGuid, uint? pendingGiveItemGuid,
-        IReadOnlySet<uint> wieldDispatchedGuids)
+        IReadOnlySet<uint> wieldDispatchedGuids,
+        IReadOnlySet<uint> pickupDispatchedGuids)
         => errorType != 0
            || (pendingGiveItemGuid is uint pg && pg == itemGuid)
-           || wieldDispatchedGuids.Contains(itemGuid);
+           || wieldDispatchedGuids.Contains(itemGuid)
+           || pickupDispatchedGuids.Contains(itemGuid);
 }

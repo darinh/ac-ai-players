@@ -79,25 +79,26 @@ public class AutoEquipFailureFilterTests
         Assert.False(f.TryConsumeAutonomous(0x42u));
     }
 
-    // ---- ShouldSurfaceInventoryFailure (cp-2386 give + cp-2418 wield) ----
+    // ---- ShouldSurfaceInventoryFailure (cp-2386 give + cp-2418 wield + pickup) ----
 
     private static readonly IReadOnlySet<uint> NoWields = new HashSet<uint>();
+    private static readonly IReadOnlySet<uint> NoPickups = new HashSet<uint>();
 
     [Fact]
     public void ShouldSurface_NonZeroError_AlwaysSurfaces()
     {
         // A specific (non-None) error always surfaces regardless of any
         // in-flight give.
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x420u, 0x1234u, null, NoWields));
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x06u, 0x1234u, 0x9999u, NoWields));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x420u, 0x1234u, null, NoWields, NoPickups));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0x06u, 0x1234u, 0x9999u, NoWields, NoPickups));
     }
 
     [Fact]
     public void ShouldSurface_NoneError_NoPendingGive_Suppressed()
     {
-        // A None (0) error with no in-flight give and no matching wield is a
+        // A None (0) error with no in-flight give and no matching wield/pickup is a
         // benign teardown — stay suppressed (preserves the pre-cp-2386 behavior).
-        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x1234u, null, NoWields));
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x1234u, null, NoWields, NoPickups));
     }
 
     [Fact]
@@ -105,7 +106,7 @@ public class AutoEquipFailureFilterTests
     {
         // A None error that names the item the bot is currently giving is a
         // refused Give — surface it so the LLM pivots instead of re-giving.
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008861u, 0x80008861u, NoWields));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008861u, 0x80008861u, NoWields, NoPickups));
     }
 
     [Fact]
@@ -113,7 +114,7 @@ public class AutoEquipFailureFilterTests
     {
         // A None error for a DIFFERENT item than the in-flight give stays
         // suppressed (e.g. a benign auto-equip None failure during a give).
-        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, 0x80008861u, NoWields));
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, 0x80008861u, NoWields, NoPickups));
     }
 
     [Fact]
@@ -123,15 +124,35 @@ public class AutoEquipFailureFilterTests
         // CheckWeaponCollision refusal (a weapon is already equipped) — surface it
         // so the LLM learns the wield failed and stops re-emitting it.
         var wields = new HashSet<uint> { 0x80008A8Eu };
-        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008A8Eu, null, wields));
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80008A8Eu, null, wields, NoPickups));
     }
 
     [Fact]
     public void ShouldSurface_NoneError_GuidNotInWieldSet_Suppressed()
     {
         // A None error for an item NOT in the wield set (and not the in-flight
-        // give) stays suppressed.
+        // give or a dispatched pickup) stays suppressed.
         var wields = new HashSet<uint> { 0x80008A8Eu };
-        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, null, wields));
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, null, wields, NoPickups));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_GuidInPickupSet_Surfaces()
+    {
+        // A None error for an item the bot dispatched a Pickup for is a refused
+        // pickup of a non-takeable object — surface it so the recently-rejected
+        // dedup breaks the re-emit loop (the failed pickup's queued auto-equip
+        // never fires, so the guid never reaches the wield set).
+        var pickups = new HashSet<uint> { 0x80003FDFu };
+        Assert.True(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0x80003FDFu, null, NoWields, pickups));
+    }
+
+    [Fact]
+    public void ShouldSurface_NoneError_GuidNotInPickupSet_Suppressed()
+    {
+        // A None error for an item NOT in the pickup set (nor give/wield) stays
+        // suppressed — a non-dispatched guid is a benign teardown.
+        var pickups = new HashSet<uint> { 0x80003FDFu };
+        Assert.False(AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(0u, 0xABCDu, null, NoWields, pickups));
     }
 }
