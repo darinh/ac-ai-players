@@ -13,57 +13,104 @@ namespace HeadlessAcClient.Tests;
 public class CrossLbRouteStuckTests
 {
     private static readonly Guid Sighting = Guid.Parse("11111111-1111-1111-1111-111111111111");
-    private static readonly Guid Boundary = Guid.Parse("22222222-2222-2222-2222-222222222222");
-    private static readonly Guid Boundary2 = Guid.Parse("33333333-3333-3333-3333-333333333333");
+    private static readonly Guid Other = Guid.Parse("44444444-4444-4444-4444-444444444444");
 
     [Fact]
     public void FirstAdvance_IsProgress()
     {
         var t = new CrossLbRouteStuck(4);
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, Boundary));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f));
     }
 
     [Fact]
-    public void SameBoundaryRepeats_BuildThenBlockAtThreshold()
+    public void NotConverging_BuildsThenBlocksAtThreshold()
     {
         var t = new CrossLbRouteStuck(4);
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, Boundary)); // 1
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, Boundary));  // 2
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, Boundary));  // 3
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, Boundary));   // 4 == threshold
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, Boundary));   // stays blocked
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // stall 2
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // stall 3
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, 100f));  // stall 4 == threshold
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, 100f));  // stays blocked
     }
 
     [Fact]
-    public void NewBoundary_ResetsToProgress()
+    public void WanderingBetweenBoundaries_StillBlocks()
+    {
+        // The varying-route case: distance-to-sighting FLUCTUATES (different boundaries each cycle)
+        // but never gets meaningfully closer than the best -> still blocks (the same-boundary
+        // detector would have missed this because the boundary changes).
+        var t = new CrossLbRouteStuck(4);
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline best=100
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 130f)); // farther
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 110f)); // closer than 130, not < 95
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 140f)); // farther
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, 120f));  // stall 4 -> Blocked
+    }
+
+    [Fact]
+    public void MeaningfulApproach_ResetsToProgress_SmallWobbleDoesNot()
     {
         var t = new CrossLbRouteStuck(3);
-        t.RecordAdvance(Sighting, Boundary); // 1
-        t.RecordAdvance(Sighting, Boundary); // 2
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, Boundary)); // 3
-        // Route advanced PAST the boundary (a new boundary node) => progress, count resets.
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, Boundary2));
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, Boundary2));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline best=100
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 98f));  // only 2u (< 5u epsilon) -> stall 2
+        // A meaningful approach (>= 5u closer than baseline=100) resets the stall.
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 90f));  // 10u closer -> converging
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 90f));  // stall 1 again
+    }
+
+    [Fact]
+    public void SteadySmallConvergence_NeverBlocks()
+    {
+        // Each advance closes < epsilon (5u) but the bot IS steadily converging. The FIXED progress
+        // baseline (not lowered on sub-epsilon stalls) lets small gains ACCUMULATE into a Progress
+        // step, so a slow-but-genuine approach is never false-Blocked.
+        var t = new CrossLbRouteStuck(4);
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline 100
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 97f));  // 3u vs 100 -> stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 94f));  // 6u vs baseline 100 -> Progress, baseline 94
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 91f));  // 3u vs 94 -> stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 88f));  // 6u vs 94 -> Progress, baseline 88
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 85f));  // 3u vs 88 -> stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 82f));  // 6u vs 88 -> Progress
+        // 7 advances of steady 3u convergence -> never 4 consecutive stalls -> never Blocked.
+    }
+
+    [Fact]
+    public void SetbackThenRecovery_MustBeatTheFixedBaseline()
+    {
+        // Deliberate semantic: "progress" means beating the last real progress BASELINE, not merely
+        // recovering from a setback. After a setback (distance jumps UP), the bot must close to
+        // <= baseline - epsilon to register Progress; partial recovery is still a stall.
+        var t = new CrossLbRouteStuck(4);
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline 100
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 130f)); // setback -> stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 110f)); // recovering, not past 95 -> stall 2
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 96f));  // 4u from baseline, < 5u -> stall 3
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 94f));  // 6u past baseline 100 -> Progress
     }
 
     [Fact]
     public void DistinctSightings_TrackedIndependently()
     {
         var t = new CrossLbRouteStuck(2);
-        var other = Guid.Parse("44444444-4444-4444-4444-444444444444");
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, Boundary));
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(other, Boundary));
-        // Each sighting's own second same-boundary advance reaches the threshold (2) independently.
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, Boundary));
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(other, Boundary));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Other, 100f));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // S stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Other, 100f));    // other stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, 100f));  // S stall 2 == threshold
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Other, 100f));     // other stall 2
     }
 
     [Fact]
     public void ThresholdBelowTwo_ClampedToTwo()
     {
-        // A single advance can never be "stuck"; the floor is 2 (a repeat is the minimum signal).
+        // A single advance can never be "stuck"; the floor is 2 (a non-converging repeat is the minimum signal).
         var t = new CrossLbRouteStuck(1);
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, Boundary));
-        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, Boundary));
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Progress, t.RecordAdvance(Sighting, 100f)); // baseline
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Building, t.RecordAdvance(Sighting, 100f)); // stall 1
+        Assert.Equal(CrossLbRouteStuck.RouteAdvanceState.Blocked, t.RecordAdvance(Sighting, 100f));  // stall 2 == clamped threshold
     }
 }
+
