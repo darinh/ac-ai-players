@@ -113,6 +113,30 @@ internal static class SelectorResolver
             .First().o;
     }
 
+    /// <summary>
+    /// Resolve a player-directed selector (e.g. a FellowshipRecruit target) to the
+    /// SINGLE matching PLAYER other than the actor. A social invite must be
+    /// unambiguous, so this returns the unique player snapshot ONLY when exactly one
+    /// player matches; it returns null when zero or several players match (the caller
+    /// Fails so Strategy re-decides with a sharper name) and never picks the nearest
+    /// on its own. <paramref name="matchCount"/> reports how many players matched
+    /// (0 / 1 / N) so the caller can distinguish "no match" from "ambiguous".
+    /// Self is excluded (the actor cannot recruit itself, and self sits at distance 0
+    /// so a nearest-pick would otherwise always return it).
+    /// </summary>
+    public static WorldObjectSnapshot? ResolveUniquePlayerOtherThanActor(
+        Selector sel,
+        WorldState world,
+        WorldObjectSnapshot actor,
+        out int matchCount)
+    {
+        var players = Resolve(sel, world, actor: actor)
+            .Where(o => o.Guid != actor.Guid && WorldStateProjection.IsPlayerGuid(o.Guid))
+            .ToList();
+        matchCount = players.Count;
+        return players.Count == 1 ? players[0] : null;
+    }
+
     // A corpse retains the slain creature's NAME but is not an attackable
     // target (the wire ObjectDescriptionFlag.Corpse bit). Callers resolving an
     // Attack target pass excludeCorpses:true so an Attack{Name} after a kill

@@ -6308,6 +6308,56 @@ internal sealed class HandshakeDriver : IDisposable
                             $"pktSeq={fqPktSeq} fragSeq={fqFragSeq} bytes={fqSent}");
                         tactics.Clear("fellowship-quit dispatched", eventStream);
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.FellowshipRecruit)
+                    {
+                        // Social action: invite a named PLAYER into the fellowship. The
+                        // LLM named the target (a `player` in Visible nearby); the motor
+                        // resolves it to the UNIQUE matching player other than self and
+                        // packs FellowshipRecruit (0x00A5). A player-directed invite must be
+                        // unambiguous: 0 matches or several matches both Fail (Strategy
+                        // re-decides with a sharper name) rather than the motor picking the
+                        // nearest on its own. It picks no target of its own.
+                        WorldObjectSnapshot? recruitPlayer = null;
+                        var recruitMatchCount = 0;
+                        if (goal.Target is { } rsel)
+                            recruitPlayer = Tactics.SelectorResolver.ResolveUniquePlayerOtherThanActor(
+                                rsel, worldState, tacticsSelf, out recruitMatchCount);
+                        if (recruitPlayer is null)
+                        {
+                            var recruitFailReason = recruitMatchCount == 0
+                                ? "fellowship-recruit: no visible player matches the target"
+                                : "fellowship-recruit: target ambiguous (multiple players match)";
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL FellowshipRecruit: target {goal.Target} resolved to " +
+                                $"{recruitMatchCount} player(s) (need exactly 1); not sending. source={goal.Source}");
+                            tactics.Fail(recruitFailReason, eventStream);
+                        }
+                        else
+                        {
+                            var frPktSeq  = nextOutboundPacketSequence++;
+                            var frFragSeq = nextOutboundFragmentSequence++;
+                            var frBuf = new byte[GameActionFellowshipRecruitMessage.PackedSize];
+                            var frLen = GameActionFellowshipRecruitMessage.Pack(frBuf, recruitPlayer.Guid);
+                            var frMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                frMsg.AddAckSequence(lastReceivedSeq);
+                            frMsg.AddBlobFragment(
+                                fragSequence: frFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: frBuf.AsSpan(0, frLen));
+                            var frSent = frMsg.Pack(sendBuf, myClientId,
+                                                    sequence: frPktSeq, iteration: 1,
+                                                    encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, frSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL FellowshipRecruit: player '{recruitPlayer.Name}' " +
+                                $"guid=0x{recruitPlayer.Guid:X8} source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={frPktSeq} fragSeq={frFragSeq} bytes={frSent}");
+                            tactics.Clear("fellowship-recruit dispatched", eventStream);
+                        }
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that

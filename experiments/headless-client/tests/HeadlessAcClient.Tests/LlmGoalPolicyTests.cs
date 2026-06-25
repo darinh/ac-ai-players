@@ -71,6 +71,26 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_FellowshipRecruitRequiresTarget()
+    {
+        // FellowshipRecruit is a player-DIRECTED action (unlike Create/Quit): it is NOT
+        // exempt from the empty-target rejection, so a targetless recruit must be rejected
+        // and fall back rather than dispatch a recruit with no player to invite.
+        var json = """{"kind":"FellowshipRecruit","rationale":"invite someone","priority":4}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_FellowshipRecruitWithTargetParses()
+    {
+        var json = """{"kind":"FellowshipRecruit","target":{"name":"Galad"},"rationale":"invite a nearby player","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.FellowshipRecruit, g!.Kind);
+        Assert.Equal("Galad", g.Target.Name);
+    }
+
+    [Fact]
     public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
     {
         // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
@@ -19709,14 +19729,19 @@ public class LlmGoalPolicyTests
     // and should hunt the weak monsters it can beat rather than wander empty-handed. Static-
     // floor only; does not move the runtime 413 risk (per-tick WORLD/visible sections), and
     // the ceiling is a regression guard, not a runtime size.
+    // Bumped 19200 -> 19400 (fellowship-recruit) for the new "FellowshipRecruit"
+    // verb added to BOTH JSON `kind` enumerations the static floor renders (the
+    // stack-null and stack-present goal-shape blocks). Multi-bot social capability;
+    // static-floor only, does not move the runtime 413 risk (per-tick WORLD/visible
+    // sections), and the ceiling is a regression guard, not a runtime size.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 19200,
-            $"static prompt floor grew to {prompt.Length} chars (budget 19200)");
+        Assert.True(prompt.Length <= 19400,
+            $"static prompt floor grew to {prompt.Length} chars (budget 19400)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
