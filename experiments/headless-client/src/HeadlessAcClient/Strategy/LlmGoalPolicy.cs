@@ -3903,18 +3903,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Self-limiting: as the bot moves away its health recovers and normal
         // combat resumes. Own self-health failure history only; the LLM still chose
         // WHAT to fight — this only defers it while recovering. No game knowledge.
-        if (goal.Kind == GoalKind.Attack && IsLowHealthDeferredAttackRepeat(events))
+        if (goal.Kind == GoalKind.Attack && IsLowHealthDeferredAttackRepeat(events, nowUtc))
         {
             Console.WriteLine(
-                $"[llm-override] low-health egress: dropping LLM Attack target={goal.Target}" +
-                " — Motor repeatedly deferred it for low self-health; substituting Explore{anywhere} to recover.");
+                $"[llm-override] deferred-attack egress: dropping LLM Attack target={goal.Target}" +
+                " — Motor repeatedly deferred it (low self-health or a just-disengaged target on its" +
+                " avoid cooldown); substituting Explore{anywhere} to break the loop.");
             _training?.RecordParseError(decisionId,
-                "dropped-by-override: LLM Attack repeatedly deferred for low self-health (recover)");
+                "dropped-by-override: LLM Attack repeatedly deferred (low health / avoid cooldown)");
             return MakeEgressExploreGoal(
                 nowUtc, "override:low-health-attack-egress",
-                "mechanical low-health egress: the Motor repeatedly refused this Attack because " +
-                "self-health is below the re-engage threshold; leaving the fight to recover instead " +
-                "of re-emitting an Attack too weak to land");
+                "mechanical deferred-attack egress: the Motor repeatedly refused this Attack (self-health " +
+                "below the re-engage threshold, or the target is on its brief post-disengage avoid cooldown); " +
+                "leaving this target instead of looping a refused Attack");
         }
 
         // Unarmed-Attack drop (reduce-llm-call-volume): an LLM Attack while the bot
@@ -4512,31 +4513,56 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const string InteractOutOfReachFailMarker =
         "interaction target out of reach";
 
-    // Marker substring of the Motor's low-self-health Attack-defer GoalFailed reason
+    // Marker substring of the Motor's Attack-defer GoalFailed reason
     // (HandshakeDriver: "{Kind}: combat deferred: self-health too low to re-engage —
-    // recover before attacking"). Distinct from the two unreachable-target signals
-    // above: the target is reachable, but the BOT is too weak to engage it.
+    // recover before attacking"). The Motor emits this SHARED marker for BOTH defer
+    // causes: self-health below the re-engage threshold AND a recently-disengaged
+    // target on its brief avoid cooldown (the bot fled it, then re-attacked it at
+    // full health). Distinct from the two unreachable-target signals above: the
+    // target is reachable, but the engage is being declined.
     private const string CombatDeferredLowHealthMarker =
         "self-health too low to re-engage";
 
+    // Recency bound for the deferred-Attack loop signal. The durable GoalFailed window
+    // retains failures for ~30 min (eviction-resistant, unlike events.Recent(N) which the
+    // perception firehose evicts), so WITHOUT a recency bound two stale defers would keep
+    // the egress armed for the whole retention and convert EVERY later Attack to Explore
+    // (a ~30-min combat lockout after one brief defer episode). A real loop emits a defer
+    // each decision cycle (~tens of seconds apart), so a short window distinguishes a
+    // CURRENT loop from a resolved one; once the bot stops being refused, the signal
+    // clears within this window.
+    private static readonly TimeSpan DeferredAttackRepeatRecency = TimeSpan.FromSeconds(90);
+
     /// <summary>
-    /// True iff the Motor has REPEATEDLY (>= threshold) failed an Attack with the
-    /// low-self-health defer reason in the recent event window — the bot is below the
-    /// combat re-engage health threshold and a weak model keeps re-emitting Attack
-    /// that the Motor defers, burning a no-current-goal LLM call each cycle while the
-    /// bot should be recovering. The caller substitutes an Explore egress (leave the
-    /// fight, let health regen). Pure read of the bot's OWN GoalFailed history — no
-    /// target choice, no self-state threshold logic here (that lives in the Motor),
-    /// no game knowledge.
+    /// True iff the Motor has REPEATEDLY (>= threshold) DEFERRED an Attack with the
+    /// combat-defer reason in the RECENT past — the engage is being declined (self below
+    /// the re-engage health threshold, OR the target is on the brief post-disengage avoid
+    /// cooldown) and a weak model keeps re-emitting the same Attack, burning a
+    /// no-current-goal LLM call each cycle and looping on a refused Attack instead of
+    /// disengaging. The caller substitutes an Explore egress (leave this target — recover
+    /// and/or fight something else).
+    ///
+    /// Reads the DURABLE GoalFailed window (RecentGoalFailures), NOT events.Recent(N):
+    /// consecutive deferred-Attack refusals land on SEPARATE decisions ~tens of seconds
+    /// apart, with hundreds of perception/motion events between, so the prior refusal was
+    /// evicted from the ring before the count reached the threshold — the egress then fired
+    /// ONLY when two refusals were adjacent in the ring, i.e. ≈never in practice, so a
+    /// refused Attack looped unbroken. SAME eviction fix as IsWieldNoWeaponRepeat. Scoped
+    /// to <see cref="DeferredAttackRepeatRecency"/> of <paramref name="nowUtc"/> (the
+    /// caller's decision clock) so the long durable retention does not lock the bot out of
+    /// combat long after a loop ends. RecentGoalFailures() is newest-first, so the scan
+    /// stops at the first too-old entry. Pure read of the bot's OWN GoalFailed history — no
+    /// target choice, no self-state threshold logic here (that lives in the Motor), no game
+    /// knowledge.
     /// </summary>
-    internal static bool IsLowHealthDeferredAttackRepeat(EventStream events)
+    internal static bool IsLowHealthDeferredAttackRepeat(EventStream events, DateTimeOffset? nowUtc = null)
     {
-        const int LookbackEvents = 30;
         const int LowHealthDeferRepeatThreshold = 2;
+        var cutoff = (nowUtc ?? DateTimeOffset.UtcNow) - DeferredAttackRepeatRecency;
         var deferrals = 0;
-        foreach (var ev in events.Recent(LookbackEvents))
+        foreach (var ev in events.RecentGoalFailures())   // newest-first
         {
-            if (ev.Kind != EventKind.GoalFailed) continue;
+            if (ev.Utc < cutoff) break;                   // older than the window; rest are older too
             if (ev.Text is null ||
                 ev.Text.IndexOf(CombatDeferredLowHealthMarker, StringComparison.Ordinal) < 0)
                 continue;

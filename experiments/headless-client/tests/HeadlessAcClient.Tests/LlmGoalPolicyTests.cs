@@ -13784,6 +13784,62 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(new EventStream()));
     }
 
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_SurvivesRingEvictionByPerceptionTraffic()
+    {
+        // The regression this fix targets: two combat-defer refusals land on SEPARATE
+        // decisions ~tens of seconds apart, with hundreds of perception/motion events
+        // between them, so the first was evicted from the 256-event ring before the
+        // second arrived — events.Recent(N) then saw only ONE and the egress never fired,
+        // so the bot looped a refused Attack. Reading the DURABLE GoalFailed window keeps
+        // both, so a real loop is detected.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+        for (int i = 0; i < 400; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = t0.AddSeconds(20), Kind = EventKind.HealthChanged });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0.AddSeconds(40), Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+
+        // now = t0+40s: both defers (t0 and t0+40s) are within the 90s recency window.
+        Assert.True(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es, t0.AddSeconds(40)));
+        // The first defer is indeed gone from the perception-dominated ring (the old
+        // window) — proving the durable read is what carries it.
+        Assert.Equal(1, es.Recent(EventStream.DefaultCapacity).Count(e => e.Kind == EventKind.GoalFailed));
+    }
+
+    [Fact]
+    public void IsLowHealthDeferredAttackRepeat_StaleDefersOutsideRecency_NoAppend_False()
+    {
+        // Two defers, then the wall clock advances past the recency window with NO new
+        // event appended (a timer-driven re-deliberation re-reads history). The durable
+        // window still holds them, but they are no longer a CURRENT loop -> false, so the
+        // egress does NOT convert a later (post-recovery) Attack to Explore for the whole
+        // 30-min durable retention.
+        var es = new EventStream();
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+        Assert.True(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es, t0.AddSeconds(2)));  // current loop
+        // Wall clock +3 min with NO append (the real-clock cutoff, not a stale event proxy).
+        Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(es, t0.AddMinutes(3))); // resolved -> no over-fire
+    }
+
     // ---- SUSTAIN-COMBAT CHECK (fragile-flee-raise-hp): the prompt cue that fires
     //      when the bot repeatedly FLEES low-health combat (deferred attacks) with
     //      unspent XP and is NOT in a recent-death / death-spiral state. ----
@@ -13814,18 +13870,25 @@ public class LlmGoalPolicyTests
     [Fact]
     public void SustainCombatCheck_AbsentWhenDeferralsAgeOut()
     {
-        // The deferral signal is windowed (the last ~30 events). Two old defers followed
-        // by enough unrelated events to push them out of the window must NOT keep the cue
+        // The deferral signal is the DURABLE GoalFailed window scoped to a short recency
+        // window (eviction-resistant, but only a CURRENT loop counts). Two defers followed
+        // by enough TIME (a later event past the recency window) must NOT keep the cue
         // latched (it is a CURRENT-fragility cue, not a stale-history one).
         var es = new EventStream();
-        AppendLowHealthDeferFail(es);
-        AppendLowHealthDeferFail(es);
-        for (var i = 0; i < 35; i++)
-            es.Append(new StreamEvent
-            {
-                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
-                Text = "Explore target=name=\"anywhere\" item= source=llm:test",
-            });
+        var t0 = new DateTimeOffset(2026, 6, 24, 12, 0, 0, TimeSpan.Zero);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0, Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = t0.AddSeconds(1), Kind = EventKind.GoalFailed,
+            Text = "Attack: combat deferred: self-health too low to re-engage — recover before attacking",
+        });
+        // Advance "now" (the newest stream event) well past the recency window with only
+        // perception traffic -> the stale defers fall outside the window.
+        es.Append(new StreamEvent { Sequence = -1, Utc = t0.AddMinutes(3), Kind = EventKind.HealthChanged });
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             BuildXpWorld(69296, 5475), es, null, null, null, null,
             secondsSinceLastDeath: null, recentOwnDeathCount: 0);
