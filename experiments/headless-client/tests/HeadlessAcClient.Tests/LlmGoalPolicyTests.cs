@@ -3143,6 +3143,132 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_RendersWhenVisibleBeyondReach()
+    {
+        // The bot re-Explores a name that IS a visible object but beyond reach (~28u):
+        // the unresolved cue cannot fire (it resolves) and the reached cue cannot fire
+        // (beyond reach), so this sibling tells the LLM to use the interaction verb.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Explore toward visible object", prompt);
+        Assert.Contains("Ianto", prompt);
+        Assert.Contains("emit the INTERACTION verb directly", prompt);
+        // The unresolved-target Explore loop must NOT fire (the name DOES resolve).
+        Assert.DoesNotContain("## Explore loop (unresolved target)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_OmittedWhenWithinReach()
+    {
+        // Within the reached radius (<5u) the cp022 `## Reached Explore target` cue owns
+        // it; this sibling must NOT also fire.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 2f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Explore toward visible object", prompt);
+        // Ownership: the reached cue is the one that fires within reach.
+        Assert.Contains("## Reached Explore target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_OmittedForSubsequenceMatchWithinReach()
+    {
+        // gpt-5.4 fix: a fuzzy whole-word subsequence bind ("Courtyard" -> visible
+        // "Central Courtyard") at 2u must NOT fire the cue — the bound object is within
+        // reach. (Before the fix, the mismatched exact-only reached check let it slip.)
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Courtyard", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 2f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Explore toward visible object", prompt);
+        // The reached cue now OWNS it (the reached detectors share the resolver).
+        Assert.Contains("## Reached Explore target", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_OmittedForQuotedRoleMatchWithinReach()
+    {
+        // gpt-5.4 fix: a quoted-role-suffixed emitted name ("Ianto \"Town Crier\"") whose
+        // bare form binds a visible "Ianto" at 2u must NOT fire — bound object is in reach.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto \"Town Crier\"", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 2f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Explore toward visible object", prompt);
+        Assert.Contains("## Reached Explore target", prompt);
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_FuzzyAndRoleBindsWithinReach()
+    {
+        // The hard-drop reached check shares the resolver too: a subsequence bind and a
+        // quoted-role bind within reach are both recognised as reached (no-op Explore).
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 2f));
+        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world));
+        var world2 = BuildVisibleWorld(NamedVisible("Ianto", 2f));
+        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Ianto \"Town Crier\"" } }, world2));
+        // Beyond reach -> NOT reached (so the far-visible cue owns it).
+        var world3 = BuildVisibleWorld(NamedVisible("Central Courtyard", 30f));
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world3));
+    }
+
+    [Fact]
+    public void IsExploreToReachedTarget_DuplicateExactNames_NearestWithinReachStillReached()
+    {
+        // Regression lock (gpt-5.4 nit): two objects with the SAME exact name, one at 2u
+        // one at 30u. The old "any exact within reach" and the new "nearest exact within
+        // reach" agree -> reached (the bot is at the near one).
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 2f), NamedVisible("Ianto", 30f));
+        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Ianto" } }, world));
+    }
+
+    [Fact]
+    public void ExploreCues_AmbiguousSubsequence_UnresolvedOwnsIt()
+    {
+        // gpt-5.4 nit: an AMBIGUOUS subsequence ("Courtyard" matching 2+ visible
+        // courtyards) does NOT uniquely resolve -> the reached hard-drop is false, the
+        // far-visible cue does not fire, and the unresolved `## Explore loop` owns it.
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 2f), NamedVisible("East Courtyard", 8f));
+        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(
+            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world));
+        var es = ExploreEmissions("Courtyard", 3, System.DateTimeOffset.UtcNow);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Explore toward visible object", prompt);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_FiresForSubsequenceMatchBeyondReach()
+    {
+        // Symmetric to the within-reach case: a fuzzy bind BEYOND reach SHOULD fire (the
+        // detector reads the bound object's true distance, so fuzzy binds are handled).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Courtyard", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 30f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Explore toward visible object", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_OmittedWhenNotVisible()
+    {
+        // No visible match -> the unresolved `## Explore loop` cue owns it; this sibling
+        // (which requires a visible resolve) must NOT fire.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Explore toward visible object", prompt);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_ExploreLoopCapsule_SemanticRejectionDoesNotClaimUnreachable()
     {
         // gpt-5.4 fix: a SEMANTIC server refusal (a real WeenieError code, NOT a

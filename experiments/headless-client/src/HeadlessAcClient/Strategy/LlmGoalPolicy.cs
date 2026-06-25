@@ -6291,16 +6291,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var isContains = nm.Groups[1].Success;
 
         // The closest visible object whose name matches the pursued selector and
-        // is within reach. name= matches by equality; name_contains= by substring.
+        // is within reach. name_contains= matches by substring; name= resolves under
+        // the SHARED selector semantics (exact / quoted-role-strip / unique
+        // subsequence — ResolveVisibleObjectForName) so this reached detector and the
+        // unresolved/visible-object Explore cues all agree on which object a name
+        // binds (a fuzzy/role bind within reach is owned HERE, not left uncovered).
         VisibleObjectProjection? best = null;
-        foreach (var v in world.Visible)
+        if (isContains)
         {
-            if (v.Distance is not float d || d > ReachedExploreTargetDistanceUnits) continue;
-            var match = isContains
-                ? v.Name is not null && v.Name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0
-                : string.Equals(v.Name, token, StringComparison.OrdinalIgnoreCase);
-            if (!match) continue;
-            if (best is null || d < (best.Distance ?? float.MaxValue)) best = v;
+            foreach (var v in world.Visible)
+            {
+                if (v.Distance is not float d || d > ReachedExploreTargetDistanceUnits) continue;
+                if (v.Name is not null
+                    && v.Name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0
+                    && (best is null || d < (best.Distance ?? float.MaxValue))) best = v;
+            }
+        }
+        else
+        {
+            var resolved = ResolveVisibleObjectForName(world.Visible, token, excludeCorpses: false);
+            if (resolved is { Distance: float rd } && rd <= ReachedExploreTargetDistanceUnits)
+                best = resolved;
         }
         if (best is null) return false;
         targetName = best.Name;
@@ -6325,15 +6336,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var name = goal.Target?.Name;
         var nameContains = goal.Target?.NameContains;
         if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(nameContains)) return false;
-        foreach (var v in world.Visible)
-        {
-            if (v.Distance is not float d || d > ReachedExploreTargetDistanceUnits) continue;
-            if (!string.IsNullOrWhiteSpace(name)
-                && string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
-            if (!string.IsNullOrWhiteSpace(nameContains)
-                && v.Name is not null
-                && v.Name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-        }
+        // name= resolves under the SHARED selector semantics (exact / quoted-role-strip
+        // / unique subsequence) so a fuzzy/role bind that is already within reach is
+        // recognised as a no-op Explore (consistent with the reached cue + the
+        // visible-object Explore cue); name_contains= stays a substring match.
+        if (!string.IsNullOrWhiteSpace(name)
+            && ResolveVisibleObjectForName(world.Visible, name, excludeCorpses: false)
+                is { Distance: float rd } && rd <= ReachedExploreTargetDistanceUnits)
+            return true;
+        if (!string.IsNullOrWhiteSpace(nameContains))
+            foreach (var v in world.Visible)
+            {
+                if (v.Distance is not float d || d > ReachedExploreTargetDistanceUnits) continue;
+                if (v.Name is not null
+                    && v.Name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
         return false;
     }
 
@@ -6375,6 +6392,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string? RepeatedUnresolvedExploreName(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
         => MostRepeatedUnresolvedTargetName(world, events, since, "Explore", RepeatedUnresolvedExploreThreshold, excludeCorpses: false);
+
+    // COMPLEMENT of RepeatedUnresolvedExploreName: the NAME the bot has Explored
+    // toward >= threshold times within the window that DOES resolve to a visible
+    // object which is NOT yet within reach (so the cp022 `## Reached Explore
+    // target` hard-drop, which only fires within ReachedExploreTargetDistanceUnits,
+    // does not own it). Explore walks toward a target and stops at its arrival
+    // radius WITHOUT interacting, so the goal clears and a fresh no-current-goal
+    // call re-emits the SAME Explore; the unresolved-Explore cue cannot fire (the
+    // name DOES resolve to a visible object) and the reached cue cannot fire (it is
+    // beyond reach), so nothing tells the LLM to use the interaction verb (which
+    // navigates INTO range AND acts). Resolve the SINGLE object the name binds
+    // (ResolveVisibleObjectForName — the same semantics VisibleResolvesName uses)
+    // and fire only when THAT object is beyond the reached radius, so this detector
+    // and the reached cue never disagree on which object the name resolves to. Keyed
+    // purely on the bot's OWN emission history + perception; no game knowledge, no
+    // priority, no source-side target choice.
+    internal static string? RepeatedResolvedFarVisibleExploreName(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (world?.Visible is null) return null;
+        foreach (var kv in CountRecentEmittedTargetNames(events, since, "Explore", excludeItemGoals: false)
+                     .OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < RepeatedUnresolvedExploreThreshold) break;
+            // Resolve the SAME object VisibleResolvesName binds, then read ITS distance:
+            // fire only when that bound object is BEYOND the reached radius (a within-reach
+            // bind is owned by the cp022 `## Reached Explore target` cue + its hard-drop).
+            // Using the single resolved object keeps this detector and the reached cue in
+            // agreement on which object the name resolves to (a fuzzy/quoted-role bind that
+            // a different matcher would miss cannot slip through as "not reached").
+            if (ResolveVisibleObjectForName(world.Visible, kv.Key, excludeCorpses: false)
+                    is { Distance: float d } && d > ReachedExploreTargetDistanceUnits)
+                return kv.Key;
+        }
+        return null;
+    }
 
     // Sibling for Attack: the NAME the bot has tried to `Attack` >= threshold times within
     // the window that matches NO currently-visible object — the monster has left view/range,
@@ -6678,15 +6731,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // on observed names; no game knowledge.
     private static bool VisibleResolvesName(
         IReadOnlyList<VisibleObjectProjection> visible, string name, bool excludeCorpses)
+        => ResolveVisibleObjectForName(visible, name, excludeCorpses) is not null;
+
+    // The SINGLE visible object VisibleResolvesName binds the NAME to (the NEAREST
+    // exact/quoted-role match, else the UNIQUE whole-word subsequence match), or null
+    // when none binds. Exposes the bound object so callers can read its distance under
+    // the EXACT resolver semantics (the loop-vs-reached detectors must agree on which
+    // object the name resolves to, not approximate it with a different matcher). Pure
+    // name comparison on observed objects; no game knowledge.
+    private static VisibleObjectProjection? ResolveVisibleObjectForName(
+        IReadOnlyList<VisibleObjectProjection> visible, string name, bool excludeCorpses)
     {
-        var pool = (excludeCorpses ? visible.Where(v => !v.IsCorpse) : visible).ToList();
+        var pool = excludeCorpses ? visible.Where(v => !v.IsCorpse) : visible;
         var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
-        if (pool.Any(v => v.Name is not null
+        var exact = pool
+            .Where(v => v.Name is not null
                 && (string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase))))
-            return true;
-        return pool.Count(v =>
-            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name)) == 1;
+                    || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(v => v.Distance ?? float.MaxValue)
+            .FirstOrDefault();
+        if (exact is not null) return exact;
+        var subseq = pool
+            .Where(v => HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name))
+            .ToList();
+        return subseq.Count == 1 ? subseq[0] : null;
     }
     // WorldObjectInteracted echo (a real Use/Pickup opcode dispatch) since the
     // last LLM look whose identity is selector-compatible with the spatial
@@ -10864,6 +10932,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "CANNOT interact with a PLACE. In that case, to ADVANCE, interact with a VISIBLE object — a " +
                     "portal/NPC/door/sign in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`) — or pursue a " +
                     $"DIFFERENT objective, instead of re-`Explore`-ing `{loopedExploreDisplay}`.");
+        }
+
+        // ── ## Explore toward visible object — sibling of the Explore loop ──
+        // The cue above covers an Explore toward a name with NO visible match. The
+        // COMPLEMENT: the bot re-Explores a name that DOES resolve to a VISIBLE
+        // object which is beyond reach — Explore walks toward it and stops at its
+        // arrival radius WITHOUT interacting, so it never engages; the cp022 reached
+        // cue cannot fire (it is beyond reach) and the unresolved cue cannot fire (it
+        // IS visible), leaving the loop unaddressed. Surface it as an informational
+        // CUE telling the LLM to use the INTERACTION verb (which navigates INTO range
+        // AND acts) instead of re-Exploring a visible object. Keyed on the bot's OWN
+        // repeated emissions + perception — NOT a hard drop, so a single
+        // approach-Explore is never flagged; the LLM still decides. No game
+        // knowledge, no priority, no source-side target/verb choice (it names the
+        // generic verb menu, not which one to use).
+        if (RepeatedResolvedFarVisibleExploreName(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedExploreWindow) is string visibleExploreName
+            && OneLine(visibleExploreName) is string visibleExploreDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Explore toward visible object");
+            sb.AppendLine(
+                $"- you have `Explore`d toward `{visibleExploreDisplay}` several times recently, but " +
+                $"`{visibleExploreDisplay}` IS already VISIBLE in the world state here (just not yet within " +
+                "reach). `Explore` only WALKS toward a target and STOPS at its arrival radius WITHOUT interacting, " +
+                $"so re-`Explore`-ing `{visibleExploreDisplay}` never engages it. To ACT on it, emit the INTERACTION " +
+                "verb directly — `Talk` an NPC, `Use` a vendor/door/object, `Attack` a monster, or `Pickup` an item — " +
+                $"that verb walks you INTO range AND performs the action in one goal. Use the interaction verb on " +
+                $"`{visibleExploreDisplay}` instead of re-`Explore`-ing it.");
         }
 
         // ── ## Attack loop (target not in view) — sibling of the Explore loop ──
