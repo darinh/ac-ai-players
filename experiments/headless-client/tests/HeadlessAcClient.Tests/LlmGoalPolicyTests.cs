@@ -2866,6 +2866,24 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void SummarizeOmittedTags_CountsPlayerAsPlayerNotNpc()
+    {
+        // A trimmed (budget-omitted) PLAYER must be summarized as `player`, not lumped
+        // into `npc` (after players stop being monsters they fall into the non-monster
+        // creature bucket otherwise).
+        var omitted = new[]
+        {
+            CivilianNpc(0x500000A1u) with { IsPlayer = true },  // a player
+            CivilianNpc(0x90000002u) with { IsMonster = true }, // a monster
+            CivilianNpc(0x90000003u),                           // a plain npc
+        };
+        var summary = LlmGoalPolicy.SummarizeOmittedTags(omitted);
+        Assert.Contains("player=1", summary);
+        Assert.Contains("monster=1", summary);
+        Assert.Contains("npc=1", summary);
+    }
+
+    [Fact]
     public void TryExtractTalkGoalTargetIdentity_NameOnlyEmission_CapturesNameNotGuid()
     {
         var ok = LlmGoalPolicy.TryExtractTalkGoalTargetIdentity(

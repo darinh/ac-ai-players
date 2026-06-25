@@ -219,7 +219,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
 
         // 2) Combat — nearest observed-hostile creature.
         var hostile = world.Visible
-            .Where(v => v.IsCreature && v.ObservedHostile)
+            .Where(v => v.IsCreature && v.ObservedHostile && !v.IsPlayer)
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();

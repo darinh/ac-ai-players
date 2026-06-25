@@ -41,6 +41,18 @@ internal static class EntityClassifier
     }
 
     /// <summary>
+    /// Guid-aware <see cref="IsMonster(uint,uint,uint,uint)"/> overload: a PLAYER
+    /// (guid in the player band, <see cref="WorldStateProjection.IsPlayerGuid"/>) is
+    /// never a monster, regardless of its wire bits. A player shares the
+    /// Creature+Attackable wire profile a monster has — the flags alone cannot tell
+    /// them apart — so only the guid band distinguishes them. Use this everywhere the
+    /// object's guid is known (live projection + sighting/exploration memory) so the
+    /// player exclusion has ONE definition and the paths cannot drift.
+    /// </summary>
+    public static bool IsMonster(uint guid, uint itemType, uint descFlags, uint weenieFlags)
+        => !WorldStateProjection.IsPlayerGuid(guid) && IsMonster(itemType, descFlags, weenieFlags);
+
+    /// <summary>
     /// Coarse wire-derived kind for sighting memory. Only distinguishes
     /// the categories the out-of-view recall prompt section surfaces:
     /// <see cref="EntityKind.Mob"/> (the IsMonster composite holds),
@@ -65,6 +77,18 @@ internal static class EntityClassifier
         if (!isCreature) return EntityKind.Unknown;
         return IsMonster(itemType, descFlags, weenieFlags) ? EntityKind.Mob : EntityKind.NPC;
     }
+
+    /// <summary>
+    /// Guid-aware <see cref="ClassifySighting(uint,uint,uint)"/> overload: a PLAYER
+    /// (guid band) is classified <see cref="EntityKind.Unknown"/> — it is neither a
+    /// huntable Mob nor a dialog NPC, so the out-of-view recall / exploration memory
+    /// never surfaces a remembered player as a target. Mirrors the projection's
+    /// player exclusion so sighting memory and the live projection cannot drift.
+    /// </summary>
+    public static EntityKind ClassifySighting(uint guid, uint itemType, uint descFlags, uint weenieFlags)
+        => WorldStateProjection.IsPlayerGuid(guid)
+            ? EntityKind.Unknown
+            : ClassifySighting(itemType, descFlags, weenieFlags);
 
     /// <summary>
     /// Wire-derived vendor flag for sighting memory: the

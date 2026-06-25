@@ -86,4 +86,42 @@ public class EntityClassifierTests
         // The Portal bit is decoded regardless of other non-creature bits.
         Assert.Equal(EntityKind.Portal, EntityClassifier.ClassifySighting(0u, Portal | Attackable, 0u));
     }
+
+    // ── Guid-aware overloads: a PLAYER (guid band) is never a Mob ─────────
+    private const uint PlayerGuid  = 0x500000A1u; // player band 0x50000001..0x5FFFFFFF
+    private const uint MonsterGuid = 0x80005D89u; // dynamic band, NOT a player
+
+    [Fact]
+    public void IsMonster_GuidAware_PlayerBand_False()
+    {
+        // A player shares the Creature+Attackable monster profile, so the flag-only
+        // overload calls it a monster; the guid-aware overload excludes it.
+        Assert.True(EntityClassifier.IsMonster(Creature, Attackable, 0u));               // flags alone
+        Assert.False(EntityClassifier.IsMonster(PlayerGuid, Creature, Attackable, 0u));  // but a player is not
+    }
+
+    [Fact]
+    public void IsMonster_GuidAware_NonPlayerBand_True()
+    {
+        // A real monster (non-player guid) with the same flags is still a monster.
+        Assert.True(EntityClassifier.IsMonster(MonsterGuid, Creature, Attackable, 0u));
+    }
+
+    [Fact]
+    public void ClassifySighting_GuidAware_PlayerBand_Unknown()
+    {
+        // A remembered player must NOT be surfaced as a huntable Mob (nor an NPC);
+        // the sighting classifier returns Unknown so recall does not target it.
+        Assert.Equal(EntityKind.Mob, EntityClassifier.ClassifySighting(Creature, Attackable, 0u)); // flags alone
+        Assert.Equal(EntityKind.Unknown,
+            EntityClassifier.ClassifySighting(PlayerGuid, Creature, Attackable, 0u));
+    }
+
+    [Fact]
+    public void ClassifySighting_GuidAware_NonPlayerBand_Mob()
+    {
+        // A real monster sighting (non-player guid) stays a Mob.
+        Assert.Equal(EntityKind.Mob,
+            EntityClassifier.ClassifySighting(MonsterGuid, Creature, Attackable, 0u));
+    }
 }

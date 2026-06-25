@@ -12444,15 +12444,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return sb.ToString();
     }
 
-    private static string SummarizeOmittedTags(IReadOnlyList<VisibleObjectProjection> omitted)
+    internal static string SummarizeOmittedTags(IReadOnlyList<VisibleObjectProjection> omitted)
     {
-        int monster = 0, npc = 0, portal = 0, door = 0, corpse = 0, chest = 0,
+        int monster = 0, npc = 0, player = 0, portal = 0, door = 0, corpse = 0, chest = 0,
             book = 0, sign = 0, lifestone = 0, vendor = 0, healer = 0, openable = 0,
             other = 0;
         foreach (var v in omitted)
         {
             bool tagged = false;
-            if (v.IsCreature) { if (v.IsMonster) monster++; else npc++; tagged = true; }
+            if (v.IsCreature) { if (v.IsPlayer) player++; else if (v.IsMonster) monster++; else npc++; tagged = true; }
             if (v.IsPortal) { portal++; tagged = true; }
             if (v.IsDoor) { door++; tagged = true; }
             if (v.IsCorpse) { corpse++; tagged = true; }
@@ -12467,7 +12467,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         var parts = new List<string>();
         void Add(string k, int n) { if (n > 0) parts.Add($"{k}={n}"); }
-        Add("monster", monster); Add("npc", npc); Add("portal", portal);
+        Add("monster", monster); Add("npc", npc); Add("player", player); Add("portal", portal);
         Add("door", door); Add("corpse", corpse); Add("chest", chest);
         Add("book", book); Add("sign", sign); Add("lifestone", lifestone);
         Add("vendor", vendor); Add("healer", healer); Add("openable", openable);
