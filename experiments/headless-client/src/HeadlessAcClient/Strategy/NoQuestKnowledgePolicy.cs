@@ -525,7 +525,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         //    "Fishing Hole" scenery — so the fallback stops marching across
         //    the map to Talk non-conversational objects of the same wcid.
         var npc = (huntActive || townTourTapped) ? null : world.Visible
-            .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
+            .Where(v => LlmGoalPolicy.IsDialogNpcCandidate(v) && !v.ObservedHostile)
             .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
             .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
             .Where(v => !_recentProposedGuids.Contains(v.Guid))
@@ -554,7 +554,7 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         {
             _recentProposedGuids.Clear();
             var npcRetry = world.Visible
-                .Where(v => v.IsCreature && !v.IsMonster && !v.ObservedHostile)
+                .Where(v => LlmGoalPolicy.IsDialogNpcCandidate(v) && !v.ObservedHostile)
                 .Where(v => !(_silentTalk?.IsSilent(v.Wcid) ?? false))
                 .Where(v => !recentlyRejectedGuids.Contains(v.Guid))
                 // cp-2413: off-hunt detour bound applies to the recycle too.

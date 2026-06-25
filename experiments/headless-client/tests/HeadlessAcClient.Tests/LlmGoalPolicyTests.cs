@@ -1739,6 +1739,21 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void UseItemWorldObject_VisiblePlayerMisfiledInItemField_ReturnsNull()
+    {
+        // A visible PLAYER is a non-monster creature but is not a Use-target world object;
+        // a malformed Use{item="<player name>"} must NOT be rewritten onto another player
+        // (players became visible, so the rewrite pool must classify them out).
+        var player = new VisibleObjectProjection
+        {
+            Guid = 0x500000B7u, Name = "Otherbot",
+            IsVendor = false, IsCreature = true, IsMonster = false, IsCorpse = false, IsPlayer = true,
+        };
+        var world = WorldWithVisible(player);
+        Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(UseItemGoal("Otherbot"), world));
+    }
+
+    [Fact]
     public void UseItemWorldObject_NonUseGoal_ReturnsNull()
     {
         var world = WorldWithVisible(VendorVisible(0x7A9B5006u, "Merchant"));
@@ -2823,6 +2838,31 @@ public class LlmGoalPolicyTests
             talkedNpcNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "npc 90000001" });
 
         Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void CountUntalkedNpcsInView_SkipsVisiblePlayer()
+    {
+        // A visible PLAYER shares the IsCreature wire class (and since players became
+        // visible, appears in `Visible`) but is never a dialog/task NPC, so it must NOT
+        // be counted as an untalked NPC (which would mis-fire the town-stuck LOOP-BREAK
+        // and the contract-source gate, and drive the bot to Talk another player).
+        var world = BuildVisibleWorld(
+            CivilianNpc(0x500000A1u) with { IsPlayer = true });
+
+        var count = LlmGoalPolicy.CountUntalkedNpcsInView(world, new HashSet<uint>());
+
+        Assert.Equal(0, count);
+    }
+
+    [Fact]
+    public void IsDialogNpcCandidate_TrueForNpc_FalseForPlayerAndMonster()
+    {
+        Assert.True(LlmGoalPolicy.IsDialogNpcCandidate(CivilianNpc(0x90000001u)));
+        Assert.False(LlmGoalPolicy.IsDialogNpcCandidate(
+            CivilianNpc(0x500000A1u) with { IsPlayer = true }));
+        Assert.False(LlmGoalPolicy.IsDialogNpcCandidate(
+            CivilianNpc(0x90000002u) with { IsMonster = true }));
     }
 
     [Fact]
