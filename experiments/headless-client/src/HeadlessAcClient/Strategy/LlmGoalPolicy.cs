@@ -6803,22 +6803,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // Sibling for Pickup: the fuzzy type-DESCRIPTOR (short_desc~= / name_contains) the bot has
-    // tried to `Pickup` >= threshold times within the window. A descriptor Pickup says "pick up
-    // any item matching this description" instead of naming a concrete item; when nothing in
-    // view matches, the goal resolves to MISS, clears, and a fresh no-current-goal call re-emits
-    // the SAME descriptor Pickup — a call storm in place (live: an unarmed bot re-emitting a
-    // type-descriptor Pickup for a weapon it hopes is on the ground, with no such item present).
-    // The name-keyed loop machinery (CountRecentEmittedTargetNames) parses only name="...", so a
-    // descriptor selector is invisible to it; this is the descriptor sibling. Returns the
-    // descriptor VALUE (the bot's own emitted selector text) at/above threshold, or null. This is
-    // keyed on the EMISSION COUNT only: a `short_desc~=` selector resolves against the
-    // WeenieRepository ShortDesc (absent from the prompt-side projection), so unlike the name-keyed
-    // siblings this cannot re-check whether a match is visible — the caller therefore words its cue
-    // CONDITIONALLY (a productive Pickup that binds + completes is recorded as a distinct emission
-    // too, so the count alone does not prove a MISS loop). A concrete name=/guid=/wcid Pickup is
-    // handled by the Motor's pickup rewrites + normal nav, not here. Pure: own emission history
-    // only; no game knowledge, no priority, no target choice.
-    internal static string? RepeatedDescriptorPickup(EventStream events, DateTimeOffset since)
+    // tried to `Pickup` >= threshold times within the window that NO currently-visible object
+    // would bind. A descriptor Pickup says "pick up any item matching this description" instead
+    // of naming a concrete item; when nothing in view matches, the goal resolves to MISS, clears,
+    // and a fresh no-current-goal call re-emits the SAME descriptor Pickup — a call storm in place
+    // (live: an unarmed bot re-emitting a type-descriptor Pickup for a weapon it hopes is on the
+    // ground, with no such item present). The name-keyed loop machinery (CountRecentEmittedTargetNames)
+    // parses only name="...", so a descriptor selector is invisible to it; this is the descriptor
+    // sibling. Like the name-keyed siblings (which skip a name VisibleResolvesName binds), this skips
+    // a descriptor a VISIBLE object matches (its ShortDesc/Name binds the selector — see
+    // VisibleMatchesDescriptor, mirroring SelectorResolver) so the cue fires only on a genuine
+    // no-match loop, never while a matching item is in view. Returns the descriptor VALUE (the bot's
+    // own emitted selector text) or null. A concrete name=/guid=/wcid Pickup is handled by the Motor's
+    // pickup rewrites + normal nav, not here. Pure: own emission history + perception; no game
+    // knowledge, no priority, no target choice.
+    internal static string? RepeatedDescriptorPickup(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
     {
         if (events is null) return null;
         var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -6834,19 +6834,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var ii = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
             var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
             int tEnd = ii >= 0 ? ii : (srcIdx >= 0 ? srcIdx : txt.Length);
-            if (DescriptorValueInSegment(txt.Substring(ti, tEnd - ti)) is not string desc) continue;
-            counts[desc] = counts.TryGetValue(desc, out var c) ? c + 1 : 1;
+            // Count by the descriptor VALUE regardless of whether it was emitted as short_desc~= or
+            // name_contains, so the same intent expressed under either kind accumulates as one loop.
+            if (DescriptorValueInSegment(txt.Substring(ti, tEnd - ti)) is not string value) continue;
+            counts[value] = counts.TryGetValue(value, out var c) ? c + 1 : 1;
         }
         foreach (var kv in counts.OrderByDescending(k => k.Value))
         {
             if (kv.Value < RepeatedDescriptorPickupThreshold) break;
+            // A visible object whose ShortDesc OR Name contains the value — the Pickup could still
+            // resolve to it, so normal nav/picker owns it; do not surface the no-match cue (mirrors
+            // the name-keyed siblings skipping a name VisibleResolvesName binds).
+            if (world?.Visible is not null && VisibleMatchesDescriptor(world.Visible, kv.Key))
+                continue;
             return kv.Key;
         }
         return null;
     }
 
     // The fuzzy type-DESCRIPTOR value of a target segment — the quoted value of short_desc~="..."
-    // or name_contains="..." (the selector forms that match an item by description rather than by
+    // or name_contains="..." (the selector forms that match an item by DESCRIPTION rather than by
     // exact name), or null if the segment carries neither (a concrete name=/guid=/wcid target).
     // Pure string parsing of the bot's own emitted selector text.
     private static string? DescriptorValueInSegment(string segment)
@@ -6855,6 +6862,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (sd.Success) return sd.Groups[1].Value;
         var nc = System.Text.RegularExpressions.Regex.Match(segment, "name_contains=\"([^\"]+)\"");
         return nc.Success ? nc.Groups[1].Value : null;
+    }
+
+    // True iff a VISIBLE object would bind the fuzzy descriptor value: its ShortDesc CONTAINS the
+    // value (mirroring SelectorResolver.MatchesShortDescContains, the short_desc~= matcher) OR its
+    // Name CONTAINS it (mirroring MatchesNameContains, the name_contains matcher). Case-insensitive
+    // substring — the same semantics the Motor resolves these selectors with. BOTH fields are checked
+    // (not just the field of the kind the bot happened to emit) so the SAME value emitted under either
+    // kind is suppressed by either field; this is conservative — it errs toward NOT firing, so the
+    // assertive cue never claims "no match" while a bindable object is visible. A weenie ShortDesc not
+    // yet loaded (null) simply does not match; the cue is informational, so the rare cache-miss is
+    // harmless.
+    private static bool VisibleMatchesDescriptor(
+        IReadOnlyList<VisibleObjectProjection> visible, string value)
+    {
+        foreach (var v in visible)
+        {
+            if ((!string.IsNullOrEmpty(v.ShortDesc)
+                    && v.ShortDesc.Contains(value, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrEmpty(v.Name)
+                    && v.Name.Contains(value, StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+        return false;
     }
 
     // Count the bot's own recent goal emissions of `verb` (within the window) by the
@@ -11550,33 +11580,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // instead of a concrete name, expecting an item matching that description on the ground; when
         // nothing in view matches, the Pickup resolves to MISS, clears, and a fresh no-current-goal
         // call re-emits the SAME descriptor Pickup. The name-keyed loop cues parse only name="...", so
-        // a descriptor selector trips none of them; this is the descriptor sibling. A `short_desc~=`
-        // selector is resolved by the Motor against the WeenieRepository ShortDesc, which the prompt-
-        // side projection does NOT carry, so (unlike the name-keyed siblings, which re-check
-        // VisibleResolvesName) this cue CANNOT verify whether a match is visible — it is keyed on the
-        // bot's OWN repeated emissions only. It is therefore worded CONDITIONALLY (it does NOT assert
-        // nothing matches): it helps when the attempts are failing and stays harmless in the rare case
-        // the bot is productively picking matching items up (each productive Pickup is a distinct
-        // emission too, so the count cannot prove a MISS loop). Informational, NOT a hard drop. A
-        // CONCRETE-name Pickup is out of scope here: a corpse/chest/vendor-offer name is rewritten by
-        // the Motor (Pickup->Use / ->Buy) and a plain ground-item name Pickup binds + walks via normal
-        // nav, so the descriptor selector is the uncovered loop. No game knowledge (the descriptor is
-        // the bot's own emitted goal text echoed back), no priority, no source-side target choice.
+        // a descriptor selector trips none of them; this is the descriptor sibling. Like those siblings
+        // (which skip a name VisibleResolvesName binds), RepeatedDescriptorPickup re-checks perception
+        // and returns a looped descriptor ONLY when NO visible object's ShortDesc/Name matches it (the
+        // visible ShortDesc now carried by the projection), so the cue fires only on a genuine no-match
+        // loop, never while a matching item is in view. Informational, NOT a hard drop. A CONCRETE-name
+        // Pickup is out of scope here: a corpse/chest/vendor-offer name is rewritten by the Motor
+        // (Pickup->Use / ->Buy) and a plain ground-item name Pickup binds + walks via normal nav, so the
+        // descriptor selector is the uncovered loop. No game knowledge (the descriptor is the bot's own
+        // emitted goal text echoed back), no priority, no source-side target choice.
         if (RepeatedDescriptorPickup(
-                events, DateTimeOffset.UtcNow - RepeatedDescriptorPickupWindow) is string loopedPickupDesc
+                world, events, DateTimeOffset.UtcNow - RepeatedDescriptorPickupWindow) is string loopedPickupDesc
             && OneLine(loopedPickupDesc) is string loopedPickupDisplay)
         {
             sb.AppendLine();
             sb.AppendLine("## Pickup loop (repeated item-description Pickup)");
             sb.AppendLine(
-                $"- you have emitted a `Pickup` for an item matching the description `{loopedPickupDisplay}` several " +
-                "times. `Pickup` only takes a SPECIFIC item that is actually lying on the ground in view (the Motor " +
-                "matches your description against items here). If those attempts are SUCCEEDING — a matching item is " +
-                "entering your `## Inventory` — keep going. But if they keep FAILING (nothing on the ground here " +
-                "matches that description), re-emitting the same description makes no progress: `Pickup` a specific " +
-                "item that IS visible in `## Nearest objects` by its exact `name`, or acquire one another way — hunt a " +
-                "monster and loot its corpse, or `Buy` it from a vendor — instead of re-`Pickup`-ing a description " +
-                "nothing here matches.");
+                $"- you have tried several times to `Pickup` an item matching the description `{loopedPickupDisplay}`, " +
+                "but NO item matching it is in view in `## Nearest objects` — `Pickup` only takes a SPECIFIC item that " +
+                "is actually lying on the ground here. Re-emitting the same description makes no progress: `Pickup` a " +
+                "specific item that IS visible by its exact `name`, or acquire one another way — hunt a monster and loot " +
+                "its corpse, or `Buy` it from a vendor — instead of re-`Pickup`-ing a description nothing here matches.");
         }
 
         // ── ## Un-equipped gear (protected-tail equip cue) ──

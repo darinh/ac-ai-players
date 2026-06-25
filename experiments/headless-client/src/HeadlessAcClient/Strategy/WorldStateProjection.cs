@@ -85,6 +85,15 @@ internal sealed record VisibleObjectProjection
     /// </summary>
     [JsonPropertyName("title")]     public string? Title { get; init; }
 
+    /// <summary>
+    /// The object's ShortDesc (weenie description text). Sourced from
+    /// WeenieRepository; the wire delivers only the Name. Lets a fuzzy
+    /// item-description selector (short_desc~=) be matched against a
+    /// VISIBLE object — the same field SelectorResolver matches a Pickup's
+    /// ShortDescContains against. Null if absent / unknown.
+    /// </summary>
+    [JsonPropertyName("short_desc")] public string? ShortDesc { get; init; }
+
     /// <summary>True if ItemType has Creature bit AND object is not us.</summary>
     [JsonPropertyName("is_creature")] public bool IsCreature { get; init; }
 
@@ -766,14 +775,17 @@ internal sealed record WorldStateProjection
                 // player by name/guid). Same definition the sighting memory uses.
                 var isMonster = EntityClassifier.IsMonster(o.Guid, itemType, descFlags, weenieFlags);
 
-                // Role/title (weenie PropertyString.Quality) for role-based
-                // directive matching — preloaded on sighting (HandshakeDriver),
-                // so TryGet is a cache hit. Only NPCs typically carry one;
-                // null otherwise. Pure projection of the object's own static
-                // string; the LLM does the role matching.
-                string? title = (o.WeenieClassId is uint vwcid && weenies is not null)
-                    ? weenies.TryGet(vwcid)?.Title
+                // Role/title (weenie PropertyString.Quality) for role-based directive
+                // matching, and ShortDesc (the weenie's description text) for matching a
+                // fuzzy item-description selector — both preloaded on sighting
+                // (HandshakeDriver), so TryGet is a cache hit. Only NPCs typically carry a
+                // title; ShortDesc is set for many items. Pure projection of the object's
+                // own static strings; the LLM/Motor do the matching.
+                var vrec = (o.WeenieClassId is uint vwcid && weenies is not null)
+                    ? weenies.TryGet(vwcid)
                     : null;
+                string? title = vrec?.Title;
+                string? shortDesc = vrec?.ShortDesc;
 
                 return new VisibleObjectProjection
                 {
@@ -784,6 +796,7 @@ internal sealed record WorldStateProjection
                     Distance = dist,
                     CellId = o.CellId,
                     Title = title,
+                    ShortDesc = shortDesc,
                     IsCreature = isCreature,
                     IsPortal = isPortal,
                     IsDoor = isDoor,
