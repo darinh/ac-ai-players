@@ -128,6 +128,16 @@ internal sealed class WorldObjectSnapshot
     public uint? HealthCurrent { get; internal set; }
     public uint? HealthMax { get; internal set; }
 
+    // Bot's own current STAMINA + a peak-observed max proxy (same
+    // approach as Health above — the wire vital messages carry only the
+    // current, the max is derived server-side, so the peak observed
+    // Current stands in for the max). Both null until the first stamina
+    // PrivateUpdateVital arrives. Stamina is the melee/run sustain pool;
+    // surfaced so a melee bot can see when it is depleted (swings weaken,
+    // cannot run) the way it already sees Health.
+    public uint? StaminaCurrent { get; internal set; }
+    public uint? StaminaMax { get; internal set; }
+
     // Raw observed health TREND: true when the last accepted current
     // reading was strictly GREATER than the prior accepted reading
     // (regen/heal), false when it was lower or equal, null until a

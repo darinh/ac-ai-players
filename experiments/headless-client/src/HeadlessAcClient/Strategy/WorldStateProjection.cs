@@ -217,6 +217,13 @@ internal sealed record SelfProjection
     /// <summary>True when current HP is strictly rising over the last two readings (regen) — proves the bot is BELOW its true max, so the fraction overstates health.</summary>
     [JsonPropertyName("health_rising")] public bool? HealthRising { get; init; }
 
+    // Raw self-stamina perception (the melee/run sustain pool). Current is
+    // wire-authoritative; observed peak is a max PROXY (same as health).
+    /// <summary>Latest wire current stamina (absolute), or null until first observed.</summary>
+    [JsonPropertyName("stamina_current")] public int? StaminaCurrent { get; init; }
+    /// <summary>Peak current stamina ever observed this session — a max proxy.</summary>
+    [JsonPropertyName("stamina_observed_peak")] public int? StaminaObservedPeak { get; init; }
+
     // Server-authoritative counters (read directly from PropertyInts;
     // ACE pushes these on character-load + on every change).
     /// <summary>PropertyInt.NumDeaths (43). Total deaths this character has ever suffered. Persists across sessions.</summary>
@@ -768,6 +775,8 @@ internal sealed record WorldStateProjection
         float? hfrac = null;
         int? hcurOut = self.HealthCurrent is uint hc0 ? (int)hc0 : (int?)null;
         int? hpeakOut = self.HealthMax is uint hm0 ? (int)hm0 : (int?)null;
+        int? stamCurOut = self.StaminaCurrent is uint sc0 ? (int)sc0 : (int?)null;
+        int? stamPeakOut = self.StaminaMax is uint sm0 ? (int)sm0 : (int?)null;
         if (self.HealthCurrent is uint hcur && self.HealthMax is uint hmax && hmax > 0)
         {
             // Clamp to [0,1] — Current should never exceed the
@@ -958,6 +967,8 @@ internal sealed record WorldStateProjection
                 HealthCurrent = hcurOut,
                 HealthObservedPeak = hpeakOut,
                 HealthRising = self.HealthRising,
+                StaminaCurrent = stamCurOut,
+                StaminaObservedPeak = stamPeakOut,
                 NumDeaths = numDeaths,
                 CoinValue = coinValue,
                 Attributes = attrProj,

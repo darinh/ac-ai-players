@@ -73,6 +73,11 @@ internal sealed record PrivateUpdateVitalMessage(
     /// AC keys the health vital by its MAX attribute2nd, so the wire
     /// value is MaxHealth (1).</summary>
     public bool IsHealth => Vital == (uint)VitalKind.MaxHealth;
+
+    /// <summary>True when this update is for the player's STAMINA vital.
+    /// Like health, AC keys it by the MAX attribute2nd (MaxStamina = 3) in
+    /// this 0x02E7 descriptor; the carried Current is the CURRENT stamina.</summary>
+    public bool IsStamina => Vital == (uint)VitalKind.MaxStamina;
 }
 
 // PrivateUpdateAttribute2ndLevel (0x02E9) - the per-tick CURRENT-LEVEL
@@ -114,4 +119,9 @@ internal sealed record PrivateUpdateAttribute2ndLevelMessage(
     /// current-level packet keys health by Health (2), unlike the
     /// descriptor packet (0x02E7) which keys it by MaxHealth (1).</summary>
     public bool IsHealth => Vital == (uint)VitalKind.Health;
+
+    /// <summary>True when this current-level update is for STAMINA. The
+    /// current-level packet keys it by Stamina (4); the carried Current is
+    /// the bot's CURRENT stamina (the timely per-tick source).</summary>
+    public bool IsStamina => Vital == (uint)VitalKind.Stamina;
 }

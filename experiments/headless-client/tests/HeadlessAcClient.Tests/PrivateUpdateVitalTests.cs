@@ -66,6 +66,7 @@ public class PrivateUpdateVitalTests
         var msg = GameMessageDecoder.Decode(wire) as PrivateUpdateVitalMessage;
         Assert.NotNull(msg);
         Assert.False(msg!.IsHealth);
+        Assert.True(msg.IsStamina);   // descriptor keys stamina by MaxStamina (3)
     }
 
     [Fact]
@@ -180,7 +181,7 @@ public class PrivateUpdateVitalTests
         var ws = new WorldState();
         ws.SetSelf(TestGuid);
         Assert.False(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
-            Sequence: 1, Vital: (uint)VitalKind.Stamina, Current: 40)));
+            Sequence: 1, Vital: (uint)VitalKind.Mana, Current: 40)));
         Assert.Null(ws.Self?.HealthCurrent);
     }
 
@@ -250,7 +251,7 @@ public class PrivateUpdateVitalTests
         var ws = new WorldState();
         ws.SetSelf(TestGuid);
         Assert.False(ws.Apply(new PrivateUpdateVitalMessage(
-            Sequence: 1, Vital: (uint)VitalKind.MaxStamina,
+            Sequence: 1, Vital: (uint)VitalKind.MaxMana,
             Ranks: 0, StartingValue: 0, ExperienceSpent: 0, Current: 50)));
         // Self snapshot may exist (SetSelf), but health stays null.
         Assert.Null(ws.Self?.HealthCurrent);
@@ -443,5 +444,114 @@ public class PrivateUpdateVitalTests
     {
         Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfHealth(
             current: null, observedPeak: null, fraction: null, rising: null));
+    }
+
+    // ---- stamina perception (mirrors the health pair) ----
+
+    [Fact]
+    public void Stamina_VitalUpdates_FlowToProjection_AndTrackPeakMax()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PlayerCreateMessage(TestGuid));
+
+        // First (full) stamina reading seeds the peak max; then it depletes.
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Stamina, Current: 100));
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 2, Vital: (uint)VitalKind.Stamina, Current: 40));
+
+        var proj = WorldStateProjection.FromWorldState(ws, null);
+        Assert.NotNull(proj);
+        Assert.Equal(40, proj!.Self.StaminaCurrent);     // current is wire-authoritative
+        Assert.Equal(100, proj.Self.StaminaObservedPeak); // peak never shrinks from depletion
+    }
+
+    [Fact]
+    public void Stamina_VitalUpdate_DoesNotDriveHealth()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PlayerCreateMessage(TestGuid));
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Stamina, Current: 30));
+        var proj = WorldStateProjection.FromWorldState(ws, null);
+        // Stamina must NOT populate health state (separate vital + counter).
+        Assert.Null(proj!.Self.HealthCurrent);
+        Assert.Equal(30, proj.Self.StaminaCurrent);
+    }
+
+    [Fact]
+    public void FormatSelfStaminaWhenLow_Depleted_RendersSignal()
+    {
+        var line = HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: 40, observedPeak: 100);   // 40% <= 50% low threshold
+        Assert.NotNull(line);
+        Assert.Contains("stamina:", line);
+        Assert.Contains("40/100", line);
+        Assert.Contains("is LOW", line);
+    }
+
+    [Fact]
+    public void FormatSelfStaminaWhenLow_NearFull_ReturnsNull()
+    {
+        // 99/100 is NOT meaningfully low -> omitted (no noise / over-caution).
+        Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: 99, observedPeak: 100));
+        // Exactly at the threshold (50%) still renders (boundary inclusive).
+        Assert.NotNull(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: 50, observedPeak: 100));
+    }
+
+    [Fact]
+    public void FormatSelfStaminaWhenLow_Full_ReturnsNull()
+    {
+        // Full (or peak under-estimate where cur>=max) -> no signal, no noise.
+        Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: 100, observedPeak: 100));
+    }
+
+    [Fact]
+    public void FormatSelfStaminaWhenLow_Unknown_ReturnsNull()
+    {
+        Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: null, observedPeak: null));
+        Assert.Null(HeadlessAcClient.Strategy.LlmGoalPolicy.FormatSelfStaminaWhenLow(
+            current: 50, observedPeak: null));
+    }
+
+    [Fact]
+    public void Stamina_DescriptorPacket_UpdatesStamina()
+    {
+        // The 0x02E7 descriptor keys stamina by MaxStamina(3) and carries the
+        // CURRENT value (like the health descriptor keyed by MaxHealth(1)).
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PlayerCreateMessage(TestGuid));
+        Assert.True(ws.Apply(new PrivateUpdateVitalMessage(
+            Sequence: 1, Vital: (uint)VitalKind.MaxStamina,
+            Ranks: 0, StartingValue: 0, ExperienceSpent: 0, Current: 80)));
+        Assert.Equal(80u, ws.Self?.StaminaCurrent);
+        Assert.Null(ws.Self?.HealthCurrent);   // stamina must not touch health
+    }
+
+    [Fact]
+    public void Stamina_SequenceCountersIndependentOfHealthAndEachOther()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(new PlayerCreateMessage(TestGuid));
+        // A high HEALTH seq must NOT gate a low STAMINA seq (distinct counters).
+        ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 200, Vital: (uint)VitalKind.Health, Current: 5));
+        Assert.True(ws.Apply(new PrivateUpdateAttribute2ndLevelMessage(
+            Sequence: 1, Vital: (uint)VitalKind.Stamina, Current: 70)));
+        Assert.Equal(70u, ws.Self?.StaminaCurrent);
+        // The 0x02E7 (MaxStamina) seq is DISTINCT from the 0x02E9 (Stamina) seq:
+        // a high 0x02E9 seq must not gate a low 0x02E7 seq.
+        Assert.True(ws.Apply(new PrivateUpdateVitalMessage(
+            Sequence: 2, Vital: (uint)VitalKind.MaxStamina,
+            Ranks: 0, StartingValue: 0, ExperienceSpent: 0, Current: 65)));
+        Assert.Equal(65u, ws.Self?.StaminaCurrent);
     }
 }
