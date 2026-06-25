@@ -3388,6 +3388,66 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ExploreLoop_RouteBlockedBranch_RendersWhenTargetRouteBlocked()
+    {
+        // The Motor reported the cross-LB route to the looped target blocked at a boundary
+        // (routeBlockedTarget). The Explore-loop cue renders the route-blocked variant, NOT the
+        // default "keep going if distant" wording (the bot is not closing on the destination).
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Sparring Golem", 5f)); // no object named the target
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, es, currentGoal: null, stack: null, pickerActivity: null, explorationCandidates: null,
+            routeBlockedTarget: "Central Courtyard");
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.Contains("your route keeps STOPPING at the same boundary", prompt);
+        Assert.DoesNotContain("DISTANT place you have NOT reached", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoop_DefaultBranch_WhenRouteBlockedTargetIsDifferent()
+    {
+        // routeBlockedTarget names a DIFFERENT place -> the route-blocked branch does NOT fire for
+        // this looped target; the default "keep going if distant" wording renders.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Sparring Golem", 5f));
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, es, currentGoal: null, stack: null, pickerActivity: null, explorationCandidates: null,
+            routeBlockedTarget: "Some Other Place");
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.DoesNotContain("your route keeps STOPPING at the same boundary", prompt);
+        Assert.Contains("DISTANT place you have NOT reached", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreLoop_DefaultBranch_WhenNoRouteBlockedTarget()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Sparring Golem", 5f));
+        var es = ExploreEmissions("Central Courtyard", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, es, currentGoal: null, stack: null, pickerActivity: null, explorationCandidates: null);
+        Assert.Contains("## Explore loop (unresolved target)", prompt);
+        Assert.DoesNotContain("your route keeps STOPPING at the same boundary", prompt);
+        Assert.Contains("DISTANT place you have NOT reached", prompt);
+    }
+
+    [Fact]
+    public void FreshRouteBlockedTarget_FreshReturnsName_StaleReturnsNull()
+    {
+        // A route-blocked observation is AREA-DEPENDENT, so it must age out: fresh (re-confirmed
+        // within the freshness window) surfaces the name; stale (the bot moved on / a teleport)
+        // returns null so the cue never fires from a different area.
+        var now = System.DateTimeOffset.UtcNow;
+        Assert.Equal("Central Courtyard", LlmGoalPolicy.FreshRouteBlockedTarget("Central Courtyard", now, now));
+        Assert.Equal("Central Courtyard",
+            LlmGoalPolicy.FreshRouteBlockedTarget("Central Courtyard", now.AddSeconds(-89), now)); // within 90s
+        Assert.Null(LlmGoalPolicy.FreshRouteBlockedTarget("Central Courtyard", now.AddSeconds(-120), now)); // stale
+        Assert.Null(LlmGoalPolicy.FreshRouteBlockedTarget(null, now, now));
+    }
+
+    [Fact]
     public void RepeatedUnresolvedExploreName_NullWhenNameUniquelyFuzzyMatchesVisibleObject()
     {
         // Shared-helper behavior: an explored partial name that UNIQUELY subsequence-matches
