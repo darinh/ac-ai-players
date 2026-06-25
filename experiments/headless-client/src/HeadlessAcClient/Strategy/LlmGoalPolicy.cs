@@ -738,6 +738,44 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     public void SetCurrentExplorationCandidates(IReadOnlyList<ExplorationCandidate>? candidates)
         => _currentExplorationCandidates = candidates;
 
+    // The NAME of a cross-landblock Explore target whose route the Motor has found
+    // repeatedly BLOCKED at the same boundary it cannot cross from the bot's current
+    // area (set by HandshakeDriver via SetCurrentRouteBlockedTarget when its own
+    // cross-LB route advance keeps returning the same boundary node for the same
+    // sighting). Surfaced in the `## Explore loop` cue's route-blocked branch so the LLM
+    // stops re-`Explore`-ing a destination it provably cannot reach from here. Null = no
+    // route-blocked target. The Motor's own mechanical navigation observation; the LLM
+    // decides what to do instead. The observation is AREA-DEPENDENT (the block is from the
+    // bot's current area), so _routeBlockedAtUtc stamps when it was last (re-)observed and
+    // FreshRouteBlockedTarget ages it out — after a teleport/recall/death or wandering off,
+    // the Motor stops re-observing the block, so a stale signal never surfaces from a new
+    // area. While actively stuck the Motor re-confirms it each ~20s advance, keeping it fresh.
+    private string? _currentRouteBlockedTarget;
+    private DateTimeOffset _routeBlockedAtUtc;
+
+    // A route-blocked observation older than this is stale (the bot has moved on / the Motor
+    // stopped re-confirming it); comfortably longer than the ~20s same-boundary re-advance
+    // cadence so it never ages out while the bot is actively stuck.
+    private static readonly TimeSpan RouteBlockedFreshness = TimeSpan.FromSeconds(90);
+
+    /// <summary>
+    /// Driver-driven setter. Called by HandshakeDriver when its cross-landblock route
+    /// advance toward a sighting keeps stalling at the same impassable boundary (the
+    /// destination is unreachable from the bot's current area), or null to clear when
+    /// the route advances past it. Stamps the observation time for staleness aging.
+    /// </summary>
+    public void SetCurrentRouteBlockedTarget(string? targetName)
+    {
+        _currentRouteBlockedTarget = targetName;
+        if (targetName is not null) _routeBlockedAtUtc = DateTimeOffset.UtcNow;
+    }
+
+    // The route-blocked target name if the observation is still fresh (re-confirmed within
+    // RouteBlockedFreshness of <paramref name="now"/>), else null — so a stale area-dependent
+    // block never surfaces after the bot has moved on. Pure; no side effects.
+    internal static string? FreshRouteBlockedTarget(string? name, DateTimeOffset atUtc, DateTimeOffset now)
+        => (name is not null && now - atUtc <= RouteBlockedFreshness) ? name : null;
+
     // Remembered out-of-view creature sightings surfaced as the
     // "## Recently sighted (out of view)" prompt block. Projected from
     // the bot's own SightedLocation memory and pushed by the driver
@@ -2985,7 +3023,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the FIND-A-KILL-TASK-SOURCE rule uses. Console-only; logs on change;
         // resets when the finished-batch state is absent.
         EmitContractBatchSourceDiagnostic(world);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling, recentOwnDeathCount: RecentOwnDeathCount(nowUtc));
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling, recentOwnDeathCount: RecentOwnDeathCount(nowUtc), routeBlockedTarget: FreshRouteBlockedTarget(_currentRouteBlockedTarget, _routeBlockedAtUtc, nowUtc));
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -7965,7 +8003,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlySet<uint>? talkedNpcGuids = null,
         IReadOnlySet<string>? talkedNpcNames = null,
         int? promptCeiling = null,
-        int recentOwnDeathCount = 0)
+        int recentOwnDeathCount = 0,
+        string? routeBlockedTarget = null)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -11425,6 +11464,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // Own emission history + the Motor's own transport-rejection record; no
             // game knowledge, no priority, no source-side target.
             var loopedExploreRejected = IsExploreNameTransportRefused(loopedExploreName, events);
+            // Route-blocked variant: the Motor's own cross-landblock route advance toward this
+            // sighting keeps stopping at the same boundary it cannot cross from the bot's current
+            // area (HandshakeDriver set routeBlockedTarget). Unlike a transport REFUSAL the goal
+            // still "advances + arrives" at the boundary, so loopedExploreRejected does not fire,
+            // yet the bot is NOT closing on the destination — the default "keep going if distant"
+            // wording would be wrong. Match the blocked target name (role-suffix-normalized) to the
+            // looped Explore name. The Motor's mechanical navigation observation; the LLM decides.
+            var loopedExploreRouteBlocked = routeBlockedTarget is string rbName
+                && string.Equals(NormalizeEmittedTargetName(rbName), loopedExploreName, StringComparison.OrdinalIgnoreCase);
             if (loopedExploreRejected)
                 sb.AppendLine(
                     $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently and EACH attempt is " +
@@ -11434,6 +11482,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "`Explore{target: {name: \"anywhere\"}}` to travel toward open ground, or interact with a VISIBLE " +
                     "object in `## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`/`Attack`) — do NOT re-`Explore` " +
                     $"`{loopedExploreDisplay}`.");
+            else if (loopedExploreRouteBlocked)
+                sb.AppendLine(
+                    $"- you have `Explore`d toward `{loopedExploreDisplay}` several times, but your route keeps " +
+                    "STOPPING at the same boundary you cannot cross from your current area — " +
+                    $"`{loopedExploreDisplay}` is NOT reachable from here right now, and re-`Explore`-ing it will " +
+                    "not get you there. To make progress, emit `Explore{target: {name: \"anywhere\"}}` to travel " +
+                    "toward open ground (you may find another way around), interact with a VISIBLE object in " +
+                    "`## Nearest objects` (`Talk`/`Use`/`Give`/`Pickup`/`Attack`), or pursue a DIFFERENT objective " +
+                    $"— do NOT keep re-`Explore`-ing `{loopedExploreDisplay}`.");
             else
                 sb.AppendLine(
                     $"- you have `Explore`d toward `{loopedExploreDisplay}` several times recently but NO " +

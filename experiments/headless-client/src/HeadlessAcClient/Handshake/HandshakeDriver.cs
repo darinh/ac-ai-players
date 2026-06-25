@@ -1560,6 +1560,15 @@ internal sealed class HandshakeDriver : IDisposable
         // Keyed by NavNode.Id of the advance waypoint.
         var crossLbAdvanceCooldownUntil = new Dictionary<Guid, DateTime>();
         var crossLbAdvanceCooldown = TimeSpan.FromSeconds(20);
+        // Route-stuck detection (see CrossLbRouteStuck): when the cross-landblock route advance
+        // re-steers to the SAME boundary node for the SAME sighting repeatedly, the bot cannot get
+        // PAST that boundary (the destination is unreachable from its current area). At the
+        // threshold the destination name is surfaced to the policy (route-blocked Explore cue).
+        const int crossLbStuckThreshold = 4;
+        var crossLbRouteStuck = new HeadlessAcClient.World.CrossLbRouteStuck(crossLbStuckThreshold);
+        // Which sighting (if any) is currently surfaced as route-blocked, so a Progress
+        // advance for a DIFFERENT sighting does not clear a still-blocked target's signal.
+        Guid? crossLbBlockedSightingId = null;
         // Autonomous indoor frontier exploration (road-to-endgame
         // Phase A1) — per-cell revisit cooldown so a frontier cell the
         // bot targeted but couldn't reach (or reached without resolving
@@ -6570,6 +6579,29 @@ internal sealed class HandshakeDriver : IDisposable
                                     motionIndoorPathAttempted = true;
                                     crossLbAdvanceCooldownUntil[boundary.Id] =
                                         nowWall + crossLbAdvanceCooldown;
+                                    // Route-stuck detection: if the route keeps re-advancing the
+                                    // SAME boundary for this sighting (cannot get past it), surface
+                                    // the destination as route-blocked so the policy cues the LLM to
+                                    // stop re-Exploring an unreachable place; a NEW boundary =
+                                    // progress (clear). The LLM still decides what to do instead.
+                                    switch (crossLbRouteStuck.RecordAdvance(farSighting.Id, boundary.Id))
+                                    {
+                                        case HeadlessAcClient.World.CrossLbRouteStuck.RouteAdvanceState.Blocked:
+                                            llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(farSighting.Name);
+                                            crossLbBlockedSightingId = farSighting.Id;
+                                            break;
+                                        case HeadlessAcClient.World.CrossLbRouteStuck.RouteAdvanceState.Progress:
+                                            // Only clear when the CURRENTLY-blocked sighting is the one
+                                            // that just progressed — progress on a different target must
+                                            // not wipe a still-blocked target's signal.
+                                            if (crossLbBlockedSightingId == farSighting.Id)
+                                            {
+                                                llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(null);
+                                                crossLbBlockedSightingId = null;
+                                            }
+                                            break;
+                                        // Building (same boundary, below threshold): leave the flag unchanged.
+                                    }
                                     if (WorldDistance.TrySquaredDistance(tacticsSelf, dest, out var d2adv))
                                         bestDist = (float)Math.Sqrt(d2adv);
                                     Console.WriteLine(
