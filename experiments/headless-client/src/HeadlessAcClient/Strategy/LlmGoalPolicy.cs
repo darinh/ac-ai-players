@@ -8188,6 +8188,37 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "dead character lands no swings): invest in ENDURANCE/health to raise max HP FIRST, before " +
                     "pouring more XP into offense. (If instead you SURVIVE your fights but cannot KILL — swings " +
                     "miss or barely hurt, with NO recent deaths — then offense is the limit per SPEND XP.)");
+            // SUSTAIN-COMBAT CHECK: the FLEE analog of the death case above. The Motor
+            // repeatedly DEFERS the bot's Attack because its health is below the
+            // re-engage threshold (IsLowHealthDeferredAttackRepeat) and substitutes a
+            // recover-egress — so the bot SURVIVES by fleeing rather than dying, which
+            // means neither the SURVIVABILITY-FIRST (recent-death) cue nor the death-
+            // spiral caution fires, and a model has no signal that it keeps abandoning
+            // fights. Surface the FLEE pattern, scoped to the gap: NOT a recent death
+            // (owned by SURVIVABILITY-FIRST above), NOT a death-spiral (owned by
+            // `## Survival caution`, which says max HP will NOT help while the penalty
+            // re-stacks), and unspent XP to invest. It does NOT categorically claim max
+            // HP is the limit — a low-health flee can be EITHER a winning-but-too-slow
+            // fight (max HP lets you finish) OR an offense-limited fight (the SPEND XP
+            // rule's "survive but cannot kill -> offense" case); it points the LLM at its
+            // OWN landed-vs-evaded + target-health evidence to pick the lever, so it never
+            // contradicts the SPEND XP offense guidance. The LLM still allocates. Reasons
+            // from the bot's OWN deferral history + the unspent-XP gate; no game knowledge.
+            else if (IsLowHealthDeferredAttackRepeat(events)
+                && recentOwnDeathCount < DeathSpiralMinDeaths
+                && world.Self.AvailableExperience is long fxp
+                && ShouldSurfaceUnspentXp(fxp, MinMeaningfulUnspentXp))
+                sb.AppendLine(
+                    "- SUSTAIN-COMBAT CHECK: you keep BREAKING OFF fights to recover because your health drops too " +
+                    "low to stay in melee (repeated low-health attack deferrals), with NO recent death and unspent " +
+                    "XP. Surviving by FLEEING is not progress — you cannot finish a kill you keep running from. " +
+                    "Decide the lever from YOUR evidence (per the SPEND XP rule): if your swings are LANDING and the " +
+                    "target's health is FALLING (you are winning, just too slowly to outlast the damage you take), " +
+                    "more MAX HP — raise ENDURANCE/health — lets you STAY in long enough to finish it; but if your " +
+                    "swings keep MISSING or barely hurt (you are not making progress), OFFENSE is the limit instead " +
+                    "and more max HP only lets you lose slower — raise accuracy/damage. Either way, invest the unspent " +
+                    "XP your landed-vs-evaded split and the target's health trend point to, rather than fleeing every " +
+                    "fight.");
         }
         // Attributes, raisable skills, health, and deaths — the compact,
         // decision-critical self facts, rendered via the shared helper so the
