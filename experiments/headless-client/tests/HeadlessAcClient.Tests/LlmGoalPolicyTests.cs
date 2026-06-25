@@ -6094,6 +6094,174 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Spend before wandering", prompt);
     }
 
+    // ---- wander-streak path: spend cue fires under an Active-but-unactionable intent ----
+
+    private static StreamEvent UntargetedExploreEmit(string targetSel) => new()
+    {
+        Sequence = 0,
+        Utc = DateTimeOffset.UnixEpoch.AddHours(1),
+        Kind = EventKind.GoalEmitted,
+        Text = $"Explore target={targetSel} item= source=llm",
+    };
+
+    private static EventStream WanderEventStream(params StreamEvent[] evs)
+    {
+        var es = new EventStream();
+        foreach (var e in evs) es.Append(e);
+        return es;
+    }
+
+    [Fact]
+    public void CountUntargetedExplore_CountsAnywhereAndEmpty_IgnoresDirectedAndNonExplore()
+    {
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""),             // untargeted (anywhere)
+            UntargetedExploreEmit("<empty>"),                       // untargeted (empty)
+            UntargetedExploreEmit("name=\"Holtburg\""),             // DIRECTED named place -> not counted
+            UntargetedExploreEmit("guid=0x80001234 name=\"Door\""), // DIRECTED concrete guid -> not counted
+            new StreamEvent
+            {
+                Sequence = 0, Utc = DateTimeOffset.UnixEpoch.AddHours(1), Kind = EventKind.GoalEmitted,
+                Text = "Talk target=name=\"anywhere\" item= source=llm", // non-Explore -> not counted
+            });
+        Assert.Equal(2, LlmGoalPolicy.CountRecentUntargetedExploreEmissions(es));
+    }
+
+    [Fact]
+    public void CountUntargetedExplore_ZeroGuidIsUntargeted()
+    {
+        // A guid=0x00000000 (the resolved unexplored-area form) is NOT a concrete object, so it
+        // still reads as an untargeted wander.
+        var es = WanderEventStream(UntargetedExploreEmit("guid=0x00000000"));
+        Assert.Equal(1, LlmGoalPolicy.CountRecentUntargetedExploreEmissions(es));
+    }
+
+    [Fact]
+    public void CountUntargetedExplore_OnlyNewest10Counted()
+    {
+        // The window is the bot's LAST 10 emissions (RecentGoalEmissions is newest-first). Two
+        // OLD untargeted Explores beyond that window must NOT count once 10 newer non-wander
+        // goals push them out — so an old wander does not keep firing the cue forever.
+        var evs = new System.Collections.Generic.List<StreamEvent>
+        {
+            UntargetedExploreEmit("name=\"anywhere\""), // oldest (position 12)
+            UntargetedExploreEmit("name=\"anywhere\""), // position 11 -> both outside the newest-10
+        };
+        for (int i = 0; i < 10; i++) evs.Add(UntargetedExploreEmit("name=\"Holtburg\"")); // 10 newer DIRECTED
+        Assert.Equal(0, LlmGoalPolicy.CountRecentUntargetedExploreEmissions(WanderEventStream(evs.ToArray())));
+    }
+
+    [Fact]
+    public void CountUntargetedExplore_NonConsecutiveWithinWindowStillCounts()
+    {
+        // Stickiness is intentional: ANY 2 untargeted Explores within the last 10 count, even
+        // interleaved with other goals — a drift broken up by incidental actions is still a drift.
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""),
+            new StreamEvent
+            {
+                Sequence = 0, Utc = DateTimeOffset.UnixEpoch.AddHours(1), Kind = EventKind.GoalEmitted,
+                Text = "Talk target=name=\"Greeter\" item= source=llm",
+            },
+            UntargetedExploreEmit("name=\"anywhere\""));
+        Assert.Equal(2, LlmGoalPolicy.CountRecentUntargetedExploreEmissions(es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_FiresViaWanderStreak_WithNoNoObjectiveTrigger()
+    {
+        // A NULL stack makes StackHasNoActiveObjective FALSE, so the gate can ONLY fire via the
+        // new wander-streak path: >=2 untargeted Explores + unspent XP + no winnable monster.
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
+        Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, BuildXpWorld(69296, 5475), secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_DoesNotFireBelowWanderThreshold()
+    {
+        // ONE untargeted Explore is not a sustained drift; with a null stack (no no-objective
+        // trigger) the gate stays closed.
+        var es = WanderEventStream(UntargetedExploreEmit("name=\"anywhere\""));
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, BuildXpWorld(69296, 5475), secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_DirectedExploresDoNotTriggerWanderPath()
+    {
+        // Two DIRECTED Explores (named places) are purposeful travel, not a wander -> no fire.
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"Holtburg\""), UntargetedExploreEmit("name=\"Glenden Wood\""));
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, BuildXpWorld(69296, 5475), secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_WanderStreak_StillSuppressedByRecentDeath()
+    {
+        // Existing guards still bind on the wander path: a recent death is owned by
+        // SURVIVABILITY-FIRST, so even a clear wander streak does not fire this cue.
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, BuildXpWorld(69296, 5475), secondsSinceLastDeath: 30, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_WanderStreak_StillSuppressedByWinnableMonster()
+    {
+        // A winnable monster in view => there IS a fight here => engage it, not the no-fight wander.
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            Visible = new[] { new VisibleObjectProjection { Guid = 0x80001001u, Name = "Drudge", IsMonster = true } },
+        };
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            null, world, secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_ActiveIntentPlusWanderStreak_Fires()
+    {
+        // The real scenario: an ACTIVE intent (so StackHasNoActiveObjective is FALSE) but the bot
+        // is drifting on untargeted Explore with unspent XP -> the wander path fires the steer.
+        var world = BuildXpWorld(69296, 5475);
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "i-w1", Kind = "canvass-town-npcs", Rationale = "test active objective",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+        Assert.False(LlmGoalPolicy.StackHasNoActiveObjective(stack)); // precondition: objective IS active
+        var es = WanderEventStream(
+            UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
+        Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            stack, world, secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: es));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_ActiveIntentNoWander_DoesNotFire()
+    {
+        // Active intent + NO wander streak -> the gate stays closed (we did NOT turn the cue into
+        // an always-fire under an active objective).
+        var world = BuildXpWorld(69296, 5475);
+        var stack = new IntentStack();
+        Assert.Equal(StackOpResult.Ok, stack.TryPush(new Intent
+        {
+            Id = "i-w2", Kind = "canvass-town-npcs", Rationale = "test active objective",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, new EventStream(), DateTime.UtcNow),
+            Status = IntentLifecycle.Active,
+        }));
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            stack, world, secondsSinceLastDeath: null, recentOwnDeathCount: 0, events: new EventStream()));
+    }
+
     [Fact]
     public async Task LlmGoalPolicy_EstablishmentCall_SurvivesFallbackGoalChurnMidCall()
     {

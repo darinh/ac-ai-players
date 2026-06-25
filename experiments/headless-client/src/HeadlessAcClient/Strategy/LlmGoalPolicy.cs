@@ -6105,21 +6105,72 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool StackHasNoActiveObjective(IntentStack? stack) =>
         stack is not null && (stack.Top is null || stack.Top.Status != IntentLifecycle.Active);
 
-    // Gate for the SPEND-BEFORE-WANDER salience cue: the bot has NO active objective, NO recent
-    // death (the recent-death case is owned by SURVIVABILITY-FIRST CHECK, so the two never
-    // double-fire), meaningful unspent XP, and NO monster in view it can currently defeat (none
-    // attackable, or only lethal-beaten kinds). That is the XP-hoarding wander situation — a
-    // weak model defaults to Explore "anywhere" for ever-weaker foes instead of spending XP to
-    // make nearby monsters winnable. SUPPRESSED in an active death-spiral
-    // (recentOwnDeathCount >= DeathSpiralMinDeaths): there `## Survival caution` owns the steer
-    // (retreat + earn XP safely, NOT "spend XP to make these monsters winnable"), and its window
-    // is wider than the SURVIVABILITY-FIRST recency gate above, so this guard covers the spiral
-    // tail where that gate has lapsed. Pure predicate over own self/stack/perception facts; the
-    // cue it gates only POINTS at the SPEND XP option, it never spends or picks a target.
+    // How many of the bot's most-recent goal emissions the wander detector inspects, and how
+    // many of them must be UNTARGETED Explores to count as a confirmed XP-hoarding wander. ">= 2"
+    // (not 1) requires a SUSTAINED aimless drift, so a single Explore between productive actions
+    // (e.g. one step toward a known place, or a one-off egress) does not trip it.
+    private const int RecentWanderEmissionWindow = 10;
+    private const int WanderStreakSpendThreshold = 2;
+
+    // Count the bot's OWN recent UNTARGETED Explore emissions — the aimless "wander" pattern:
+    // an `Explore` goal with NO concrete target (target `<empty>`, no name, or the generic
+    // name "anywhere"; and no object guid). A DIRECTED Explore toward a NAMED place or a specific
+    // guid is purposeful travel and is NOT counted. Purely structural read of the bot's own
+    // GoalEmitted history (the "VERB target=... item=... source=..." text the executor records,
+    // matching HasRecentRepeatedGoalOfKinds' parse) — no server text, no game knowledge. Used by
+    // the SPEND-BEFORE-WANDER gate so an XP-hoarding wander is recognised even while an intent is
+    // technically Active: the sustained aimless Explore IS the evidence that the active objective
+    // is not actionable here, which the bare stack-status check misses.
+    internal static int CountRecentUntargetedExploreEmissions(EventStream events)
+    {
+        var n = 0;
+        foreach (var ge in events.RecentGoalEmissions()
+                     .Where(e => !string.IsNullOrEmpty(e.Text))
+                     .Take(RecentWanderEmissionWindow))
+        {
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Explore ", StringComparison.Ordinal)) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            // Read the target selector's tokens the robust way the other emission
+            // counters use (CountRecentTalkGoalsToName): scan from "target=" and take
+            // the FIRST guid / name token. An Explore goal carries no item, so the
+            // first guid/name after target= is the TARGET's — robust to a name that
+            // itself contains " item=", which a bounded target=(.*?) item= regex would
+            // truncate.
+            var afterTarget = txt.Substring(ti);
+            // A concrete (nonzero) object guid => a directed Explore; not a wander.
+            var gm = System.Text.RegularExpressions.Regex.Match(afterTarget, "guid=0x([0-9A-Fa-f]+)");
+            if (gm.Success && gm.Groups[1].Value.TrimStart('0').Length > 0) continue;
+            var nm = System.Text.RegularExpressions.Regex.Match(afterTarget, "name=\"([^\"]*)\"");
+            var name = nm.Success ? nm.Groups[1].Value.Trim() : string.Empty;
+            // Untargeted = no concrete object: no name (empty / "<empty>" selector) OR
+            // the generic "anywhere". A NAMED place is purposeful travel, not a wander.
+            if (name.Length == 0 || name.Equals("anywhere", StringComparison.OrdinalIgnoreCase)) n++;
+        }
+        return n;
+    }
+
+    // Gate for the SPEND-BEFORE-WANDER salience cue: meaningful unspent XP, NO recent death (the
+    // recent-death case is owned by SURVIVABILITY-FIRST CHECK, so the two never double-fire), NO
+    // monster in view it can currently defeat (none attackable, or only lethal-beaten kinds), and
+    // the bot is WANDERING — either it has NO active objective, OR (even with an Active intent) it
+    // is in a sustained UNTARGETED-Explore drift. That second path is the key fix: live, the bot
+    // held an Active intent whose target was not actionable here, drifted on Explore "anywhere"
+    // for many decisions while HOARDING XP, and the bare no-active-objective check suppressed this
+    // cue for the whole drift. The wander-streak read (the bot's own emission history) recognises
+    // that drift. SUPPRESSED in an active death-spiral (recentOwnDeathCount >= DeathSpiralMinDeaths):
+    // there `## Survival caution` owns the steer (retreat + earn XP safely, NOT "spend XP to make
+    // these monsters winnable"), and its window is wider than the SURVIVABILITY-FIRST recency gate
+    // above, so this guard covers the spiral tail where that gate has lapsed. Pure predicate over
+    // own self/stack/perception/emission facts; the cue it gates only POINTS at the SPEND XP
+    // option, it never spends or picks a target.
     internal static bool ShouldSurfaceSpendBeforeWander(
         IntentStack? stack, WorldStateProjection world, int? secondsSinceLastDeath,
-        int recentOwnDeathCount = 0)
-        => StackHasNoActiveObjective(stack)
+        int recentOwnDeathCount = 0, EventStream? events = null)
+        => (StackHasNoActiveObjective(stack)
+            || (events is not null
+                && CountRecentUntargetedExploreEmissions(events) >= WanderStreakSpendThreshold))
            && (secondsSinceLastDeath is not int rd || rd > RecentDeathSalienceWindowSeconds)
            && recentOwnDeathCount < DeathSpiralMinDeaths
            && world.Self.AvailableExperience is long wxp
@@ -9499,26 +9550,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         // ── ## Spend before wandering (XP-hoarding wander salience, protected tail) ─
         // Sibling of the body SURVIVABILITY-FIRST CHECK but for a DIFFERENT trigger and placed
-        // in the PROTECTED TAIL so it survives the dense-scene body hard-cut: the bot has NO
-        // active objective, unspent XP, NO recent death (the death case is owned by
-        // SURVIVABILITY-FIRST — mutually exclusive), and NO monster in view it can defeat (none
-        // here, or only kinds that have already beaten it). A weak model then defaults to
-        // wandering (`Explore` "anywhere") for ever-weaker foes while HOARDING the XP that would
-        // make nearby monsters winnable. Elevate the SPEND option as a salient pointer for that
-        // exact situation. Balance-preserving (spend OR travel-to-easier, but spend either way);
-        // names no stat build / monster / number; the LLM still decides.
-        if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath, recentOwnDeathCount))
+        // in the PROTECTED TAIL so it survives the dense-scene body hard-cut: unspent XP, NO
+        // recent death (the death case is owned by SURVIVABILITY-FIRST — mutually exclusive), NO
+        // monster in view it can defeat (none here, or only kinds that have already beaten it),
+        // and the bot is WANDERING — either no active objective, OR a sustained untargeted
+        // `Explore` "anywhere" drift even under an Active-but-unactionable intent. A weak model
+        // defaults to that drift for ever-weaker foes while HOARDING the XP that would make nearby
+        // monsters winnable. Elevate the SPEND option as a salient pointer for that exact
+        // situation. Balance-preserving (spend OR travel-to-easier, but spend either way); names
+        // no stat build / monster / number; the LLM still decides.
+        if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath, recentOwnDeathCount, events))
         {
             sb.AppendLine();
             sb.AppendLine("## Spend before wandering");
             sb.AppendLine(
-                "- you have no active objective and unspent XP, and no monster in view you can currently defeat " +
-                "(none here, or only kinds that have already beaten you). Rather than only wandering (`Explore` " +
-                "\"anywhere\") to find ever-weaker foes, INVEST that unspent XP now (raise a stat per SPEND XP — " +
-                "endurance/health to survive tougher monsters, or coordination/weapon-skill to land + hurt them) so " +
-                "the monsters around you become winnable: getting stronger IS progress. (If this area is genuinely " +
-                "far above your level, traveling toward a known easier area is also valid — but spend your hoarded " +
-                "XP either way.)");
+                "- you have unspent XP and no monster in view you can currently defeat (none here, or only kinds " +
+                "that have already beaten you). Before falling back to wandering (`Explore` \"anywhere\") for " +
+                "ever-weaker foes, INVEST that unspent XP now (raise a stat or skill per the SPEND XP rule above, " +
+                "which explains what each does and how to choose by your bottleneck) so the monsters around you " +
+                "become winnable: getting stronger IS progress. (If this area is genuinely far above your level, " +
+                "traveling toward a known easier area is also valid — but spend your hoarded XP either way.)");
         }
 
         // ── ## Persistent objectives (intent stack re-surfaced, protected tail) ─
