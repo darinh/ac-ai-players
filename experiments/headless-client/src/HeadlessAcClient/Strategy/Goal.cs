@@ -115,6 +115,16 @@ internal enum GoalKind
     /// (Use/Talk) first. No game-content knowledge lives here.
     /// </summary>
     Sell = 15,
+
+    /// <summary>
+    /// Form a fellowship (a small player party) led by the bot, so members can
+    /// share XP and coordinate. A self/social action with no world target: the
+    /// LLM names the fellowship in <see cref="Goal.Target"/> (name = the desired
+    /// fellowship name). The motor packs the FellowshipCreate wire action; it
+    /// makes NO decision about WHETHER or WHEN to form one (Strategy owns that).
+    /// The server replies with a FellowshipFullUpdate the client already decodes.
+    /// </summary>
+    FellowshipCreate = 16,
 }
 
 /// <summary>

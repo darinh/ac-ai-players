@@ -54,6 +54,7 @@ internal enum GameActionType : uint
     TeleToLifestone     = 0x0063,
     Buy                 = 0x005F,
     Sell                = 0x0060,
+    FellowshipCreate    = 0x00A2,
 }
 
 /// <summary>
@@ -386,6 +387,52 @@ internal static class GameActionSellMessage
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), 1u); cursor += 4;   // numItems
         BinaryPrimitives.WriteInt32LittleEndian(dest.Slice(cursor), amount); cursor += 4;
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), itemGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// FellowshipCreate (0x00A2): ask the server to create a fellowship led by the
+/// bot. Mirrors ACE-bots GameActionFellowshipCreate.Handle, which reads, after
+/// the GameAction header:
+///   String16L fellowshipName   (u16 length + CP1252 bytes + pad to 4-byte align)
+///   u32       shareXp          (0 = no XP sharing, nonzero = share)
+/// On success the server broadcasts a FellowshipFullUpdate the client already
+/// decodes into <see cref="HeadlessAcClient.World.FellowshipMembership"/>. The
+/// LLM chose to form the fellowship; this only packs the wire bytes.
+/// </summary>
+internal static class GameActionFellowshipCreateMessage
+{
+    /// <summary>
+    /// Clamp a (possibly LLM-authored) fellowship name to printable ASCII and a
+    /// non-empty mechanical default. WriteString16L casts each char to one byte,
+    /// so non-ASCII LLM punctuation (curly quotes, em dashes) would otherwise pack
+    /// as the wrong byte; restricting to printable ASCII keeps the name legible.
+    /// </summary>
+    public static string SanitizeName(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "Fellowship";
+        Span<char> buf = stackalloc char[raw.Length];
+        var n = 0;
+        foreach (var ch in raw)
+            if (ch >= 0x20 && ch <= 0x7E) buf[n++] = ch;
+        var cleaned = new string(buf[..n]).Trim();
+        return cleaned.Length == 0 ? "Fellowship" : cleaned;
+    }
+
+    /// <summary>Packed size for a given name (header + String16L + u32 shareXp).</summary>
+    public static int MeasureSize(ReadOnlySpan<char> fellowshipName) =>
+        GameActionMessage.HeaderSize + AcStrings.MeasureString16L(fellowshipName) + 4;
+
+    public static int Pack(Span<byte> dest, ReadOnlySpan<char> fellowshipName, bool shareXp, uint actionSequence = 1)
+    {
+        var need = MeasureSize(fellowshipName);
+        if (dest.Length < need)
+            throw new ArgumentException($"buffer too small: need {need}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipCreate, actionSequence);
+        cursor += AcStrings.WriteString16L(dest.Slice(cursor), fellowshipName);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), shareXp ? 1u : 0u); cursor += 4;
         return cursor;
     }
 }
