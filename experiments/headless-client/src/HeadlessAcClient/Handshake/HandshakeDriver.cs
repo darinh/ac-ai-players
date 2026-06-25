@@ -898,7 +898,7 @@ internal sealed class HandshakeDriver : IDisposable
         const int            LosingExchangeMinSwings = 4;
         const double         LosingExchangeSelfHealthLostFraction = 0.50;
         const double         LosingExchangeMaxTargetHealthLostFraction = 0.15;
-        const double         CombatReengageHealthFraction = 0.70;
+        const double         CombatReengageHealthFraction = CombatDisengage.DefaultReengageHealthFraction;
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
         var                  combatAvoidUntil = new Dictionary<uint, DateTime>();

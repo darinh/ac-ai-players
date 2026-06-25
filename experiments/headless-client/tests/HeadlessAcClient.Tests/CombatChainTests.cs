@@ -367,6 +367,39 @@ public class CombatChainTests
     }
 
     [Fact]
+    public void ChooseChainTarget_SelfHealthSuppressed_SkipsEvenWithMatchingTarget()
+    {
+        // The chain must NOT mint an Attack while the bot is too hurt to (re)engage
+        // (self-health below the re-engage fraction). The Motor refuses such an
+        // approach, so minting would loop mint -> REFUSE -> MISS -> re-mint while the
+        // bot drifts. Yields to the LLM (flee / heal / disengage) even with an active
+        // commitment + a matching target in view.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            combatCapable: true, selfHealthSuppressed: true);
+        Assert.Null(chosen);
+        Assert.Equal("self-health-below-reengage", reason);
+    }
+
+    [Fact]
+    public void ChooseChainTarget_SelfHealthNotSuppressed_MintsMatchingTarget()
+    {
+        // Default (selfHealthSuppressed:false) is unchanged — a healthy armed bot
+        // still mints the matching committed target.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            combatCapable: true, selfHealthSuppressed: false);
+        Assert.NotNull(chosen);
+        Assert.Null(reason);
+    }
+
+    [Fact]
     public void IsCombatCapable_TruthTable()
     {
         const uint meleeType = 0x1u, missileType = 0x100u;

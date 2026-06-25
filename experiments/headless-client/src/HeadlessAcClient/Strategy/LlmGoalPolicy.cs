@@ -2780,7 +2780,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 MaxCombatChainAttacks,
                 out var chainSkipReason,
                 combatCapable: IsCombatCapable(world.Inventory),
-                canUnarmedMelee: CanUnarmedMelee(world.Inventory));
+                canUnarmedMelee: CanUnarmedMelee(world.Inventory),
+                // Mirror the Motor's dispatch REFUSE (HandshakeDriver: it treats an
+                // Attack as unresolved while self-health is below the re-engage
+                // fraction). Without this the chain keeps minting Attacks the Motor
+                // then refuses — a mint -> REFUSE -> MISS -> re-mint loop while the
+                // bot drifts away from the target, never yielding to recover. The
+                // LLM/fallback owns the flee/heal decision, so yield to it. Use the
+                // SAME integer current/max + IsCombatSuppressed the Motor uses (the
+                // projection's HealthObservedPeak carries the live max HP) for exact
+                // parity — a float-fraction compare would diverge by one HP tick at
+                // the boundary.
+                selfHealthSuppressed:
+                    world.Self.HealthCurrent is int selfHc &&
+                    world.Self.HealthObservedPeak is int selfHm && selfHm > 0 &&
+                    CombatDisengage.IsCombatSuppressed(
+                        (uint)selfHc, (uint)selfHm, CombatDisengage.DefaultReengageHealthFraction));
             if (chainTarget is not null)
             {
                 _combatChainCount++;
@@ -12643,7 +12658,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// Overload that also reports WHY no target was minted (diagnostic only — the
     /// returned target is identical). <paramref name="skipReason"/> is null when a
     /// target is returned, else a stable tag (chain-disabled / budget-exhausted /
-    /// no-visible / no-active-commitment / not-combat-capable / no-matching-monster)
+    /// no-visible / no-active-commitment / not-combat-capable / self-health-below-reengage /
+    /// no-matching-monster)
     /// so the chain-never-fires tempo gap is observable in the log. Pure
     /// classification; no behavior change, no game knowledge.
     /// </summary>
@@ -12658,7 +12674,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         out string? skipReason,
         float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
         bool combatCapable = true,
-        bool canUnarmedMelee = false)
+        bool canUnarmedMelee = false,
+        bool selfHealthSuppressed = false)
     {
         skipReason = null;
         if (!enabled) { skipReason = "chain-disabled"; return null; }
@@ -12673,6 +12690,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // UNARMED combat-readiness line and arms or does non-combat progress.
         // Pure wire-state gate; the LLM still chose WHAT to do.
         if (!combatCapable && !canUnarmedMelee) { skipReason = "not-combat-capable"; return null; }
+        // Do not mint an autonomous Attack while the bot is too hurt to (re)engage.
+        // The Motor's dispatch refuses an Attack approach below the re-engage health
+        // fraction (treating the target as unresolved); if the chain keeps minting,
+        // the result is a mint -> REFUSE -> MISS -> re-mint loop while the bot drifts
+        // away, never yielding to recover. Yielding routes control to the LLM /
+        // fallback, which owns the flee / heal / disengage decision. Caller computes
+        // the suppressed flag from self-health, mirroring CombatDisengage
+        // .IsCombatSuppressed. Pure self-state gate; the LLM still chose WHAT to do.
+        if (selfHealthSuppressed) { skipReason = "self-health-below-reengage"; return null; }
         if (visible is null || visible.Count == 0) { skipReason = "no-visible"; return null; }
         if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) { skipReason = "no-active-commitment"; return null; }
 
