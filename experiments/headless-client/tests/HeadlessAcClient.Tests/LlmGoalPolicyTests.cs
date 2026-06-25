@@ -5403,6 +5403,228 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
     }
 
+    [Theory]
+    [InlineData(null, 3)]   // unset -> default
+    [InlineData("", 3)]     // blank -> default
+    [InlineData("xyz", 3)]  // unparseable -> default
+    [InlineData("0", 3)]    // below min (2) -> default
+    [InlineData("1", 3)]    // a single death is not a spiral -> default
+    [InlineData("-4", 3)]   // negative -> default
+    [InlineData("2", 2)]    // min accepted (treat two quick deaths as a spiral)
+    [InlineData("3", 3)]    // default explicit
+    [InlineData("10", 10)]  // max accepted (tolerate more deaths before cautioning)
+    [InlineData("11", 10)]  // above max -> clamped
+    [InlineData("100", 10)] // well above max -> clamped
+    public void ResolveDeathSpiralMinDeaths_DefaultsAndClamps(string? env, int expected)
+    {
+        Assert.Equal(expected, LlmGoalPolicy.ResolveDeathSpiralMinDeaths(env));
+    }
+
+    [Fact]
+    public void SurvivalCaution_RendersWhenDeathSpiral()
+    {
+        // recentOwnDeathCount >= DeathSpiralMinDeaths (default 3) -> the death-spiral
+        // escape capsule renders, naming the bot's own death count + the escape steer.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 3);
+        Assert.Contains("## Survival caution", prompt);
+        Assert.Contains("DIED 3 times", prompt);
+        Assert.Contains("DEATH-SPIRAL", prompt);
+        Assert.Contains("Explore` AWAY", prompt);
+        // Accurate mechanic: burns off by earning XP, NOT by passive waiting.
+        Assert.Contains("earn XP", prompt);
+        // Explicitly overrides the conflicting body guidance for this state.
+        Assert.Contains("OVERRIDES the optional-combat", prompt);
+    }
+
+    [Fact]
+    public void SurvivalCaution_AbsentBelowThreshold()
+    {
+        // One under the default threshold (2 < 3) -> no spiral capsule yet.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 2);
+        Assert.DoesNotContain("## Survival caution", prompt);
+    }
+
+    [Fact]
+    public void SurvivalCaution_AbsentWhenNoRecentDeaths()
+    {
+        // Default recentOwnDeathCount (0) -> capsule never renders.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Survival caution", prompt);
+    }
+
+    [Fact]
+    public void SurvivalCaution_SuppressesSurvivabilityFirstCheck_WhenSpiraling()
+    {
+        // In an active death-spiral the body SURVIVABILITY-FIRST CHECK ("invest in max HP
+        // FIRST") must YIELD to the spiral capsule (which correctly says raising max HP
+        // will not help while the penalty re-stacks) so the two do not contradict.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            secondsSinceLastDeath: 30, recentOwnDeathCount: 3);
+        Assert.Contains("## Survival caution", prompt);
+        Assert.DoesNotContain("SURVIVABILITY-FIRST CHECK", prompt);
+    }
+
+    [Fact]
+    public void SurvivabilityFirstCheck_StillRendersBelowSpiralThreshold()
+    {
+        // Below the spiral threshold the single-death SURVIVABILITY-FIRST CHECK still owns
+        // the recent-death case (the suppression is scoped to the spiral state only).
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            secondsSinceLastDeath: 30, recentOwnDeathCount: 2);
+        Assert.Contains("SURVIVABILITY-FIRST CHECK", prompt);
+        Assert.DoesNotContain("## Survival caution", prompt);
+    }
+
+    [Fact]
+    public void SurvivalCaution_SurvivesTightCeiling()
+    {
+        // The capsule lives in the PROTECTED TAIL, so it must survive a hard body cut at
+        // a tight ceiling (the dense-scene case the death-spiral most needs it).
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null,
+            recentOwnDeathCount: 4, promptCeiling: 6000);
+        Assert.Contains("## Survival caution", prompt);
+        Assert.Contains("DIED 4 times", prompt);
+    }
+
+    [Fact]
+    public void SurvivalCaution_IsFirstInProtectedTail()
+    {
+        // The caution is the highest-urgency tail capsule: it must appear BEFORE the
+        // other protected-tail capsules so its override framing is read first. (Anchor
+        // on `## No active objective`, which renders for an empty stack; `## Spend
+        // before wandering` is suppressed during a spiral so it cannot anchor here.)
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack(), null, null,
+            recentOwnDeathCount: 3);
+        var cautionIdx = prompt.IndexOf("## Survival caution", System.StringComparison.Ordinal);
+        var noObjIdx = prompt.IndexOf("## No active objective", System.StringComparison.Ordinal);
+        Assert.True(cautionIdx >= 0, "caution should render");
+        Assert.True(noObjIdx >= 0, "no-active-objective should render for an empty stack");
+        Assert.True(cautionIdx < noObjIdx, "caution must precede the other tail capsules");
+    }
+
+    [Fact]
+    public void SpendXpRule_DeathSpiralException_RendersWhenSpiralingWithUnspentXp()
+    {
+        // The always-on SPEND XP rule's "dying -> raise max HP" tiebreaker must carry a
+        // gated DEATH-SPIRAL EXCEPTION when spiraling, so it does not contradict the
+        // survival caution. Needs unspent XP (the rule's gate) + spiral.
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 3);
+        Assert.Contains("DEATH-SPIRAL EXCEPTION", prompt);
+    }
+
+    [Fact]
+    public void SpendXpRule_DeathSpiralException_AbsentWhenNotSpiraling()
+    {
+        // Not spiraling -> the SPEND XP rule renders byte-identically (no exception clause).
+        var world = BuildXpWorld(69296, 5475);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 2);
+        Assert.DoesNotContain("DEATH-SPIRAL EXCEPTION", prompt);
+    }
+
+    [Fact]
+    public void UnspentXpCapsule_DyingLever_DefersToCautionWhenSpiraling()
+    {
+        // The `## Unspent XP` accuracy/lever mapping's "dying FAST points to endurance/health"
+        // clause must NOT contradict the survival caution: when spiraling it points at the
+        // caution/retreat instead. Needs swings (the mapping's gate) + spiral.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 3);
+        Assert.DoesNotContain("dying FAST points to endurance/health", prompt);
+        Assert.Contains("dying REPEATEDLY in quick succession is a DEATH-SPIRAL", prompt);
+    }
+
+    [Fact]
+    public void UnspentXpCapsule_DyingLever_NormalWhenNotSpiraling()
+    {
+        // Below the spiral threshold the original "dying FAST -> endurance/health" mapping stands.
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CumulativeSwingsLanded = 4,
+            CumulativeSwingsEvaded = 7,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, recentOwnDeathCount: 2);
+        Assert.Contains("dying FAST points to endurance/health", prompt);
+        Assert.DoesNotContain("dying REPEATEDLY in quick succession is a DEATH-SPIRAL", prompt);
+    }
+
+    [Fact]
+    public void SpendBeforeWander_SuppressedWhenSpiraling()
+    {
+        // The spiral window (10 min) is wider than the SURVIVABILITY-FIRST recency gate (300s),
+        // so a stale-death spiral could otherwise re-fire this "spend to make monsters winnable"
+        // cue. The death-spiral guard must suppress it (the caution owns the steer instead).
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 5475),
+            secondsSinceLastDeath: 600, recentOwnDeathCount: 3));
+        // Below the threshold (and stale death) it still fires.
+        Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), BuildXpWorld(69296, 5475),
+            secondsSinceLastDeath: 600, recentOwnDeathCount: 2));
+    }
+
+    [Theory]
+    [InlineData(0, 3, 10, 2)]   // both within the 10-min window -> 2
+    [InlineData(0, 3, 2, 1)]    // B (3 min old) is past the 2-min window -> pruned to 1
+    [InlineData(20, 30, 10, 0)] // both older than the window -> pruned to 0
+    public void PruneAndCountWithinWindow_PrunesThenCounts(
+        int minutesAgoA, int minutesAgoB, int windowMinutes, int expectedCount)
+    {
+        var now = DateTimeOffset.UnixEpoch.AddHours(1);
+        var times = new System.Collections.Generic.List<DateTimeOffset>
+        {
+            now.AddMinutes(-minutesAgoA),
+            now.AddMinutes(-minutesAgoB),
+        };
+        var n = LlmGoalPolicy.PruneAndCountWithinWindow(times, now, System.TimeSpan.FromMinutes(windowMinutes));
+        Assert.Equal(expectedCount, n);
+        Assert.Equal(expectedCount, times.Count); // pruned in place
+    }
+
+    [Fact]
+    public void PruneAndCountWithinWindow_BoundaryIsInclusive()
+    {
+        // A timestamp exactly at (now - window) is kept (cutoff uses strict <).
+        var now = DateTimeOffset.UnixEpoch.AddHours(1);
+        var window = System.TimeSpan.FromMinutes(10);
+        var times = new System.Collections.Generic.List<DateTimeOffset> { now - window };
+        Assert.Equal(1, LlmGoalPolicy.PruneAndCountWithinWindow(times, now, window));
+    }
+
+    [Fact]
+    public void PruneAndCountWithinWindow_SelfClearsAfterWindow()
+    {
+        // Deaths stop: once all timestamps age past the window the count returns to 0,
+        // so the caution self-clears (the bot resumes normal play).
+        var window = System.TimeSpan.FromMinutes(10);
+        var deathTime = DateTimeOffset.UnixEpoch.AddHours(1);
+        var times = new System.Collections.Generic.List<DateTimeOffset> { deathTime, deathTime, deathTime };
+        // Just past the window -> all pruned.
+        var later = deathTime + window + System.TimeSpan.FromSeconds(1);
+        Assert.Equal(0, LlmGoalPolicy.PruneAndCountWithinWindow(times, later, window));
+    }
+
     [Fact]
     public void SpendBeforeWander_TrueWhenWanderSituation()
     {

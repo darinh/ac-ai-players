@@ -258,6 +258,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // outcome + a timer — no game content. Mirrors _egressLastObservedLevel.
     private int? _lastObservedDeaths;
     private DateTimeOffset? _lastOwnDeathUtc;
+    // Rolling window of the bot's OWN death timestamps (one per observed death
+    // increment), used to compute the recent death-RATE for death-spiral
+    // detection. Pruned to DeathSpiralWindow in RecentOwnDeathCount. Own outcome
+    // + timers — no game content.
+    private readonly List<DateTimeOffset> _ownDeathTimesUtc = new();
     private readonly HashSet<uint> _talkedNpcGuids = new();
     private readonly HashSet<string> _talkedNpcNames = new(StringComparer.OrdinalIgnoreCase);
 
@@ -1988,6 +1993,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
     private static readonly TimeSpan ExploreLoopedVendorWindow = TimeSpan.FromMinutes(5);
 
+    // Death-spiral detection threshold: how many of the bot's OWN deaths within
+    // DeathSpiralWindow mark an active death-spiral. AC applies a stacking respawn
+    // penalty for repeated deaths that lowers effective max HP (and other vitals)
+    // until the deaths STOP — so a bot that keeps dying respawns ever weaker and
+    // cannot recover by raising max HP, only by surviving long enough for the
+    // penalty to fade. The LLM cannot derive this rate from the cumulative deaths
+    // count or the single last-death timestamp, so the prompt surfaces it. Env
+    // AC_BOTS_DEATH_SPIRAL_MIN_DEATHS overrides; default 3, clamp [2, 10].
+    internal static readonly int DeathSpiralMinDeaths =
+        ResolveDeathSpiralMinDeaths(
+            Environment.GetEnvironmentVariable("AC_BOTS_DEATH_SPIRAL_MIN_DEATHS"));
+
+    // Parse AC_BOTS_DEATH_SPIRAL_MIN_DEATHS. A positive integer >= 2 is used
+    // (clamped to [2, 10]); anything else (unset/blank/unparseable/<2) falls back to 3.
+    internal static int ResolveDeathSpiralMinDeaths(string? envValue)
+    {
+        const int Default = 3;
+        const int Min = 2;
+        const int Max = 10;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+    private static readonly TimeSpan DeathSpiralWindow = TimeSpan.FromMinutes(10);
+
     // Returns the guid of a visible VENDOR the bot has repeatedly Explored TOWARD (>=
     // ExploreLoopedVendorThreshold recent Explore emissions naming it). Explore only WALKS
     // to a target and never interacts, so an Explore that NAMES a vendor "arrives" at it
@@ -2905,7 +2936,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the FIND-A-KILL-TASK-SOURCE rule uses. Console-only; logs on change;
         // resets when the finished-batch state is absent.
         EmitContractBatchSourceDiagnostic(world);
-        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling);
+        var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling, recentOwnDeathCount: RecentOwnDeathCount(nowUtc));
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -5985,12 +6016,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // double-fire), meaningful unspent XP, and NO monster in view it can currently defeat (none
     // attackable, or only lethal-beaten kinds). That is the XP-hoarding wander situation — a
     // weak model defaults to Explore "anywhere" for ever-weaker foes instead of spending XP to
-    // make nearby monsters winnable. Pure predicate over own self/stack/perception facts; the
+    // make nearby monsters winnable. SUPPRESSED in an active death-spiral
+    // (recentOwnDeathCount >= DeathSpiralMinDeaths): there `## Survival caution` owns the steer
+    // (retreat + earn XP safely, NOT "spend XP to make these monsters winnable"), and its window
+    // is wider than the SURVIVABILITY-FIRST recency gate above, so this guard covers the spiral
+    // tail where that gate has lapsed. Pure predicate over own self/stack/perception facts; the
     // cue it gates only POINTS at the SPEND XP option, it never spends or picks a target.
     internal static bool ShouldSurfaceSpendBeforeWander(
-        IntentStack? stack, WorldStateProjection world, int? secondsSinceLastDeath)
+        IntentStack? stack, WorldStateProjection world, int? secondsSinceLastDeath,
+        int recentOwnDeathCount = 0)
         => StackHasNoActiveObjective(stack)
            && (secondsSinceLastDeath is not int rd || rd > RecentDeathSalienceWindowSeconds)
+           && recentOwnDeathCount < DeathSpiralMinDeaths
            && world.Self.AvailableExperience is long wxp
            && ShouldSurfaceUnspentXp(wxp, MinMeaningfulUnspentXp)
            && (!AnyAttackableMonsterInView(world) || OnlyBeatenMonstersInView(world));
@@ -6724,7 +6761,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         if (numDeaths is not int nd) return;
         if (_lastObservedDeaths is int prev && nd > prev)
+        {
             _lastOwnDeathUtc = nowUtc;
+            // One timestamp per fresh death since the last observation (normally
+            // a single increment; loop covers a multi-death gap between ticks).
+            for (var i = prev; i < nd; i++)
+                _ownDeathTimesUtc.Add(nowUtc);
+        }
         _lastObservedDeaths = nd;
     }
 
@@ -6735,6 +6778,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         => _lastOwnDeathUtc is DateTimeOffset d
             ? Math.Max(0, (int)(nowUtc - d).TotalSeconds)
             : (int?)null;
+
+    // Count of the bot's OWN deaths within DeathSpiralWindow of now, pruning
+    // entries older than the window. A recent death-RATE the LLM cannot derive
+    // from the cumulative deaths count or the single last-death timestamp; used
+    // to surface the death-spiral caution. Own outcome + a timer — no game content.
+    private int RecentOwnDeathCount(DateTimeOffset nowUtc)
+        => PruneAndCountWithinWindow(_ownDeathTimesUtc, nowUtc, DeathSpiralWindow);
+
+    // Prune timestamps strictly older than (now - window) from `times` in place,
+    // then return how many remain (those within the window, inclusive of the
+    // exact boundary). Pure sliding-window bookkeeping; no game content.
+    internal static int PruneAndCountWithinWindow(
+        List<DateTimeOffset> times, DateTimeOffset nowUtc, TimeSpan window)
+    {
+        var cutoff = nowUtc - window;
+        times.RemoveAll(t => t < cutoff);
+        return times.Count;
+    }
 
     // Sample the bot-to-target distance of the active goal's target each tick.
     // Tracks ONE locked guid for the current goal-target selector so a chase
@@ -7429,7 +7490,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         (int Distinct, bool Latched)? localUseChurn = null,
         IReadOnlySet<uint>? talkedNpcGuids = null,
         IReadOnlySet<string>? talkedNpcNames = null,
-        int? promptCeiling = null)
+        int? promptCeiling = null,
+        int recentOwnDeathCount = 0)
     {
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
@@ -7633,7 +7695,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // floor passes any positive value). A render gate on an observed fact; the
         // LLM still decides.
         if (unspentSpendSurfaced)
-        sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (the target MUST be a skill NAME from the `trained skills` list in `## Self` — NEVER a weapon ITEM's name such as the weapon you wield; if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill` at all, raise an attribute instead — the server rejects anything else). A positive `amount` is REQUIRED: invest in FEWER, LARGER raises. When you choose to invest in a target, commit a SUBSTANTIAL chunk — up to your full unspent balance — in that ONE raise, NOT the same small amount (e.g. 10) repeated across many turns, because EACH raise costs a full decision turn you need for combat and quests. This governs raise SIZE, not WHICH target: keep choosing the target by the bottleneck evidence below, and you may raise a DIFFERENT target next time. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength PRIMARILY drives DAMAGE — how HARD your swings hit, on a swing that already LANDS — and is NOT your main accuracy lever, while COORDINATION and the TRAINED WEAPON SKILL you fight with are your PRIMARY ACCURACY levers (how OFTEN your swings LAND), the trained weapon skill being the biggest (often bigger than the coordination attribute), raised via `RaiseSkill` using a name from `trained skills` in `## Self`; quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH." + (stuckUnarmedForSpend ? " UNARMED EXCEPTION: the coordination-vs-strength accuracy guidance in this rule is for a WIELDED weapon; when you fight UNARMED (no weapon — `Combat readiness` says `UNARMED`) your fist `UnarmedCombat` to-hit is half STRENGTH + half coordination, so STRENGTH raises accuracy AND damage — favor STRENGTH for unarmed misses (see the `unarmed accuracy` note)." : "") + " Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` (your swings keep MISSING), the limit is ACCURACY — PRIORITIZE coordination and your trained weapon skill (your accuracy levers; the weapon skill only when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) over strength, whose main effect is damage; if your swings LAND but deal 0/low `damage`, the limit is strength; if you fight with spells, raise magic attributes/skills. E.g. raise coordination (and your trained weapon skill) when melee swings MISS/evade; raise strength when swings LAND but barely hurt; raise endurance/health when low max HP is killing you. These are NOT co-equal defaults you pick by current HP: if you SURVIVE your fights but still cannot kill — your swings keep missing or barely hurt, racking up `ineffective`/`near-death` outcomes (NOT `deaths`) with no `kills` — the binding limit is OFFENSE, not max HP, and adding more endurance/health only lets you LOSE the same unwinnable fights more slowly. Raise coordination (and your trained weapon skill via `RaiseSkill` ONLY when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) when your swings MISS, and strength when they LAND but barely hurt — so do not pour XP only into attributes and leave the weapon skill you fight with neglected — until you can kill the weak monsters you meet. (But if instead you are DYING fast — taking `deaths`, dropping in a hit or two — then max HP survivability IS the limit, or the monsters here are simply too strong and you should Explore to a weaker area.)");
+        sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (the target MUST be a skill NAME from the `trained skills` list in `## Self` — NEVER a weapon ITEM's name such as the weapon you wield; if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill` at all, raise an attribute instead — the server rejects anything else). A positive `amount` is REQUIRED: invest in FEWER, LARGER raises. When you choose to invest in a target, commit a SUBSTANTIAL chunk — up to your full unspent balance — in that ONE raise, NOT the same small amount (e.g. 10) repeated across many turns, because EACH raise costs a full decision turn you need for combat and quests. This governs raise SIZE, not WHICH target: keep choosing the target by the bottleneck evidence below, and you may raise a DIFFERENT target next time. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength PRIMARILY drives DAMAGE — how HARD your swings hit, on a swing that already LANDS — and is NOT your main accuracy lever, while COORDINATION and the TRAINED WEAPON SKILL you fight with are your PRIMARY ACCURACY levers (how OFTEN your swings LAND), the trained weapon skill being the biggest (often bigger than the coordination attribute), raised via `RaiseSkill` using a name from `trained skills` in `## Self`; quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH." + (stuckUnarmedForSpend ? " UNARMED EXCEPTION: the coordination-vs-strength accuracy guidance in this rule is for a WIELDED weapon; when you fight UNARMED (no weapon — `Combat readiness` says `UNARMED`) your fist `UnarmedCombat` to-hit is half STRENGTH + half coordination, so STRENGTH raises accuracy AND damage — favor STRENGTH for unarmed misses (see the `unarmed accuracy` note)." : "") + " Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` (your swings keep MISSING), the limit is ACCURACY — PRIORITIZE coordination and your trained weapon skill (your accuracy levers; the weapon skill only when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) over strength, whose main effect is damage; if your swings LAND but deal 0/low `damage`, the limit is strength; if you fight with spells, raise magic attributes/skills. E.g. raise coordination (and your trained weapon skill) when melee swings MISS/evade; raise strength when swings LAND but barely hurt; raise endurance/health when low max HP is killing you. These are NOT co-equal defaults you pick by current HP: if you SURVIVE your fights but still cannot kill — your swings keep missing or barely hurt, racking up `ineffective`/`near-death` outcomes (NOT `deaths`) with no `kills` — the binding limit is OFFENSE, not max HP, and adding more endurance/health only lets you LOSE the same unwinnable fights more slowly. Raise coordination (and your trained weapon skill via `RaiseSkill` ONLY when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) when your swings MISS, and strength when they LAND but barely hurt — so do not pour XP only into attributes and leave the weapon skill you fight with neglected — until you can kill the weak monsters you meet. (But if instead you are DYING fast — taking `deaths`, dropping in a hit or two — then max HP survivability IS the limit, or the monsters here are simply too strong and you should Explore to a weaker area.)" + (recentOwnDeathCount >= DeathSpiralMinDeaths ? " DEATH-SPIRAL EXCEPTION: if you have died REPEATEDLY in quick succession (see `## Survival caution`), max HP is NOT the fix — repeated deaths stack a penalty that lowers effective max HP and RESET your recovery each time, so raising it will not dig you out while the deaths continue; retreat to safer content and earn XP WITHOUT dying until the penalty burns off." : ""));
         sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
         // cp-2369: the COMBAT SAFETY & PACE rule (~2KB, the single largest
         // bullet) is ENTIRELY about an in-progress or imminent fight — every
@@ -8011,9 +8073,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // unspent XP to invest. Reasons from the deaths telemetry + the unspent-XP gate
             // (same gate as the SPEND XP cues); names no attribute build / monster / number.
             // Balance-preserving: it restates the rule's both-options so it cannot
-            // over-steer to endurance; the LLM still decides.
+            // over-steer to endurance; the LLM still decides. SUPPRESSED in an active
+            // death-spiral (recentOwnDeathCount >= DeathSpiralMinDeaths): there the
+            // `## Survival caution` tail capsule takes over and correctly says raising max
+            // HP will NOT help while the respawn penalty keeps re-stacking — so this
+            // "invest in max HP FIRST" pointer must yield to avoid contradicting it.
             if (secondsSinceLastDeath is int dsd
                 && dsd <= RecentDeathSalienceWindowSeconds
+                && recentOwnDeathCount < DeathSpiralMinDeaths
                 && world.Self.AvailableExperience is long sxp
                 && ShouldSurfaceUnspentXp(sxp, MinMeaningfulUnspentXp))
                 sb.AppendLine(
@@ -9148,6 +9215,40 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // capsules intact.
         var salienceTailStart = sb.Length;
 
+        // ── ## Survival caution (death-spiral escape, protected tail) ─
+        // Highest-urgency tail capsule: when the bot has died DeathSpiralMinDeaths+
+        // times within DeathSpiralWindow it is in a death-spiral — AC's death
+        // penalty is a stacking multiplier that lowers effective max HP (and other
+        // vitals/skills) one step per death and RESETS its recovery counter on each
+        // death, and it burns off ONLY by earning XP between deaths; so a bot that
+        // keeps dying respawns ever weaker and cannot recover by raising max HP
+        // alone. Surface the bot's OWN death-RATE + the generic mechanic + the
+        // escape (disengage, travel to a safer/weaker area, earn XP from safe kills
+        // until it burns down) in the protected tail so it survives the dense-scene
+        // body cut. It explicitly OVERRIDES the optional-combat guidance and the
+        // SPEND XP "dying -> raise max HP" tiebreaker for this state so those do not
+        // contradict it. Gated purely on the bot's OWN observed deaths; it names no
+        // monster/place/stat build/number (other than the bot's own death count)
+        // and preserves the HOSTILE-on-you / explicit-directive priority. The LLM
+        // still decides where to go and when to resume.
+        if (recentOwnDeathCount >= DeathSpiralMinDeaths)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Survival caution");
+            sb.AppendLine(
+                $"- you have DIED {recentOwnDeathCount} times in the last several minutes — you are in a " +
+                "DEATH-SPIRAL. Repeated deaths in quick succession STACK a penalty that lowers your EFFECTIVE " +
+                "max HP (and other vitals — you come back weaker each time), and EACH new death RESETS your " +
+                "recovery progress, so the penalty burns off ONLY as you EARN XP WITHOUT dying — raising max HP " +
+                "helps less and will NOT fix it alone while the deaths keep resetting your recovery. BREAK the " +
+                "spiral: do NOT start optional fights you might lose; `Explore` AWAY from whatever keeps killing " +
+                "you toward a SAFER, weaker area (or `Recall` if you have an attuned lifestone), then earn XP " +
+                "from only SAFE, winnable kills (or other low-risk progress) until the penalty burns down. While " +
+                "this caution applies it OVERRIDES the optional-combat/hunt guidance and the 'dying -> raise max " +
+                "HP' XP tiebreaker above. (A `HOSTILE` already attacking you, or an explicit server/quest " +
+                "directive, still takes priority — defend or flee as needed.)");
+        }
+
         // ── ## Recent directive check (end-of-prompt salience capsule, cp-2346)
         // The QUEST-DIALOG COMPILER rule renders mid-prompt and can be lost
         // behind the long context; re-surface a short decision-proximate
@@ -9211,7 +9312,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // make nearby monsters winnable. Elevate the SPEND option as a salient pointer for that
         // exact situation. Balance-preserving (spend OR travel-to-easier, but spend either way);
         // names no stat build / monster / number; the LLM still decides.
-        if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath))
+        if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath, recentOwnDeathCount))
         {
             sb.AppendLine();
             sb.AppendLine("## Spend before wandering");
@@ -9489,6 +9590,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     ? "your trained WEAPON SKILL (the main accuracy lever, raised via `RaiseSkill` using a name from your `trained skills` in `## Self`) and coordination"
                     : "coordination (`## Self` lists no `trained skills`, so `RaiseSkill` is unavailable here — raise the attribute)";
                 var hurtLever = "strength";
+                // The "dying fast -> raise max HP" mapping is correct ONLY outside a
+                // death-spiral. While spiraling (recentOwnDeathCount >= threshold) raising
+                // max HP does NOT fix it (the penalty re-stacks + resets recovery), so point
+                // at the `## Survival caution` escape instead — keeping this tail mapping
+                // consistent with the caution + the SPEND XP DEATH-SPIRAL EXCEPTION.
+                var dyingLever = recentOwnDeathCount >= DeathSpiralMinDeaths
+                    ? "dying REPEATEDLY in quick succession is a DEATH-SPIRAL — raising max HP will NOT dig you out (see `## Survival caution`); retreat to safer content and earn XP WITHOUT dying"
+                    : "dying FAST points to endurance/health";
                 // For a WIELDED weapon, strength does not drive accuracy (the weapon skill +
                 // coordination do), so it is the wrong accuracy lever. UNARMED is the exception:
                 // fist to-hit is half STRENGTH, so strength IS an accuracy lever there (named in
@@ -9501,8 +9610,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "- apply the SPEND XP rule to YOUR facts above (which to raise stays your call): swings being " +
                     $"EVADED (the landed-vs-evaded split) is an ACCURACY/miss problem — driven by {accuracyLevers}, " +
                     "and NOT fixed by endurance/health (which only raise max HP)" + strengthAccuracyCaveat +
-                    $" Being OUT-DAMAGED after your hits LAND points to {hurtLever}; dying " +
-                    "FAST points to endurance/health. Pouring XP into max HP while your swings keep evading does NOT " +
+                    $" Being OUT-DAMAGED after your hits LAND points to {hurtLever}; {dyingLever}. Pouring XP into max HP while your swings keep evading does NOT " +
                     "fix accuracy — read your own landed-vs-evaded and kills above and raise the lever your evidence " +
                     "points to.");
             }
