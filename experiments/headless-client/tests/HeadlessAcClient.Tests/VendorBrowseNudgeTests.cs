@@ -346,4 +346,20 @@ public class VendorBrowseNudgeTests
             w, untalkedNpcInView: true, vendorInView: false);
         Assert.Contains("nearestNpc=\"Townsperson\"@9.0", key);
     }
+
+    [Fact]
+    public void DiagKey_ReportsArmedState()
+    {
+        // The actual FIND cue is suppressed while UNARMED, so the diagnostic
+        // reports armed= alongside ruleFires=: sourceInView (ruleFires) True with
+        // armed=False explains a cue that does not render. Pass armed:false (the
+        // helper defaults armed:true and injects a wielded weapon) to model an
+        // unarmed bot.
+        var w = World(vendorVisible: false, npcVisible: true, armed: false,
+            contractStages: new uint[] { 3u, 3u });
+        var key = LlmGoalPolicy.BuildContractSourceDiagKey(
+            w, untalkedNpcInView: true, vendorInView: false);
+        Assert.Contains("armed=False", key);
+        Assert.Contains("ruleFires=True", key);
+    }
 }

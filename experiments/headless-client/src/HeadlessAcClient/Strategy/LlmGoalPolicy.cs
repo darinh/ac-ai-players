@@ -7710,9 +7710,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Pure key builder for the contract-batch-source diagnostic (extracted for
     // deterministic unit testing). The nearest non-monster, non-corpse creature
     // is the "is a task-giver near?" proxy. `ruleFires` mirrors the FIND-A-
-    // KILL-TASK-SOURCE gate (an open-panel-less vendor OR an un-talked npc in
-    // view). Own perception + own contract projection + own vendor-panel state
-    // only; no decision, no game knowledge.
+    // KILL-TASK-SOURCE gate's SOURCE-IN-VIEW disjunct (an open-panel-less vendor
+    // OR an un-talked npc in view); the actual cue ALSO gates on combat-readiness
+    // (it is suppressed while UNARMED) + contract state, so `armed` is reported
+    // too — sourceInView=True with armed=False explains a non-rendered cue.
+    // Own perception + own contract projection + own vendor-panel + inventory
+    // state only; no decision, no game knowledge.
     internal static string BuildContractSourceDiagKey(
         WorldStateProjection world, bool untalkedNpcInView, bool vendorInView)
     {
@@ -7727,7 +7730,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return
             $"doneBatch={world.Contracts.Count} untalkedNpcInView={untalkedNpcInView} " +
             $"vendorInView={vendorInView} vendorPanelOpen={world.Vendor is not null} " +
-            $"ruleFires={ruleFires} nearestNpc={npcDesc}";
+            $"ruleFires={ruleFires} armed={IsCombatCapable(world.Inventory)} nearestNpc={npcDesc}";
     }
 
     // cp-2402: cheap pre-pass for the BLOCKED-targets rule's relevance gate.
