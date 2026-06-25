@@ -6579,12 +6579,17 @@ internal sealed class HandshakeDriver : IDisposable
                                     motionIndoorPathAttempted = true;
                                     crossLbAdvanceCooldownUntil[boundary.Id] =
                                         nowWall + crossLbAdvanceCooldown;
-                                    // Route-stuck detection: if the route keeps re-advancing the
-                                    // SAME boundary for this sighting (cannot get past it), surface
-                                    // the destination as route-blocked so the policy cues the LLM to
-                                    // stop re-Exploring an unreachable place; a NEW boundary =
-                                    // progress (clear). The LLM still decides what to do instead.
-                                    switch (crossLbRouteStuck.RecordAdvance(farSighting.Id, boundary.Id))
+                                    // Route-stuck detection: if the route stops getting CLOSER to
+                                    // this sighting across advances (re-hitting one boundary it
+                                    // cannot cross, OR wandering between boundaries without closing
+                                    // in), surface the destination as route-blocked so the policy
+                                    // cues the LLM to stop re-Exploring an unreachable place; a
+                                    // CONVERGING advance = progress (clear). The LLM still decides.
+                                    var (botGx, botGy) = Strategy.AcCoords.ToGlobalXY(tacticsSelfCell, tacticsSelf.Position);
+                                    var stuckDx = botGx - farSighting.WorldX;
+                                    var stuckDy = botGy - farSighting.WorldY;
+                                    var distToSightingU = (float)Math.Sqrt(stuckDx * stuckDx + stuckDy * stuckDy);
+                                    switch (crossLbRouteStuck.RecordAdvance(farSighting.Id, distToSightingU))
                                     {
                                         case HeadlessAcClient.World.CrossLbRouteStuck.RouteAdvanceState.Blocked:
                                             llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(farSighting.Name);
@@ -6600,7 +6605,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                 crossLbBlockedSightingId = null;
                                             }
                                             break;
-                                        // Building (same boundary, below threshold): leave the flag unchanged.
+                                        // Building (not converging, below threshold): leave the flag unchanged.
                                     }
                                     if (WorldDistance.TrySquaredDistance(tacticsSelf, dest, out var d2adv))
                                         bestDist = (float)Math.Sqrt(d2adv);
