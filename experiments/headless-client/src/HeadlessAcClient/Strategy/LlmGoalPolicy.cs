@@ -2050,6 +2050,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return loopCount >= ExploreLoopedVendorThreshold ? vendorGuid : (uint?)null;
     }
 
+    // Buy{vendor-name} with NO vendor trade panel open -> the vendor guid to Use
+    // (approach + open the panel). The Buy dispatch FAILS a Buy when no panel is open
+    // within reach (by design, expecting the LLM to Use/approach the vendor first), but
+    // a model often re-emits the SAME Buy (sticky) instead, looping on "no panel open"
+    // without ever approaching. When the Buy NAMES a uniquely-visible vendor and no panel
+    // is open, this returns that vendor's guid so the verb can be rewritten to Use. Once
+    // a panel IS open (world.Vendor != null) it returns null, so it only fires during the
+    // approach phase (no loop; the eventual Buy resolves normally). Keyed on the open-panel
+    // wire state + the IsVendor bit + the bot's OWN named target; no autonomous pick.
+    internal static uint? TryResolveBuyVendorNoPanel(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Buy) return null;
+        if (world.Vendor is not null) return null;          // a panel is open -> let Buy run
+        if (goal.Target?.Name is not string name || string.IsNullOrWhiteSpace(name)) return null;
+        return ResolveUniqueVisibleVendorByName(world.Visible, name);
+    }
+
     // Returns the guid of the UNIQUE visible VENDOR (IsVendor, not monster/corpse) that
     // binds `name` under the SAME name semantics as the Motor's SelectorResolver: exact
     // (case-insensitive), exact after stripping a trailing quoted-role suffix, OR a UNIQUE
@@ -4051,6 +4068,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = exploreVendorGuid },
+                Item = null,
+            };
+        }
+
+        // Buy{vendor} with no trade panel open -> Use{vendor} (approach + open the panel).
+        // The Buy dispatch FAILS a Buy when no vendor panel is open within reach (by design,
+        // expecting the LLM to approach the vendor first via Use), but a model often re-emits
+        // the SAME Buy (sticky) instead of Use, looping on "no panel open" without ever
+        // approaching. When the Buy names a VISIBLE vendor and no panel is open, rewrite into
+        // Use{that vendor} -- the approach the dispatch expects. Once the panel is open it
+        // never fires, so the eventual Buy resolves normally + the affordability marker/
+        // recent-buy guard handle an unaffordable item; no loop. Mirrors the explore-vendor->
+        // use / Pickup->Use rewrites; the LLM chose WHICH vendor, the Motor only corrects the
+        // verb/sequencing.
+        if (TryResolveBuyVendorNoPanel(goal, world) is uint buyVendorGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] buy-no-panel -> use: target={goal.Target}" +
+                $" guid=0x{buyVendorGuid:X8} — Buy needs an OPEN vendor panel; none open," +
+                " so Use the visible vendor first to approach + open its trade panel.");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = buyVendorGuid },
                 Item = null,
             };
         }
