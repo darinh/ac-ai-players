@@ -132,6 +132,22 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Resolve the escalating-backoff cap for the out-of-reach interaction
+    // suppression from the env var. Falls back to 5 for an unset/blank/invalid/
+    // below-min value; clamps to [1, 20]. 1 disables escalation (fixed base
+    // cooldown); higher values let a persistently out-of-reach target be retried
+    // (re-locked + walked to) progressively less often, up to base x cap.
+    internal static int ResolveInteractUnreachableBackoffMax(string? envValue)
+    {
+        const int Default = 5;
+        const int Min = 1;
+        const int Max = 20;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
     // Resolve the per-run observe budget from the env var. Falls back to the 3600s
     // default for an unset/blank/invalid value; clamps to [60s, 7 days] so a typo
     // can neither starve a run nor leave a process effectively immortal.
@@ -896,6 +912,11 @@ internal sealed class HandshakeDriver : IDisposable
         // retried after the cooldown (a later approach from a different cell may
         // succeed). Mechanical nav bookkeeping; no game knowledge.
         var                  interactUnreachableCooldown = TimeSpan.FromSeconds(60);
+        // Escalating-backoff cap for the out-of-reach interaction suppression:
+        // a persistently unreachable target (re-marked within the tracker's decay
+        // window) gets retried progressively less often, up to base x this cap.
+        var                  interactUnreachableBackoffMax = ResolveInteractUnreachableBackoffMax(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_INTERACT_UNREACHABLE_BACKOFF_MAX"));
         var                  interactUnreachable = new HeadlessAcClient.World.InteractUnreachableTracker();
         // Recently-killed creature guids (combat saw health reach 0), TTL'd. A
         // slain creature can LINGER in the world model (no ObjectDelete, health=0
@@ -4907,7 +4928,8 @@ internal sealed class HandshakeDriver : IDisposable
                             // bypasses visitedTargetGuids) stops re-locking the
                             // same terrain-unreachable target every cycle. TTL'd.
                             interactUnreachable.MarkUnreachable(
-                                motionTarget.Guid, DateTime.UtcNow, interactUnreachableCooldown);
+                                motionTarget.Guid, DateTime.UtcNow, interactUnreachableCooldown,
+                                interactUnreachableBackoffMax);
                             tactics.Fail(
                                 $"interaction target out of reach: server walked us toward " +
                                 $"'{motionTarget.Name}' after the use instead of completing it " +

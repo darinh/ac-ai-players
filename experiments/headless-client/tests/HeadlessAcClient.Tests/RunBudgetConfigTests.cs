@@ -96,6 +96,23 @@ public class RunBudgetConfigTests
         Assert.Equal(expected, HandshakeDriver.ResolveAbandonNoDamageSeconds(env));
     }
 
+    [Theory]
+    [InlineData(null, 5)]       // unset -> default
+    [InlineData("", 5)]         // blank -> default
+    [InlineData("abc", 5)]      // unparseable -> default
+    [InlineData("5", 5)]        // explicit default
+    [InlineData("1", 1)]        // min (accepted) -> escalation disabled (fixed base ttl)
+    [InlineData("3", 3)]        // mid override
+    [InlineData("20", 20)]      // max (accepted)
+    [InlineData("0", 5)]        // below min -> default
+    [InlineData("-2", 5)]       // negative -> default
+    [InlineData("21", 20)]      // above max -> clamped
+    [InlineData("100000", 20)]  // far above max -> clamped
+    public void ResolveInteractUnreachableBackoffMax_DefaultsAndClamps(string? env, int expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveInteractUnreachableBackoffMax(env));
+    }
+
     [Fact]
     public void OuterBudgetHeadroom_CoversWorstCaseReconnectOverhead()
     {

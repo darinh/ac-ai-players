@@ -117,4 +117,124 @@ public class InteractUnreachableTrackerTests
         // The expired chest entry was lazily evicted by the snapshot.
         Assert.Equal(1, t.Count);
     }
+
+    // ── escalating backoff (opt-in via maxBackoffMultiplier) ──────────────
+
+    [Fact]
+    public void Backoff_Default1_DoesNotEscalate()
+    {
+        // The default path (no/explicit 1 multiplier) keeps the fixed base ttl:
+        // rapid consecutive re-marks each extend by only the base 60s.
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 1);
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(5), Ttl, maxBackoffMultiplier: 1);
+        // Still only base ttl from the last mark (T0+5+60 = T0+65), NOT 2x.
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(64)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(65)));
+    }
+
+    [Fact]
+    public void Backoff_ConsecutiveRefusals_ExtendCooldown()
+    {
+        // A second refusal within the decay window doubles the base ttl (streak 2).
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 5);              // streak1 -> T0+60
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(30), Ttl, maxBackoffMultiplier: 5); // streak2 -> T0+30+120 = T0+150
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(149)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(150)));
+    }
+
+    [Fact]
+    public void Backoff_CapsAtMaxMultiplier()
+    {
+        // With cap 2, a third consecutive refusal stays at 2x base (not 3x).
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 2);               // streak1 -> T0+60
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(10), Ttl, maxBackoffMultiplier: 2); // streak2 -> T0+10+120 = T0+130
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(20), Ttl, maxBackoffMultiplier: 2); // streak3 capped@2 -> T0+20+120 = T0+140
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(139)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(140)));
+    }
+
+    [Fact]
+    public void Backoff_StreakResets_AfterDecayWindowGap()
+    {
+        // A re-mark more than the 5-min decay window after the previous one resets
+        // the streak to 1 -> back to the base ttl (NOT the escalated 2x), so a
+        // target reachable from a new position later is not over-suppressed.
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 5);                  // streak1 -> T0+60 (expires)
+        // 400s later (> 300s decay window): streak resets to 1 -> base 60s.
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(400), Ttl, maxBackoffMultiplier: 5);  // streak1 -> T0+460
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(459)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(460)));
+    }
+
+    [Fact]
+    public void Backoff_DecayReset_GivesFreshBaseTtl_NotStaleLongSuppression()
+    {
+        // After a gap longer than the (scaled) decay window the streak resets, so
+        // the new cooldown is the base ttl (a fresh chance), NOT an inherited
+        // escalated one. With cap 5 the decay window is 60*(5+1)=360s.
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 5);                // streak1 -> T0+60
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(1), Ttl, maxBackoffMultiplier: 5);  // streak2 -> T0+121
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(2), Ttl, maxBackoffMultiplier: 5);  // streak3 -> T0+182
+        // Re-mark 400s after the last mark (> 360s window) -> streak resets to 1 ->
+        // base 60s from now (T0+402 -> T0+462), a fresh chance.
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(402), Ttl, maxBackoffMultiplier: 5);
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(461)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(462)));   // base ttl, not escalated
+    }
+
+    [Fact]
+    public void Backoff_RealRetryCadence_ClimbsToCapThenHolds()
+    {
+        // Model the REAL driver cadence: the guid is suppressed for its current
+        // cooldown, so the next refusal re-mark arrives ~cooldown later. With cap 5
+        // the cooldown should climb 60 -> 120 -> 180 -> 240 -> 300 then HOLD at 300
+        // (the scaled decay window 360s keeps the streak from resetting at the
+        // boundary), NOT cycle back to 60.
+        var t = new InteractUnreachableTracker();
+        const int cap = 5;
+        var mark = T0;
+        var expectedTtl = new[] { 60, 120, 180, 240, 300, 300, 300 };
+        foreach (var ttlSec in expectedTtl)
+        {
+            t.MarkUnreachable(ChestGuid, mark, Ttl, maxBackoffMultiplier: cap);
+            // Still suppressed just before the expected expiry, free at it.
+            Assert.True(t.IsSuppressed(ChestGuid, mark.AddSeconds(ttlSec - 1)));
+            Assert.False(t.IsSuppressed(ChestGuid, mark.AddSeconds(ttlSec)));
+            // Next refusal arrives right when the cooldown lapses (the natural cadence).
+            mark = mark.AddSeconds(ttlSec);
+        }
+    }
+
+    [Fact]
+    public void Backoff_BoundaryGapEqualToWindow_Resets()
+    {
+        // The streak-continue test is strict (`now < StaleAfter`), so a re-mark at
+        // EXACTLY the decay window (cap 5 -> 360s) resets to base ttl, not escalates.
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 5);                 // streak1, StaleAfter T0+360
+        t.MarkUnreachable(ChestGuid, T0.AddSeconds(360), Ttl, maxBackoffMultiplier: 5); // gap==360 -> reset -> base 60s -> T0+420
+        Assert.True(t.IsSuppressed(ChestGuid, T0.AddSeconds(419)));
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(420)));    // base ttl, would be T0+480 if it had escalated
+    }
+
+    [Fact]
+    public void Backoff_StrikeState_SelfPrunes_OnReads_InQuiescence()
+    {
+        // Strike state must outlive the _until cooldown (to accumulate the streak)
+        // but not leak forever if marks stop. A read after the decay window prunes it.
+        var t = new InteractUnreachableTracker();
+        t.MarkUnreachable(ChestGuid, T0, Ttl, maxBackoffMultiplier: 5);  // StaleAfter T0+360
+        Assert.Equal(1, t.StrikeCount);
+        // Within the window the strike survives even though the cooldown lapsed at T0+60.
+        Assert.False(t.IsSuppressed(ChestGuid, T0.AddSeconds(100)));
+        Assert.Equal(1, t.StrikeCount);
+        // A read at/after the decay window prunes the stale strike (no further marks).
+        t.SnapshotSuppressed(T0.AddSeconds(360));
+        Assert.Equal(0, t.StrikeCount);
+    }
 }
