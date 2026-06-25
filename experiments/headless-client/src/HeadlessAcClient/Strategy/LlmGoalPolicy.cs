@@ -7573,6 +7573,47 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
+    // The NPC NAME of the bot's most-recent Talk or Explore goal emission (its live
+    // re-targeting target), normalized, or null. Anchors the settled-contract cue on
+    // the NPC the bot is ACTUALLY fixated on, so in the roving multi-contract case the
+    // cue never names the wrong settled NPC. Structural read of own emission history.
+    internal static string? LatestEmittedInteractionTargetName(EventStream events)
+    {
+        // RecentGoalEmissions() is newest-first, so the bot's CURRENT pursuit is the
+        // FIRST non-empty emission. The cue is about a LIVE re-targeting, so only the
+        // newest emission counts: if it is NOT a Talk/Explore (e.g. a newer Attack/Use
+        // after an earlier settled Talk), the bot has MOVED ON -> return null.
+        foreach (var ge in events.RecentGoalEmissions())
+        {
+            var txt = ge.Text;
+            if (string.IsNullOrEmpty(txt)) continue;
+            if (!(txt.StartsWith("Talk", StringComparison.Ordinal)
+                  || txt.StartsWith("Explore", StringComparison.Ordinal)))
+                return null;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) return null;
+            var nm = System.Text.RegularExpressions.Regex.Match(
+                txt.Substring(ti), "name=\"([^\"]+)\"");
+            return nm.Success ? NormalizeEmittedTargetName(nm.Groups[1].Value) : null;
+        }
+        return null;
+    }
+
+    // The NAME of a settled stage-3 turn-in NPC the bot is RE-TARGETING, or null.
+    // Anchors on the bot's LATEST Talk/Explore target (its live fixation) and confirms
+    // it is a settled turn-in NPC via IsSettledStage3TurnInNpc — the SAME recognition the
+    // Motor's settled-turn-in Talk/Explore DROPS use, so the cue fires exactly when the
+    // Motor is already dropping those goals. In the roving multi-contract case this names
+    // the NPC actually being re-targeted, not just the first settled one. Own contract
+    // stage + own goal-emission history; no game knowledge.
+    internal static string? FindReTargetedSettledTurnInNpc(WorldStateProjection world, EventStream events)
+    {
+        if (world.Contracts.Count == 0) return null;
+        var latest = LatestEmittedInteractionTargetName(events);
+        if (string.IsNullOrWhiteSpace(latest)) return null;
+        return IsSettledStage3TurnInNpc(world, events, latest) ? latest : null;
+    }
+
     // The NAMES of any done-batch issuing/turn-in NPCs (a done contract's
     // NpcStart/NpcEnd) currently in view as a creature/vendor. Shared by the
     // unbounded "a contract source IS in view" check (DoneBatchIssuerInView) and the
@@ -9779,6 +9820,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "which explains what each does and how to choose by your bottleneck) so the monsters around you " +
                 "become winnable: getting stronger IS progress. (If this area is genuinely far above your level, " +
                 "traveling toward a known easier area is also valid — but spend your hoarded XP either way.)");
+        }
+
+        // ── ## Settled contract — no turn-in (salience, protected tail) ──
+        // Decision-proximate extraction of the buried "a settled stage-3 contract has
+        // no separate hand-in; re-attempting its turn-in is fixation, not progress"
+        // guidance (in the long QUEST-DIALOG COMPILER rule). Fires ONLY when the bot
+        // has PROVENLY re-targeted (Talk+Explore) a settled turn-in NPC past the
+        // threshold — not as a static render — so it points at the exact live mistake.
+        // Names the NPC from the runtime contract projection (not a hardcoded list);
+        // the LLM still decides what to do instead. Mirrors the salience-extraction
+        // pattern of SURVIVABILITY-FIRST / Spend before wandering.
+        var reTargetedSettledNpc = FindReTargetedSettledTurnInNpc(world, events);
+        if (reTargetedSettledNpc is { Length: > 0 })
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Settled contract — no turn-in");
+            sb.AppendLine(
+                $"- you have repeatedly re-targeted `{reTargetedSettledNpc}` to turn in a DONE contract " +
+                "(stage 3). That contract is COMPLETE and has NO separate turn-in step — re-`Talk`ing or " +
+                "`Explore`-ing toward that NPC changes nothing and is NOT progress. STOP returning to it. " +
+                "Do something OTHER than re-targeting that done contract's NPC: hunt monsters for XP (this " +
+                "also works toward arming/leveling) — and, ONCE you can fight effectively, you MAY get a " +
+                "FRESH batch (Buy a new contract, or Use/Talk a contract source for new work) instead.");
         }
 
         // ── ## Persistent objectives (intent stack re-surfaced, protected tail) ─
