@@ -6851,6 +6851,98 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsGoalRecentlyRejected_RejectionSurvivesRingRollover()
+    {
+        // Regression for the perception-ring-eviction bug: the dedup must still
+        // see a server rejection after the bot's next decision, even though a
+        // single decision gap floods the bounded event ring (DefaultCapacity 256)
+        // with hundreds of perception events. A ring scan (raw Recent OR
+        // RecentOfKind) loses the rejection once it rolls out of the ring; the
+        // DEDICATED durable rejection window outlives the ring. Flood with MORE
+        // than the ring capacity so any ring-based scan would have evicted it.
+        // A semantic rejection (real WeenieError) so the transport-staleness
+        // path is not involved — this isolates pure eviction.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Name = "Worcer",
+            Text = "Worcer doesn't want that.",
+            ItemGuid = 0x80001269u,
+        });
+        // 300 > the 256-ring capacity: the rejection is evicted from the ring
+        // entirely, so only the durable window can still surface it.
+        for (int i = 0; i < 300; i++)
+            es.Append(new StreamEvent
+            { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+
+        var talk = new Goal
+        {
+            Kind = GoalKind.Talk,
+            Target = new Selector { Name = "Worcer" },
+        };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(talk, es));
+    }
+
+    [Theory]
+    [InlineData(89, true)]   // just inside the 90s window -> still blocks
+    [InlineData(90, true)]   // exactly at the boundary -> still blocks (>= cutoff)
+    [InlineData(91, false)]  // just past the window -> aged out, goal flows
+    public void IsGoalRecentlyRejected_RecencyBoundary(int rejectionAgeSeconds, bool expectMatch)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = now - TimeSpan.FromSeconds(rejectionAgeSeconds),
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
+            Name = "Worcer",
+            Text = "Worcer doesn't want that.",
+            ItemGuid = 0x80001269u,
+        });
+
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Worcer" } };
+        Assert.Equal(expectMatch, LlmGoalPolicy.IsGoalRecentlyRejected(talk, es, now));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_TransportFailure_ClearedByArrival_SurvivesRingRollover()
+    {
+        // A transport rejection (Unreachable) is durable, and so is the arrival
+        // that should clear it. After the bot arrives at the target, a >256-event
+        // perception flood must NOT resurrect the stale rejection: the arrival
+        // outlives the ring (durable arrivals window) so the stale-clear still
+        // sees it and the goal flows. Without durable arrivals the arrival would
+        // be ring-evicted while the durable rejection survived -> a false block.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ActionRejected,
+            ErrorCode = 0xFFFE, ErrorLabel = "Unreachable",
+            Name = "Worcer",
+            Text = "Unreachable: 'Worcer' (walk timeout 30s)",
+            ItemGuid = 0x80001269u,
+        });
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.PickerArrivedNoAction,
+            Name = "Worcer",
+            ItemGuid = 0x80001269u,
+        });
+        for (int i = 0; i < 300; i++)   // > the 256-ring: both rejection + arrival roll out of the ring
+            es.Append(new StreamEvent
+            { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.HealthChanged });
+
+        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Worcer" } };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(talk, es));
+    }
+
+    [Fact]
     public void IsGoalRecentlyRejected_TransportFailure_ArrivalMatchedByName_WhenNoGuid()
     {
         // When the transport rejection carries no guid, arrival is
@@ -7048,25 +7140,18 @@ public class LlmGoalPolicyTests
     [Fact]
     public void IsGoalRecentlyRejected_OldRejection_OutsideWindow_DoesNotMatch()
     {
-        // Slice O — widened the dedup lookback from 15 to 30 events.
-        // Push the rejection then 35 unrelated events so it falls off
-        // the window.
+        // A rejection ages out of the dedup by TIME, not by event count: once
+        // it is older than the recency window the goal flows again so the bot
+        // can retry (the world may have changed). Stamp the rejection beyond
+        // the 90s window.
         var es = new EventStream();
         es.Append(new StreamEvent
         {
-            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Sequence = -1, Utc = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(91),
             Kind = EventKind.ActionRejected,
             ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant",
             Text = "Worcer",
         });
-        for (int i = 0; i < 35; i++)
-        {
-            es.Append(new StreamEvent
-            {
-                Sequence = -1, Utc = DateTimeOffset.UtcNow,
-                Kind = EventKind.ServerMessage, Text = $"filler {i}",
-            });
-        }
 
         var goal = new Goal
         {
