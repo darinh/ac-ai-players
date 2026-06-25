@@ -13368,6 +13368,106 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsLowHealthDeferredAttackRepeat(new EventStream()));
     }
 
+    // ---- SUSTAIN-COMBAT CHECK (fragile-flee-raise-hp): the prompt cue that fires
+    //      when the bot repeatedly FLEES low-health combat (deferred attacks) with
+    //      unspent XP and is NOT in a recent-death / death-spiral state. ----
+
+    [Fact]
+    public void SustainCombatCheck_RendersWhenFleeingWithUnspentXp()
+    {
+        // Repeated low-health attack deferrals + unspent XP + no recent death + not
+        // spiraling -> the cue surfaces the FLEE pattern and points at BOTH levers
+        // (max HP if winning-but-slow, offense if missing), deferring to the bot's
+        // evidence so it never contradicts the SPEND XP "survive-but-cannot-kill ->
+        // offense" guidance.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.Contains("SUSTAIN-COMBAT CHECK", prompt);
+        Assert.Contains("ENDURANCE/health", prompt);
+        // Balanced, evidence-based: it must NOT categorically claim max HP is the limit;
+        // it names the offense alternative so it cannot mis-steer an offense-limited fight.
+        Assert.Contains("OFFENSE is the limit", prompt);
+        // Lock in the round-1 fix: the old categorical claim must not return.
+        Assert.DoesNotContain("MAX HP is the binding limit", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_AbsentWhenDeferralsAgeOut()
+    {
+        // The deferral signal is windowed (the last ~30 events). Two old defers followed
+        // by enough unrelated events to push them out of the window must NOT keep the cue
+        // latched (it is a CURRENT-fragility cue, not a stale-history one).
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        for (var i = 0; i < 35; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Explore target=name=\"anywhere\" item= source=llm:test",
+            });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_AbsentWhenNotFleeing()
+    {
+        // No low-health deferrals -> not the fragile-flee state -> no cue.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), new EventStream(), null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_AbsentWhenRecentDeath_SurvivabilityFirstOwnsIt()
+    {
+        // A recent death routes to SURVIVABILITY-FIRST CHECK (the else-if yields), so the
+        // flee cue must NOT also fire (no double survivability steer).
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), es, null, null, null, null,
+            secondsSinceLastDeath: 30, recentOwnDeathCount: 0);
+        Assert.Contains("SURVIVABILITY-FIRST CHECK", prompt);
+        Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_AbsentWhenSpiraling()
+    {
+        // In a death-spiral the `## Survival caution` owns it (max HP will not help while
+        // the penalty re-stacks), so the "raise max HP" flee cue must yield.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 3);
+        Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_AbsentWhenNoUnspentXp()
+    {
+        // Fleeing but nothing to invest -> no cue.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 0), es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
+    }
+
     // ---- IsWieldNoWeaponRepeat (cp041): the Motor rejects a Wield whose selector
     //      resolves to no equippable in-bag weapon; a model can re-emit it every
     //      cycle (e.g. trying to wield missile ammo with an empty quiver), burning
