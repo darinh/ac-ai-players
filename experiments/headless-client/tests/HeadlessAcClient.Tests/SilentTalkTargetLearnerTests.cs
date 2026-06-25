@@ -285,6 +285,41 @@ public class SilentTalkTargetLearnerTests
         Assert.Equal(GoalKind.Talk, goal!.Kind);
     }
 
+    [Fact]
+    public void Policy_DoesNotTalkVisiblePlayer_FallsThroughToExplore()
+    {
+        // A visible PLAYER shares the IsCreature wire class but is never a dialog NPC.
+        // The autonomous fallback Talk picker must classify it out (IsDialogNpcCandidate
+        // excludes players) and fall through to Explore rather than marching to Talk it.
+        var policy = new NoQuestKnowledgePolicy(null, null);
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = 0x500000A6u, Name = "Headless", Landblock = 0xAAB5u,
+                CellId = 0xAAB50003u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                {
+                    Guid = 0x500000B7u, Name = "Otherbot", Wcid = 1u,
+                    ItemType = 0x10u, Distance = 10f,
+                    IsCreature = true, IsMonster = false, ObservedHostile = false,
+                    IsPlayer = true,
+                },
+            },
+        };
+
+        var goal = policy.ProposeGoal(world, new EventStream(), null);
+
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Talk, goal!.Kind);
+        Assert.Equal(GoalKind.Explore, goal.Kind);
+    }
+
     // ---- Observability: RecordTalkDispatch outcome + Evaluate conclusions ----
 
     [Fact]

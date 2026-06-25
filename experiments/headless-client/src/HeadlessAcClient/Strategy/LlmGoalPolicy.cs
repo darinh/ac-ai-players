@@ -1384,14 +1384,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
     }
 
+    // A visible object is a dialog-NPC CANDIDATE only when it is a creature that is
+    // neither a monster nor another PLAYER. Players share the IsCreature wire class
+    // and (now that players are surfaced in `Visible`) appear there, but they are
+    // never task/dialog NPCs, so the untalked-npc count, the fallback Talk picker,
+    // the nearest-npc diagnostic, and the untalked-npc render all classify them out
+    // through this one predicate. Corpse / observed-hostile / vendor / already-talked
+    // filters stay per-caller (they vary by call site).
+    internal static bool IsDialogNpcCandidate(VisibleObjectProjection v)
+        => v.IsCreature && !v.IsMonster && !v.IsPlayer;
+
     internal static int CountUntalkedNpcsInView(
         WorldStateProjection world,
         IReadOnlySet<uint>? talkedNpcGuids,
         IReadOnlySet<string>? talkedNpcNames = null,
         bool excludeVendors = false)
         => world.Visible.Count(v =>
-            v.IsCreature
-            && !v.IsMonster
+            IsDialogNpcCandidate(v)
             && !v.IsCorpse
             && !v.ObservedHostile
             // IsCreature and IsVendor are independent wire bits: a live vendor is
@@ -2114,8 +2123,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     // The GUID of the unique visible vendor/NPC whose name resolves to NAME (exact /
     // role-stripped / unique whole-word subsequence — the SAME SelectorResolver semantics the
-    // Motor's Use target resolves with). Monsters and corpses are excluded (they have their own
-    // Attack / corpse-loot paths). Returns null when 0 or >1 candidates match (an ambiguous
+    // Motor's Use target resolves with). Monsters, corpses, and other PLAYERS are excluded
+    // (monsters/corpses have their own Attack / corpse-loot paths; another player is not a
+    // Use-target world object). Returns null when 0 or >1 candidates match (an ambiguous
     // partial stays unresolved so the LLM re-decides). Used to move a world object a model
     // mis-filed into a Use goal's ITEM field back into the TARGET field. Pure name resolution
     // over perception; no game knowledge, no autonomous target choice.
@@ -2123,7 +2133,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         IReadOnlyList<VisibleObjectProjection> visible, string name)
     {
         var pool = visible.Where(v =>
-            (v.IsVendor || v.IsCreature) && !v.IsMonster && !v.IsCorpse && v.Name is not null).ToList();
+            (v.IsVendor || v.IsCreature) && !v.IsMonster && !v.IsCorpse && !v.IsPlayer && v.Name is not null).ToList();
         if (pool.Count == 0) return null;
         var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
         var exact = pool.Where(v =>
@@ -7721,7 +7731,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         var ruleFires = (vendorInView && world.Vendor is null) || untalkedNpcInView;
         var nearestNpc = world.Visible
-            .Where(v => v.IsCreature && !v.IsMonster && !v.IsCorpse)
+            .Where(v => IsDialogNpcCandidate(v) && !v.IsCorpse)
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         var npcDesc = nearestNpc is null
@@ -10357,7 +10367,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             int untalkedChars = 0;
             foreach (var v in world.Visible
                          .Where(v =>
-                             v.IsCreature && !v.IsMonster && !v.IsCorpse && !v.ObservedHostile
+                             IsDialogNpcCandidate(v) && !v.IsCorpse && !v.ObservedHostile
                              && !nearestShownGuids.Contains(v.Guid)
                              && !IsNpcAlreadyTalked(v, talkedNpcGuids, talkedNpcNames))
                          .OrderBy(v => v.Distance ?? float.MaxValue))
