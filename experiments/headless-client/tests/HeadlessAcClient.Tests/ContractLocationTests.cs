@@ -301,6 +301,119 @@ public class ContractLocationTests
     }
 
     [Fact]
+    public void SettledContractCue_FiresWhenReTargetingSettledTurnInNpc()
+    {
+        // The salience extraction: when the bot has re-targeted a settled stage-3
+        // turn-in NPC past the recognition threshold, the protected-tail cue fires
+        // and names that NPC, telling the LLM there is no turn-in and to do else.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 850u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = since,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Buckminster", 3, since), null);
+        Assert.Contains("## Settled contract — no turn-in", prompt);
+        Assert.Contains("Buckminster", prompt);
+        Assert.Contains("NO separate turn-in step", prompt);
+    }
+
+    [Fact]
+    public void SettledContractCue_OmittedForSingleAttempt()
+    {
+        // One (legitimate) post-completion attempt is below the recognition threshold,
+        // so the NPC is not yet "settled" -> the cue must not fire.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 851u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = since,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Buckminster", 1, since), null);
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+    }
+
+    [Fact]
+    public void SettledContractCue_OmittedWhenNoContracts()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(), new EventStream(), null);
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+    }
+
+    [Fact]
+    public void SettledContractCue_FiresOnExploreReTargeting()
+    {
+        // The Explore branch: a LOCATE/REACH contract is pursued via navigate-only
+        // Explore (not Talk). The newest emission is Explore toward the settled NPC.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        { ContractId = 863u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster", Stage3SinceUtc = since };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithExploreGoals("Buckminster", 3, since), null);
+        Assert.Contains("## Settled contract — no turn-in", prompt);
+        Assert.Contains("Buckminster", prompt);
+    }
+
+    [Fact]
+    public void SettledContractCue_RovingTwoSettled_NamesTheCurrentlyTargetedNpc()
+    {
+        // Roving multi-contract case: TWO settled turn-in NPCs both qualify. The cue
+        // must name the one the bot is CURRENTLY re-targeting (its LATEST emission),
+        // not just the first settled contract.
+        var since = DateTimeOffset.UtcNow;
+        var c1 = new ContractProjection
+        { ContractId = 860u, Stage = 3u, Name = "Find the Pathwarden", NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since };
+        var c2 = new ContractProjection
+        { ContractId = 861u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster", Stage3SinceUtc = since };
+        var es = new EventStream();
+        AppendTalkGoals(es, "Pathwarden Thorolf", 3, since);
+        AppendTalkGoals(es, "Buckminster", 3, since.AddSeconds(1)); // newer -> the live target
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(c1, c2), es, null);
+
+        Assert.Contains("## Settled contract — no turn-in", prompt);
+        var cueLine = prompt.Split('\n').FirstOrDefault(l => l.Contains("re-targeted") && l.Contains("DONE contract"));
+        Assert.NotNull(cueLine);
+        Assert.Contains("Buckminster", cueLine!);          // the live (latest) target
+        Assert.DoesNotContain("Pathwarden", cueLine!);     // not the other settled NPC
+    }
+
+    private static void AppendTalkGoals(EventStream es, string npcName, int times, DateTimeOffset at)
+    {
+        for (int i = 0; i < times; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = at, Kind = EventKind.GoalEmitted,
+                Text = $"Talk target=name=\"{npcName}\" item= source=llm:test",
+            });
+    }
+
+    [Fact]
+    public void SettledContractCue_OmittedWhenNewerGoalIsNotInteraction()
+    {
+        // The cue is about the bot's CURRENT pursuit: a newer Attack (or any non-
+        // Talk/Explore goal) AFTER the settled Talk/Explore means the bot has MOVED ON,
+        // so the cue must not fire stale during combat.
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        { ContractId = 862u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster", Stage3SinceUtc = since };
+        var es = new EventStream();
+        AppendTalkGoals(es, "Buckminster", 3, since);
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = since.AddSeconds(1), Kind = EventKind.GoalEmitted,
+            Text = "Attack target=name=\"Drudge\" item= source=llm:test", // newer, non-interaction
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), es, null);
+
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+    }
+
+    [Fact]
     public void Capsule_Stage3RepeatedExplorePursuit_SurfacesDoneNoHandIn()
     {
         // cp031: a stage-3 contract whose objective is a LOCATE/REACH task is
