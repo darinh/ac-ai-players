@@ -7651,7 +7651,15 @@ internal sealed class HandshakeDriver : IDisposable
                                     tactics.Fail(
                                         combatDeferredAttack
                                             ? "combat deferred: self-health too low to re-engage — recover before attacking"
-                                            : "selector resolved to no live object",
+                                            // Distinguish an ITEM-only miss (the TARGET resolved but the required
+                                            // inventory item did not) from a TARGET selector-miss. Only a target
+                                            // selector-miss is evidence the target itself could not be reached/bound,
+                                            // so readers that key on the no-live-object suffix (IsUnreachableTargetRepeat;
+                                            // the far-visible "unreachable" Explore escalation) do not conflate an
+                                            // item-acquisition failure with an unreachable target.
+                                            : (goalCarriesItem && itemSnap is null && targetSnap is not null)
+                                                ? "required inventory item unresolved"
+                                                : "selector resolved to no live object",
                                         eventStream);
                                 }
                             }
