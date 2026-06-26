@@ -7746,6 +7746,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
+    // Whether `npcName` is the turn-in NPC of a stage-3 DONE contract objective with no
+    // remaining live business — the INTENT-level staleness signal. Differs from
+    // IsSettledStage3TurnInNpc: it does NOT require a NAMED Talk/Explore re-targeting count,
+    // because an intent can pursue a done objective by decomposing into an UNNAMED Explore
+    // (so that count stays zero), yet the objective is already complete the moment its
+    // contract reaches stage 3. Gated on the SAME structural facts the goal-level recognition
+    // uses (unique stage-3 NpcEnd with the done-time recorded, and NO non-stage-3 contract
+    // involving the NPC — so an NPC with live business is never flagged). Own contract
+    // projection only; no game knowledge.
+    internal static bool IsDoneStage3ContractObjectiveNpc(WorldStateProjection world, string? npcName)
+    {
+        var name = OneLine(npcName);
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        bool Involves(ContractProjection o) =>
+            string.Equals(OneLine(o.NpcStart), name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
+        if (world.Contracts.Any(o => o.Stage != 3u && Involves(o)))
+            return false; // live (non-done) business with this NPC -> not a settled objective
+        bool IsEnd(ContractProjection o) =>
+            string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
+        if (world.Contracts.Count(IsEnd) != 1)
+            return false; // ambiguous turn-in attribution -> do not flag
+        return world.Contracts.Any(c => IsEnd(c) && c.Stage == 3u && c.Stage3SinceUtc is not null);
+    }
+
     // The NPC NAME of the bot's most-recent Talk or Explore goal emission (its live
     // re-targeting target), normalized, or null. Anchors the settled-contract cue on
     // the NPC the bot is ACTUALLY fixated on, so in the roving multi-contract case the
@@ -10037,28 +10062,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "## Persistent objectives (re-surfaced because the full `## Intent stack` above can be trimmed " +
                 $"to fit; revision={stack.Revision}, depth={stack.Depth}/{stack.MaxDepth})");
-            var hasActionableObjective = false;
+            var hasUnfinishedActiveObjective = false;
+            var hasAnyActiveObjective = false;
+            var hasSettledActiveObjective = false;
+            var topFrameSettled = false;
             for (int i = 0; i < frames.Count; i++)
             {
                 var f = frames[i];
-                var role = i == frames.Count - 1 ? "TOP" : $"ancestor[{i}]";
+                var isTop = i == frames.Count - 1;
+                var role = isTop ? "TOP" : $"ancestor[{i}]";
                 var tgt = string.IsNullOrEmpty(f.TargetName) ? "" : $" target=\"{f.TargetName}\"";
                 var rat = string.IsNullOrEmpty(f.Rationale) ? "" : $" — {Truncate(f.Rationale, 110)}";
-                sb.AppendLine($"- {role}: kind={f.Kind} status={f.Status}{tgt}{rat}");
+                // A frame whose target is the turn-in NPC of a stage-3 DONE contract is flagged
+                // with the raw contract-stage fact: if THAT frame's objective was to complete or
+                // locate that contract, the objective is already done. Unlike the goal-level
+                // ## Settled turn-in / ## Settled contract cues (which require NAMED Talk/Explore
+                // re-targeting past a threshold), an intent can pursue a done objective via an
+                // UNNAMED Explore ("anywhere" toward the area), so that count stays zero and those
+                // cues never fire. The tag is a non-prescriptive fact, NOT a "do not go there":
+                // the same NPC may also be a contract SOURCE for NEW work (a different objective),
+                // which the note below preserves.
+                var settled = f.Status == IntentLifecycle.Active
+                    && !string.IsNullOrEmpty(f.TargetName)
+                    && IsDoneStage3ContractObjectiveNpc(world, f.TargetName);
+                var settledTag = settled
+                    ? " — note: this NPC's contract is DONE (stage 3; see `## Contracts`)"
+                    : "";
+                sb.AppendLine($"- {role}: kind={f.Kind} status={f.Status}{tgt}{rat}{settledTag}");
                 if (f.Status == IntentLifecycle.Active)
-                    hasActionableObjective = true;
+                {
+                    hasAnyActiveObjective = true;
+                    if (settled)
+                    {
+                        hasSettledActiveObjective = true;
+                        if (isTop) topFrameSettled = true;
+                    }
+                    else
+                    {
+                        hasUnfinishedActiveObjective = true;
+                    }
+                }
             }
-            if (hasActionableObjective)
+            if (hasUnfinishedActiveObjective)
                 sb.AppendLine(
                     "- raw fact, not a recommendation: these are your OWN persistent objectives. An `Active` " +
                     "ancestor resurfaces as TOP when the frames above it pop — an earlier compiled task is NOT " +
                     "gone just because a newer frame sits on top, so do not treat the scene as having no directive " +
                     "while an `Active` one is listed above. Whether to pursue an unfinished one now is your call.");
-            else
+            else if (!hasAnyActiveObjective)
                 sb.AppendLine(
                     "- raw fact, not a recommendation: every objective above has reached a terminal state " +
                     "(Blocked/Completed/Expired), so none is currently actionable; a `stack_ops` push or replace " +
                     "sets a new persistent objective if you want one. Your strategic call.");
+            // `MARK_TOP_BLOCKED` acts on the TOP frame by identity, so the block instruction only
+            // applies when the TOP objective is the settled one — recommending it while a settled
+            // frame is merely a buried ANCESTOR would block the (different, current) TOP task. A
+            // settled ancestor is noted factually instead, to be resolved when it resurfaces.
+            if (topFrameSettled)
+                sb.AppendLine(
+                    "- raw fact: your TOP objective targets the NPC of a DONE (stage 3) contract. If that " +
+                    "objective was to COMPLETE or LOCATE that contract, it is already satisfied — re-pursuing it " +
+                    "is not progress, so `MARK_TOP_BLOCKED` it and do other work. (That NPC can still be a SOURCE " +
+                    "for a NEW contract — a separate objective, not this one. Your call.)");
+            else if (hasSettledActiveObjective)
+                sb.AppendLine(
+                    "- raw fact: an ANCESTOR objective above targets the NPC of a DONE (stage 3) contract. If it " +
+                    "was to COMPLETE or LOCATE that contract it is already satisfied, so do not resume it as-is " +
+                    "when it resurfaces as TOP (replace or clear it then). That NPC can still be a SOURCE for a " +
+                    "NEW contract — a separate objective. Your call.");
         }
 
         // ── ## Settled turn-in (decision-proximate salience) ─────────────────
