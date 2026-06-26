@@ -2049,6 +2049,50 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void EscapeHeadingForLandblock_DeterministicAndNullSafe()
+    {
+        Assert.Null(LlmGoalPolicy.EscapeHeadingForLandblock(null));
+        // Deterministic: same landblock -> same heading.
+        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
+                     LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u));
+        // A valid 8-way compass bearing.
+        Assert.Contains(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
+            new[] { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" });
+    }
+
+    [Fact]
+    public void WithEscapeDirection_StampsUndirectedAnywhereExploreOnLongStallOnly()
+    {
+        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
+        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
+        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
+
+        // Long stall -> a committed compass Direction is stamped (matches the landblock bearing).
+        var stamped = LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, 0x0125u);
+        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), stamped.Direction);
+
+        // Below the threshold -> unchanged (undirected).
+        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, shortDwell, 0x0125u).Direction);
+
+        // An LLM-chosen Direction is NEVER overridden.
+        var directed = explore with { Direction = "north" };
+        Assert.Equal("north", LlmGoalPolicy.WithEscapeDirectionForTest(directed, longDwell, 0x0125u).Direction);
+
+        // A TARGETED Explore (a concrete place, not "anywhere") is not stamped.
+        var targeted = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "SomeNamedPlace" } };
+        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(targeted, longDwell, 0x0125u).Direction);
+
+        // A non-Explore goal passes through untouched.
+        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Chicken" } };
+        var afterAttack = LlmGoalPolicy.WithEscapeDirectionForTest(attack, longDwell, 0x0125u);
+        Assert.Equal(GoalKind.Attack, afterAttack.Kind);
+        Assert.Null(afterAttack.Direction);
+
+        // Unknown landblock -> no heading -> unchanged.
+        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, null).Direction);
+    }
+
+    [Fact]
     public void BuyVendorNoPanel_PanelOpen_ReturnsNull()
     {
         // A panel IS open -> let the Buy run (no rewrite); this is the no-loop guard.

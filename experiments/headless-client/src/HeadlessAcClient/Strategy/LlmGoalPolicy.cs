@@ -191,6 +191,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // threshold, while a productive hunt resets it on every loot/level.
     private static readonly TimeSpan BarrenStallTimeout =
         TimeSpan.FromMinutes(2 * EgressDwellMinutes);
+    // Threshold past which an undirected barren-stall egress escalates to a DIRECTIONAL
+    // escape. The undirected egress (Explore{anywhere}) had its chance for the first
+    // ~LongBarrenStallDwellMinutes but the Motor's frontier only fans the LOCAL unexplored
+    // cells, so a bot in a monster-free landblock keeps re-covering it without leaving. Past
+    // this dwell, commit a compass bearing so the bot travels SUSTAINED out of the landblock.
+    private static readonly double LongBarrenStallDwellMinutes = 3 * EgressDwellMinutes;
+    // Deterministic 8-way compass escape bearing from the bot's OWN landblock id: STABLE while
+    // the bot is stuck in one landblock (same id => same heading => sustained escape that way),
+    // rotating when it crosses to a new landblock (a fresh bearing for the next excursion until
+    // a monster appears). A mechanical SEARCH direction to try, NOT a known monster location;
+    // no map, no game knowledge.
+    private static readonly string[] BarrenEscapeCompass =
+        { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" };
+    internal static string? EscapeHeadingForLandblock(uint? landblock)
+        => landblock is uint lb ? BarrenEscapeCompass[(int)(lb % 8u)] : null;
+
+    // On a LONG barren-stall, stamp an UNDIRECTED Explore{anywhere} with a COMMITTED compass
+    // `Direction` so the Motor travels SUSTAINED out of the tapped-out landblock (Goal.Direction
+    // drives the headingDominant frontier path) instead of fanning the LOCAL frontier and never
+    // leaving. Only an undirected Explore is stamped — an LLM-chosen Direction is never
+    // overridden, and a non-Explore goal passes through untouched. Mechanical escape bearing
+    // from the bot's OWN landblock id; no map, no game knowledge.
+    private static Goal WithEscapeDirectionIfLongStall(Goal goal, double dwellMin, uint? landblock)
+    {
+        if (dwellMin < LongBarrenStallDwellMinutes) return goal;
+        if (goal.Direction is not null || !IsUntargetedExploreGoal(goal)) return goal;
+        if (EscapeHeadingForLandblock(landblock) is not string heading) return goal;
+        return goal with { Direction = heading };
+    }
+
+    // Test seam for the directional-escape rewrite above (private overload keeps the call sites
+    // terse; this internal one lets a unit test drive it with an explicit dwell/landblock).
+    internal static Goal WithEscapeDirectionForTest(Goal goal, double dwellMin, uint? landblock)
+        => WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
+
+    // Exposed for unit tests: the long-barren-stall dwell threshold (minutes).
+    internal static double LongBarrenStallDwellMinutesForTest => LongBarrenStallDwellMinutes;
     // Fresh-directive egress veto window. A low-level bot still being actively
     // guided by the server (a NEW, distinct tutorial/instruction PopupString it
     // has not yet acted on) is making progress even with no inventory/level
@@ -1179,7 +1216,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             overrideReason = "stationary-use";
 
         if (overrideReason is null)
-            return goal;
+            return WithEscapeDirectionIfLongStall(goal, dwellMin, lb);
 
         Console.WriteLine(
             $"[llm-override] town-stuck hunt-egress: dwell={dwellMin:F1}min, combat-ready, " +
@@ -1187,10 +1224,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             $"progress for {sinceProgress.TotalMinutes:F1}min — substituting {goal.Kind} " +
             $"target={goal.Target} with Explore{{anywhere}} to leave the tapped-out zone.");
 
-        return MakeEgressExploreGoal(
+        return WithEscapeDirectionIfLongStall(MakeEgressExploreGoal(
             nowUtc, "override:hunt-egress",
             "mechanical hunt-egress: tapped-out monster-free safe zone, dwell past threshold " +
-            "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)");
+            "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)"),
+            dwellMin, lb);
     }
 
     // Construct the generic targetless Explore{anywhere} goal that the egress
