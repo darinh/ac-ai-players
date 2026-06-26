@@ -1053,6 +1053,33 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_AttackEgress_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            attackEgresses: 4);
+        Assert.Contains("atk-egress=4", with);
+
+        // The glass-jaw can't-finish picture: kills=0 (omitted) + swings present + atk-egress>0.
+        var glassJaw = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            swingsLanded: 8, swingsEvaded: 8, kills: 0, attackEgresses: 3);
+        Assert.Contains("atk-egress=3", glassJaw);
+        Assert.Contains("swings=8L/8E", glassJaw);
+        Assert.DoesNotContain("kills=", glassJaw);
+
+        // Zero egresses this run -> omitted (no noise).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            attackEgresses: 0);
+        Assert.DoesNotContain("atk-egress=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Deaths_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };

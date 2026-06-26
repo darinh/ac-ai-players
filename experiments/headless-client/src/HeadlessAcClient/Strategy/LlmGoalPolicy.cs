@@ -3094,6 +3094,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // targets vs actual kills. Surfaced as beaten-vetoes=N in [run-summary]. Pure
     // observability.
     private int _summaryBeatenVetoes;
+    // Count of deferred-attack egresses this run: times the policy gave up an LLM Attack the
+    // Motor REPEATEDLY deferred. The Motor emits the SAME deferral marker for BOTH causes —
+    // self-health below the re-engage threshold AND a recently-disengaged target on its brief
+    // post-disengage avoid cooldown — so this counts both (it cannot distinguish them here). For
+    // a glass-jaw bot the low-health cause dominates: a high count with kills=0 + swings>0 is the
+    // can't-finish-the-fight signal (lands hits but keeps giving up before the kill). Surfaced as
+    // atk-egress=N in [run-summary]. Pure observability.
+    private int _summaryDeferredAttackEgresses;
     // NumDeaths observed at the first decision of this run. [run-summary] reports
     // current NumDeaths minus this baseline = deaths THIS run. Null until first
     // observed.
@@ -3128,7 +3136,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
             FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
-            world.CumulativeRaises, FormatTopIntent(_stack)));
+            world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3211,7 +3219,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
-        int raises = 0, string? topIntent = null)
+        int raises = 0, int attackEgresses = 0, string? topIntent = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3322,6 +3330,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // baseline), shown only when >0. Pure observability; no behavior change.
         if (deathsThisRun is int dr && dr > 0)
             line += $" deaths={dr}";
+        // Deferred-attack egresses this run: the policy gave up an LLM Attack the Motor
+        // REPEATEDLY deferred — self-health below the re-engage threshold OR the target on its
+        // brief post-disengage avoid cooldown (one shared marker, both counted). Paired with
+        // kills= and swings=: kills=0 + swings>0 + atk-egress>0 is the glass-jaw can't-finish
+        // signal (lands hits but keeps giving up before the killing blow, low-health dominating).
+        // Shown only when >0. Pure observability; no behavior change.
+        if (attackEgresses > 0)
+            line += $" atk-egress={attackEgresses}";
         // Peak current HP observed this run (HealthObservedPeak, a max-HP proxy).
         // Pairs with swings= and deaths= as a combat-effectiveness diagnostic. Shown
         // only when known + positive. Pure observability; no behavior change, no game
@@ -3999,6 +4015,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // WHAT to fight — this only defers it while recovering. No game knowledge.
         if (goal.Kind == GoalKind.Attack && IsLowHealthDeferredAttackRepeat(events, nowUtc))
         {
+            _summaryDeferredAttackEgresses++;
             Console.WriteLine(
                 $"[llm-override] deferred-attack egress: dropping LLM Attack target={goal.Target}" +
                 " — Motor repeatedly deferred it (low self-health or a just-disengaged target on its" +
