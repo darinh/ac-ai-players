@@ -15512,6 +15512,122 @@ public class LlmGoalPolicyTests
         => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 3, NearDeaths: 2,
             Fights: 5, LastOutcome: "death", Ineffective: 0) };
 
+    // A kind the bot has 0 kills against but many INEFFECTIVE (no-damage) fights — the
+    // can't-DAMAGE-it wedge (live: 89 stuck-timeouts cycling 50s no-damage abandons).
+    // MaxLossBotLevel = the level the bot kept failing at (the runtime records it on every
+    // ineffective abandon); without it the veto re-tests once, so the fixtures set it.
+    private static CombatHistoryEntry[] IneffectiveBeaten(
+        string name, uint wcid, int ineffective = 8, int? maxLossLevel = 15)
+        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
+            Fights: ineffective, LastOutcome: "ineffective", Ineffective: ineffective,
+            MaxLossBotLevel: maxLossLevel) };
+
+    [Fact]
+    public void IsExhaustedIneffectiveKind_FiresAtThreshold_NotBelow()
+    {
+        var below = IneffectiveBeaten("Gnawer Shreth", 99u,
+            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold - 1);
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(below, 99u, "Gnawer Shreth", 15));
+        var at = IneffectiveBeaten("Gnawer Shreth", 99u,
+            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
+        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(at, 99u, "Gnawer Shreth", 15));
+    }
+
+    [Fact]
+    public void IsExhaustedIneffectiveKind_NotWhenKindHasAKill()
+    {
+        // A kill -> the bot CAN damage/beat it, so it is not a can't-damage wedge.
+        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
+            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15) };
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hasKill, 99u, "X", 15));
+    }
+
+    [Fact]
+    public void IsExhaustedIneffectiveKind_CoversSingleDeathPlusManyIneffective()
+    {
+        // The Deaths==1 first-death reprieve makes IsLethalBeatenKind FALSE, but a kind the bot
+        // ALSO cannot DAMAGE (0 kills, many ineffective) must still be avoided — this branch
+        // covers it regardless of the single death (a kind DIED to 2+ times is held by the lethal
+        // veto). Without this the bot stays wedged re-attacking an un-damageable kind it died to once.
+        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
+            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
+        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, 99u, "Gnawer Shreth", 15)); // first-death reprieve
+        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
+        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
+        // ... and it re-tests once the bot out-levels the level it kept failing at.
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16));
+    }
+
+    [Fact]
+    public void IsExhaustedIneffectiveKind_NoFailingLevelRecorded_RetestsOnce()
+    {
+        // A loss recorded with no failing level (the field did not exist yet, or self level was
+        // momentarily unknown) deserializes null; rather than bar the kind forever (no out-level
+        // escape), re-test once so a fresh attempt records the level this veto then bounds.
+        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0,
+            NearDeaths: 0, Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: null) };
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
+    }
+
+    [Fact]
+    public void IsExhaustedIneffectiveKind_RetestableOnceOutLevelled()
+    {
+        // MaxLossBotLevel records the level the bot kept failing at; once it out-levels that,
+        // the kind is re-testable (the bot may now be strong enough).
+        var rec = new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0, NearDeaths: 0,
+            Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15);
+        var hist = new[] { rec };
+        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));  // same level
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_IneffectiveExhaustedKind_Vetoes()
+    {
+        // The can't-DAMAGE-it wedge: a survived-loss kind re-attempted past the allowance is now
+        // vetoed (was not, under the lethal-only IsLethalBeatenKind).
+        var world = BuildWorldBeaten(IneffectiveBeaten("Gnawer Shreth", 99u), selfLevel: 15);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Gnawer Shreth"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_SingleDeathIneffectiveExhausted_Vetoes()
+    {
+        // The Deaths==1 + can't-damage hole, end-to-end at the explicit-Attack decision gate:
+        // the first-death reprieve does NOT leave an un-damageable kind re-attemptable.
+        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
+            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
+        var world = BuildWorldBeaten(hist, selfLevel: 15);
+        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Gnawer Shreth"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_IneffectiveBelowThreshold_DoesNotVeto()
+    {
+        // The deadlock-fix allowance is preserved: a FEW ineffective attempts are still allowed.
+        var world = BuildWorldBeaten(
+            IneffectiveBeaten("Gnawer Shreth", 99u, LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold - 1),
+            selfLevel: 15);
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Gnawer Shreth"), world));
+    }
+
+    [Fact]
+    public void IsOptionalAttackOnBeatenKind_IneffectiveExhausted_ActivelyHostile_Exempt()
+    {
+        // Self-defense still wins: if the ineffective-exhausted kind is attacking now, fight back.
+        var world = BuildWorldBeaten(IneffectiveBeaten("Gnawer Shreth", 99u), selfLevel: 15,
+            new VisibleObjectProjection
+            {
+                Guid = MobGuid, Name = "Gnawer Shreth", Wcid = 99u,
+                Distance = 3f, IsMonster = true, ObservedHostile = true,
+            });
+        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
+            AttackGoal("Gnawer Shreth"), world));
+    }
+
     [Fact]
     public void IsOptionalAttackOnBeatenKind_BeatenKindNotInView_Vetoes()
     {
@@ -15931,6 +16047,18 @@ public class LlmGoalPolicyTests
         var world = BuildWorldBeaten(hist, selfLevel: 11,
             Mob(MobGuid, "Drudge Skulker", 7u),
             Mob(MobGuid + 1, "Mosswart", 8u));
+        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void OnlyBeatenMonstersInView_SingleDeathIneffectiveExhausted_True()
+    {
+        // A Deaths==1 + ineffective-exhausted kind is avoid-beaten (NOT lethal-beaten), so a view
+        // of only that kind must still let the stalemate egress fire — else the bot is parked
+        // among un-damageable targets the veto always drops, re-asked every decision.
+        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
+            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
+        var world = BuildWorldBeaten(hist, selfLevel: 15, Mob(MobGuid, "Gnawer Shreth", 99u));
         Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
     }
 

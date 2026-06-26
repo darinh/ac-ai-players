@@ -1418,7 +1418,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .ToList();
         if (monsters.Count == 0) return false;
         if (monsters.Any(v => v.ObservedHostile)) return false;
-        return monsters.All(v => IsLethalBeatenKind(
+        return monsters.All(v => IsAvoidBeatenKind(
             world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
     }
 
@@ -4947,20 +4947,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (TargetResolvesToHostileInViewLikeMotor(target, world))
             return false;
 
-        // Override an explicit Attack order ONLY to prevent an UNRECOVERABLE
-        // outcome: a kind whose own ledger records an actual DEATH. A merely
-        // SURVIVED loss (Deaths==0: only near-deaths or ineffective swings) is
-        // NOT vetoed here. Survival during any re-attempt is enforced
-        // independently by the Motor's low-health flee / self-preservation
-        // gate, so this veto need not also block survivable kinds; and the
+        // Override an explicit Attack order ONLY to prevent a FUTILE engagement:
+        // a kind whose own ledger records an actual DEATH, OR a survived-loss kind
+        // the bot has re-attempted INEFFECTIVELY past the deadlock-fix allowance (it
+        // cannot DAMAGE it after many tries). A survived loss within the allowance
+        // (few ineffective swings, no death) is still NOT vetoed. Survival during any
+        // re-attempt is enforced independently by the Motor's low-health flee /
+        // self-preservation gate, so this veto need not also block survivable kinds; and the
         // out-level re-test gate (below) keys on the bot's level, which a
         // survived loss does not raise, so vetoing here would bar re-engagement
         // indefinitely. A FATAL-loss kind stays beaten, re-testable only once
         // the bot out-levels the death. Bot-owned outcome counts + own level
-        // only; no game knowledge. The lethal-beaten verdict itself is the shared
-        // IsLethalBeatenKind helper, so this veto and the stalemate egress gate
+        // only; no game knowledge. The combined verdict — a FATAL-loss kind, OR a
+        // survived-loss kind re-attempted INEFFECTIVELY past the deadlock-fix allowance
+        // (IsExhaustedIneffectiveKind, the can't-DAMAGE-it wedge) — is the shared
+        // IsAvoidBeatenKind helper, so this veto and the stalemate egress gate
         // (OnlyBeatenMonstersInView) can never disagree about which kinds count.
-        return IsLethalBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
+        return IsAvoidBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
             world.Self.Level);
     }
 
@@ -5044,6 +5047,46 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && IsBeatenKind(history, wcid, name, currentLevel,
                 lethalRetestableWhenOutleveled: true);
     }
+
+    // Aggregate-ledger threshold of INEFFECTIVE (no-kill, no-death) fights at which a
+    // SURVIVED-loss kind's deadlock-fix re-attempt allowance is exhausted: the bot has fought
+    // this kind this many times at its level and never landed a killing blow nor died, so it is
+    // effectively unbeatable here even though it never kills the bot. Above the handful the
+    // deadlock-fix wants to keep re-attemptable. Live: a single kind cycled 89 stuck-timeouts of
+    // 50s no-damage abandons because the lethal-only veto never engaged a kind it cannot DAMAGE.
+    internal const int ExhaustedIneffectiveFightsThreshold = 6;
+
+    // A kind the bot has NEVER killed (0 kills) yet re-attempted INEFFECTIVELY so many times at its
+    // current level that another attempt is futile — the can't-DAMAGE-it wedge the lethal-only
+    // IsLethalBeatenKind (which requires a DEATH) never catches. Independent of the DEATH count: it
+    // covers both a never-lethal kind AND a kind the bot also DIED to ONCE, whose lethal first-death
+    // reprieve would otherwise leave it re-attemptable despite overwhelming can't-damage evidence (a
+    // kind DIED to 2+ times is already held by IsLethalBeatenKind). Re-testable once the bot
+    // OUT-LEVELS the level it kept failing at (mirrors IsBeatenKind's non-lethal out-level re-test),
+    // so a few more attempts are allowed after the bot grows stronger elsewhere — the deadlock-fix
+    // intent (do not bar a kind indefinitely) is preserved, just bounded. A record without that
+    // failing level (a loss recorded before the field existed, or before self level was known) is
+    // re-tested once so the re-attempt captures fresh leveled data this veto can then bound.
+    // Aggregate own ledger + own level only; no game knowledge.
+    internal static bool IsExhaustedIneffectiveKind(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+    {
+        var record = FindCombatRecord(history, wcid, name);
+        if (record is not { Kills: 0 }) return false;
+        if (record.Ineffective < ExhaustedIneffectiveFightsThreshold) return false;
+        if (record.MaxLossBotLevel is not int maxLoss) return false; // no failing level on record -> re-test once
+        if (currentLevel is int cur && cur > maxLoss) return false; // out-levelled the futile attempts -> re-testable
+        return true;
+    }
+
+    // The combined "decline this OPTIONAL engagement" verdict: a kind the bot's own ledger shows
+    // it cannot win against right now — either a LETHAL-beaten kind (it died to it) OR an
+    // EXHAUSTED-INEFFECTIVE kind (it cannot damage it after many tries). Shared by the explicit-
+    // Attack veto AND the stalemate egress gate so the two never disagree about which kinds count.
+    internal static bool IsAvoidBeatenKind(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+        => IsLethalBeatenKind(history, wcid, name, currentLevel)
+           || IsExhaustedIneffectiveKind(history, wcid, name, currentLevel);
 
     /// <summary>
     /// True iff a <see cref="EventKind.PickerArrivedNoAction"/> event for
@@ -11922,17 +11965,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (world.CombatHistoryFull is { Count: > 0 } fullLedger)
         {
             var beatenKinds = fullLedger
-                .Where(h => h.Deaths > 0 && IsBeatenKind(
-                    world.CombatHistoryFull, h.Wcid, h.Name, world.Self.Level,
-                    lethalRetestableWhenOutleveled: true))
+                .Where(h => IsAvoidBeatenKind(
+                    world.CombatHistoryFull, h.Wcid, h.Name, world.Self.Level))
                 .ToList();
             if (beatenKinds.Count > 0)
             {
                 sb.AppendLine();
                 sb.AppendLine(
                     "## Beaten kinds (your own combat ledger; the Motor DECLINES an offensive Attack you order on a " +
-                    "kind below — it has killed you with 0 kills for you — and allows fighting back only when that " +
-                    "kind is attacking you now)");
+                    "kind below — your ledger shows you cannot defeat it: it has killed you, or you cannot damage it " +
+                    "after many tries, with 0 kills for you — and allows fighting back only when that " +
+                    "kind is attacking you now). Hunt a kind you CAN kill, or Explore to a winnable area.");
                 foreach (var h in beatenKinds)
                     sb.AppendLine(
                         $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
