@@ -3688,6 +3688,95 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_Unreachable_RendersRedirectWhenGoalFailed()
+    {
+        // The bot re-Explores a far-visible object (Ianto @ 28u) AND a recent goal that
+        // targeted it failed with a TARGET selector-MISS (the target could not be bound —
+        // e.g. a Use/Talk that MISSed because it is out of reach). The cue must ESCALATE to
+        // the unreachable/redirect branch, NOT tell the bot to "use the interaction verb".
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Use: selector resolved to no live object" });
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Explore toward visible object", prompt);
+        Assert.Contains("cannot get within range to act on it", prompt);
+        // The escalation REPLACES the "use the interaction verb" advice.
+        Assert.DoesNotContain("emit the INTERACTION verb directly", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_NoFailure_KeepsUseInteractionVerb()
+    {
+        // Far-visible (28u) with NO recent goal failure on the name -> the original "use the
+        // interaction verb" advice, NOT the unreachable/redirect escalation.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("emit the INTERACTION verb directly", prompt);
+        Assert.DoesNotContain("cannot get within range to act on it", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ExploreTowardVisibleObject_ItemOnlyMiss_KeepsUseInteractionVerb()
+    {
+        // A far-visible object whose recent failure was an ITEM-only miss (the TARGET bound,
+        // but the required inventory item did not) is NOT evidence the target is unreachable
+        // -> the escalation must NOT fire; keep the "use the interaction verb" advice.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = ExploreEmissions("Ianto", 3, now);
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Give: required inventory item unresolved" });
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("emit the INTERACTION verb directly", prompt);
+        Assert.DoesNotContain("cannot get within range to act on it", prompt);
+    }
+
+    [Fact]
+    public void HasRecentInteractionFailureForName_MatchesTargetMissWithinWindowOnly()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var since = now.AddMinutes(-3);
+        var es = new EventStream();
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Use: selector resolved to no live object" });
+        Assert.True(LlmGoalPolicy.HasRecentInteractionFailureForName(es, "Ianto", since));
+        // A different name does not match.
+        Assert.False(LlmGoalPolicy.HasRecentInteractionFailureForName(es, "Sedor", since));
+        // An ITEM-only miss (target bound, item unresolved) is NOT a target-reach failure.
+        var itemEs = new EventStream();
+        itemEs.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Give: required inventory item unresolved" });
+        Assert.False(LlmGoalPolicy.HasRecentInteractionFailureForName(itemEs, "Ianto", since));
+        // Outside the window does not match.
+        var oldEs = new EventStream();
+        oldEs.Append(new StreamEvent
+            { Sequence = -1, Utc = now.AddMinutes(-10), Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Use: selector resolved to no live object" });
+        Assert.False(LlmGoalPolicy.HasRecentInteractionFailureForName(oldEs, "Ianto", since));
+    }
+
+    [Fact]
+    public void HasRecentInteractionFailureForName_RoleNormalizesFailedName()
+    {
+        // The failure carries a role-suffixed name; it normalizes to the bare name the
+        // far-visible Explore detector returns, so the escalation still binds.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto \"Town Crier\"",
+              Text = "Talk: selector resolved to no live object" });
+        Assert.True(LlmGoalPolicy.HasRecentInteractionFailureForName(es, "Ianto", now.AddMinutes(-3)));
+    }
+
+    [Fact]
     public void BuildUserPrompt_ExploreTowardVisibleObject_OmittedWhenWithinReach()
     {
         // Within the reached radius (<5u) the cp022 `## Reached Explore target` cue owns

@@ -6800,6 +6800,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return null;
     }
 
+    // True if a recent TARGET selector-MISS GoalFailed carried this (role-normalized)
+    // target NAME — i.e. the bot tried a goal on that name and its TARGET could not be
+    // bound to a live object (e.g. a Use/Talk whose far target was out of reach). Filters
+    // to the no-live-object suffix (the SAME reach-consistent signal IsUnreachableTargetRepeat
+    // keys on), so an item-only miss (target bound, required inventory item missing) does NOT
+    // count — that is not evidence the TARGET is unreachable. Pairs with the far-visible
+    // Explore-loop detector: a name the bot keeps Exploring toward AND whose target keeps
+    // failing to bind is one it cannot get within range of from here. Newest-first scan of
+    // the durable failure window; own failure history; no game knowledge, no priority.
+    internal static bool HasRecentInteractionFailureForName(
+        EventStream? events, string normalizedName, DateTimeOffset since)
+    {
+        if (events is null || string.IsNullOrWhiteSpace(normalizedName)) return false;
+        foreach (var f in events.RecentGoalFailures())   // newest-first
+        {
+            if (f.Utc < since) break;                    // older than the window; rest are older too
+            if (f.Text is null || !f.Text.EndsWith(NoLiveObjectFailSuffix, StringComparison.Ordinal))
+                continue;                                // only a TARGET selector-miss (reach-consistent)
+            if (string.IsNullOrWhiteSpace(f.Name)) continue;
+            if (string.Equals(NormalizeEmittedTargetName(f.Name), normalizedName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
     // Sibling for Attack: the NAME the bot has tried to `Attack` >= threshold times within
     // the window that matches NO currently-visible object — the monster has left view/range,
     // died, or the bot travelled past it, so the Attack would resolve to MISS and a fresh
@@ -11739,14 +11764,32 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Explore toward visible object");
-            sb.AppendLine(
-                $"- you have `Explore`d toward `{visibleExploreDisplay}` several times recently, but " +
-                $"`{visibleExploreDisplay}` IS already VISIBLE in the world state here (just not yet within " +
-                "reach). `Explore` only WALKS toward a target and STOPS at its arrival radius WITHOUT interacting, " +
-                $"so re-`Explore`-ing `{visibleExploreDisplay}` never engages it. To ACT on it, emit the INTERACTION " +
-                "verb directly — `Talk` an NPC, `Use` a vendor/door/object, `Attack` a monster, or `Pickup` an item — " +
-                $"that verb walks you INTO range AND performs the action in one goal. Use the interaction verb on " +
-                $"`{visibleExploreDisplay}` instead of re-`Explore`-ing it.");
+            // Escalation: if the bot has ALSO recently tried an INTERACTION verb on this
+            // same far-visible object and it FAILED (e.g. a Use/Talk resolved to MISS
+            // because the object is out of reach — the navmesh route stalls short of
+            // interaction range), then "use the interaction verb" is futile: the object is
+            // visible but UNREACHABLE from here. Redirect instead (mirrors the `## Explore
+            // loop` route-blocked branch). Own emission + failure history + perception; no
+            // game knowledge, no priority, no source-side target/verb choice.
+            if (HasRecentInteractionFailureForName(
+                    events, visibleExploreName, DateTimeOffset.UtcNow - RepeatedUnresolvedExploreWindow))
+                sb.AppendLine(
+                    $"- you have `Explore`d toward `{visibleExploreDisplay}` several times AND a recent goal that " +
+                    $"targeted it could not connect — `{visibleExploreDisplay}` IS VISIBLE but you cannot get within " +
+                    "range to act on it (your route stalls short of it; it is blocked/unreachable from here). " +
+                    "Re-`Explore`-ing or re-targeting it will NOT reach it. To make progress, emit " +
+                    "`Explore{target: {name: \"anywhere\"}}` to travel toward open ground (you may find another way " +
+                    "around), interact with a DIFFERENT visible object in `## Nearest objects`, or pursue a DIFFERENT " +
+                    $"objective — do NOT keep targeting `{visibleExploreDisplay}`.");
+            else
+                sb.AppendLine(
+                    $"- you have `Explore`d toward `{visibleExploreDisplay}` several times recently, but " +
+                    $"`{visibleExploreDisplay}` IS already VISIBLE in the world state here (just not yet within " +
+                    "reach). `Explore` only WALKS toward a target and STOPS at its arrival radius WITHOUT interacting, " +
+                    $"so re-`Explore`-ing `{visibleExploreDisplay}` never engages it. To ACT on it, emit the INTERACTION " +
+                    "verb directly — `Talk` an NPC, `Use` a vendor/door/object, `Attack` a monster, or `Pickup` an item — " +
+                    $"that verb walks you INTO range AND performs the action in one goal. Use the interaction verb on " +
+                    $"`{visibleExploreDisplay}` instead of re-`Explore`-ing it.");
         }
 
         // ── ## Attack loop (target not in view) — sibling of the Explore loop ──
