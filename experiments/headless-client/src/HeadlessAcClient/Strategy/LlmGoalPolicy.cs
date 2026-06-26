@@ -6743,6 +6743,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // a descriptor selector — this is the descriptor sibling.
     private static readonly TimeSpan RepeatedDescriptorPickupWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedDescriptorPickupThreshold = 3;
+    // Sibling: repeated-Pickup-of-a-departed-NAME window + threshold. A name-keyed `Pickup`
+    // (a concrete ground item or a monster corpse) whose named object has left the distance-
+    // bounded `## Visible` (the item/corpse decayed, was taken, or the bot travelled past it)
+    // resolves to MISS — the visible-corpse case is handled by the Pickup->Use rewrite, so a
+    // surviving MISS loop is a DEPARTED target. The descriptor sibling above covers fuzzy
+    // type-selectors; this is the concrete-name sibling of the Attack/Use loop cues.
+    private static readonly TimeSpan RepeatedUnresolvedPickupWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnresolvedPickupThreshold = 3;
 
     // cp067: the NAME the bot has Explored toward >= threshold times within the recent
     // window that resolves to NO visible object (a reached area / unresolved name), or
@@ -6863,6 +6871,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string? RepeatedUnresolvedUseTarget(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
         => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, itemNameWhenTargetEmpty: true);
+
+    // Sibling for Pickup: the concrete NAME the bot has tried to `Pickup` >= threshold times
+    // within the window that NO currently-visible object would bind — the ground item or corpse
+    // has left view/range (decayed/taken/travelled past), so the Pickup resolves to MISS and a
+    // fresh no-current-goal call re-emits the SAME Pickup. Surfaced as the `## Pickup loop`
+    // informational cue. Corpses are NOT excluded: a VISIBLE corpse is converted to a Use by the
+    // Pickup->Use rewrite (so a visible corpse never reaches here as a loop), while a DEPARTED
+    // corpse is exactly the loop. Pickup carries no item field, so the item-field misfile mode is
+    // off. Same audit posture as the Attack/Use loop cues.
+    internal static string? RepeatedUnresolvedPickupTarget(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Pickup", RepeatedUnresolvedPickupThreshold, excludeCorpses: false);
 
     private static readonly TimeSpan EngagementChurnWindow = TimeSpan.FromMinutes(3);
     private const int EngagementChurnDistinctThreshold = 3;
@@ -11855,6 +11875,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
                 "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
                 $"re-`Use`-ing `{loopedUseDisplay}`.");
+        }
+
+        // ── ## Pickup loop (target not in view) — concrete-name sibling of the Attack/Use loops ──
+        // The bot re-emits `Pickup` toward a named ground item or monster corpse no longer within the
+        // visible radius (it decayed / was taken / the bot travelled past it), so the goal resolves to
+        // MISS, clears, and a fresh no-current-goal call re-emits the SAME Pickup (live: a decayed
+        // monster corpse re-Pickup-ed many times). A VISIBLE corpse is converted to a Use by the
+        // Pickup->Use rewrite, so only a DEPARTED target survives here. The descriptor `## Pickup loop`
+        // covers fuzzy type-selectors; the name-keyed loop machinery parses only name="...", so this is
+        // the concrete-name sibling. Informational CUE keyed on the bot's OWN repeated emissions +
+        // perception — NOT a hard drop, so a close-in toward a target just out of view is never
+        // overridden; the LLM still decides. The bot's OWN corpse is exempt (its `## Corpse` cue guides
+        // retrieval). No game knowledge, no priority, no source-side target choice.
+        if (RepeatedUnresolvedPickupTarget(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedPickupWindow) is string loopedPickupName
+            && !IsOwnCorpseName(loopedPickupName, world.Self.Name)
+            && OneLine(loopedPickupName) is string loopedPickupNameDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Pickup loop (target not in view)");
+            sb.AppendLine(
+                $"- you have tried to `Pickup` `{loopedPickupNameDisplay}` several times recently but NO object named " +
+                $"`{loopedPickupNameDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING toward " +
+                $"`{loopedPickupNameDisplay}` and closing in (your `landblock`/position is changing as you go), keep " +
+                "going — `Pickup` walks you to a target, and it will come into view. But if your position is NOT " +
+                $"changing, or `{loopedPickupNameDisplay}` has decayed / been taken / you have travelled PAST it, " +
+                "re-`Pickup`-ing makes no progress: `Pickup`/`Use` a DIFFERENT object that IS visible in " +
+                $"`## Nearest objects`, or pursue a DIFFERENT objective, instead of re-`Pickup`-ing " +
+                $"`{loopedPickupNameDisplay}`.");
         }
 
         // ── ## Use target unreachable — sibling of the far-visible Explore escalation ──
