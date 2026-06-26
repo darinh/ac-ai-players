@@ -3199,6 +3199,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return parts.Count > 0 ? string.Join(" ", parts) : null;
     }
 
+    // Strength-minus-endurance base gap at which a bot's ENDURANCE counts as NEGLECTED
+    // relative to its offense — a survival-vs-offense imbalance worth surfacing as a fact.
+    internal const int EnduranceImbalanceMargin = 20;
+
+    // The (endurance, strength) base values when the bot's ENDURANCE is far below its STRENGTH
+    // (strength >= endurance + EnduranceImbalanceMargin), else null. Endurance sets max HP (the
+    // survival floor); a bot that pours XP into strength while leaving endurance near baseline is
+    // fragile. Pure read of the bot's OWN attributes; no game knowledge, no behavior.
+    internal static (uint Endurance, uint Strength)? EnduranceFarBelowStrength(WorldStateProjection world)
+    {
+        var attrs = world.Self.Attributes;
+        if (attrs is null || attrs.Count == 0) return null;
+        uint? Get(string n) =>
+            attrs.FirstOrDefault(a => string.Equals(a.Name, n, StringComparison.OrdinalIgnoreCase))?.Base;
+        if (Get("endurance") is uint e && Get("strength") is uint s && s >= e + EnduranceImbalanceMargin)
+            return (e, s);
+        return null;
+    }
+
     // Compact identity of the strategic stack's TOP intent (kind + target, with a
     // status marker when not Active) for the run-summary. Reads the bot's OWN
     // IntentStack; OneLine + quote-strip + truncate keep it a single safe log token.
@@ -10080,6 +10099,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "which explains what each does and how to choose by your bottleneck) so the monsters around you " +
                 "become winnable: getting stronger IS progress. (If this area is genuinely far above your level, " +
                 "traveling toward a known easier area is also valid — but spend your hoarded XP either way.)");
+        }
+
+        // ── ## Attribute imbalance (survival-vs-offense salience, protected tail) ─
+        // The death/flee-gated survivability cues (SURVIVABILITY-FIRST, SUSTAIN-COMBAT CHECK) only
+        // render WHILE the bot is dying/fleeing; the always-on SPEND XP rule names endurance among
+        // many levers. NONE surfaces a large strength-over-endurance gap as a single decision-
+        // proximate fact, so a model with an offense allocation prior can keep widening it. Surface
+        // the raw values when strength far outruns endurance and there is unspent XP to close it.
+        // Own attributes + own unspent only; a general endurance-sets-max-HP mechanic; the LLM
+        // still allocates.
+        if (EnduranceFarBelowStrength(world) is { } imb
+            && world.Self.AvailableExperience is long imbXp
+            && ShouldSurfaceUnspentXp(imbXp, MinMeaningfulUnspentXp))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Attribute imbalance");
+            sb.AppendLine(
+                $"- raw fact: your STRENGTH ({imb.Strength}) is far above your ENDURANCE ({imb.Endurance}) — a large gap. " +
+                "ENDURANCE (with health) is your MAX-HP lever (your survivability floor), so a strength-far-above-endurance " +
+                "gap means your survivability stat is lagging your offense stat. You have unspent XP; weigh this gap when " +
+                "you choose which attribute to raise — the SPEND XP mapping in `## Unspent XP` (accuracy vs damage vs " +
+                "survivability, including the unarmed case) still governs WHICH lever your own evidence points to.");
         }
 
         // ── ## Settled contract — no turn-in (salience, protected tail) ──
