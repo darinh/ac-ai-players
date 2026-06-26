@@ -3128,7 +3128,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
             FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
-            FormatTopIntent(_stack)));
+            world.CumulativeRaises, FormatTopIntent(_stack)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3211,7 +3211,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
-        string? topIntent = null)
+        int raises = 0, string? topIntent = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3290,6 +3290,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // bot is not spending. Pure observability; no behavior change, no game knowledge.
         if (unspent is long ux && ux > 0)
             line += $" unspent={ux}";
+        // XP-spend RATE: CONFIRMED raises this run (RaiseAttribute/Skill/Vital the server
+        // acknowledged by dropping unspent XP). Pairs with unspent= (the HOARD): a large
+        // unspent= with raises absent self-reports the bot HOARDING XP it should spend;
+        // raises rising means it is allocating. Shown only when >0. Pure observability; no
+        // behavior change, no game knowledge.
+        if (raises > 0)
+            line += $" raises={raises}";
         // Combat OUTCOME: foes the bot was fighting that died this run
         // (CumulativeKills). Pairs with swings= (accuracy attempts) — landing
         // swings with kills=0 means the target out-defends/out-heals you; kills

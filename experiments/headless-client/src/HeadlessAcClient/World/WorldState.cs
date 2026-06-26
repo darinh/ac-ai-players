@@ -325,6 +325,16 @@ internal sealed class WorldState
     public int CumulativeKills { get; set; }
 
     /// <summary>
+    /// Session-cumulative count of XP raises (RaiseAttribute/Skill/Vital) the bot
+    /// CONFIRMED this run — i.e. the server acknowledged the spend by dropping the
+    /// bot's unspent (available) XP. Read with <see cref="AvailableExperience"/>
+    /// (the unspent HOARD): a large hoard with few raises means the bot is NOT
+    /// spending; raises rising means it is. Raw count of own confirmed spends;
+    /// source draws no conclusion.
+    /// </summary>
+    public int CumulativeRaises { get; set; }
+
+    /// <summary>
     /// The bot's last death location (global meters + landblock + time), set on a
     /// detected self-death and cleared once self comes within the visible radius
     /// of it. Raw position bookkeeping.

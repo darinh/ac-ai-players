@@ -1024,6 +1024,35 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_Raises_ShownOnlyWhenPositive_AfterUnspent()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            raises: 3);
+        Assert.Contains("raises=3", with);
+
+        // raises renders AFTER unspent (the hoard, then the spend-rate) so the pair reads
+        // together: a large unspent= with raises absent/low is the hoarding signal.
+        var both = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            unspent: 3500L, raises: 2);
+        Assert.Contains("raises=2", both);
+        Assert.Contains("unspent=3500", both);
+        Assert.True(both.IndexOf("unspent=", StringComparison.Ordinal)
+            < both.IndexOf("raises=", StringComparison.Ordinal));
+
+        // Zero raises this run -> omitted (no noise).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            raises: 0);
+        Assert.DoesNotContain("raises=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Deaths_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
