@@ -4704,6 +4704,75 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void RepeatedUnresolvedPickupTarget_ReturnsNameForRepeatedDepartedCorpse()
+    {
+        // 3 recent Pickup emissions toward a concrete corpse name with NO matching visible object
+        // (the corpse decayed / the bot travelled past it) -> the looped target.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // some other object, NOT the corpse
+        var es = PickupEmissions("name=\"Corpse of Chicken\"", 3, now);
+        Assert.Equal("Corpse of Chicken",
+            LlmGoalPolicy.RepeatedUnresolvedPickupTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedPickupTarget_NullWhenVisibleCorpseMatches()
+    {
+        // A VISIBLE corpse named X binds (the Pickup->Use rewrite converts it) -> NOT a departed
+        // loop, no cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var corpse = new VisibleObjectProjection
+            { Guid = 0x800000C4u, Name = "Corpse of Chicken", Distance = 5f, IsCorpse = true };
+        var es = PickupEmissions("name=\"Corpse of Chicken\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedPickupTarget(BuildVisibleWorld(corpse), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickupLoop_RendersWhenDepartedNamedTarget()
+    {
+        // 3 Pickup emissions toward a departed corpse name (not in view) -> the concrete-name
+        // Pickup loop cue (sibling of the Attack/Use loops).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name=\"Corpse of Chicken\"", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Pickup loop (target not in view)", prompt);
+        Assert.Contains("Corpse of Chicken", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickupLoop_AbsentForOwnCorpse()
+    {
+        // The bot's OWN corpse is exempt (its `## Corpse` cue guides retrieval); the generic
+        // "Pickup a different object" redirect would contradict it. Self name in BuildVisibleWorld
+        // is "Headless", and the corpse is NOT visible (departed) so the detector returns the name.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name=\"Corpse of Headless\"", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Pickup loop (target not in view)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_PickupLoop_MixedSelector_FiresConcreteNameCue()
+    {
+        // Documents the gpt-5.4 NIT: a combined selector Pickup{name="X", short_desc~="Y"} may light
+        // BOTH pickup-loop cues (the concrete-name one for name="X" + the descriptor one for the
+        // short_desc). They are informational + non-contradictory (both say "no match in view,
+        // redirect"), consistent with the loop-cue family convention; no strict de-confliction is
+        // imposed. Assert the concrete-name cue fires for the name= component.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+                { Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                  Text = "Pickup target=name=\"Brass Lantern\" short_desc~=\"lantern\" item= source=llm:test" });
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // neither "Brass Lantern" nor a lantern desc
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Pickup loop (target not in view)", prompt);
+    }
+
+    [Fact]
     public void RepeatedDescriptorPickup_ReturnsValueForRepeatedShortDescPickup()
     {
         // 3 recent Pickup emissions carrying a short_desc~= type-descriptor with NO visible object
