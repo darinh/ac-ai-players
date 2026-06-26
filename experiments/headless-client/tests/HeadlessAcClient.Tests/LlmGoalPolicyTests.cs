@@ -1151,6 +1151,66 @@ public class LlmGoalPolicyTests
         Assert.Equal("end:13 coord:10 str:47", LlmGoalPolicy.FormatCombatAttributes(attrs));
     }
 
+    private static WorldStateProjection AttrWorld(uint end, uint coord, uint str, long unspent = 0) => new()
+    {
+        Self = new SelfProjection
+        {
+            Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u, CellId = 0xA9B40019u,
+            PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
+            Level = 15, TotalExperience = 400000, AvailableExperience = unspent,
+            Attributes = new[]
+            {
+                new SelfAttributeProjection { Name = "endurance", Base = end },
+                new SelfAttributeProjection { Name = "coordination", Base = coord },
+                new SelfAttributeProjection { Name = "strength", Base = str },
+            },
+        },
+        Inventory = System.Array.Empty<InventoryItemProjection>(),
+        Visible = System.Array.Empty<VisibleObjectProjection>(),
+    };
+
+    [Fact]
+    public void EnduranceFarBelowStrength_DetectsImbalanceAtMargin()
+    {
+        // end 21, str 63 -> gap 42 >= margin (20) -> imbalance reported with the base values.
+        var imb = LlmGoalPolicy.EnduranceFarBelowStrength(AttrWorld(end: 21, coord: 48, str: 63));
+        Assert.NotNull(imb);
+        Assert.Equal((21u, 63u), imb!.Value);
+        // Balanced (gap 5 < margin) -> null.
+        Assert.Null(LlmGoalPolicy.EnduranceFarBelowStrength(AttrWorld(end: 50, coord: 52, str: 55)));
+        // Exactly at the boundary (str == end + 20) -> imbalance.
+        Assert.NotNull(LlmGoalPolicy.EnduranceFarBelowStrength(AttrWorld(end: 30, coord: 40, str: 50)));
+        // One below the boundary (gap 19) -> null.
+        Assert.Null(LlmGoalPolicy.EnduranceFarBelowStrength(AttrWorld(end: 30, coord: 40, str: 49)));
+    }
+
+    [Fact]
+    public void AttributeImbalanceCue_RendersWhenEnduranceFarBelowStrengthWithUnspentXp()
+    {
+        // Live treadmill state: end 21 vs str 63, unspent XP -> surface the concrete imbalance.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            AttrWorld(end: 21, coord: 48, str: 63, unspent: 5000), new EventStream(), null);
+        Assert.Contains("## Attribute imbalance", prompt);
+        Assert.Contains("ENDURANCE (21)", prompt);
+        Assert.Contains("STRENGTH (63)", prompt);
+    }
+
+    [Fact]
+    public void AttributeImbalanceCue_AbsentWhenBalanced()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            AttrWorld(end: 50, coord: 52, str: 55, unspent: 5000), new EventStream(), null);
+        Assert.DoesNotContain("## Attribute imbalance", prompt);
+    }
+
+    [Fact]
+    public void AttributeImbalanceCue_AbsentWhenNoUnspentXp()
+    {
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            AttrWorld(end: 21, coord: 48, str: 63, unspent: 0), new EventStream(), null);
+        Assert.DoesNotContain("## Attribute imbalance", prompt);
+    }
+
     [Fact]
     public void FormatCombatAttributes_NullOrEmpty_ReturnsNull()
     {
