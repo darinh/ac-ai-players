@@ -9097,6 +9097,58 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ArmByGettingStronger_WhenUnarmedWithUnspentXp()
+    {
+        // The bootstrap-escape clause: an UNARMED bot sitting on unspent XP is told to raise
+        // stats (to become able to beat the tougher, loot-bearing monsters) instead of hoarding
+        // the XP while it loots empty weak-monster corpses. Live: gpt-4o/gpt-4o-mini hoarded
+        // unspent up to 8000 with 0 raises, staying glass-jaw + unarmed.
+        var w = BuildInventoryWorld();
+        w = w with { Self = w.Self with { AvailableExperience = 2000L } };
+        var p = LlmGoalPolicy.BuildUserPrompt(w, new EventStream(), null);
+        Assert.Contains("ARM BY GETTING STRONGER", p);
+        Assert.Contains("2000", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ArmByGettingStronger_AbsentWhenNoUnspentXp()
+    {
+        // No unspent XP -> nothing to spend -> the clause does not fire (the base SELF-ARM rule
+        // still renders because the bot is unarmed).
+        var p = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), new EventStream(), null);
+        Assert.Contains("SELF-ARM before fighting", p);
+        Assert.DoesNotContain("ARM BY GETTING STRONGER", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ArmByGettingStronger_AbsentWhenArmed()
+    {
+        // Armed (a wielded melee weapon) -> the whole SELF-ARM block, including this clause, is
+        // gated off (the bot does not need the arming bootstrap).
+        var armed = new InventoryItemProjection
+        { Guid = 0xBEEFu, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u };
+        var w = BuildInventoryWorld(armed);
+        w = w with { Self = w.Self with { AvailableExperience = 2000L } };
+        var p = LlmGoalPolicy.BuildUserPrompt(w, new EventStream(), null);
+        Assert.DoesNotContain("ARM BY GETTING STRONGER", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ArmByGettingStronger_AbsentWhenBagWeaponAvailable()
+    {
+        // gpt-5.4 regression: unarmed (no WIELDED weapon) but a melee weapon sits in the BAG and
+        // is Wield-able. The cue must NOT fire — arming directly (Wield the bag weapon, per the
+        // base SELF-ARM rule) is faster than raising stats, so the cue must not compete with it.
+        var bagWeapon = new InventoryItemProjection
+        { Guid = 0xCAFEu, Name = "Bag Sword", Wcid = 2u, ItemType = 0x1u }; // melee, NOT wielded
+        var w = BuildInventoryWorld(bagWeapon);
+        w = w with { Self = w.Self with { AvailableExperience = 2000L } };
+        var p = LlmGoalPolicy.BuildUserPrompt(w, new EventStream(), null);
+        Assert.Contains("SELF-ARM before fighting", p); // base rule still renders (not wielded)
+        Assert.DoesNotContain("ARM BY GETTING STRONGER", p);
+    }
+
+    [Fact]
     public void BuildUserPrompt_NoWeapon_VendorInView_LootToArmGuidanceIsCoherent()
     {
         // Combined deadlock state: unarmed (empty inventory) + a vendor in view (panel not
