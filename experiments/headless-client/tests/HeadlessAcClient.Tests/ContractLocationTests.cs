@@ -844,4 +844,223 @@ public class ContractLocationTests
         Assert.Contains("objective: Slay six marauders in the lowlands.", cap);
         Assert.DoesNotContain("Slay six marauders in the lowlands.  (stage 3 done", cap);
     }
+
+    // ── ## Persistent objectives: a done-stage-3-contract intent is flagged satisfied ──
+
+    private static IntentStack StackWithFrame(string kind, string targetName, IntentLifecycle status)
+    {
+        var baseline = IntentBaseline.Capture(WorldWithContracts(), new EventStream(), DateTime.UtcNow);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = kind, Rationale = $"test:{kind}", TargetName = targetName,
+            Status = status, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        });
+        return stack;
+    }
+
+    [Fact]
+    public void PersistentObjectives_DoneContractIntent_FlaggedContractDone()
+    {
+        // The live wedge: the bot compiled a quest intent toward a contract NPC whose contract is
+        // now stage-3 DONE, and pursued it by decomposing into an UNNAMED Explore ("anywhere") — so
+        // no NAMED Talk/Explore goal exists and the goal-level ## Settled turn-in cue never fires,
+        // yet the intent is stale. The re-surfaced persistent objective is flagged with the raw
+        // contract-DONE fact + a MARK_TOP_BLOCKED note, while explicitly preserving the option to
+        // use that NPC as a SOURCE for a NEW contract (a different objective).
+        var contract = new ContractProjection
+        {
+            ContractId = 880u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow,
+        };
+        var stack = StackWithFrame("quest:find-barkeeper", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("contract is DONE", cap);
+        Assert.Contains("MARK_TOP_BLOCKED", cap);
+        // The fresh-work path is preserved — the cue must NOT categorically forbid the NPC.
+        Assert.Contains("SOURCE for a NEW contract", cap);
+    }
+
+    [Fact]
+    public void PersistentObjectives_OnlySettledActive_OmitsPursueUnfinishedLine()
+    {
+        // Coherence: when the ONLY Active frame is a settled-contract objective, the section must
+        // NOT also say "pursue an unfinished one is your call" (that would re-introduce the very
+        // contradiction this slice removes), and must NOT falsely claim every objective is terminal.
+        var contract = new ContractProjection
+        {
+            ContractId = 887u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow,
+        };
+        var stack = StackWithFrame("quest:find-barkeeper", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("contract is DONE", cap);
+        Assert.DoesNotContain("pursue an unfinished one", cap);
+        Assert.DoesNotContain("every objective above has reached a terminal state", cap);
+    }
+
+    [Fact]
+    public void PersistentObjectives_FreshWorkIntentSameNpc_NotForbidden()
+    {
+        // gpt-5.4 case: in the live data the done contract's start == end (the NPC is BOTH a
+        // turn-in AND a contract SOURCE). A separate intent to get NEW work from that same NPC
+        // must not be categorically forbidden — the cue surfaces the contract-DONE fact but the
+        // note explicitly keeps the fresh-contract SOURCE option open.
+        var contract = new ContractProjection
+        {
+            ContractId = 888u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcStart = "Buckminster", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow,
+        };
+        var stack = StackWithFrame("get-fresh-contract", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("SOURCE for a NEW contract", cap);
+        Assert.DoesNotContain("do NOT pursue", cap);
+    }
+
+    [Fact]
+    public void PersistentObjectives_BothAncestorAndTopSettled_TopPrecedence()
+    {
+        // Both an ANCESTOR and the TOP target a done-contract NPC. topFrameSettled wins: the
+        // MARK_TOP_BLOCKED note fires (for the TOP), each settled frame keeps its inline DONE tag,
+        // and the ancestor-only note does NOT also render (no double-message).
+        var contract = new ContractProjection
+        { ContractId = 893u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        var baseline = IntentBaseline.Capture(WorldWithContracts(), new EventStream(), DateTime.UtcNow);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "quest:locate", TargetName = "Buckminster",
+            Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        }); // ancestor (settled)
+        stack.TryPush(new Intent
+        {
+            Id = "i-002", Kind = "quest:find-barkeeper", TargetName = "Buckminster",
+            Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        }); // TOP (settled)
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("MARK_TOP_BLOCKED", cap);             // TOP precedence -> the block note fires
+        Assert.DoesNotContain("ANCESTOR objective above", cap); // the ancestor-only note does NOT also render
+        // Both settled frames carry the inline DONE tag.
+        var doneTags = System.Text.RegularExpressions.Regex.Matches(cap, "this NPC's contract is DONE").Count;
+        Assert.True(doneTags >= 2, $"expected both frames inline-tagged DONE, got {doneTags}");
+    }
+
+    [Fact]
+    public void PersistentObjectives_SettledAncestorUnfinishedTop_NoMarkTopBlocked()
+    {
+        // gpt-5.4 case: a settled done-contract objective as a buried ANCESTOR with a DIFFERENT
+        // unfinished active TOP must NOT trigger a MARK_TOP_BLOCKED instruction — that op acts on
+        // TOP by identity, so it would block the (current, unfinished) TOP task. The ancestor is
+        // noted factually; the unfinished-objective line still renders for the live TOP.
+        var contract = new ContractProjection
+        { ContractId = 892u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        var baseline = IntentBaseline.Capture(WorldWithContracts(), new EventStream(), DateTime.UtcNow);
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001", Kind = "quest:find-barkeeper", TargetName = "Buckminster",
+            Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        }); // ancestor (settled)
+        stack.TryPush(new Intent
+        {
+            Id = "i-002", Kind = "hunt", TargetName = "Drudge",
+            Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
+        }); // TOP (unfinished, non-contract)
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("contract is DONE", cap);            // the ancestor is tagged with the fact
+        Assert.Contains("pursue an unfinished one", cap);    // the live unfinished TOP keeps the line
+        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);      // but NO top-block (would hit the wrong frame)
+        Assert.Contains("ANCESTOR objective above", cap);    // the ancestor-only factual note
+    }
+
+    [Fact]
+    public void PersistentObjectives_InProgressContractIntent_NotFlagged()
+    {
+        // An intent toward an NPC with a still-live (non-stage-3) contract must NOT be flagged
+        // — that objective is genuinely unfinished and should still be pursued.
+        var contract = new ContractProjection
+        {
+            ContractId = 881u, Stage = 2u, Name = "Find the Barkeeper", NpcEnd = "Buckminster",
+        };
+        var stack = StackWithFrame("quest:find-barkeeper", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.DoesNotContain("contract is DONE", cap);
+        Assert.Contains("pursue an unfinished one", cap);
+    }
+
+    [Fact]
+    public void PersistentObjectives_NonContractIntentTarget_NotFlagged()
+    {
+        // A frame whose target is not any contract NPC is not flagged (no false positive).
+        var contract = new ContractProjection
+        {
+            ContractId = 882u, Stage = 3u, Name = "Find the Barkeeper",
+            NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow,
+        };
+        var stack = StackWithFrame("quest:explore", "Some Cave", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.DoesNotContain("contract is DONE", cap);
+    }
+
+    [Fact]
+    public void IsDoneStage3ContractObjectiveNpc_NoNamedPursuitRequired()
+    {
+        // The intent-level recognition fires on the contract stage ALONE — no NAMED Talk/Explore
+        // re-targeting (unlike IsSettledStage3TurnInNpc), because the intent can pursue the
+        // objective via an unnamed Explore so that count stays zero.
+        var contract = new ContractProjection
+        { ContractId = 883u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        var world = WorldWithContracts(contract);
+        Assert.True(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(world, "Buckminster"));
+        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, new EventStream(), "Buckminster"));
+    }
+
+    [Fact]
+    public void IsDoneStage3ContractObjectiveNpc_LiveBusinessOrInProgress_False()
+    {
+        // An NPC with any non-stage-3 contract (live business) is NOT a settled objective.
+        var done = new ContractProjection
+        { ContractId = 884u, Stage = 3u, Name = "Locate", NpcEnd = "Broker", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        var live = new ContractProjection
+        { ContractId = 885u, Stage = 2u, Name = "Kill", NpcStart = "Broker", NpcEnd = "Sergeant" };
+        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(done, live), "Broker"));
+        // An in-progress-only contract NPC is not done.
+        var liveOnly = new ContractProjection
+        { ContractId = 886u, Stage = 2u, Name = "Kill", NpcEnd = "Sergeant" };
+        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(liveOnly), "Sergeant"));
+    }
+
+    [Fact]
+    public void IsDoneStage3ContractObjectiveNpc_Stage3WithoutDoneTime_False()
+    {
+        // A stage-3 row without the done-time recorded is not treated as a settled objective.
+        var c = new ContractProjection
+        { ContractId = 889u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = null };
+        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(c), "Buckminster"));
+    }
+
+    [Fact]
+    public void IsDoneStage3ContractObjectiveNpc_AmbiguousTurnIn_False()
+    {
+        // Two done contracts share the same NpcEnd -> attribution ambiguous -> not flagged.
+        var a = new ContractProjection
+        { ContractId = 890u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        var b = new ContractProjection
+        { ContractId = 891u, Stage = 3u, Name = "Deliver", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
+        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(a, b), "Buckminster"));
+    }
 }
