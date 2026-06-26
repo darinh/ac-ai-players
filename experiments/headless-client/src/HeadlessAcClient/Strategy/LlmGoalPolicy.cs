@@ -8728,6 +8728,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 && recentOwnDeathCount < DeathSpiralMinDeaths
                 && world.Self.AvailableExperience is long fxp
                 && ShouldSurfaceUnspentXp(fxp, MinMeaningfulUnspentXp))
+            {
                 sb.AppendLine(
                     "- SUSTAIN-COMBAT CHECK: you keep BREAKING OFF fights to recover because your health drops too " +
                     "low to stay in melee (repeated low-health attack deferrals), with NO recent death and unspent " +
@@ -8739,6 +8740,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "and more max HP only lets you lose slower — raise accuracy/damage. Either way, invest the unspent " +
                     "XP your landed-vs-evaded split and the target's health trend point to, rather than fleeing every " +
                     "fight.");
+                // Unarmed nuance / de-conflict: for a WEAPONLESS bot the "barely hurt -> raise
+                // offense" lever above mostly means raising STRENGTH, but bare fists cap low, so
+                // more strength barely moves unarmed DAMAGE. A model that keeps picking it pours XP
+                // into strength while ENDURANCE stays at baseline, so it keeps FLEEING the tougher
+                // (loot-bearing) monsters and grinds only the weakest — which drop little — a
+                // treadmill. Split by the bot's OWN evidence so it does NOT over-correct the MISS
+                // case: unarmed to-hit is driven by STRENGTH+COORDINATION, so if swings are EVADING
+                // accuracy is still the limit (offense); only when swings LAND but barely dent does
+                // the fists-cap-low fact apply (then endurance to outlast + a weapon). This aligns
+                // the offense lever with the SELF-ARM "ARM BY GETTING STRONGER" cue (endurance +
+                // seek a weapon) for the landing-but-too-slow case without contradicting the
+                // unarmed-accuracy guidance. Gated on the wire combat-readiness fact; a general
+                // fists-are-weak / tougher-foes-drop-more rule; the LLM still allocates.
+                if (HasNoUsableWeaponAnywhere(world))
+                    sb.AppendLine(
+                        "- UNARMED NUANCE: with NO weapon, weigh that offense lever by WHICH problem your evidence " +
+                        "shows. If your swings are MISSING (lots of evades), accuracy IS the limit — raise STRENGTH " +
+                        "and COORDINATION (together they drive your unarmed to-hit). But if your swings LAND yet " +
+                        "barely dent the foe, bare fists cap low so MORE STRENGTH adds little damage — then the bigger " +
+                        "levers are ENDURANCE/max HP, to OUTLAST the tougher, loot-bearing monsters you keep fleeing, " +
+                        "and a real WEAPON (the large damage fix — keep seeking one to Wield/Pickup/Buy). The weakest " +
+                        "monsters you already beat drop little, so grinding only them is a slow treadmill.");
+            }
         }
         // Attributes, raisable skills, health, and deaths — the compact,
         // decision-critical self facts, rendered via the shared helper so the
