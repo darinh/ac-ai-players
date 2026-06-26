@@ -3136,7 +3136,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
             FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
-            world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack)));
+            world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack),
+            world.Self.StaminaCurrent, world.Self.StaminaObservedPeak));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3238,7 +3239,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
-        int raises = 0, int attackEgresses = 0, string? topIntent = null)
+        int raises = 0, int attackEgresses = 0, string? topIntent = null,
+        int? staminaCurrent = null, int? staminaPeak = null)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3363,6 +3365,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // knowledge.
         if (maxHpProxy is int mhp && mhp > 0)
             line += $" hppeak={mhp}";
+        // Self stamina current/peak. A melee bot spends stamina on swings + running; at low
+        // stamina swings weaken and it cannot run, so a low current-vs-peak ratio here flags
+        // stamina as a possible combat/mobility limiter (the perception the bot now tracks, not
+        // otherwise visible in the run-summary). Shown only when a peak is known + positive.
+        // Pure observability; no behavior change, no game knowledge.
+        if (staminaPeak is int stamP && stamP > 0)
+            line += $" stam={(staminaCurrent?.ToString() ?? "?")}/{stamP}";
         // Combat-attribute STATE behind the survival/accuracy EFFECT fields (hppeak=/swings=):
         // endurance/coordination/strength base values, shown when known. Lets a run self-report
         // whether the bot's XP-allocation is actually moving the right stat (e.g. endurance

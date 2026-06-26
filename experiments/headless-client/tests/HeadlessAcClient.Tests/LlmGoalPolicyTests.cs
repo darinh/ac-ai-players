@@ -1271,6 +1271,53 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("hppeak=", zero);
     }
 
+    [Fact]
+    public void BuildRunSummaryLine_Stamina_ShownOnlyWhenPeakKnownAndPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        // Known peak + current -> rendered as current/peak.
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            staminaCurrent: 45, staminaPeak: 120);
+        Assert.Contains("stam=45/120", with);
+
+        // Peak known, current unknown -> "?/peak".
+        var noCur = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            staminaCurrent: null, staminaPeak: 120);
+        Assert.Contains("stam=?/120", noCur);
+
+        // No peak (no stamina reading yet) -> omitted.
+        var unknown = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            staminaPeak: null);
+        Assert.DoesNotContain("stam=", unknown);
+
+        // Zero/non-positive peak -> omitted (no noise).
+        var zero = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            staminaPeak: 0);
+        Assert.DoesNotContain("stam=", zero);
+    }
+
+    [Fact]
+    public void BuildRunSummaryLine_TopIntentAndStamina_TailTokensAllRender()
+    {
+        // Pin the optional tail (topIntent then staminaCurrent/staminaPeak): set all three with
+        // DISTINCT values + assert each token, so a future optional-arg reorder is caught.
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var line = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 13, totalXp: 240000L, model: "m",
+            topIntent: "hunt-monster Chicken", staminaCurrent: 45, staminaPeak: 120);
+        Assert.Contains("top-intent=\"hunt-monster Chicken\"", line);
+        Assert.Contains("stam=45/120", line);
+    }
+
     [Theory]
     [InlineData(null, null, null)]   // both unknown -> null
     [InlineData(5, null, null)]      // baseline unknown -> null
