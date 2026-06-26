@@ -490,6 +490,14 @@ internal sealed record WorldStateProjection
     public int CumulativeKills { get; init; }
 
     /// <summary>
+    /// Session-cumulative count of CONFIRMED XP raises this run. Copied straight
+    /// from <see cref="WorldState.CumulativeRaises"/>. Read with <see cref="AvailableExperience"/>
+    /// (the unspent hoard): a large hoard with few raises means the bot is not spending.
+    /// </summary>
+    [JsonPropertyName("cumulative_raises")]
+    public int CumulativeRaises { get; init; }
+
+    /// <summary>
     /// Global-X of the bot's last death location, set only when
     /// <see cref="CorpseRecovery.ShouldSurfaceCorpse"/> passes; null otherwise.
     /// </summary>
@@ -1039,6 +1047,7 @@ internal sealed record WorldStateProjection
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
             CumulativeKills = world.CumulativeKills,
+            CumulativeRaises = world.CumulativeRaises,
             CorpseWorldX = corpseWorldX,
             CorpseWorldY = corpseWorldY,
             CorpseAgeSeconds = corpseAgeSeconds,

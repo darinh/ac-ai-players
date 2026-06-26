@@ -5718,6 +5718,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 (confirmed
                                     ? $"CONFIRMED (unspent {pr0.PreAvailableXp}->{availXpNow})"
                                     : "timed out (no unspent-XP confirmation)"));
+                            if (confirmed) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
 
@@ -5813,6 +5814,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 (confirmedV
                                     ? $"CONFIRMED (unspent {pv0.PreAvailableXp}->{availXpNow})"
                                     : "timed out (no unspent-XP confirmation)"));
+                            if (confirmedV) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
 
@@ -5902,6 +5904,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 (confirmedS
                                     ? $"CONFIRMED (unspent {ps0.PreAvailableXp}->{availXpNow})"
                                     : "timed out (no unspent-XP confirmation)"));
+                            if (confirmedS) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
 
