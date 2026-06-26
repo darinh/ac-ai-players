@@ -14759,6 +14759,65 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("SUSTAIN-COMBAT CHECK", prompt);
     }
 
+    [Fact]
+    public void SustainCombatCheck_UnarmedNuance_RendersWhenWeaponless()
+    {
+        // Live (gpt-4o-mini, L15): an UNARMED bot poured XP into strength (str 61) per the
+        // "barely-hurting -> offense" lever while ENDURANCE sat at baseline (21, max HP ~11), so
+        // it kept FLEEING the tougher monsters (atk-egress 23) and ground only Chickens (which
+        // drop nothing) -> a treadmill. The unarmed nuance de-conflicts the offense lever, BUT
+        // splits by the bot's evidence so it preserves the miss case (accuracy = str+coord).
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildXpWorld(69296, 5475), es, null, null, null, null, // BuildXpWorld is weaponless
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.Contains("SUSTAIN-COMBAT CHECK", prompt);
+        Assert.Contains("UNARMED NUANCE", prompt);
+        // MISS branch preserved: missing -> accuracy (strength+coordination).
+        Assert.Contains("accuracy IS the limit", prompt);
+        Assert.Contains("COORDINATION", prompt);
+        // LANDING-but-low-damage branch: fists cap low -> endurance + weapon.
+        Assert.Contains("bare fists cap low", prompt);
+        Assert.Contains("ENDURANCE/max HP", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_UnarmedNuance_AbsentWhenArmed()
+    {
+        // With a WIELDED weapon the unarmed nuance must NOT render; the base cue still renders.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var w = BuildXpWorld(69296, 5475);
+        w = w with { Inventory = new[] { new InventoryItemProjection
+            { Guid = 0xBEEFu, Name = "Blade", Wcid = 1u, ItemType = 0x1u, WieldedAt = 0x100000u } } };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            w, es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.Contains("SUSTAIN-COMBAT CHECK", prompt);
+        Assert.DoesNotContain("UNARMED NUANCE", prompt);
+    }
+
+    [Fact]
+    public void SustainCombatCheck_UnarmedNuance_AbsentWhenBagWeaponAvailable()
+    {
+        // gpt-5.4: the gate is HasNoUsableWeaponAnywhere, so a Wield-able BAG weapon (not yet
+        // wielded) also suppresses the nuance — arming directly is the move, not raising stats.
+        var es = new EventStream();
+        AppendLowHealthDeferFail(es);
+        AppendLowHealthDeferFail(es);
+        var w = BuildXpWorld(69296, 5475);
+        w = w with { Inventory = new[] { new InventoryItemProjection
+            { Guid = 0xCAFEu, Name = "Bag Sword", Wcid = 2u, ItemType = 0x1u } } }; // melee, NOT wielded
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            w, es, null, null, null, null,
+            secondsSinceLastDeath: null, recentOwnDeathCount: 0);
+        Assert.Contains("SUSTAIN-COMBAT CHECK", prompt);
+        Assert.DoesNotContain("UNARMED NUANCE", prompt);
+    }
+
     // ---- IsWieldNoWeaponRepeat (cp041): the Motor rejects a Wield whose selector
     //      resolves to no equippable in-bag weapon; a model can re-emit it every
     //      cycle (e.g. trying to wield missile ammo with an empty quiver), burning
