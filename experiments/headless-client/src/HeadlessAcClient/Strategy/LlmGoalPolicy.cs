@@ -228,6 +228,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     // Exposed for unit tests: the long-barren-stall dwell threshold (minutes).
     internal static double LongBarrenStallDwellMinutesForTest => LongBarrenStallDwellMinutes;
+
+    // The directional-escape gate applied on the NON-egressing path (combat-ready not required,
+    // so it also covers an unarmed bot the egress latch cancels). A winnable monster in view ->
+    // pass the goal through (fight it, never escape). Otherwise apply the long-barren-stall
+    // escape, which only stamps an UNDIRECTED Explore{anywhere} past the dwell threshold (any
+    // other goal — including a town `Use` of a vendor — passes through unchanged). Pure; tested.
+    internal static Goal NonEgressBarrenEscape(
+        Goal goal, bool winnableMonsterInView, double dwellMin, uint? landblock)
+        => winnableMonsterInView ? goal : WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
     // Fresh-directive egress veto window. A low-level bot still being actively
     // guided by the server (a NEW, distinct tutorial/instruction PopupString it
     // has not yet acted on) is making progress even with no inventory/level
@@ -1196,7 +1205,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"no-progress={sinceProgress.TotalMinutes:F1}min, tappedOut={tappedOut}, " +
                 $"trigger={(dwellMin >= EgressDwellMinutes ? "dwell" : "barren-stall")}.");
         if (!_isEgressing)
-            return goal;
+            // The combat-ready egress latch above (ComputeEgressActive) CANCELS for a NOT-
+            // combat-ready (unarmed) bot — by design, so an unarmed bot in a TOWN can `Use`
+            // vendors/objects to self-arm rather than wander off. But an unarmed bot stuck in a
+            // monster-free WILDERNESS landblock has no objects to Use and is just as barren-
+            // stalled (it emits undirected `Explore{anywhere}` with nothing else to do). So when
+            // NOT egressing and NO winnable monster is in view, still apply the long-barren-stall
+            // directional escape: it only stamps an UNDIRECTED Explore{anywhere} past the dwell
+            // threshold (a town bot Using a vendor emits `Use`, not Explore, so it is untouched),
+            // letting an unarmed wilderness-stuck bot travel OUT instead of re-fanning local cells.
+            return NonEgressBarrenEscape(goal, HasWinnableMonsterInView(world), dwellMin, lb);
 
         // Egress is engaged. Substitute the goals that would keep the bot
         // stuck in this tapped-out zone: the social dwell-extending verbs
@@ -1459,6 +1477,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return monsters.All(v => IsAvoidBeatenKind(
             world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
     }
+
+    // True when at least one WINNABLE monster is in view: an attackable (non-corpse) monster
+    // exists AND they are not ALL beaten kinds the veto would drop. The standard "engage here
+    // vs leave to find a fight" predicate (same composition the egress-defer + explore-skip
+    // beaten-only arms use), correct REGARDLESS of combat-ready/tapped-out — it reads the beaten
+    // ledger directly, unlike ComputeEffectiveMonsterInView whose killed-kinds exclusion is gated
+    // on tappedOut (false for an unarmed bot). Own perception + own combat ledger; no game knowledge.
+    internal static bool HasWinnableMonsterInView(WorldStateProjection world)
+        => AnyAttackableMonsterInView(world) && !OnlyBeatenMonstersInView(world);
 
     // A visible object is a dialog-NPC CANDIDATE only when it is a creature that is
     // neither a monster nor another PLAYER. Players share the IsCreature wire class

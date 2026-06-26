@@ -2093,6 +2093,32 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void NonEgressBarrenEscape_EscapesUnarmedWildernessStallButDefersToMonsterAndUse()
+    {
+        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
+        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
+
+        // No winnable monster + long barren stall + undirected Explore -> directional escape
+        // stamped (the case the combat-ready egress latch cancels for an UNARMED bot).
+        var escaped = LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, longDwell, 0x0125u);
+        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), escaped.Direction);
+
+        // A WINNABLE monster in view -> pass through (fight it), even on a long stall.
+        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: true, longDwell, 0x0125u).Direction);
+
+        // No monster but a town `Use` goal (not Explore) -> untouched, so a bot can still Use a
+        // vendor to self-arm rather than being sent wandering.
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Grocer" } };
+        var afterUse = LlmGoalPolicy.NonEgressBarrenEscape(use, winnableMonsterInView: false, longDwell, 0x0125u);
+        Assert.Equal(GoalKind.Use, afterUse.Kind);
+        Assert.Null(afterUse.Direction);
+
+        // Below the dwell threshold -> unchanged even with no monster.
+        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
+        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, shortDwell, 0x0125u).Direction);
+    }
+
+    [Fact]
     public void BuyVendorNoPanel_PanelOpen_ReturnsNull()
     {
         // A panel IS open -> let the Buy run (no rewrite); this is the no-loop guard.
@@ -16682,6 +16708,22 @@ public class LlmGoalPolicyTests
         // Nothing in view -> the general stuck-loop egress / fallback owns it.
         var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
         Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
+    }
+
+    [Fact]
+    public void HasWinnableMonsterInView_TrueOnlyWhenANonBeatenMonsterIsAttackable()
+    {
+        // A winnable (non-beaten) monster in view -> true (fight it; the barren-escape must DEFER).
+        Assert.True(LlmGoalPolicy.HasWinnableMonsterInView(
+            BuildWorldBeaten(new[] { Winnable("Rabbit", 9u) }, selfLevel: 11, Mob(MobGuid, "Rabbit", 9u))));
+        // ONLY a lethal-beaten kind in view -> false (no winnable target). This is the gpt-5.4 BLOCKING
+        // case ComputeEffectiveMonsterInView missed for an UNARMED bot: the barren-escape MUST still fire
+        // when the only monsters around are ones the veto drops.
+        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
+            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11, Mob(MobGuid, "Drudge Skulker", 7u))));
+        // No monster in view -> false (nothing to fight here).
+        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
+            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11)));
     }
 
     [Fact]
