@@ -4095,6 +4095,103 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_UseTargetUnreachable_RendersWhenFarVisibleAndTargetMiss()
+    {
+        // The bot re-Uses a far-visible object (Ianto @ 28u) AND a recent goal that targeted
+        // it failed with a TARGET selector-MISS -> it is visible but unreachable; redirect.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Ianto", 3, now);
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Use: selector resolved to no live object" });
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains("## Use target unreachable", prompt);
+        Assert.Contains("cannot get within range to `Use` it", prompt);
+        // The not-in-view Use-loop cue must NOT fire (the name DOES resolve to a visible object).
+        Assert.DoesNotContain("## Use loop (target not in view)", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseTargetUnreachable_AbsentWhenNoFailure()
+    {
+        // Far-visible (28u) with NO target-MISS failure -> the bot is simply walking up; `Use`
+        // navigates into range and succeeds. No unreachable cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Ianto", 3, now);
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Use target unreachable", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseTargetUnreachable_AbsentWhenItemOnlyMiss()
+    {
+        // A far-visible object whose recent failure was an ITEM-only miss (target bound, item
+        // unresolved) is NOT evidence the target is unreachable -> no unreachable cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Ianto", 3, now);
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Ianto",
+              Text = "Use: required inventory item unresolved" });
+        var world = BuildVisibleWorld(NamedVisible("Ianto", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Use target unreachable", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseTargetUnreachable_AbsentForOwnCorpse()
+    {
+        // The bot's OWN corpse is exempt (its `## Corpse` cue guides retrieval); the generic
+        // "Use a different object" redirect would contradict it.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Corpse of Headless", 3, now);   // self name in BuildVisibleWorld is "Headless"
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Corpse of Headless",
+              Text = "Use: selector resolved to no live object" });
+        var corpse = new VisibleObjectProjection
+            { Guid = 0x800000C9u, Name = "Corpse of Headless", Distance = 28f, IsCorpse = true };
+        var world = BuildVisibleWorld(corpse);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Use target unreachable", prompt);
+    }
+
+    [Fact]
+    public void RepeatedResolvedFarVisibleTargetName_Use_ReturnsFarVisibleName()
+    {
+        // The generalized detector with verb="Use": 3 Use emissions toward a far-visible (28u)
+        // object -> the name; a within-reach (3u) bind -> null (owned by the reached path).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Ianto", 3, now);
+        Assert.Equal("Ianto", LlmGoalPolicy.RepeatedResolvedFarVisibleTargetName(
+            BuildVisibleWorld(NamedVisible("Ianto", 28f)), es, now.AddMinutes(-3), "Use", 3, excludeItemGoals: true));
+        Assert.Null(LlmGoalPolicy.RepeatedResolvedFarVisibleTargetName(
+            BuildVisibleWorld(NamedVisible("Ianto", 3f)), es, now.AddMinutes(-3), "Use", 3, excludeItemGoals: true));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_UseTargetUnreachable_AbsentForItemFieldMisfile()
+    {
+        // gpt-5.4 fix: the item-field-misfile shape `Use target=<empty> item=name="X"` puts the
+        // OBJECT name in the ITEM field (no target) -- its own item-field loop cue handles it, and
+        // the default name= regex would otherwise capture the ITEM name as a pseudo-target. With
+        // excludeItemGoals:true the populated item= emission is skipped, so even with a far-visible
+        // X + a recent target-miss, the unreachable Use cue must NOT fire.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+                { Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                  Text = "Use target=<empty> item=name=\"Pawn Shopkeep\" source=llm:test" });
+        es.Append(new StreamEvent
+            { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = "Pawn Shopkeep",
+              Text = "Use: selector resolved to no live object" });
+        var world = BuildVisibleWorld(NamedVisible("Pawn Shopkeep", 28f));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Use target unreachable", prompt);
+    }
+
+    [Fact]
     public void RepeatedUnresolvedUseTarget_NullWhenNameMatchesVisibleObject()
     {
         // The named object IS visible -> in range; normal nav / picker handles it.

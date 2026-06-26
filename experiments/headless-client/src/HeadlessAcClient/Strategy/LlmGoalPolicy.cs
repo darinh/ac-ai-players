@@ -6781,24 +6781,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // priority, no source-side target choice.
     internal static string? RepeatedResolvedFarVisibleExploreName(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => RepeatedResolvedFarVisibleTargetName(
+            world, events, since, "Explore", RepeatedUnresolvedExploreThreshold, excludeItemGoals: false);
+
+    // Generalized: the NAME the bot has emitted goal <paramref name="verb"/> toward
+    // >= <paramref name="threshold"/> times in the window that resolves to a VISIBLE
+    // object BEYOND the reached radius, else null. Resolve the SINGLE object the name
+    // binds (ResolveVisibleObjectForName — the same semantics VisibleResolvesName uses)
+    // and read ITS distance, so this detector and the reached cue never disagree on which
+    // object the name resolves to. <paramref name="excludeItemGoals"/> skips an emission
+    // carrying a populated `item=` field so the item-field-misfile shape
+    // `Use target=<empty> item=name="X"` (whose name= is the ITEM, not a target) is NOT
+    // counted as a target loop — its own loop cue handles it. Own emission history +
+    // perception; no game knowledge, no priority, no source-side target choice.
+    internal static string? RepeatedResolvedFarVisibleTargetName(
+        WorldStateProjection world, EventStream events, DateTimeOffset since, string verb, int threshold,
+        bool excludeItemGoals = false)
     {
         if (world?.Visible is null) return null;
-        foreach (var kv in CountRecentEmittedTargetNames(events, since, "Explore", excludeItemGoals: false)
+        foreach (var kv in CountRecentEmittedTargetNames(events, since, verb, excludeItemGoals)
                      .OrderByDescending(k => k.Value))
         {
-            if (kv.Value < RepeatedUnresolvedExploreThreshold) break;
-            // Resolve the SAME object VisibleResolvesName binds, then read ITS distance:
-            // fire only when that bound object is BEYOND the reached radius (a within-reach
-            // bind is owned by the cp022 `## Reached Explore target` cue + its hard-drop).
-            // Using the single resolved object keeps this detector and the reached cue in
-            // agreement on which object the name resolves to (a fuzzy/quoted-role bind that
-            // a different matcher would miss cannot slip through as "not reached").
+            if (kv.Value < threshold) break;
             if (ResolveVisibleObjectForName(world.Visible, kv.Key, excludeCorpses: false)
                     is { Distance: float d } && d > ReachedExploreTargetDistanceUnits)
                 return kv.Key;
         }
         return null;
     }
+
 
     // True if a recent TARGET selector-MISS GoalFailed carried this (role-normalized)
     // target NAME — i.e. the bot tried a goal on that name and its TARGET could not be
@@ -11844,6 +11855,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
                 "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
                 $"re-`Use`-ing `{loopedUseDisplay}`.");
+        }
+
+        // ── ## Use target unreachable — sibling of the far-visible Explore escalation ──
+        // The `## Use loop (target not in view)` cue above covers a Use toward a name NOT in
+        // view. The COMPLEMENT (live-dominant for an unreachable in-view vendor): the bot
+        // re-Uses a name that DOES resolve to a VISIBLE object beyond reach whose TARGET keeps
+        // failing to bind (a Use MISS for out-of-range) — the object is visible but the route
+        // stalls short of interaction range, so re-Using it never connects. The not-in-view
+        // Use-loop cue cannot fire (it IS visible), and the far-visible Explore escalation only
+        // fires when the bot EXPLORES the name (not Uses it), so a Use-dominant unreachable loop
+        // trips neither. Gate on a TARGET selector-MISS failure (HasRecentInteractionFailureForName,
+        // the reach-consistent signal) so a far-but-REACHABLE vendor the bot is simply walking up
+        // to (Use navigates INTO range and succeeds — no failure) is never flagged. Own corpse
+        // exempt (its `## Corpse` cue guides retrieval). Own emission + failure history +
+        // perception; no game knowledge, no priority, no source-side target choice.
+        if (RepeatedResolvedFarVisibleTargetName(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedUseWindow, "Use", RepeatedUnresolvedUseThreshold,
+                excludeItemGoals: true)
+                is string farUseName
+            && !IsOwnCorpseName(farUseName, world.Self.Name)
+            && HasRecentInteractionFailureForName(
+                events, farUseName, DateTimeOffset.UtcNow - RepeatedUnresolvedUseWindow)
+            && OneLine(farUseName) is string farUseDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Use target unreachable");
+            sb.AppendLine(
+                $"- you have tried to `Use` `{farUseDisplay}` several times AND a recent goal that targeted it " +
+                $"could not bind — `{farUseDisplay}` IS VISIBLE but you cannot get within range to `Use` it (your " +
+                "route stalls short of it; it is blocked/unreachable from here). Re-`Use`-ing it will NOT reach it. " +
+                "To make progress, emit `Explore{target: {name: \"anywhere\"}}` to travel toward open ground (you " +
+                "may find another way around), `Use` a DIFFERENT visible object in `## Nearest objects`, or pursue a " +
+                $"DIFFERENT objective — do NOT keep re-`Use`-ing `{farUseDisplay}`.");
         }
 
         // ── ## Engagement churn — multi-target unresolved-interaction loop-break ──
