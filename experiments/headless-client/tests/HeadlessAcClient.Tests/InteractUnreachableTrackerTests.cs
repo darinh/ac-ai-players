@@ -211,6 +211,31 @@ public class InteractUnreachableTrackerTests
     }
 
     [Fact]
+    public void Backoff_NoDamageAbandonCadence_ClimbsToCapThenHolds_120sBase()
+    {
+        // The no-damage abandon tracker uses a 120s BASE cooldown (vs the interact
+        // tracker's 60s). A monster the bot repeatedly abandons for zero damage
+        // (e.g. one it can never close to melee range) is re-locked + walked to on
+        // the same cadence: suppressed for its current cooldown, so the next no-
+        // damage abandon re-mark arrives ~cooldown later. With cap 5 the suppression
+        // should climb 120 -> 240 -> 360 -> 480 -> 600 then HOLD at 600 (the scaled
+        // decay window 720s keeps the streak from resetting at the boundary), so the
+        // bot stops cyclically re-selecting the same unreachable target.
+        var t = new InteractUnreachableTracker();
+        const int cap = 5;
+        var baseTtl = TimeSpan.FromSeconds(120);
+        var mark = T0;
+        var expectedTtl = new[] { 120, 240, 360, 480, 600, 600, 600 };
+        foreach (var ttlSec in expectedTtl)
+        {
+            t.MarkUnreachable(ChestGuid, mark, baseTtl, maxBackoffMultiplier: cap);
+            Assert.True(t.IsSuppressed(ChestGuid, mark.AddSeconds(ttlSec - 1)));
+            Assert.False(t.IsSuppressed(ChestGuid, mark.AddSeconds(ttlSec)));
+            mark = mark.AddSeconds(ttlSec);
+        }
+    }
+
+    [Fact]
     public void Backoff_BoundaryGapEqualToWindow_Resets()
     {
         // The streak-continue test is strict (`now < StaleAfter`), so a re-mark at

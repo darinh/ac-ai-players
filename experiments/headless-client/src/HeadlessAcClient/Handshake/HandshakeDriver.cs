@@ -148,6 +148,26 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Resolve the escalating-backoff cap for the no-damage abandon suppression
+    // from the env var. Falls back to 5 for an unset/blank/invalid/below-min
+    // value; clamps to [1, 20]. 1 disables escalation (the original fixed base
+    // cooldown); higher values let a guid the bot repeatedly abandons for zero
+    // damage (e.g. a target it can never close to melee range, so every
+    // engagement times out at no damage) be re-locked + walked to progressively
+    // less often, up to base x cap, so the bot stops re-selecting the same
+    // unreachable target and hunts a closeable one. Mirrors the interact-
+    // unreachable backoff policy on its sibling tracker.
+    internal static int ResolveNoDamageAbandonBackoffMax(string? envValue)
+    {
+        const int Default = 5;
+        const int Min = 1;
+        const int Max = 20;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
     // Resolve the per-run observe budget from the env var. Falls back to the 3600s
     // default for an unset/blank/invalid value; clamps to [60s, 7 days] so a typo
     // can neither starve a run nor leave a process effectively immortal.
@@ -941,6 +961,21 @@ internal sealed class HandshakeDriver : IDisposable
         // combat-feel ledger separately records the per-kind ineffective outcome.
         var                  recentlyAbandonedNoDamageCooldown = TimeSpan.FromSeconds(120);
         var                  recentlyAbandonedNoDamageTargets = new HeadlessAcClient.World.InteractUnreachableTracker();
+        // Escalating-backoff cap for the no-damage abandon suppression (above):
+        // a guid the bot repeatedly abandons for zero damage (e.g. a target it
+        // can never close to melee range, so each engagement times out at no
+        // damage) is re-locked + walked to progressively less often, up to the
+        // base 120s cooldown x cap, so the bot stops cyclically re-selecting the
+        // same unreachable target. The default-1 (env=1) path is byte-identical
+        // to the prior fixed-120s suppression. Mirrors interactUnreachable's
+        // backoff on its sibling tracker. The streak HOLDS at the cap only while
+        // the re-abandon cadence (one no-damage abandon window + the current
+        // suppression) stays under the scaled decay window 120s*(cap+1); with the
+        // default ~50-60s abandon window that holds, and if AbandonOnNoDamageSec
+        // is configured >= the 120s base the streak merely cycles instead of
+        // holding at the cap — still strictly better than the prior fixed loop.
+        var                  recentlyAbandonedNoDamageBackoffMax = ResolveNoDamageAbandonBackoffMax(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_NO_DAMAGE_ABANDON_BACKOFF_MAX"));
         // cp-2403 — containers (chests/corpses) the bot OPENED and confirmed
         // EMPTY, with a TTL cooldown. The no-quest fallback's openable/chest Use
         // steps pick the nearest visible openable, so when the LLM throttles and
@@ -4412,16 +4447,31 @@ internal sealed class HandshakeDriver : IDisposable
                     // accumulated (own swing outcomes only — see
                     // CombatRetry.ShouldAbandonUnbeatable).
                     string? abandonReason = null;
+                    // Escalating-backoff is scoped to the ZERO-DAMAGE abandons (the
+                    // bot dealt no damage at all: it could not close to melee range,
+                    // or every swing evaded). Those are the "cannot make ANY progress
+                    // here" cases the live re-lock wedge came from, so suppressing the
+                    // guid progressively longer is safe. The stalemate branch below is
+                    // a DIFFERENT case (the bot DID land hits and deal damage, just too
+                    // slowly), where the same individual may become winnable as the bot
+                    // gets stronger — leave it on the fixed base cooldown (no escalation).
+                    var abandonZeroDamage = false;
                     if (sinceLastDamage >= AbandonOnNoDamageSec)
+                    {
                         abandonReason =
                             $"after {sinceLastDamage:F0}s with no damage";
+                        abandonZeroDamage = true;
+                    }
                     else if (sinceLastDamage >= AbandonAllEvadedMinSec &&
                              CombatRetry.ShouldAbandonUnbeatable(
                                  combatSwingsLanded, combatDamageDealt,
                                  combatSwingsEvaded, AbandonAllEvadedMinSwings))
+                    {
                         abandonReason =
                             $"after {combatSwingsEvaded} swings all evaded (0 landed, " +
                             $"0 damage) in {sinceLastDamage:F0}s — target out-defends bot";
+                        abandonZeroDamage = true;
+                    }
                     else if ((DateTime.UtcNow - cstart).TotalSeconds >= AbandonStalemateMinSec &&
                              CombatRetry.ShouldAbandonStalemate(
                                  combatSwingsLanded, combatSwingsEvaded,
@@ -4460,7 +4510,11 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                         visitedTargetGuids.Add(ctgWatch);
                         recentlyAbandonedNoDamageTargets.MarkUnreachable(
-                            ctgWatch, DateTime.UtcNow, recentlyAbandonedNoDamageCooldown);
+                            ctgWatch, DateTime.UtcNow, recentlyAbandonedNoDamageCooldown,
+                            // Escalate only the zero-damage abandons (can't-close /
+                            // all-evaded); a slow-but-damaging stalemate stays on the
+                            // fixed base cooldown (cap 1 = no escalation).
+                            abandonZeroDamage ? recentlyAbandonedNoDamageBackoffMax : 1);
                         combatTargetGuid = null;
                         combatStartedAt = null;
                         lastCombatAttackAt = null;
