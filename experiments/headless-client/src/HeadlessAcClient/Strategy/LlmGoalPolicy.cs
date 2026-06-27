@@ -3202,7 +3202,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
             FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
             world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack),
-            world.Self.StaminaCurrent, world.Self.StaminaObservedPeak));
+            world.Self.StaminaCurrent, world.Self.StaminaObservedPeak,
+            world.CumulativeZeroDamageAbandons));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3305,7 +3306,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
         int raises = 0, int attackEgresses = 0, string? topIntent = null,
-        int? staminaCurrent = null, int? staminaPeak = null)
+        int? staminaCurrent = null, int? staminaPeak = null, int zeroDamageAbandons = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3424,6 +3425,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Shown only when >0. Pure observability; no behavior change.
         if (attackEgresses > 0)
             line += $" atk-egress={attackEgresses}";
+        // Zero-damage abandons this run: combat targets the bot gave up on after
+        // dealing NO damage at all — it could never close to melee range (target
+        // fled / unreachable) or every swing evaded. Distinct from atk-egress=
+        // (a low-health defer) and from swings= (which never increments for the
+        // never-swung can't-close case); a recurring nodmg= flags an un-closeable/
+        // un-hittable target class (the Motor suppresses those guids with escalating
+        // backoff). Shown only when >0. Pure observability; no behavior change.
+        if (zeroDamageAbandons > 0)
+            line += $" nodmg={zeroDamageAbandons}";
         // Peak current HP observed this run (HealthObservedPeak, a max-HP proxy).
         // Pairs with swings= and deaths= as a combat-effectiveness diagnostic. Shown
         // only when known + positive. Pure observability; no behavior change, no game

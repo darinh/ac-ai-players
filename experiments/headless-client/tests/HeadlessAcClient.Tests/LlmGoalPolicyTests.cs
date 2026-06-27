@@ -1080,6 +1080,33 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_ZeroDamageAbandons_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            zeroDamageAbandons: 6);
+        Assert.Contains("nodmg=6", with);
+
+        // The un-closeable picture pairs with atk-egress= (a low-health defer) and
+        // swings= (which does NOT count the never-swung can't-close case).
+        var unclose = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            attackEgresses: 2, zeroDamageAbandons: 4);
+        Assert.Contains("nodmg=4", unclose);
+        Assert.Contains("atk-egress=2", unclose);
+
+        // Zero this run -> omitted (no noise).
+        var none = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 10, totalXp: 80000L, model: "m",
+            zeroDamageAbandons: 0);
+        Assert.DoesNotContain("nodmg=", none);
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Deaths_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };

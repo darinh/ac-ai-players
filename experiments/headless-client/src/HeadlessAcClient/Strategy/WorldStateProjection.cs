@@ -498,6 +498,16 @@ internal sealed record WorldStateProjection
     public int CumulativeRaises { get; init; }
 
     /// <summary>
+    /// Session-cumulative count of combat targets abandoned this run after ZERO
+    /// damage (could never close to melee, or all-evaded). Copied straight from
+    /// <see cref="WorldState.CumulativeZeroDamageAbandons"/>. Surfaces the
+    /// un-closeable/un-hittable abandon class distinctly from swings= and the
+    /// stuck-timeout trigger; raw perception, source draws no conclusion.
+    /// </summary>
+    [JsonPropertyName("cumulative_zero_damage_abandons")]
+    public int CumulativeZeroDamageAbandons { get; init; }
+
+    /// <summary>
     /// Global-X of the bot's last death location, set only when
     /// <see cref="CorpseRecovery.ShouldSurfaceCorpse"/> passes; null otherwise.
     /// </summary>
@@ -1048,6 +1058,7 @@ internal sealed record WorldStateProjection
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,
             CumulativeKills = world.CumulativeKills,
             CumulativeRaises = world.CumulativeRaises,
+            CumulativeZeroDamageAbandons = world.CumulativeZeroDamageAbandons,
             CorpseWorldX = corpseWorldX,
             CorpseWorldY = corpseWorldY,
             CorpseAgeSeconds = corpseAgeSeconds,

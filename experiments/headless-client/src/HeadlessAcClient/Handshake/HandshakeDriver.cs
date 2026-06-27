@@ -4515,6 +4515,11 @@ internal sealed class HandshakeDriver : IDisposable
                             // all-evaded); a slow-but-damaging stalemate stays on the
                             // fixed base cooldown (cap 1 = no escalation).
                             abandonZeroDamage ? recentlyAbandonedNoDamageBackoffMax : 1);
+                        // Count the zero-damage abandons (can't-close / all-evaded) so
+                        // [run-summary] can self-report the un-closeable/un-hittable
+                        // abandon class distinctly from swings= and stuck-timeout.
+                        if (abandonZeroDamage)
+                            worldState.CumulativeZeroDamageAbandons++;
                         combatTargetGuid = null;
                         combatStartedAt = null;
                         lastCombatAttackAt = null;
