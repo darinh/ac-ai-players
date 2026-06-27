@@ -11261,6 +11261,34 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void FellowshipGuidance_SurvivesTightCeiling_InProtectedTail()
+    {
+        // Relocated to the PROTECTED TAIL: with a `player` in view, the actionable
+        // recruit cue must survive a hard body cut at a tight ceiling — live a dense
+        // 26000-byte prompt guillotined the BODY copy entirely, so a co-located bot
+        // never even saw it could group. The tail copy is cut-proof.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x500000A1u, Name = "Otherbot", IsCreature = true, IsPlayer = true, Distance = 8f },
+            },
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, null, null, null, promptCeiling: 6000);
+        Assert.Contains("## Fellowship guidance", prompt);
+        Assert.Contains("you are NOT in a fellowship", prompt);
+    }
+
+    [Fact]
     public void FellowshipGuidance_InFellowship_SuggestsStayGrouped()
     {
         // ShareXp on, EvenShare off -> XP is split by level, NOT a "speeds everyone" claim.
