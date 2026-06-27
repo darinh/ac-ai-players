@@ -114,6 +114,52 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Decide whether an in-flight RaiseAttribute/RaiseSkill/RaiseVital landed.
+    //
+    // For an ATTRIBUTE raise whose pre-raise base was observed, confirm ONLY when
+    // that attribute's BASE has risen since dispatch. This signal is income-immune
+    // (an attribute's base changes only when it is raised, so concurrent kill-XP
+    // income cannot mask it) AND it SERIALIZES same-attribute re-raises: the pending
+    // clears when THIS raise's echo lands, so the next same-attribute raise captures
+    // its pre-base AFTER this one resolved — a prior raise's delayed base echo can
+    // never false-confirm the next. The available-XP drop is deliberately NOT a
+    // confirm signal for these: it can clear the pending BEFORE the base echo
+    // arrives, letting the next raise capture a stale (pre-this-raise) baseline.
+    //
+    // With NO observed pre-base — an attribute's first-ever raise (before it appears
+    // in SelfAttributes) or a Vital/Skill raise (no per-id base signal here) — the
+    // available-XP drop is the only signal. There is no prior same-target raise to
+    // stale a baseline in those cases, so the drop is safe. Pure own-state read; no
+    // game knowledge.
+    internal static bool IsPendingRaiseConfirmed(
+        string kind, uint id, long? preAvailableXp, uint? preBase,
+        long? availXpNow, IReadOnlyList<PdAttribute>? selfAttributes)
+    {
+        if (kind == "Attribute" && preBase is uint pb)
+            return TryGetSelfAttributeBaseById(selfAttributes, id, out var nowBase) && nowBase > pb;
+        return preAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
+    }
+
+    // Find the current base of the attribute with wire id `id` among the bot's
+    // observed self-attributes, mapping each entry's NAME back to its id via the
+    // pure AttributeRaise resolver (PdAttribute carries name+base, not the id).
+    // Pure lookup; no game knowledge.
+    internal static bool TryGetSelfAttributeBaseById(
+        IReadOnlyList<PdAttribute>? attrs, uint id, out uint baseValue)
+    {
+        baseValue = 0;
+        if (attrs is null) return false;
+        foreach (var a in attrs)
+        {
+            if (AttributeRaise.TryResolveAttributeId(a.Name, out var aid) && aid == id)
+            {
+                baseValue = a.Base;
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Resolve the no-damage combat-abandon backstop from the env var. Falls back
     // to the 60s default for an unset/blank/invalid/below-min value; clamps to
     // [45s, 600s]. The 45s floor sits comfortably above the watchdog comment's
@@ -1508,7 +1554,7 @@ internal sealed class HandshakeDriver : IDisposable
         // pre-dispatch. Reconciled at the next raise attempt (of either kind):
         // cleared on a confirmed AvailableExperience decrease (success) or
         // after the timeout (no confirmation seen).
-        (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp)? pendingRaise = null;
+        (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp, uint? PreBase)? pendingRaise = null;
         // Vendor-buy in-flight bookkeeping. Buy (0x005F) spends currency
         // irreversibly, so — exactly like the Raise* self-actions — only ONE
         // buy is allowed in flight: it is reconciled by a currency-AGNOSTIC
@@ -5878,20 +5924,24 @@ internal sealed class HandshakeDriver : IDisposable
                             selfP64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNow)
                                 ? axNow : (long?)null;
 
-                        // Reconcile any prior pending raise: a confirmed drop in
-                        // AvailableExperience means the last spend landed; a
-                        // stale entry past the timeout is dropped so it can never
-                        // wedge the dedup window.
+                        // Reconcile any prior pending raise: it landed when the confirm
+                        // predicate holds (for an attribute raise, the target attribute's
+                        // base rose — income-immune; otherwise a drop in AvailableExperience);
+                        // a stale entry past the timeout is dropped so it can never wedge
+                        // the dedup window.
                         if (pendingRaise is { } pr0 &&
-                            ((pr0.PreAvailableXp is long preXp && availXpNow is long nowXp && nowXp < preXp) ||
+                            (IsPendingRaiseConfirmed(pr0.Kind, pr0.Id, pr0.PreAvailableXp, pr0.PreBase,
+                                 availXpNow, worldState.Self?.SelfAttributes) ||
                              (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
-                            var confirmed = pr0.PreAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
+                            var confirmed = IsPendingRaiseConfirmed(
+                                pr0.Kind, pr0.Id, pr0.PreAvailableXp, pr0.PreBase,
+                                availXpNow, worldState.Self?.SelfAttributes);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{pr0.Kind} id={pr0.Id} amount={pr0.Amount} " +
                                 (confirmed
                                     ? $"CONFIRMED (unspent {pr0.PreAvailableXp}->{availXpNow})"
-                                    : "timed out (no unspent-XP confirmation)"));
+                                    : "timed out (no spend confirmation)"));
                             if (confirmed) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
@@ -5949,7 +5999,9 @@ internal sealed class HandshakeDriver : IDisposable
                                                           encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSent),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaise = ("Attribute", attrId, spendAmount, DateTime.UtcNow, availXpNow);
+                            pendingRaise = ("Attribute", attrId, spendAmount, DateTime.UtcNow, availXpNow,
+                                TryGetSelfAttributeBaseById(worldState.Self?.SelfAttributes, attrId, out var preAttrBase)
+                                    ? preAttrBase : (uint?)null);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseAttribute: id={attrId} amount={spendAmount} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
@@ -5979,15 +6031,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 ? axNowV : (long?)null;
 
                         if (pendingRaise is { } pv0 &&
-                            ((pv0.PreAvailableXp is long preXpV && availXpNow is long nowXpV && nowXpV < preXpV) ||
+                            (IsPendingRaiseConfirmed(pv0.Kind, pv0.Id, pv0.PreAvailableXp, pv0.PreBase,
+                                 availXpNow, worldState.Self?.SelfAttributes) ||
                              (DateTime.UtcNow - pv0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
-                            var confirmedV = pv0.PreAvailableXp is long pxpV && availXpNow is long nxpV && nxpV < pxpV;
+                            var confirmedV = IsPendingRaiseConfirmed(
+                                pv0.Kind, pv0.Id, pv0.PreAvailableXp, pv0.PreBase,
+                                availXpNow, worldState.Self?.SelfAttributes);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{pv0.Kind} id={pv0.Id} amount={pv0.Amount} " +
                                 (confirmedV
                                     ? $"CONFIRMED (unspent {pv0.PreAvailableXp}->{availXpNow})"
-                                    : "timed out (no unspent-XP confirmation)"));
+                                    : "timed out (no spend confirmation)"));
                             if (confirmedV) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
@@ -6036,7 +6091,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                             encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentV),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaise = ("Vital", vitalId, spendAmountV, DateTime.UtcNow, availXpNow);
+                            pendingRaise = ("Vital", vitalId, spendAmountV, DateTime.UtcNow, availXpNow, null);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseVital: id={vitalId} amount={spendAmountV} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
@@ -6069,15 +6124,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 ? axNowS : (long?)null;
 
                         if (pendingRaise is { } ps0 &&
-                            ((ps0.PreAvailableXp is long preXpS && availXpNow is long nowXpS && nowXpS < preXpS) ||
+                            (IsPendingRaiseConfirmed(ps0.Kind, ps0.Id, ps0.PreAvailableXp, ps0.PreBase,
+                                 availXpNow, worldState.Self?.SelfAttributes) ||
                              (DateTime.UtcNow - ps0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
-                            var confirmedS = ps0.PreAvailableXp is long pxpS && availXpNow is long nxpS && nxpS < pxpS;
+                            var confirmedS = IsPendingRaiseConfirmed(
+                                ps0.Kind, ps0.Id, ps0.PreAvailableXp, ps0.PreBase,
+                                availXpNow, worldState.Self?.SelfAttributes);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{ps0.Kind} id={ps0.Id} amount={ps0.Amount} " +
                                 (confirmedS
                                     ? $"CONFIRMED (unspent {ps0.PreAvailableXp}->{availXpNow})"
-                                    : "timed out (no unspent-XP confirmation)"));
+                                    : "timed out (no spend confirmation)"));
                             if (confirmedS) worldState.CumulativeRaises++;
                             pendingRaise = null;
                         }
@@ -6126,7 +6184,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                             encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentS),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaise = ("Skill", skillId, spendAmountS, DateTime.UtcNow, availXpNow);
+                            pendingRaise = ("Skill", skillId, spendAmountS, DateTime.UtcNow, availXpNow, null);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseSkill: id={skillId} amount={spendAmountS} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
