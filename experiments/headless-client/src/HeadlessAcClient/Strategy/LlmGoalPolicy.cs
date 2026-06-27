@@ -8961,51 +8961,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
-        // ── ## Fellowship guidance (the social DECISION) ─────────────────
-        // The perception above is fact-only; this conditional cue supplies the
-        // WHEN-to-act guidance for the FellowshipCreate/Recruit/Quit verbs. A
-        // fellowship shares kill XP among members hunting near each other (the
-        // ShareXp flag rendered above), so grouping speeds leveling. Rendered ONLY
-        // when in a fellowship OR a `player` is in view, so it costs nothing in the
-        // common solo case. Generic mechanic, OPTIONAL — the LLM owns the decision.
-        var inFellowship = world.Fellowship is not null;
-        var aPlayerIsInView = world.Visible.Any(v => v.IsPlayer);
-        if (inFellowship || aPlayerIsInView)
-        {
-            sb.AppendLine("## Fellowship guidance");
-            if (world.Fellowship is { } fg)
-            {
-                // The XP-share claim is conditional on the rendered ShareXp/EvenShare
-                // flags: a fellowship shares kill XP only when ShareXp is on (the
-                // server can force it off, e.g. for an incompatible level spread), and
-                // "speeds everyone's leveling" is the even-share case. Mis-stating this
-                // would mis-steer the LLM into valuing a non-sharing group.
-                var xpClause = fg.ShareXp
-                    ? (fg.EvenShare
-                        ? "your fellowship SHARES kill XP evenly among members in range, so hunting near your " +
-                          "fellow members can speed everyone's leveling"
-                        : "your fellowship SHARES kill XP among members in range (split by level), so hunting " +
-                          "near your fellow members spreads kill XP")
-                    : "your fellowship is NOT currently sharing XP (see `shares XP` above), so grouping gives " +
-                      "no XP benefit right now";
-                sb.AppendLine(
-                    $"- You are grouped: {xpClause}. `FellowshipRecruit` another visible `player` by name " +
-                    "(only when exactly one visible `player` matches that name) to add them; `FellowshipQuit` " +
-                    "only if you part ways or grouping no longer helps you. Do this only when it does not " +
-                    "interrupt a more important immediate objective.");
-            }
-            else
-            {
-                sb.AppendLine(
-                    "- Another `player` is nearby and you are NOT in a fellowship. A fellowship CAN share kill " +
-                    "XP among members hunting near each other when its settings and level spread allow, which " +
-                    "can speed leveling. You MAY `FellowshipCreate` (you become leader) then `FellowshipRecruit` " +
-                    "that `player` by name (only when exactly one visible `player` matches that name) to invite " +
-                    "them. OPTIONAL — only worth it if you will hunt together; skip it if you are pursuing a " +
-                    "solo objective.");
-            }
-            sb.AppendLine();
-        }
+        // ── ## Fellowship guidance — relocated to the PROTECTED salience tail
+        // (search "## Fellowship guidance" below). It is an ACTIONABLE social cue
+        // (when a `player` is co-located, the bot MAY group to share kill XP), but
+        // rendered HERE in the body it is among the trailing sections hard-cut first
+        // when the prompt overflows the request ceiling — live the 26000-byte cap
+        // guillotined it entirely (a 2-bot co-location run showed prompt-bytes=26000
+        // with NO `## Fellowship guidance` reaching the model, so the bots never even
+        // saw that they could recruit). Moving it to the protected tail (beside
+        // `## Contracts` etc.) keeps the rare-but-actionable grouping cue cut-proof.
 
         // ── ## Contracts — relocated to the PROTECTED salience tail (search
         // "## Contracts" below). The body's trailing sections are hard-cut first
@@ -10136,6 +10100,55 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "this caution applies it OVERRIDES the optional-combat/hunt guidance and the 'dying -> raise max " +
                 "HP' XP tiebreaker above. (A `HOSTILE` already attacking you, or an explicit server/quest " +
                 "directive, still takes priority — defend or flee as needed.)");
+        }
+
+        // ── ## Fellowship guidance (the social DECISION, protected tail) ─────
+        // Relocated from the body to the PROTECTED salience tail so it survives the
+        // dense-scene body hard-cut (live: the 26000-byte prompt cap guillotined the
+        // body copy, so a co-located bot never saw it could group). The perception
+        // facts render in the body `## Fellowship` membership section; THIS conditional
+        // cue supplies the WHEN-to-act guidance for the FellowshipCreate/Recruit/Quit
+        // verbs. A fellowship shares kill XP among members hunting near each other (the
+        // ShareXp flag), so grouping speeds leveling. Rendered ONLY when in a fellowship
+        // OR a `player` is in view, so it costs nothing in the common solo case. Generic
+        // mechanic, OPTIONAL — the LLM owns the decision; no game knowledge.
+        var inFellowship = world.Fellowship is not null;
+        var aPlayerIsInView = world.Visible.Any(v => v.IsPlayer);
+        if (inFellowship || aPlayerIsInView)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Fellowship guidance");
+            if (world.Fellowship is { } fg)
+            {
+                // The XP-share claim is conditional on the rendered ShareXp/EvenShare
+                // flags: a fellowship shares kill XP only when ShareXp is on (the
+                // server can force it off, e.g. for an incompatible level spread), and
+                // "speeds everyone's leveling" is the even-share case. Mis-stating this
+                // would mis-steer the LLM into valuing a non-sharing group.
+                var xpClause = fg.ShareXp
+                    ? (fg.EvenShare
+                        ? "your fellowship SHARES kill XP evenly among members in range, so hunting near your " +
+                          "fellow members can speed everyone's leveling"
+                        : "your fellowship SHARES kill XP among members in range (split by level), so hunting " +
+                          "near your fellow members spreads kill XP")
+                    : "your fellowship is NOT currently sharing XP (see `shares XP` above), so grouping gives " +
+                      "no XP benefit right now";
+                sb.AppendLine(
+                    $"- You are grouped: {xpClause}. `FellowshipRecruit` another visible `player` by name " +
+                    "(only when exactly one visible `player` matches that name) to add them; `FellowshipQuit` " +
+                    "only if you part ways or grouping no longer helps you. Do this only when it does not " +
+                    "interrupt a more important immediate objective.");
+            }
+            else
+            {
+                sb.AppendLine(
+                    "- Another `player` is nearby and you are NOT in a fellowship. A fellowship CAN share kill " +
+                    "XP among members hunting near each other when its settings and level spread allow, which " +
+                    "can speed leveling. You MAY `FellowshipCreate` (you become leader) then `FellowshipRecruit` " +
+                    "that `player` by name (only when exactly one visible `player` matches that name) to invite " +
+                    "them. OPTIONAL — only worth it if you will hunt together; skip it if you are pursuing a " +
+                    "solo objective.");
+            }
         }
 
         // ── ## Area danger (spatial death memory, protected tail) ────────────
