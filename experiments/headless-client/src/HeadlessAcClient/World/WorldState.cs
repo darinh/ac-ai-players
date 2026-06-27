@@ -335,6 +335,19 @@ internal sealed class WorldState
     public int CumulativeRaises { get; set; }
 
     /// <summary>
+    /// Session-cumulative count of combat targets the bot ABANDONED this run after
+    /// dealing ZERO damage to them — i.e. it could never close to melee range (the
+    /// target fled / is unreachable) or every swing evaded (0 landed, 0 damage).
+    /// These are the "made no damage progress at all" abandons whose guid the Motor
+    /// suppresses with escalating backoff so the bot stops cyclically re-selecting an
+    /// un-closeable/un-hittable target. A stalemate abandon (the bot DID damage, just
+    /// slowly) is NOT counted here. Distinct from swings= (which never increments for
+    /// the never-swung can't-close case) and from the stuck-timeout kickoff trigger.
+    /// Raw observed outcome; source draws no conclusion.
+    /// </summary>
+    public int CumulativeZeroDamageAbandons { get; set; }
+
+    /// <summary>
     /// The bot's last death location (global meters + landblock + time), set on a
     /// detected self-death and cleared once self comes within the visible radius
     /// of it. Raw position bookkeeping.
