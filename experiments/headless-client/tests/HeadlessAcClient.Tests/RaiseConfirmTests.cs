@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Unit tests for the robust XP-raise confirmation
-// (HandshakeDriver.IsPendingRaiseConfirmed / TryGetSelfAttributeBaseById).
+// (HandshakeDriver.IsPendingRaiseConfirmed / TryGetSelfAttributeExperienceSpentById).
 //
-// Why this exists: the in-flight raise was confirmed ONLY by the bot's
-// AvailableExperience dropping. During rapid kill-XP flux, concurrent income
-// refills the pool between dispatch and the next reconcile, so a raise that
-// actually landed reads as a false "timed out" — undercounting raises and
-// (via the one-in-flight dedup) throttling the spend rate so the unspent-XP
-// hoard grows. For an ATTRIBUTE raise the target attribute's BASE rising is an
-// income-immune confirmation (an attribute base changes only when raised), so
-// it is added as a second confirm signal.
+// Why this exists: the in-flight raise was confirmed by the bot's AvailableExperience
+// dropping, which concurrent kill-XP income masks (false timeouts). For an ATTRIBUTE
+// raise the target attribute's EXPERIENCE-SPENT rising is income-immune (it changes
+// only when XP is spent on that attribute) AND it confirms a PARTIAL-rank spend (the
+// server adds the amount to ExperienceSpent even when the rank/base does not move) --
+// which a base-only signal would miss, re-introducing a false-timeout throttle. It
+// also serializes same-attribute re-raises (no stale-baseline false-confirm).
 
 using System.Collections.Generic;
 using HeadlessAcClient.Protocol;
@@ -20,96 +19,100 @@ namespace HeadlessAcClient.Tests;
 
 public class RaiseConfirmTests
 {
-    private static List<PdAttribute> Attrs(params (string Name, uint Base)[] a)
+    // PdAttribute is (Name, Base, Ranks, ExperienceSpent); the confirm keys on the
+    // 4th field (ExperienceSpent).
+    private static List<PdAttribute> Attrs(params (string Name, uint ExpSpent)[] a)
     {
         var list = new List<PdAttribute>();
-        foreach (var x in a) list.Add(new PdAttribute(x.Name, x.Base, 0, 0));
+        foreach (var x in a) list.Add(new PdAttribute(x.Name, 0, 0, x.ExpSpent));
         return list;
     }
 
     [Fact]
-    public void TryGetSelfAttributeBaseById_FindsBaseByResolvedName()
+    public void TryGetSelfAttributeExperienceSpentById_FindsByResolvedName()
     {
-        var attrs = Attrs(("strength", 72), ("coordination", 48));
-        Assert.True(HandshakeDriver.TryGetSelfAttributeBaseById(attrs, 1, out var str)); // 1 = strength
-        Assert.Equal(72u, str);
-        Assert.True(HandshakeDriver.TryGetSelfAttributeBaseById(attrs, 4, out var coord)); // 4 = coordination
-        Assert.Equal(48u, coord);
+        var attrs = Attrs(("strength", 7200), ("coordination", 4800));
+        Assert.True(HandshakeDriver.TryGetSelfAttributeExperienceSpentById(attrs, 1, out var str)); // 1 = strength
+        Assert.Equal(7200u, str);
+        Assert.True(HandshakeDriver.TryGetSelfAttributeExperienceSpentById(attrs, 4, out var coord)); // 4 = coordination
+        Assert.Equal(4800u, coord);
     }
 
     [Fact]
-    public void TryGetSelfAttributeBaseById_NullOrAbsent_ReturnsFalse()
+    public void TryGetSelfAttributeExperienceSpentById_NullOrAbsent_ReturnsFalse()
     {
-        Assert.False(HandshakeDriver.TryGetSelfAttributeBaseById(null, 1, out _));
-        var attrs = Attrs(("strength", 72));
-        Assert.False(HandshakeDriver.TryGetSelfAttributeBaseById(attrs, 2, out _)); // 2 = endurance, not present
+        Assert.False(HandshakeDriver.TryGetSelfAttributeExperienceSpentById(null, 1, out _));
+        var attrs = Attrs(("strength", 7200));
+        Assert.False(HandshakeDriver.TryGetSelfAttributeExperienceSpentById(attrs, 2, out _)); // 2 = endurance, absent
     }
 
     [Fact]
-    public void IsPendingRaiseConfirmed_AttributeWithBase_ConfirmsOnBaseRise_NotOnXpDropAlone()
+    public void IsPendingRaiseConfirmed_AttributeWithValue_ConfirmsOnExpSpentRise_NotOnXpDropAlone()
     {
-        // The serialization invariant: an attribute raise whose pre-base was observed
-        // confirms ONLY when that attribute's base rises — NOT on an available-XP drop
-        // alone. (Confirming on the XP drop would let the next same-attribute raise
-        // capture a stale baseline before this raise's base echo arrives, so a prior
-        // raise's delayed echo could false-confirm it.)
-        var rose = Attrs(("strength", 73));
-        var same = Attrs(("strength", 72));
-        // Base rose -> confirmed (no availXp drop even passed).
+        // Confirm ONLY when the attribute's ExperienceSpent rises -- NOT on an
+        // available-XP drop alone (which would let the next same-attribute raise
+        // capture a stale baseline before this raise's echo arrives).
+        var rose = Attrs(("coordination", 4800));
+        var same = Attrs(("coordination", 4000));
         Assert.True(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: 72, availXpNow: 1000, selfAttributes: rose));
-        // availXp dropped but the base is unchanged -> NOT confirmed (waits for the
-        // base echo so the next same-attribute raise's baseline is post-this-raise).
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 1000, selfAttributes: rose));
         Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: 72, availXpNow: 800, selfAttributes: same));
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 800, selfAttributes: same));
     }
 
     [Fact]
-    public void IsPendingRaiseConfirmed_AttributeBaseRose_ConfirmsEvenWhenIncomeMasksXp()
+    public void IsPendingRaiseConfirmed_PartialRankSpend_ConfirmsViaExpSpent()
     {
-        // Concurrent kill-XP income raised availXpNow ABOVE the pre-dispatch value,
-        // masking the spend — but the target attribute's base rose, so the raise is
-        // still confirmed (the whole point of the base signal).
-        var attrs = Attrs(("strength", 73));
+        // The regression this fixes: a spend that does NOT complete a whole rank still
+        // raises ExperienceSpent (the server adds the amount), so it confirms -- even
+        // though the attribute's base/Ranks did not move. A base-only signal would miss
+        // this and re-introduce a false-timeout throttle.
+        var partial = Attrs(("coordination", 4800)); // +800 ExperienceSpent (partial rank)
         Assert.True(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: 72, availXpNow: 1200, selfAttributes: attrs));
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 1200, selfAttributes: partial));
     }
 
     [Fact]
-    public void IsPendingRaiseConfirmed_AttributeBaseUnchanged_NotConfirmed()
+    public void IsPendingRaiseConfirmed_ExpSpentRose_ConfirmsEvenWhenIncomeMasksXp()
     {
-        // Base unchanged -> not confirmed, regardless of the availXp direction (the
-        // attribute-with-base path ignores availXp entirely).
-        var attrs = Attrs(("strength", 72));
-        Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: 72, availXpNow: 1200, selfAttributes: attrs));
-        Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: 72, availXpNow: 800, selfAttributes: attrs));
+        // Concurrent kill-XP income raised availXpNow ABOVE the pre value (masking the
+        // spend), but ExperienceSpent rose -> confirmed.
+        var attrs = Attrs(("coordination", 4800));
+        Assert.True(HandshakeDriver.IsPendingRaiseConfirmed(
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 1200, selfAttributes: attrs));
     }
 
     [Fact]
-    public void IsPendingRaiseConfirmed_AttributeFirstRaise_NoPreBase_FallsBackToAvailXpDrop()
+    public void IsPendingRaiseConfirmed_ExpSpentUnchanged_NotConfirmed()
     {
-        // The attribute's first-ever raise: not yet in SelfAttributes, so no pre-base
-        // was recorded (preBase=null). With no prior same-attribute raise to stale a
+        var attrs = Attrs(("coordination", 4000));
+        Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 1200, selfAttributes: attrs));
+        Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: 4000, availXpNow: 800, selfAttributes: attrs));
+    }
+
+    [Fact]
+    public void IsPendingRaiseConfirmed_AttributeFirstRaise_NoPreValue_FallsBackToAvailXpDrop()
+    {
+        // The attribute's first-ever raise: not yet in SelfAttributes, so no pre-value
+        // recorded (preExpSpent=null). With no prior same-attribute raise to stale a
         // baseline, the available-XP drop is a safe confirm signal.
         Assert.True(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: null, availXpNow: 800, selfAttributes: null));
-        // No drop -> not confirmed.
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: null, availXpNow: 800, selfAttributes: null));
         Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Attribute", id: 1, preAvailableXp: 1000, preBase: null, availXpNow: 1000, selfAttributes: null));
+            "Attribute", id: 4, preAvailableXp: 1000, preExpSpent: null, availXpNow: 1000, selfAttributes: null));
     }
 
     [Fact]
     public void IsPendingRaiseConfirmed_NonAttributeKind_UsesOnlyAvailableXp()
     {
-        // A Vital/Skill raise has no attribute preBase; the base-rise path must not
-        // apply to it, so only the availXp drop can confirm it. A rising attribute
-        // base (unrelated to the vital) must NOT confirm a Vital raise.
-        var attrs = Attrs(("strength", 99));
+        // A Vital/Skill raise has no attribute ExperienceSpent signal; only the availXp
+        // drop confirms it. A rising (unrelated) attribute ExperienceSpent must NOT.
+        var attrs = Attrs(("strength", 9900));
         Assert.False(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Vital", id: 1, preAvailableXp: 1000, preBase: null, availXpNow: 1200, selfAttributes: attrs));
+            "Vital", id: 1, preAvailableXp: 1000, preExpSpent: null, availXpNow: 1200, selfAttributes: attrs));
         Assert.True(HandshakeDriver.IsPendingRaiseConfirmed(
-            "Vital", id: 1, preAvailableXp: 1000, preBase: null, availXpNow: 800, selfAttributes: attrs));
+            "Vital", id: 1, preAvailableXp: 1000, preExpSpent: null, availXpNow: 800, selfAttributes: attrs));
     }
 }
