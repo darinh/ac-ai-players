@@ -6569,6 +6569,39 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void ExplorationCandidates_SurviveTightCeiling_InProtectedTail()
+    {
+        // Relocated to the PROTECTED TAIL: the off-screen known-object candidate
+        // set (the fallback picker's options) must survive a hard body cut at a
+        // tight ceiling — live the prompt hit the 26000 cap on every call, so the
+        // body copy could be guillotined and the LLM would lose the directed-nav
+        // options, falling back to untargeted Explore.
+        var world = BuildXpWorld(69296, 5475);
+        var events = new EventStream();
+        var candidates = new List<ExplorationCandidate>
+        {
+            new()
+            {
+                Guid = 0x80000ABCu,
+                Name = "Sentry Outpost Door",
+                Distance = 47.0f,
+                CellId = 0x86020100u,
+                Visited = false,
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, null, null, candidates, promptCeiling: 6000);
+        Assert.Contains("## Exploration candidates", prompt);
+        Assert.Contains("Sentry Outpost Door", prompt);
+        // Relocation must render the section EXACTLY ONCE (guard against a future
+        // double-render regression where both the body and the tail emit it).
+        var occurrences =
+            (prompt.Length - prompt.Replace("## Exploration candidates", "").Length)
+            / "## Exploration candidates".Length;
+        Assert.Equal(1, occurrences);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_Prompt_IncludesProactiveLevelingDrive()
     {
         // Regression guard for the combat-engage-drive slice: the

@@ -9030,42 +9030,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
-        if (explorationCandidates is not null && explorationCandidates.Count > 0)
-        {
-            // Slice W.2 (#87): the fallback picker's candidate set
-            // surfaced to the LLM. Listed nearest-first; the picker
-            // will walk to the top entry unless the LLM emits an
-            // Explore goal naming a different one. Visited
-            // candidates are flagged so the LLM can deliberately
-            // backtrack (the picker no longer auto-backtracks).
-            sb.AppendLine("## Exploration candidates (off-screen known objects in current landblock)");
-            foreach (var c in explorationCandidates)
-            {
-                var vis = c.Visited ? " VISITED" : "";
-                // Raw wire-derived kind so the LLM can tell a creature
-                // candidate from inert scenery; ClassifySighting only
-                // yields Mob/NPC/Unknown. No priority — perception only.
-                var kind = c.Kind switch
-                {
-                    EntityKind.Mob => "mob",
-                    EntityKind.NPC => "npc",
-                    _ => "object",
-                };
-                // picker-name-respawn-audit: factual per-Name pickup tally,
-                // shown only when the bot has already picked one. The LLM
-                // decides whether a duplicate is worth re-collecting; no
-                // recommendation or "skip" wording (that valuation is its call).
-                var pickedCount = c.PickedNameCount > 0 ? $" picked_name_count={c.PickedNameCount}" : "";
-                sb.AppendLine(
-                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8} kind={kind}{pickedCount}{vis}");
-            }
-            sb.AppendLine(
-                "- NOTE: the in-range queue is empty. The fallback picker will walk to the TOP " +
-                "entry above by mechanical distance. To pick a different one, emit " +
-                "`Explore{target: {guid: \"0x...\"}}` (most reliable) or `Explore{target: {name: \"...\"}}`. " +
-                "Visited candidates are legitimate Explore targets when you want to backtrack.");
-            sb.AppendLine();
-        }
+        // ── ## Exploration candidates — relocated to the PROTECTED salience tail
+        // (search "## Exploration candidates" below). The off-screen known objects in
+        // the current landblock are the fallback picker's candidate set; surfacing them
+        // lets the LLM steer the directed Explore to a SPECIFIC one instead of the
+        // picker's mechanical nearest. Rendered HERE in the body they are among the
+        // trailing sections the request-size fitter hard-cuts first when the prompt
+        // exceeds the request ceiling, dropping the candidate list so the LLM falls
+        // back to untargeted Explore. Moving it to the protected tail keeps the
+        // directed-nav options cut-proof.
 
         sb.AppendLine("## Inventory");
         if (world.Inventory.Count == 0) sb.AppendLine("- (empty)");
@@ -11682,6 +11655,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // (item list + coordinate hint). Pages beyond this are usually flavor.
                 sb.AppendLine($"    \"{Truncate(b.Text, 800)}\"");
             }
+        }
+
+        // ── ## Exploration candidates (off-screen known nav objects, protected tail) ──
+        // Relocated from the body so the fallback picker's candidate set survives the
+        // dense-scene body hard-cut. These are off-screen known objects in the current
+        // landblock; the picker walks to the mechanical-nearest one unless the LLM steers
+        // the directed Explore to a SPECIFIC candidate by guid/name (so without this the
+        // LLM loses the list and falls back to untargeted Explore). Listed nearest-first;
+        // visited candidates flagged for deliberate backtracking. Raw wire-derived
+        // perception (guid/name/dist/cell/kind) + own pickup tally; NO priority assigned,
+        // the LLM decides. No game knowledge.
+        if (explorationCandidates is not null && explorationCandidates.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Exploration candidates (off-screen known objects in current landblock)");
+            foreach (var c in explorationCandidates)
+            {
+                var vis = c.Visited ? " VISITED" : "";
+                var kind = c.Kind switch
+                {
+                    EntityKind.Mob => "mob",
+                    EntityKind.NPC => "npc",
+                    _ => "object",
+                };
+                var pickedCount = c.PickedNameCount > 0 ? $" picked_name_count={c.PickedNameCount}" : "";
+                sb.AppendLine(
+                    $"- 0x{c.Guid:X8} \"{c.Name}\" dist={c.Distance:F1}u cell=0x{c.CellId:X8} kind={kind}{pickedCount}{vis}");
+            }
+            sb.AppendLine(
+                "- NOTE: the in-range queue is empty. The fallback picker will walk to the TOP " +
+                "entry above by mechanical distance. To pick a different one, emit " +
+                "`Explore{target: {guid: \"0x...\"}}` (most reliable) or `Explore{target: {name: \"...\"}}`. " +
+                "Visited candidates are legitimate Explore targets when you want to backtrack.");
         }
 
         // ── ## Held-item objectives (protected-tail: directive pinned to a held item) ──
