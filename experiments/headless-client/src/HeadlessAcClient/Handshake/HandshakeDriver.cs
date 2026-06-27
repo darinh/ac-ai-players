@@ -132,6 +132,44 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Resolve the mid-fight DISENGAGE health fraction from the env var: the bot breaks
+    // off melee once its current health drops to this fraction of max (a flee reflex
+    // over the bot's OWN health; the LLM still owns WHAT to fight). Falls back to 0.35
+    // for an unset/blank/invalid/below-min value; clamps to [0.05, 0.65]. The ceiling
+    // stays strictly below the 0.70 re-engage fraction so the disengage/re-engage
+    // hysteresis (no oscillation) is preserved for any configured value. A higher
+    // fraction flees with more margin (fewer flee-deaths for a fragile bot); a lower
+    // one fights longer. Default 0.35 is byte-identical to the prior fixed const.
+    internal static double ResolveCombatDisengageHealthFraction(string? envValue)
+    {
+        const double Default = 0.35;
+        const double Min = 0.05;
+        const double Max = 0.65;
+        if (double.TryParse(envValue, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
+    // Resolve the mid-fight DISENGAGE critical HP floor (absolute current HP) from the
+    // env var: at or below this the bot always flees regardless of the fraction.
+    // Falls back to 2 for an unset/blank/invalid/below-min value; clamps to [1, 100].
+    // The floor stays >= 1 so the absolute low-HP safety net cannot be disabled (a
+    // value of 0 would leave only the fractional threshold, which sits below a single
+    // hit for a very low max-HP pool). A higher floor forces an earlier flee for a
+    // low-max-HP bot whose fractional threshold sits below a single hit. Default 2 is
+    // byte-identical to the prior fixed const.
+    internal static uint ResolveCombatDisengageCriticalHpFloor(string? envValue)
+    {
+        const uint Default = 2u;
+        const uint Min = 1u;
+        const uint Max = 100u;
+        if (uint.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
     // Resolve the escalating-backoff cap for the out-of-reach interaction
     // suppression from the env var. Falls back to 5 for an unset/blank/invalid/
     // below-min value; clamps to [1, 20]. 1 disables escalation (fixed base
@@ -879,8 +917,14 @@ internal sealed class HandshakeDriver : IDisposable
         // are mechanical safety rails over the bot's OWN health only — no
         // game knowledge, no target choice (the LLM still owns WHAT to
         // fight; this only prevents dying mid-swing).
-        const double         CombatDisengageHealthFraction = 0.35;
-        const uint           CombatDisengageCriticalHpFloor = 2u;
+        // Env-tunable (AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION /
+        // AC_BOTS_COMBAT_DISENGAGE_CRITICAL_HP_FLOOR); defaults 0.35 / 2 are
+        // byte-identical to the prior fixed consts. The fraction is clamped strictly
+        // below the 0.70 re-engage fraction so the hysteresis holds for any value.
+        double               CombatDisengageHealthFraction = ResolveCombatDisengageHealthFraction(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION"));
+        uint                 CombatDisengageCriticalHpFloor = ResolveCombatDisengageCriticalHpFloor(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_CRITICAL_HP_FLOOR"));
         // Phase 7f.H — EARLY unwinnable-and-losing flee. Distinct from the
         // 35% critical reflex above: this trips while health is still well
         // ABOVE critical when the current fight is BOTH demonstrably
