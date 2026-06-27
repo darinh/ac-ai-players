@@ -115,6 +115,24 @@ public class RunBudgetConfigTests
     }
 
     [Theory]
+    [InlineData(null, 0.50)]    // unset -> default
+    [InlineData("", 0.50)]      // blank -> default
+    [InlineData("abc", 0.50)]   // unparseable -> default
+    [InlineData("0.50", 0.50)]  // explicit default
+    [InlineData("0.35", 0.35)]  // equal to the normal default -> disables the margin
+    [InlineData("0.60", 0.60)]  // more spiral margin (accepted)
+    [InlineData("0.05", 0.05)]  // min (accepted)
+    [InlineData("0.65", 0.65)]  // max (accepted, below the 0.70 re-engage)
+    [InlineData("0.04", 0.50)]  // below min -> default
+    [InlineData("-0.2", 0.50)]  // negative -> default
+    [InlineData("0.70", 0.65)]  // at the re-engage fraction -> clamped below it
+    [InlineData("0.9", 0.65)]   // above max -> clamped
+    public void ResolveSpiralDisengageHealthFraction_DefaultsAndClamps(string? env, double expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveSpiralDisengageHealthFraction(env));
+    }
+
+    [Theory]
     [InlineData(null, 2u)]      // unset -> default
     [InlineData("", 2u)]        // blank -> default
     [InlineData("abc", 2u)]     // unparseable -> default
