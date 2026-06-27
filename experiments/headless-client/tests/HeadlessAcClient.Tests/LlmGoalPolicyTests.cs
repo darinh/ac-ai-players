@@ -6602,6 +6602,48 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void CurrentGoal_SurvivesTightCeiling_InProtectedTail()
+    {
+        // Relocated to the PROTECTED TAIL: the bot's own current-goal awareness
+        // (## Current goal + the ## Current goal progress distance trend) must
+        // survive a hard body cut at a tight ceiling. In a dense scene where the
+        // body overflows, the bot often HAS a current goal mid-chain, so the body
+        // copy could be guillotined and the LLM would lose its own-goal awareness
+        // and the convergence signal.
+        var world = BuildXpWorld(69296, 5475);
+        var events = new EventStream();
+        // A long free-form rationale exercises the protected-tail truncation: an
+        // unbounded current-goal line would bloat the reserved tail and defeat the
+        // fitter, so it must be truncated and the total prompt stay within ceiling.
+        var longRationale = new string('x', 500);
+        var goal = new Goal
+        {
+            Kind = GoalKind.Attack,
+            Target = new Selector { Name = "Drudge Skulker" },
+            Rationale = longRationale,
+        };
+        var snap = new GoalProgressSnapshot("Drudge Skulker (guid=0x0000A001)", new[] { 30f, 20f, 10f }, 8.0);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, goal, stack: null, pickerActivity: null,
+            explorationCandidates: null, goalProgress: snap, promptCeiling: 6000);
+        Assert.Contains("## Current goal", prompt);
+        Assert.Contains("## Current goal progress", prompt);
+        Assert.Contains("30.0u -> 20.0u -> 10.0u", prompt);
+        // The fitter must bound the total prompt (body cut to fit + the reserved
+        // protected tail) within the ceiling, which only holds if the relocated
+        // current-goal line is bounded (the long rationale is truncated, not emitted
+        // whole).
+        Assert.True(prompt.Length <= 6000, $"prompt overflowed ceiling: {prompt.Length}");
+        Assert.DoesNotContain(longRationale, prompt);
+        // Each header renders EXACTLY ONCE (guard against a double-render regression);
+        // the bare-header regex excludes the "progress" sibling via negative lookahead.
+        var bareHeader = System.Text.RegularExpressions.Regex.Matches(prompt, "## Current goal(?! progress)").Count;
+        var progressHeader = System.Text.RegularExpressions.Regex.Matches(prompt, "## Current goal progress").Count;
+        Assert.Equal(1, bareHeader);
+        Assert.Equal(1, progressHeader);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_Prompt_IncludesProactiveLevelingDrive()
     {
         // Regression guard for the combat-engage-drive slice: the
