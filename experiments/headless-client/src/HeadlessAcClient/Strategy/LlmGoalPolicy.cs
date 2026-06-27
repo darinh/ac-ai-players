@@ -3203,7 +3203,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
             world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack),
             world.Self.StaminaCurrent, world.Self.StaminaObservedPeak,
-            world.CumulativeZeroDamageAbandons));
+            world.CumulativeZeroDamageAbandons,
+            CountUntargetedExploreEmits(events, SummaryIntervalDecisions)));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3306,7 +3307,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
         int raises = 0, int attackEgresses = 0, string? topIntent = null,
-        int? staminaCurrent = null, int? staminaPeak = null, int zeroDamageAbandons = 0)
+        int? staminaCurrent = null, int? staminaPeak = null, int zeroDamageAbandons = 0,
+        int untargetedExplores = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3329,6 +3331,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // emission history; no behavior change, no game knowledge.
         if (!string.IsNullOrEmpty(topEmit))
             line += $" top-emit={topEmit}";
+        // Wander-rate signal: how many UNTARGETED Explore{anywhere} goals the bot
+        // emitted in the recent window (the SAME window top-emit reads). top-emit
+        // surfaces only the SINGLE most-repeated label, so when the bot alternates
+        // untargeted Explore with Attack the wander count is hidden there — this
+        // counts it directly. A high explore-any with low kills = the bot is
+        // wandering for a target rather than engaging a visible one or navigating to
+        // a known candidate. Shown only when >0. Pure observability; a structural
+        // read of the bot's OWN emission history, no behavior change, no game knowledge.
+        if (untargetedExplores > 0)
+            line += $" explore-any={untargetedExplores}";
         // Recent failure-load signal: count of ALL recent terminal goal failures in the
         // durable GoalFailed window (~30 min) — a goal the Motor could not complete (a
         // selector that resolved to no live object, plus deferred/validation Fails). A compact
@@ -12631,6 +12643,31 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     sel, "name=\"anywhere\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         }
         return false;
+    }
+
+    // Count how many UNTARGETED Explore{anywhere} goals the bot emitted in the most
+    // recent `window` emissions. Mirrors LastEmitWasUntargetedExplore's per-emission
+    // untargeted-detection, applied across the window like TopRepeatedGoalEmitLabel
+    // (RecentGoalEmissions().Where(non-empty).Take(window)). Backs the [run-summary]
+    // explore-any= wander-rate field. Pure structural read of the bot's OWN emission
+    // history; no behavior change, no game knowledge.
+    internal static int CountUntargetedExploreEmits(EventStream events, int window)
+    {
+        var n = 0;
+        foreach (var e in events.RecentGoalEmissions()
+                     .Where(x => !string.IsNullOrEmpty(x.Text)).Take(window))
+        {
+            var t = e.Text!;
+            if (!t.StartsWith("Explore ", StringComparison.Ordinal)) continue;
+            var m = System.Text.RegularExpressions.Regex.Match(t, "target=(.*?) item=");
+            if (!m.Success) continue;
+            var sel = m.Groups[1].Value.Trim();
+            if (sel.Length == 0 || sel == "<empty>"
+                || System.Text.RegularExpressions.Regex.IsMatch(
+                    sel, "name=\"anywhere\"", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                n++;
+        }
+        return n;
     }
 
     // Max consecutive autonomous Attacks the Motor may mint before it MUST

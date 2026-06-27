@@ -878,6 +878,70 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_ExploreAny_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 12, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 16, totalXp: 500000L, model: "m",
+            untargetedExplores: 8);
+        Assert.Contains("explore-any=8", with);
+
+        var without = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 12, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 16, totalXp: 500000L, model: "m",
+            untargetedExplores: 0);
+        Assert.DoesNotContain("explore-any", without);
+    }
+
+    [Fact]
+    public void CountUntargetedExploreEmits_CountsOnlyUntargetedExplore()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"anywhere\" item= source=llm:test" });
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=<empty> item= source=llm:test" });
+        // A directed Explore toward a named target is NOT a blind wander.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"Distant Door\" item= source=llm:test" });
+        // A non-Explore goal is never counted.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Attack target=name=\"Black Rabbit\" item= source=llm:test" });
+        Assert.Equal(2, LlmGoalPolicy.CountUntargetedExploreEmits(es, 20));
+    }
+
+    [Fact]
+    public void CountUntargetedExploreEmits_RespectsWindow_AndEmptyIsZero()
+    {
+        Assert.Equal(0, LlmGoalPolicy.CountUntargetedExploreEmits(new EventStream(), 20));
+        var es = new EventStream();
+        for (var i = 0; i < 5; i++)
+            es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+                Text = "Explore target=name=\"anywhere\" item= source=llm:test" });
+        // The window caps the scan to the most recent N emissions.
+        Assert.Equal(3, LlmGoalPolicy.CountUntargetedExploreEmits(es, 3));
+    }
+
+    [Fact]
+    public void CountUntargetedExploreEmits_ExcludesItemNameHazard_AndEmptyTextEmit()
+    {
+        var es = new EventStream();
+        // A real untargeted wander (counts).
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"anywhere\" item= source=llm:test" });
+        // An empty-text GoalEmitted INSIDE the window must be skipped, not counted or thrown on.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "" });
+        // A DIRECTED Explore whose target name itself contains " item=" — the bounded
+        // `target=(.*?) item=` parse truncates the captured selector at the first " item=",
+        // yielding a non-anywhere selector, so it must NOT be miscounted as untargeted.
+        es.Append(new StreamEvent { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"Odd item= name\" item= source=llm:test" });
+        Assert.Equal(1, LlmGoalPolicy.CountUntargetedExploreEmits(es, 20));
+    }
+
+    [Fact]
     public void BuildRunSummaryLine_Coin_ShownWhenKnown_IncludingZero()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
