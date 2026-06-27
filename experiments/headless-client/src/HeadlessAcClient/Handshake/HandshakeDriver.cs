@@ -170,6 +170,25 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Resolve the SPIRAL disengage health fraction from the env var: the disengage
+    // fraction used (via Math.Max with the normal one) only while the bot is in an
+    // active death-spiral (DeathSpiralMinDeaths+ own deaths in the recent window), so
+    // it flees with MORE margin and is less likely to die mid-flee. Falls back to 0.50
+    // for an unset/blank/invalid/below-min value; clamps to [0.05, 0.65] (the same
+    // ceiling as the normal fraction, strictly below the 0.70 re-engage fraction, so
+    // the hysteresis holds). Set equal to the normal fraction to disable the spiral
+    // margin (the Math.Max then makes it a no-op).
+    internal static double ResolveSpiralDisengageHealthFraction(string? envValue)
+    {
+        const double Default = 0.50;
+        const double Min = 0.05;
+        const double Max = 0.65;
+        if (double.TryParse(envValue, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= Min)
+            return Math.Min(v, Max);
+        return Default;
+    }
+
     // Resolve the escalating-backoff cap for the out-of-reach interaction
     // suppression from the env var. Falls back to 5 for an unset/blank/invalid/
     // below-min value; clamps to [1, 20]. 1 disables escalation (fixed base
@@ -925,6 +944,21 @@ internal sealed class HandshakeDriver : IDisposable
                                  Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION"));
         uint                 CombatDisengageCriticalHpFloor = ResolveCombatDisengageCriticalHpFloor(
                                  Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_CRITICAL_HP_FLOOR"));
+        // Death-spiral margin: while the bot is in an active death-spiral (it has died
+        // DeathSpiralMinDeaths+ times within DeathSpiralWindow), the disengage fraction
+        // is raised to this (via Math.Max with the normal one) so the bot flees with
+        // MORE margin and is less likely to die mid-flee — a low-max-HP bot at the
+        // normal fraction can take a finishing hit while still escaping, so its retreat
+        // never succeeds and the spiral continues. Env-tunable
+        // (AC_BOTS_SPIRAL_DISENGAGE_HEALTH_FRACTION, default 0.50, clamp [0.05, 0.65]);
+        // set equal to the normal fraction to disable (the Math.Max makes it a no-op).
+        // Own death-rate + own health; no game knowledge, no target choice.
+        double               SpiralDisengageHealthFraction = ResolveSpiralDisengageHealthFraction(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_SPIRAL_DISENGAGE_HEALTH_FRACTION"));
+        // Rolling timestamps of the bot's OWN deaths this run (appended at the
+        // debounced self-death site), counted within DeathSpiralWindow to detect a
+        // death-spiral for the margin above. Mirrors LlmGoalPolicy's _ownDeathTimesUtc.
+        var                  selfDeathTimesUtc = new System.Collections.Generic.List<DateTimeOffset>();
         // Phase 7f.H — EARLY unwinnable-and-losing flee. Distinct from the
         // 35% critical reflex above: this trips while health is still well
         // ABOVE critical when the current fight is BOTH demonstrably
@@ -1867,6 +1901,9 @@ internal sealed class HandshakeDriver : IDisposable
             }
             if (selfDeathAttributed) return;
             selfDeathAttributed = true;
+            // death-spiral detection: record this death's time so the disengage
+            // margin can count recent deaths within DeathSpiralWindow.
+            selfDeathTimesUtc.Add(DateTimeOffset.UtcNow);
             // Record the death location from the cached last-alive self position
             // (the respawn teleport is a separate channel that may precede this
             // HP=0 update). Best-effort: only when an alive position is known.
@@ -4229,6 +4266,15 @@ internal sealed class HandshakeDriver : IDisposable
                 // ActionRejected event so it re-deliberates rather than
                 // re-issuing the dead Attack.
                 string? dgReason = null;
+                // death-spiral margin: while spiraling, raise the disengage fraction
+                // (Math.Max with the normal one) so the bot flees with more margin and
+                // its retreat survives instead of dying mid-flee. Pure own-death-rate +
+                // own-health; no game knowledge, no target choice.
+                var dgEffectiveDisengageFraction = CombatDisengage.EffectiveDisengageFraction(
+                    CombatDisengageHealthFraction, SpiralDisengageHealthFraction,
+                    LlmGoalPolicy.PruneAndCountWithinWindow(
+                        selfDeathTimesUtc, DateTimeOffset.UtcNow, LlmGoalPolicy.DeathSpiralWindow),
+                    LlmGoalPolicy.DeathSpiralMinDeaths);
                 if (combatTargetGuid is uint dgTarget &&
                     // Suppress the flee reflex while a lifestone recall is in
                     // flight: recall IS the escape, and a flee AP would move the
@@ -4244,7 +4290,7 @@ internal sealed class HandshakeDriver : IDisposable
                     dgSelf.CellId is uint dgCell && dgCell != 0u &&
                     (dgReason = CombatDisengage.DisengageReason(
                         dgHc, dgHm, inCombat: true,
-                        CombatDisengageHealthFraction, CombatDisengageCriticalHpFloor,
+                        dgEffectiveDisengageFraction, CombatDisengageCriticalHpFloor,
                         combatSwingsLanded, combatDamageDealt, combatSwingsEvaded,
                         EarlyFleeMinEvadedSwings,
                         combatAttacksRefused, EarlyFleeMinRefusedSwings,

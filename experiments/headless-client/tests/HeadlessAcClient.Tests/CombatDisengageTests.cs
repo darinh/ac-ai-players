@@ -20,6 +20,28 @@ public class CombatDisengageTests
     public void ShouldDisengage_NotInCombat_NeverFires()
         => Assert.False(CombatDisengage.ShouldDisengage(1u, 100u, inCombat: false, DisengageFrac, CriticalFloor));
 
+    // ---- EffectiveDisengageFraction (death-spiral margin) ----
+
+    [Fact]
+    public void EffectiveDisengageFraction_NotSpiraling_UsesNormal()
+        => Assert.Equal(0.35, CombatDisengage.EffectiveDisengageFraction(
+            normalFraction: 0.35, spiralFraction: 0.50, recentDeathCount: 2, spiralMinDeaths: 3));
+
+    [Fact]
+    public void EffectiveDisengageFraction_Spiraling_RaisesToSpiral()
+        => Assert.Equal(0.50, CombatDisengage.EffectiveDisengageFraction(
+            normalFraction: 0.35, spiralFraction: 0.50, recentDeathCount: 3, spiralMinDeaths: 3));
+
+    [Fact]
+    public void EffectiveDisengageFraction_SpiralBelowNormal_IsNoOp()
+        => Assert.Equal(0.45, CombatDisengage.EffectiveDisengageFraction(
+            normalFraction: 0.45, spiralFraction: 0.30, recentDeathCount: 5, spiralMinDeaths: 3));
+
+    [Fact]
+    public void EffectiveDisengageFraction_AtThresholdMinusOne_StillNormal()
+        => Assert.Equal(0.35, CombatDisengage.EffectiveDisengageFraction(
+            normalFraction: 0.35, spiralFraction: 0.50, recentDeathCount: 2, spiralMinDeaths: 3));
+
     [Fact]
     public void ShouldDisengage_UnknownMaxHealth_DoesNotFire()
         => Assert.False(CombatDisengage.ShouldDisengage(1u, 0u, inCombat: true, DisengageFrac, CriticalFloor));

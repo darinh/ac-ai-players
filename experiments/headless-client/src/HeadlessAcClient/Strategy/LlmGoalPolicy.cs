@@ -2136,7 +2136,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return Math.Min(v, Max);
         return Default;
     }
-    private static readonly TimeSpan DeathSpiralWindow = TimeSpan.FromMinutes(10);
+    internal static readonly TimeSpan DeathSpiralWindow = TimeSpan.FromMinutes(10);
 
     // Returns the guid of a visible VENDOR the bot has repeatedly Explored TOWARD (>=
     // ExploreLoopedVendorThreshold recent Explore emissions naming it). Explore only WALKS

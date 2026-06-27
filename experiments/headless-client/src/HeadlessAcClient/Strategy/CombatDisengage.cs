@@ -59,6 +59,25 @@ internal static class CombatDisengage
     }
 
     /// <summary>
+    /// The disengage health fraction to use given the bot's recent death rate.
+    /// When the bot is in an active death-spiral — it has died at least
+    /// <paramref name="spiralMinDeaths"/> times in the recent window — it breaks
+    /// off at the HIGHER of the normal and the spiral fraction, so it flees with
+    /// MORE margin and is less likely to die mid-flee (a low-max-HP bot at the
+    /// normal fraction can take a finishing hit while still escaping). Returns the
+    /// normal fraction when not spiraling. <c>Math.Max</c> guarantees the spiral
+    /// value can only RAISE (never lower) the threshold, so a misconfigured spiral
+    /// fraction below the normal one is a no-op. Pure self-state (own death count +
+    /// own thresholds); no target, no game knowledge.
+    /// </summary>
+    public static double EffectiveDisengageFraction(
+        double normalFraction, double spiralFraction,
+        int recentDeathCount, int spiralMinDeaths)
+        => recentDeathCount >= spiralMinDeaths
+            ? System.Math.Max(normalFraction, spiralFraction)
+            : normalFraction;
+
+    /// <summary>
     /// True when the bot should break off NOW because the current engagement
     /// is BOTH unwinnable AND costing health: it has landed zero hits and
     /// dealt zero damage across enough no-progress swings for "cannot damage" to
