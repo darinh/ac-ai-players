@@ -254,6 +254,40 @@ internal static class CombatRetry
         => swingsLanded == 0 && damageDealt == 0u && swingsEvaded >= minEvadedSwings;
 
     /// <summary>
+    /// True when the bot should abandon a target whose defenses fully ABSORB its
+    /// hits: it has LANDED at least <paramref name="minLandedSwings"/> swings yet
+    /// dealt zero total damage. This is the complement of
+    /// <see cref="ShouldAbandonUnbeatable"/> (which owns the 0-landed "every swing
+    /// evaded" case): here the bot DOES connect, but its hits are mitigated to 0,
+    /// so the fight is unwinnable for the same reason — it cannot reduce the
+    /// target's health.
+    /// </summary>
+    /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
+    /// <param name="damageDealt">Total damage dealt to the target this fight.</param>
+    /// <param name="minLandedSwings">
+    /// Minimum number of LANDED swings (with zero total damage) before the bot
+    /// concludes its hits are fully absorbed. Chosen high enough that a winnable
+    /// fight's unlucky early low rolls do not trip it.
+    /// </param>
+    /// <remarks>
+    /// Distinct from <see cref="ShouldAbandonStalemate"/>: that path keys on the
+    /// target's OBSERVED health barely moving, but a 0-damage exchange produces no
+    /// server health-change updates, so the health sample goes STALE and the
+    /// stalemate verdict is withheld — leaving only the slow absolute no-damage
+    /// watchdog (<c>AbandonOnNoDamageSec</c>). This trips sooner on the bot's OWN
+    /// swing/damage tally, which needs no health observation. Mechanical: keys ONLY
+    /// on the bot's own landed-swing count and its own damage dealt — no monster
+    /// KIND, name, wcid, landblock, or server text, and it never chooses a new
+    /// target. It mirrors the prompt's COMBAT SAFETY guidance (many swings land but
+    /// the target's health holds ⇒ you cannot out-damage its defense ⇒ disengage)
+    /// as a fast motor reflex, because the LLM round-trip is too slow to break a
+    /// live engagement.
+    /// </remarks>
+    public static bool ShouldAbandonArmorAbsorbed(
+        int swingsLanded, uint damageDealt, int minLandedSwings)
+        => swingsLanded >= minLandedSwings && damageDealt == 0u;
+
+    /// <summary>
     /// True when the bot should abandon a NO-PROGRESS STALEMATE: it IS landing
     /// hits on the target (so the all-evaded <see cref="ShouldAbandonUnbeatable"/>
     /// does NOT apply) over a sustained run of swings, yet the target's OBSERVED

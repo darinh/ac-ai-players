@@ -909,6 +909,21 @@ internal sealed class HandshakeDriver : IDisposable
         // CombatRetry.ShouldAbandonUnbeatable.
         const int            AbandonAllEvadedMinSwings = 12;
         const double         AbandonAllEvadedMinSec    = 25.0;
+        // Phase 7f.A — ARMOR-ABSORBED abandon. The complement of the all-evaded
+        // abandon above: here the bot DOES land hits, but they are fully mitigated
+        // to ZERO total damage, so the target is just as unwinnable (the bot cannot
+        // reduce its health). A 0-damage exchange produces no server health-change
+        // updates, so the stalemate path's health sample goes stale and its verdict
+        // is withheld — without this the absorbed fight runs the full no-damage
+        // watchdog (~60s) before giving up. Trips sooner on the bot's OWN
+        // landed-swing/damage tally (no health observation needed). Like the
+        // all-evaded abandon it gates on BOTH a min landed-swing count AND a min
+        // elapsed time, so it fires at max(AbandonArmorAbsorbedMinSec, time to land
+        // AbandonArmorAbsorbedMinSwings) — ~25s at the current fast/unarmed swing
+        // cadence, somewhat longer on a slow weapon, but always well before the
+        // ~60s watchdog. See CombatRetry.ShouldAbandonArmorAbsorbed.
+        const int            AbandonArmorAbsorbedMinSwings = 12;
+        const double         AbandonArmorAbsorbedMinSec    = 25.0;
         // Phase 7f.S — STALEMATE abandon. The no-damage / all-evaded abandons
         // above all require ZERO offense; this catches the OPPOSITE no-progress
         // shape — the bot LANDS hits and deals damage, yet the target out-tanks
@@ -4560,6 +4575,16 @@ internal sealed class HandshakeDriver : IDisposable
                         abandonReason =
                             $"after {combatSwingsEvaded} swings all evaded (0 landed, " +
                             $"0 damage) in {sinceLastDamage:F0}s — target out-defends bot";
+                        abandonZeroDamage = true;
+                    }
+                    else if (sinceLastDamage >= AbandonArmorAbsorbedMinSec &&
+                             CombatRetry.ShouldAbandonArmorAbsorbed(
+                                 combatSwingsLanded, combatDamageDealt,
+                                 AbandonArmorAbsorbedMinSwings))
+                    {
+                        abandonReason =
+                            $"after {combatSwingsLanded} swings landed for 0 total damage " +
+                            $"in {sinceLastDamage:F0}s — target armor fully absorbs bot's hits";
                         abandonZeroDamage = true;
                     }
                     else if ((DateTime.UtcNow - cstart).TotalSeconds >= AbandonStalemateMinSec &&
