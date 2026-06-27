@@ -97,6 +97,53 @@ public class RunBudgetConfigTests
     }
 
     [Theory]
+    [InlineData(null, 0.35)]    // unset -> default
+    [InlineData("", 0.35)]      // blank -> default
+    [InlineData("abc", 0.35)]   // unparseable -> default
+    [InlineData("0.35", 0.35)]  // explicit default
+    [InlineData("0.45", 0.45)]  // more flee margin (accepted)
+    [InlineData("0.05", 0.05)]  // min (accepted)
+    [InlineData("0.65", 0.65)]  // max (accepted, stays below the 0.70 re-engage)
+    [InlineData("0.04", 0.35)]  // below min -> default
+    [InlineData("0", 0.35)]     // zero -> default
+    [InlineData("-0.2", 0.35)]  // negative -> default
+    [InlineData("0.70", 0.65)]  // at the re-engage fraction -> clamped below it
+    [InlineData("0.9", 0.65)]   // above max -> clamped
+    public void ResolveCombatDisengageHealthFraction_DefaultsAndClamps(string? env, double expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveCombatDisengageHealthFraction(env));
+    }
+
+    [Theory]
+    [InlineData(null, 2u)]      // unset -> default
+    [InlineData("", 2u)]        // blank -> default
+    [InlineData("abc", 2u)]     // unparseable -> default
+    [InlineData("2", 2u)]       // explicit default
+    [InlineData("0", 2u)]       // zero -> default (the absolute floor cannot be disabled)
+    [InlineData("1", 1u)]       // min (accepted)
+    [InlineData("5", 5u)]       // higher floor (accepted)
+    [InlineData("100", 100u)]   // max (accepted)
+    [InlineData("101", 100u)]   // above max -> clamped
+    [InlineData("-3", 2u)]      // negative (unparseable as uint) -> default
+    public void ResolveCombatDisengageCriticalHpFloor_DefaultsAndClamps(string? env, uint expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveCombatDisengageCriticalHpFloor(env));
+    }
+
+    [Fact]
+    public void CombatDisengageFraction_CeilingStaysBelowReengageFraction()
+    {
+        // The resolver's max-clamp must keep ANY configured disengage fraction strictly
+        // below the re-engage fraction so the disengage/re-engage hysteresis (no melee
+        // oscillation) holds. Assert the relationship against the shared constant rather
+        // than a magic literal, so this fails loudly if the re-engage fraction is lowered.
+        var maxFraction = HandshakeDriver.ResolveCombatDisengageHealthFraction("0.99");
+        Assert.True(maxFraction < HeadlessAcClient.Strategy.CombatDisengage.DefaultReengageHealthFraction,
+            $"clamped disengage fraction {maxFraction} must stay below the re-engage fraction " +
+            $"{HeadlessAcClient.Strategy.CombatDisengage.DefaultReengageHealthFraction}");
+    }
+
+    [Theory]
     [InlineData(null, 5)]       // unset -> default
     [InlineData("", 5)]         // blank -> default
     [InlineData("abc", 5)]      // unparseable -> default
