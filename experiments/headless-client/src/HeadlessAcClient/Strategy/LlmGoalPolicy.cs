@@ -9872,33 +9872,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
         }
 
-        // Slice M — quest book / scroll / parchment contents.
-        // Surfaced as its own section so the LLM can read directions,
-        // coordinates, and item requirement lists. Deduped by book
-        // guid (you can re-open the same book many times); keep the
-        // last 3 distinct books so a busy quest hub doesn't blow the
-        // token budget. Newest-first ordering.
-        var bookTexts = hintPool
-            .Where(e => e.Kind == EventKind.BookText && !string.IsNullOrEmpty(e.Text))
-            .GroupBy(e => e.ItemGuid ?? 0u)
-            .Select(g => g.OrderByDescending(e => e.Sequence).First())
-            .OrderByDescending(e => e.Sequence)
-            .Take(3)
-            .ToList();
-        if (bookTexts.Count > 0)
-        {
-            sb.AppendLine("## Quest book texts (newest first — read these for quest directions, item lists, coordinates)");
-            foreach (var b in bookTexts)
-            {
-                sb.AppendLine($"- BookText name=\"{b.Name}\" guid=0x{b.ItemGuid ?? 0:X8}:");
-                // 800 chars is generous: enough for the typical
-                // 1-page quest book that contains an item list +
-                // coordinate hint. Pages beyond this are usually
-                // flavor text.
-                sb.AppendLine($"    \"{Truncate(b.Text, 800)}\"");
-            }
-            sb.AppendLine();
-        }
+        // ── ## Quest book texts — relocated to the PROTECTED salience tail (search
+        // "## Quest book texts" below). The quest book / scroll / parchment contents
+        // (directions, coordinates, item-requirement lists — criterion #3 quest
+        // comprehension) are ACTIONABLE directed text, but rendered HERE in the body
+        // they are among the trailing sections hard-cut first when the prompt overflows
+        // the request ceiling (the bot prompts hit the 26000-byte cap on every decision),
+        // so a quest book the bot read can be guillotined before it acts on it. Moving it
+        // to the protected tail (beside ## Early server directives, the sibling directed-
+        // text capsule) keeps the quest directions cut-proof. Mirrors the ## Server hints
+        // -> ## Early server directives relocation done for the same reason.
 
         sb.AppendLine("## Recent events (newest first)");
         var recent = events.Recent(25);
@@ -11671,6 +11654,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "skip/advance\", \"when you are ready\") or promises the same rewards: an unacted " +
                 "skip/advance/leave directive is a PENDING option, not 'no directive' — weigh " +
                 "pursuing it against optional grinding instead of dismissing its existence.");
+        }
+
+        // ── ## Quest book texts (criterion #3 quest comprehension, protected tail) ──
+        // Relocated from the body so the quest book / scroll / parchment contents
+        // (directions, coordinates, item-requirement lists) survive the dense-scene
+        // body hard-cut — a quest book the bot read can otherwise be guillotined by the
+        // 26000-byte prompt cap before it acts on the directions. Deduped by book guid
+        // (re-opening the same book is common); keep the last 3 distinct books so a busy
+        // quest hub cannot bloat the protected tail. Verbatim book text, truncated;
+        // never parsed or branched on by content. Newest-first.
+        var bookTexts = hintPool
+            .Where(e => e.Kind == EventKind.BookText && !string.IsNullOrEmpty(e.Text))
+            .GroupBy(e => e.ItemGuid ?? 0u)
+            .Select(g => g.OrderByDescending(e => e.Sequence).First())
+            .OrderByDescending(e => e.Sequence)
+            .Take(3)
+            .ToList();
+        if (bookTexts.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Quest book texts (newest first — read these for quest directions, item lists, coordinates)");
+            foreach (var b in bookTexts)
+            {
+                sb.AppendLine($"- BookText name=\"{b.Name}\" guid=0x{b.ItemGuid ?? 0:X8}:");
+                // 800 chars is generous: enough for the typical 1-page quest book
+                // (item list + coordinate hint). Pages beyond this are usually flavor.
+                sb.AppendLine($"    \"{Truncate(b.Text, 800)}\"");
+            }
         }
 
         // ── ## Held-item objectives (protected-tail: directive pinned to a held item) ──
