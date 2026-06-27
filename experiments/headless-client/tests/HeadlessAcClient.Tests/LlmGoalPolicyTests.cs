@@ -6548,6 +6548,27 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void QuestBookTexts_SurviveTightCeiling_InProtectedTail()
+    {
+        // Relocated to the PROTECTED TAIL: a quest book the bot read (directions /
+        // coordinates / item list — criterion #3) must survive a hard body cut at a
+        // tight ceiling — live the prompt hit the 26000 cap on every call, so the body
+        // copy could be guillotined before the bot acted on the directions.
+        var world = BuildXpWorld(69296, 5475);
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.BookText,
+            ItemGuid = 0x40001234u, Name = "Quest Note",
+            Text = "Go to the ruins and collect three relics.",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, null, null, null, promptCeiling: 6000);
+        Assert.Contains("## Quest book texts", prompt);
+        Assert.Contains("collect three relics", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_Prompt_IncludesProactiveLevelingDrive()
     {
         // Regression guard for the combat-engage-drive slice: the
