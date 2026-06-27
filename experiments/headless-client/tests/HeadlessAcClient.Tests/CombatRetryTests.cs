@@ -329,6 +329,41 @@ public class CombatRetryTests
         => Assert.False(CombatRetry.ShouldAbandonUnbeatable(
             swingsLanded: 0, damageDealt: 0u, swingsEvaded: 0, MinEvaded));
 
+    // --- ShouldAbandonArmorAbsorbed (lands hits but 0 damage — armor absorbs) ---
+    private const int MinLanded = 12;
+
+    [Fact]
+    public void ArmorAbsorbed_LandedPastThreshold_ZeroDamage_Abandons()
+        // 12 landed hits, 0 total damage — the target's armor fully absorbs the
+        // bot's hits, so it can never reduce the target's health.
+        => Assert.True(CombatRetry.ShouldAbandonArmorAbsorbed(
+            swingsLanded: 12, damageDealt: 0u, MinLanded));
+
+    [Fact]
+    public void ArmorAbsorbed_WellPastThreshold_ZeroDamage_Abandons()
+        => Assert.True(CombatRetry.ShouldAbandonArmorAbsorbed(
+            swingsLanded: 40, damageDealt: 0u, MinLanded));
+
+    [Fact]
+    public void ArmorAbsorbed_BelowLandedThreshold_DoesNotAbandon()
+        // Fewer landed hits than the threshold could be an unlucky low-roll streak
+        // in a winnable fight — tolerate it.
+        => Assert.False(CombatRetry.ShouldAbandonArmorAbsorbed(
+            swingsLanded: 11, damageDealt: 0u, MinLanded));
+
+    [Fact]
+    public void ArmorAbsorbed_AnyDamageDealt_DoesNotAbandon()
+        // Any damage dealt proves the bot CAN hurt this target — keep fighting.
+        => Assert.False(CombatRetry.ShouldAbandonArmorAbsorbed(
+            swingsLanded: 30, damageDealt: 1u, MinLanded));
+
+    [Fact]
+    public void ArmorAbsorbed_AllEvadedNoLand_DoesNotAbandon()
+        // The 0-landed "every swing evaded" case is owned by ShouldAbandonUnbeatable,
+        // not this reflex (which requires the bot to demonstrably connect).
+        => Assert.False(CombatRetry.ShouldAbandonArmorAbsorbed(
+            swingsLanded: 0, damageDealt: 0u, MinLanded));
+
     // --- ShouldAbandonStalemate (lands hits but target won't die) -----------
     private const int StaleMinSwings = 18;
     private const int StaleMinLanded = 4;
