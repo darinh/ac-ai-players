@@ -9906,74 +9906,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         else foreach (var e in recent) sb.AppendLine($"- {e}");
         sb.AppendLine();
 
-        // Pull out ActionRejected events into a dedicated section so
-        // the LLM cannot miss them in the 15-event tail. These are
-        // strong "don't retry that" signals from the server.
-        //
-        // Slice O — diversify by (label, target). In one spike the bot
-        // accumulated 95 Unreachable rejections while a critical
-        // TradeAiDoesntWant rejection (an NPC refused an offered item)
-        // never made it into the 5-most-recent window the LLM was
-        // shown — the bot kept retrying Give(that NPC, that item)
-        // for 30+ minutes. Bucket the recent rejections by their
-        // (ErrorLabel, Text/Name) tuple and keep only the most-recent
-        // of each bucket so every distinct rejection class surfaces.
-        var rejections = events.Recent(100)
-            .Where(e => e.Kind == EventKind.ActionRejected)
-            .GroupBy(e =>
-            {
-                var label = e.ErrorLabel ?? "?";
-                var key = e.Name ?? e.Text ?? string.Empty;
-                return label + "|" + key;
-            })
-            .Select(g => g.First())
-            .Take(8)
-            .ToList();
-        if (rejections.Count > 0)
-        {
-            sb.AppendLine("## Recent rejections (server refused these — do NOT retry the same combo)");
-            foreach (var r in rejections) sb.AppendLine($"- {r}");
-            sb.AppendLine();
-        }
-
-        // Distill the bot's OWN goal-lifecycle outcomes (GoalCompleted /
-        // GoalFailed) into a dedicated section. These already appear in the
-        // 25-event "## Recent events" tail, but in a busy area high-volume
-        // observe noise (Motion/UpdatePosition/ObjectCreate) evicts them long
-        // before the next decision — the same eviction problem that justified
-        // the "## Recent rejections" pull-out. Read the FAILED outcomes from the
-        // DURABLE GoalFailed window (recency-scoped), not the 120-event ring: a
-        // GoalFailed evicts within a few seconds of busy traffic, so the
-        // "don't repeat failing goals" hint silently went BLANK exactly when the
-        // bot was looping a failing goal. Completions stay ring-based — an evicted
-        // "[done]" is only lost context, not a missed warning. Dedup by
-        // (kind, target) keeping the most recent of each (newest-first after the
-        // sort) so a repeatedly-failing engagement — e.g. an Attack on a
-        // fleeing/far mob that keeps timing out — surfaces once and clearly
-        // instead of either flooding the list or being lost. Pure echo of own
-        // bookkeeping the LLM generated; it decides whether to retry or pick a
-        // different target.
-        var outcomeCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
-        var goalOutcomes = events.RecentGoalFailures()
-            .Where(e => e.Utc >= outcomeCutoff)
-            .Concat(events.Recent(120).Where(e => e.Kind == EventKind.GoalCompleted))
-            .OrderByDescending(e => e.Utc)
-            .GroupBy(e => (e.Kind, key: e.Name ?? e.Text ?? string.Empty))
-            .Select(g => g.First())
-            .Take(8)
-            .ToList();
-        if (goalOutcomes.Count > 0)
-        {
-            sb.AppendLine("## Recent goal outcomes (your own recent goals — don't keep repeating ones that keep failing)");
-            foreach (var o in goalOutcomes)
-            {
-                var verb = o.Kind == EventKind.GoalCompleted ? "[done]" : "[FAILED]";
-                var target = string.IsNullOrEmpty(o.Name) ? "" : $" target=\"{o.Name}\"";
-                var detail = string.IsNullOrEmpty(o.Text) ? "" : $": {Truncate(o.Text, 80)}";
-                sb.AppendLine($"- {verb}{target}{detail}");
-            }
-            sb.AppendLine();
-        }
+        // ── ## Recent rejections + ## Recent goal outcomes — relocated to the
+        // PROTECTED salience tail (search "## Recent rejections" below). These two
+        // distilled ANTI-REPEAT cues ("the server refused this — do NOT retry";
+        // "your own goals that keep FAILING — stop repeating them") were pulled out
+        // of the raw ## Recent events tail precisely so high-volume observe noise
+        // could not evict them — but rendered HERE in the body they are among the
+        // trailing sections hard-cut FIRST when the prompt overflows the request
+        // ceiling, and the bot prompts hit the 26000-byte cap on EVERY decision
+        // (live: prompt-bytes=26000 on every call), so both cues are guillotined
+        // before the model sees them. Moving them to the protected tail (cut-proof,
+        // beside the other own-activity capsules) keeps the anti-repeat hints alive
+        // so the LLM stops looping a failing goal / retrying a refused combo.
 
         if (currentGoal is not null)
         {
@@ -10148,6 +10092,64 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "that `player` by name (only when exactly one visible `player` matches that name) to invite " +
                     "them. OPTIONAL — only worth it if you will hunt together; skip it if you are pursuing a " +
                     "solo objective.");
+            }
+        }
+
+        // ── ## Recent rejections + ## Recent goal outcomes (anti-repeat, protected tail) ─
+        // Two distilled ANTI-REPEAT cues relocated from the body so they survive the
+        // dense-scene hard-cut (the prompt hits the 26000 ceiling on every decision,
+        // guillotining the body's trailing sections). ## Recent rejections echoes the
+        // server's own "out-of-reach / refused" verdicts ("do NOT retry the same
+        // combo"); ## Recent goal outcomes echoes the bot's OWN GoalCompleted/Failed
+        // bookkeeping ("don't keep repeating goals that keep failing"). Both are
+        // bucketed/deduped + capped at 8, so the protected tail stays bounded. Pure
+        // echo of server verdicts + the bot's own goal bookkeeping; the LLM decides
+        // whether to retry or pick a different target. No game knowledge.
+        // Slice O — diversify by (label, target): bucket the recent rejections by
+        // their (ErrorLabel, Text/Name) tuple, keeping the most-recent of each so a
+        // flood of one class can't hide a distinct critical refusal.
+        var rejections = events.Recent(100)
+            .Where(e => e.Kind == EventKind.ActionRejected)
+            .GroupBy(e =>
+            {
+                var label = e.ErrorLabel ?? "?";
+                var key = e.Name ?? e.Text ?? string.Empty;
+                return label + "|" + key;
+            })
+            .Select(g => g.First())
+            .Take(8)
+            .ToList();
+        if (rejections.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Recent rejections (server refused these — do NOT retry the same combo)");
+            foreach (var r in rejections) sb.AppendLine($"- {r}");
+        }
+
+        // Read the FAILED outcomes from the DURABLE GoalFailed window (recency-scoped,
+        // not the 120-event ring) so a GoalFailed that evicts within seconds of busy
+        // traffic does not blank the "don't repeat failing goals" hint exactly when the
+        // bot is looping a failing goal. Completions stay ring-based (an evicted [done]
+        // is lost context, not a missed warning). Dedup by (kind, target), newest-first.
+        var outcomeCutoff = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(5);
+        var goalOutcomes = events.RecentGoalFailures()
+            .Where(e => e.Utc >= outcomeCutoff)
+            .Concat(events.Recent(120).Where(e => e.Kind == EventKind.GoalCompleted))
+            .OrderByDescending(e => e.Utc)
+            .GroupBy(e => (e.Kind, key: e.Name ?? e.Text ?? string.Empty))
+            .Select(g => g.First())
+            .Take(8)
+            .ToList();
+        if (goalOutcomes.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Recent goal outcomes (your own recent goals — don't keep repeating ones that keep failing)");
+            foreach (var o in goalOutcomes)
+            {
+                var verb = o.Kind == EventKind.GoalCompleted ? "[done]" : "[FAILED]";
+                var target = string.IsNullOrEmpty(o.Name) ? "" : $" target=\"{o.Name}\"";
+                var detail = string.IsNullOrEmpty(o.Text) ? "" : $": {Truncate(o.Text, 80)}";
+                sb.AppendLine($"- {verb}{target}{detail}");
             }
         }
 
