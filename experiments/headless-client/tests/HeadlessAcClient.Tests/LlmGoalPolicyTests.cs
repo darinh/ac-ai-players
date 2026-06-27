@@ -6520,6 +6520,34 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void AntiRepeatCues_SurviveTightCeiling_InProtectedTail()
+    {
+        // Relocated to the PROTECTED TAIL: the two anti-repeat cues (## Recent
+        // rejections, ## Recent goal outcomes) must survive a hard body cut at a tight
+        // ceiling — live the prompt hit the 26000 cap on EVERY decision, guillotining
+        // both from the body so the LLM kept looping a failing goal / retrying a
+        // refused combo.
+        var world = BuildXpWorld(69296, 5475);
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            ErrorCode = 0x046A, ErrorLabel = "TradeAiDoesntWant", Text = "Greeter",
+        });
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.GoalFailed,
+            Name = "TestFoe", Text = "Attack: target timed out",
+        });
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, null, null, null, promptCeiling: 6000);
+        Assert.Contains("## Recent rejections", prompt);
+        Assert.Contains("TradeAiDoesntWant", prompt);
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("[FAILED]", prompt);
+    }
+
+    [Fact]
     public async Task LlmGoalPolicy_Prompt_IncludesProactiveLevelingDrive()
     {
         // Regression guard for the combat-engage-drive slice: the
