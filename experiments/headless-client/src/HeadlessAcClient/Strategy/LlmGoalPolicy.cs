@@ -9875,24 +9875,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // beside the other own-activity capsules) keeps the anti-repeat hints alive
         // so the LLM stops looping a failing goal / retrying a refused combo.
 
-        if (currentGoal is not null)
-        {
-            sb.AppendLine("## Current goal");
-            sb.AppendLine($"- {currentGoal}");
-            sb.AppendLine();
-            sb.AppendLine("Keep it if it still looks right; replace if observation says otherwise.");
-        }
-
-        if (goalProgress is not null && goalProgress.Distances.Count >= 2)
-        {
-            var d = goalProgress.Distances;
-            var trend = string.Join(" -> ", d.Select(x => $"{x:F1}u"));
-            var net = d[^1] - d[0];
-            var sign = net >= 0 ? "+" : "";
-            sb.AppendLine();
-            sb.AppendLine("## Current goal progress (raw bot-to-target distance over recent ticks)");
-            sb.AppendLine($"- target {goalProgress.TargetLabel}: {trend} over {goalProgress.SpanSeconds:F0}s (net {sign}{net:F1}u, {d.Count} samples)");
-        }
+        // ── ## Current goal + ## Current goal progress — relocated to the PROTECTED
+        // salience tail (search "## Current goal" below). The bot's active goal + its
+        // keep/replace guidance, and the bot→target distance-convergence trend, are
+        // decision-central whenever the bot HAS a current goal (a sticky/in-progress
+        // goal at a re-decision point — common mid-combat-chain in a dense scene).
+        // Rendered HERE in the body they are among the trailing sections the request-
+        // size fitter hard-cuts first when the prompt exceeds the request ceiling, so
+        // in exactly the dense scenes where the bot has a current goal the LLM loses
+        // its own-goal awareness + the convergence signal and may thrash. Moving them
+        // to the protected tail keeps current-goal awareness cut-proof.
 
         // ── ## Movement (immobile-stuck telemetry) ───────────────────────
         // Raw own-movement bookkeeping: how many times in a row the bot
@@ -10998,6 +10990,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "as the `untalked npcs in view` count above. The goal verbs Talk, Use, Pickup, " +
                     "Attack, and Explore all remain executable right now. Your call.");
             }
+        }
+
+        // ── ## Current goal + ## Current goal progress (protected tail) ──────
+        // Relocated from the body so the bot's own active-goal awareness + the
+        // bot→target distance-convergence trend survive the dense-scene body
+        // hard-cut (the request-size fitter trims the body's trailing sections
+        // first). Decision-central whenever the bot HAS a current goal (a
+        // sticky/in-progress goal at a re-decision point). Own bookkeeping; no
+        // game knowledge; the LLM decides whether to keep or replace the goal.
+        if (currentGoal is not null)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Current goal");
+            // Bound the protected-tail capsule: Goal.ToString() embeds the
+            // free-form, LLM-authored Rationale/Source with no length limit, so
+            // truncate it here — an unbounded protected suffix would defeat the
+            // request-size fitter's reserve-and-preserve guarantee (the fitter
+            // assumes protected capsules stay small). Mirrors the other bounded
+            // tail capsules; 300 chars keeps kind/target + a rationale prefix.
+            sb.AppendLine($"- {Truncate(currentGoal.ToString(), 300)}");
+            sb.AppendLine();
+            sb.AppendLine("Keep it if it still looks right; replace if observation says otherwise.");
+        }
+
+        if (goalProgress is not null && goalProgress.Distances.Count >= 2)
+        {
+            var dCur = goalProgress.Distances;
+            var trendCur = string.Join(" -> ", dCur.Select(x => $"{x:F1}u"));
+            var netCur = dCur[^1] - dCur[0];
+            var signCur = netCur >= 0 ? "+" : "";
+            sb.AppendLine();
+            sb.AppendLine("## Current goal progress (raw bot-to-target distance over recent ticks)");
+            sb.AppendLine($"- target {goalProgress.TargetLabel}: {trendCur} over {goalProgress.SpanSeconds:F0}s (net {signCur}{netCur:F1}u, {dCur.Count} samples)");
         }
 
         // ── ## Recent Talk (end-of-prompt salience capsule) ──────────────
