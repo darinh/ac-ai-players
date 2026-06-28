@@ -53,15 +53,6 @@ internal sealed class HandshakeDriver : IDisposable
     internal static readonly int ObserveSeconds =
         ResolveObserveSeconds(Environment.GetEnvironmentVariable("AC_BOTS_OBSERVE_SECONDS"));
 
-    // Wire SpellId of the death-vitae enchantment (ACE-bots Enum/SpellId.cs, positional
-    // value 666). The GameEventMagicUpdateEnchantment (0x02C2) carries many enchantment
-    // kinds; this protocol ID selects the vitae one so its StatModValue can be decoded
-    // into the death-vitae perception (a survivability vital projection — the post-death
-    // glass-jaw). A wire-protocol constant like an opcode, used to decode a message into
-    // a named projection — not a strategic choice, list, or priority. Verified against the
-    // server enum (Undef=0 ... Vitae = 666).
-    internal const ushort VitaeSpellId = 666;
-
     // Outer cancellation headroom (seconds) added on top of ObserveSeconds so the
     // process-level budget always exceeds the observe loop PLUS the worst-case
     // pre-observe handshake — including the login resilience loop's full backoff
@@ -2545,6 +2536,21 @@ internal sealed class HandshakeDriver : IDisposable
                                     worldState.SeedSelfAttributes(pdAttrs);
                                 bool seededSkills = pdesc.Skills is { Count: > 0 } pdSkills &&
                                     worldState.SeedSelfSkills(pdSkills);
+                                // death-vitae from the LOGIN registry: the death-path
+                                // GameEventMagicUpdateEnchantment fires only on death + XP
+                                // decay, so without this the ACCUMULATED vitae is unseen
+                                // right after a reconnect (until the first post-reconnect
+                                // death re-sends it). Self-guarded by the same bundle
+                                // recipient check above; the decode self-validates the
+                                // vitae SpellId, so a misaligned parse never applies a bogus
+                                // value. Raw fact; the LLM owns the response.
+                                if (pdesc.VitaeMultiplier is float pdVitae)
+                                {
+                                    worldState.ApplySelfVitae(pdVitae);
+                                    Console.WriteLine(
+                                        $"[vitae] login vitae multiplier={pdVitae:F3} " +
+                                        $"(effective vitals -{(1f - pdVitae) * 100f:F0}%)");
+                                }
                                 // Raisable = wire AdvancementClass Trained(2)/
                                 // Specialized(3): the only skills RaiseSkill can
                                 // target. Surface the count (and names) here so a
@@ -2635,7 +2641,7 @@ internal sealed class HandshakeDriver : IDisposable
                                          worldState.SelfGuid is uint enchSelf &&
                                          ge.ReceiverGuid == enchSelf)
                                 {
-                                    if (ench.SpellId == VitaeSpellId)
+                                    if (ench.SpellId == GameEventPayloadDecoder.VitaeSpellId)
                                     {
                                         worldState.ApplySelfVitae(ench.StatModValue);
                                         Console.WriteLine(

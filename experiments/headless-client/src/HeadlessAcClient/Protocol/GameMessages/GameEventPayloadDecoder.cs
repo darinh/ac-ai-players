@@ -556,7 +556,8 @@ internal sealed record PlayerDescriptionPayload(
     long? AvailableExperience,
     int? CoinValue = null,
     IReadOnlyList<PdAttribute>? Attributes = null,
-    IReadOnlyList<PdSkill>? Skills = null)
+    IReadOnlyList<PdSkill>? Skills = null,
+    float? VitaeMultiplier = null)
 {
     public override string ToString()
     {
@@ -918,8 +919,33 @@ internal static class GameEventPayloadDecoder
     private const uint AvailableExperienceInt64Id = 2;
 
     // DescriptionVectorFlag bits (GameEventPlayerDescription.cs).
-    private const uint VectorFlagAttribute = 0x0001;
-    private const uint VectorFlagSkill     = 0x0002;
+    private const uint VectorFlagAttribute   = 0x0001;
+    private const uint VectorFlagSkill        = 0x0002;
+    private const uint VectorFlagSpell        = 0x0100;
+    private const uint VectorFlagEnchantment  = 0x0200;
+
+    // EnchantmentMask bits (reflected from ACE.Entity EnchantmentMask). The registry is
+    // written as: u32 mask, then a List<Enchantment> (u32 count + entries) for each of
+    // Multiplicative, Additive, Cooldown IN THAT WRITE ORDER, then a SINGLE Vitae
+    // Enchantment last. We skip the lists and read only the vitae one.
+    private const uint EnchantmentMaskMultiplicative = 0x0001;
+    private const uint EnchantmentMaskAdditive       = 0x0002;
+    private const uint EnchantmentMaskVitae          = 0x0004;
+    private const uint EnchantmentMaskCooldown       = 0x0008;
+    // An Enchantment is 60 bytes through StatModValue (offset 56), +4 (trailing SpellSetID)
+    // when HasSpellSetID (u16 @ offset 6) != 0.
+    private const int EnchantmentBaseSize = 60;
+    // Spell-vector entry: u32 spellId + f32 (=2.0) = 8 bytes.
+    private const int SpellEntrySize = 8;
+
+    /// <summary>
+    /// Wire SpellId of the death-vitae enchantment (ACE-bots Enum/SpellId.cs, positional
+    /// value 666; verified by reflecting ACE.Entity.dll). Used to identify the vitae
+    /// enchantment in a decoded GameEventMagicUpdateEnchantment (the consumer's check) and
+    /// to self-validate the vitae read in the login PlayerDescription enchantment registry.
+    /// A wire-protocol constant like an opcode — owned by the wire decoder layer.
+    /// </summary>
+    internal const ushort VitaeSpellId = 666;
 
     // AttributeCache bits in the server's WRITE order. The 6 primary
     // attributes write 3 u32s (Ranks, StartingValue, ExperienceSpent); the
@@ -953,9 +979,10 @@ internal static class GameEventPayloadDecoder
         long? availXp = null;
         List<PdAttribute>? attributes = null;
         List<PdSkill>? skills = null;
+        float? vitae = null;
 
         PlayerDescriptionPayload Result() =>
-            new(level, totalXp, availXp, coin, attributes, skills);
+            new(level, totalXp, availXp, coin, attributes, skills, vitae);
 
         // u32 propertyFlags + u32 weenieType
         if (body.Length < 8)
@@ -1014,8 +1041,101 @@ internal static class GameEventPayloadDecoder
         if ((vectorFlags & VectorFlagSkill) != 0 &&
             !TryReadSkillVector(body, ref cursor, out skills))
             return Result();
+        // Skip the spell vector (a PackableHashTable of u32 spellId + f32) so the cursor
+        // reaches the enchantment registry, then read the vitae multiplier from it. Both
+        // fail CLOSED (any overrun returns what we have so far, vitae null) — and the
+        // enchantment read additionally self-validates the vitae SpellId, so a misaligned
+        // cursor can never apply a bogus vitae.
+        if ((vectorFlags & VectorFlagSpell) != 0 &&
+            !TrySkipSpellVector(body, ref cursor))
+            return Result();
+        if ((vectorFlags & VectorFlagEnchantment) != 0)
+            TryReadEnchantmentRegistryVitae(body, ref cursor, ref vitae);
 
         return Result();
+    }
+
+    // Skips the spell vector: a PackableHashTable (u16 count + u16 numBuckets) of
+    // count entries, each u32 spellId + f32 (=2.0) = SpellEntrySize. Fails closed.
+    private static bool TrySkipSpellVector(ReadOnlySpan<byte> body, ref int cursor)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("spell-header", 4, body.Length, cursor);
+            return false;
+        }
+        int count = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        cursor += 4; // count + numBuckets
+        if (count > (body.Length - cursor) / SpellEntrySize)
+        {
+            WarnPlayerDescOverrun("spell-entries", count * SpellEntrySize, body.Length, cursor);
+            return false;
+        }
+        cursor += count * SpellEntrySize;
+        return true;
+    }
+
+    // Reads the EnchantmentRegistry to extract the death-vitae multiplier. Layout
+    // (EnchantmentRegistry.Write): u32 mask, then a List<Enchantment> (u32 count +
+    // entries) for each of Multiplicative, Additive, Cooldown IN THAT WRITE ORDER, then a
+    // SINGLE Vitae Enchantment last. We skip the three lists and read the vitae one's
+    // StatModValue (offset 56 within the Enchantment), but ONLY when its SpellId is the
+    // vitae spell — so a misaligned cursor self-rejects rather than apply a bogus value.
+    // Best-effort: any overrun or non-vitae SpellId leaves vitae unchanged.
+    private static void TryReadEnchantmentRegistryVitae(
+        ReadOnlySpan<byte> body, ref int cursor, ref float? vitae)
+    {
+        if (cursor + 4 > body.Length) return;
+        var mask = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        cursor += 4;
+        // Skip the additive/multiplicative/cooldown lists in their WRITE order.
+        if ((mask & EnchantmentMaskMultiplicative) != 0 && !TrySkipEnchantmentList(body, ref cursor)) return;
+        if ((mask & EnchantmentMaskAdditive) != 0 && !TrySkipEnchantmentList(body, ref cursor)) return;
+        if ((mask & EnchantmentMaskCooldown) != 0 && !TrySkipEnchantmentList(body, ref cursor)) return;
+        if ((mask & EnchantmentMaskVitae) == 0) return;
+        // The single vitae Enchantment. Read SpellId (offset 0) + StatModValue (offset 56)
+        // from the first EnchantmentBaseSize bytes; apply ONLY when SpellId is the vitae
+        // spell (self-validation against a misaligned cursor).
+        if (cursor + EnchantmentBaseSize > body.Length) return;
+        var spellId = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor, 2));
+        if (spellId != VitaeSpellId) return;
+        vitae = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(cursor + 56, 4));
+    }
+
+    // Skips a List<Enchantment>: u32 count, then `count` Enchantments. Each is
+    // EnchantmentBaseSize bytes, +4 when its HasSpellSetID (u16 @ offset 6) != 0. Fails
+    // closed on any overrun. Returns false (and leaves the cursor unusable) on overrun.
+    private static bool TrySkipEnchantmentList(ReadOnlySpan<byte> body, ref int cursor)
+    {
+        if (cursor + 4 > body.Length)
+        {
+            WarnPlayerDescOverrun("ench-list-header", 4, body.Length, cursor);
+            return false;
+        }
+        long count = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4));
+        cursor += 4;
+        for (long i = 0; i < count; i++)
+        {
+            // Need the 60-byte base present first, both to read HasSpellSetID (@6) and as
+            // the minimum entry size.
+            if (cursor + EnchantmentBaseSize > body.Length)
+            {
+                WarnPlayerDescOverrun("ench-entry", EnchantmentBaseSize, body.Length, cursor);
+                return false;
+            }
+            var hasSpellSetId = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(cursor + 6, 2));
+            var entrySize = EnchantmentBaseSize + (hasSpellSetId != 0 ? 4 : 0);
+            // Re-check the FULL entry size (incl. the optional trailing SpellSetID) before
+            // advancing, so a truncated 64-byte entry fails closed rather than walking the
+            // cursor past the end.
+            if (cursor + entrySize > body.Length)
+            {
+                WarnPlayerDescOverrun("ench-entry-spellset", entrySize, body.Length, cursor);
+                return false;
+            }
+            cursor += entrySize;
+        }
+        return true;
     }
 
     // Reads the PropertyInt32 PackableHashTable, capturing Level (id 25) and

@@ -22,7 +22,9 @@ public class PlayerDescriptionVectorDecodeTests
                        FDid = 0x0008, FString = 0x0010, FPosition = 0x0020,
                        FIid = 0x0040, FInt64 = 0x0080;
     // vectorFlags bits
-    private const uint VAttribute = 0x0001, VSkill = 0x0002;
+    private const uint VAttribute = 0x0001, VSkill = 0x0002, VSpell = 0x0100, VEnchantment = 0x0200;
+    // EnchantmentMask bits
+    private const uint EMMultiplicative = 0x0001, EMAdditive = 0x0002, EMVitae = 0x0004, EMCooldown = 0x0008;
 
     private sealed class Builder
     {
@@ -45,6 +47,18 @@ public class PlayerDescriptionVectorDecodeTests
             for (int i = 0; i < pad; i++) _buf.Add(0);
         }
         public byte[] ToArray() => _buf.ToArray();
+        // One Enchantment in the ACE-bots Enchantment.Write WIRE order: SpellID u16,
+        // Layer u16, SpellCategory u16, HasSpellSetID u16, PowerLevel u32, StartTime f64,
+        // Duration f64, CasterGuid u32, DegradeModifier f32, DegradeLimit f32,
+        // LastTimeDegraded f64, StatModType u32, StatModKey u32, StatModValue f32 (offset
+        // 56), [SpellSetID u32 when HasSpellSetID != 0].
+        public void Enchantment(ushort spellId, float statModValue, bool hasSpellSetId = false)
+        {
+            U16(spellId); U16(0); U16(0); U16(hasSpellSetId ? (ushort)1 : (ushort)0);
+            U32(0); F64(0); F64(0); U32(0); F32(0); F32(0); F64(0); U32(0); U32(0);
+            F32(statModValue);
+            if (hasSpellSetId) U32(0);
+        }
     }
 
     // Realistic full login bundle: a small Int32 (Level), an Int64 (XP),
@@ -54,7 +68,9 @@ public class PlayerDescriptionVectorDecodeTests
     private static byte[] BuildFullBundle(
         bool withPosition,
         IReadOnlyList<(uint id, uint ranks, uint start, uint xp, uint? cur)> attrs,
-        IReadOnlyList<(uint id, uint ranks, uint sac, uint xp, uint init)> skills)
+        IReadOnlyList<(uint id, uint ranks, uint sac, uint xp, uint init)> skills,
+        int spellCount = 0,
+        (uint mask, int mult, int add, int cooldown, ushort vitaeSpellId, float vitae, bool vitaeHasSpellSetId)? ench = null)
     {
         var b = new Builder();
         uint flags = FInt32 | FInt64 | FBool | FDouble | FString | FDid | FIid;
@@ -87,7 +103,10 @@ public class PlayerDescriptionVectorDecodeTests
         }
 
         // Vector section
-        b.U32(VAttribute | VSkill);
+        uint vectorFlags = VAttribute | VSkill
+            | (spellCount > 0 ? VSpell : 0u)
+            | (ench is not null ? VEnchantment : 0u);
+        b.U32(vectorFlags);
         b.U32(1u); // healthPresent
         // attribute block
         b.U32(0x1FFu); // AttributeCache.Full
@@ -103,6 +122,22 @@ public class PlayerDescriptionVectorDecodeTests
             // Ranks is a u16 on the wire (CreatureSkill.Ranks is ushort).
             b.U32(id); b.U16((ushort)ranks); b.U16(1); b.U32(sac); b.U32(xp); b.U32(init);
             b.U32(0u); b.F64(0d);
+        }
+        // Spell vector (PHT of u32 spellId + f32) — present only when spellCount > 0.
+        if (spellCount > 0)
+        {
+            b.PhtHeader(spellCount);
+            for (int i = 0; i < spellCount; i++) { b.U32((uint)(1000 + i)); b.F32(2f); }
+        }
+        // Enchantment registry: u32 mask, then List<Enchantment> (u32 count + entries) for
+        // Multiplicative, Additive, Cooldown IN WRITE ORDER, then a single Vitae Enchantment.
+        if (ench is { } e)
+        {
+            b.U32(e.mask);
+            if ((e.mask & EMMultiplicative) != 0) { b.U32((uint)e.mult); for (int i = 0; i < e.mult; i++) b.Enchantment(110, 0.5f); }
+            if ((e.mask & EMAdditive) != 0) { b.U32((uint)e.add); for (int i = 0; i < e.add; i++) b.Enchantment(111, 0.5f, hasSpellSetId: true); }
+            if ((e.mask & EMCooldown) != 0) { b.U32((uint)e.cooldown); for (int i = 0; i < e.cooldown; i++) b.Enchantment(112, 0.5f); }
+            if ((e.mask & EMVitae) != 0) b.Enchantment(e.vitaeSpellId, e.vitae, hasSpellSetId: e.vitaeHasSpellSetId);
         }
         return b.ToArray();
     }
@@ -227,5 +262,76 @@ public class PlayerDescriptionVectorDecodeTests
         var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
 
         Assert.Equal("Skill9999", pd.Skills!.Single().Name);
+    }
+
+    // ── login death-vitae from the enchantment registry ──────────────────
+
+    [Fact]
+    public void Decode_LoginVitae_VitaeOnlyRegistry_ReadsMultiplier()
+    {
+        // No spells, no multiplicative/additive/cooldown lists — only the single vitae
+        // enchantment (mask = Vitae). The decoder reads its StatModValue.
+        var skills = new[] { (1u, 5u, 2u, 100u, 0u) };
+        var body = BuildFullBundle(false, NineAttributes(), skills,
+            spellCount: 0,
+            ench: (mask: EMVitae, mult: 0, add: 0, cooldown: 0, vitaeSpellId: (ushort)666, vitae: 0.70f, vitaeHasSpellSetId: false));
+        var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
+        Assert.Equal(0.70f, pd.VitaeMultiplier!.Value);
+    }
+
+    [Fact]
+    public void Decode_LoginVitae_SkipsSpellsAndAllLists_StillAligns()
+    {
+        // A spell vector AND all three enchantment lists (multiplicative w/ 2 entries,
+        // additive w/ 1 entry that carries a trailing SpellSetID, cooldown w/ 1) precede
+        // the vitae enchantment. The decoder must skip every one to land on the vitae read.
+        var skills = new[] { (1u, 5u, 2u, 100u, 0u) };
+        var body = BuildFullBundle(false, NineAttributes(), skills,
+            spellCount: 3,
+            ench: (mask: EMMultiplicative | EMAdditive | EMCooldown | EMVitae,
+                   mult: 2, add: 1, cooldown: 1, vitaeSpellId: (ushort)666, vitae: 0.85f, vitaeHasSpellSetId: false));
+        var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
+        Assert.Equal(0.85f, pd.VitaeMultiplier!.Value);
+    }
+
+    [Fact]
+    public void Decode_LoginVitae_NoEnchantmentVector_NullMultiplier()
+    {
+        var skills = new[] { (1u, 5u, 2u, 100u, 0u) };
+        var body = BuildFullBundle(false, NineAttributes(), skills, spellCount: 2, ench: null);
+        var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
+        Assert.Null(pd.VitaeMultiplier);
+        // The spell-vector skip must not corrupt the earlier attribute/skill reads.
+        Assert.Equal(9, pd.Attributes!.Count);
+        Assert.Single(pd.Skills!);
+    }
+
+    [Fact]
+    public void Decode_LoginVitae_NonVitaeSpellId_SelfRejects()
+    {
+        // The vitae slot carries an enchantment whose SpellId is NOT the vitae spell (a
+        // misaligned-cursor / unexpected-content guard): the decoder must NOT apply it.
+        var skills = new[] { (1u, 5u, 2u, 100u, 0u) };
+        var body = BuildFullBundle(false, NineAttributes(), skills,
+            spellCount: 0,
+            ench: (mask: EMVitae, mult: 0, add: 0, cooldown: 0, vitaeSpellId: (ushort)999, vitae: 0.50f, vitaeHasSpellSetId: false));
+        var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
+        Assert.Null(pd.VitaeMultiplier);
+    }
+
+    [Fact]
+    public void Decode_LoginVitae_VitaeEntryCarriesSpellSetId_StillReadsOffset56()
+    {
+        // The server defaults HasSpellSetID = 1, so the real vitae entry is 64 bytes (a
+        // trailing SpellSetID after StatModValue). The read uses only offsets 0 and 56, so
+        // it must still work. Precede it with a multiplicative list whose entry ALSO carries
+        // SpellSetID, so the variable-size skip is exercised on the realistic shape too.
+        var skills = new[] { (1u, 5u, 2u, 100u, 0u) };
+        var body = BuildFullBundle(false, NineAttributes(), skills,
+            spellCount: 1,
+            ench: (mask: EMMultiplicative | EMVitae,
+                   mult: 1, add: 0, cooldown: 0, vitaeSpellId: (ushort)666, vitae: 0.60f, vitaeHasSpellSetId: true));
+        var pd = GameEventPayloadDecoder.Decode(body, GameEventType.PlayerDescription)!.PlayerDescription!;
+        Assert.Equal(0.60f, pd.VitaeMultiplier!.Value);
     }
 }
