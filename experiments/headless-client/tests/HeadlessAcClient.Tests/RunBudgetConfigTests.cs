@@ -162,6 +162,84 @@ public class RunBudgetConfigTests
     }
 
     [Theory]
+    [InlineData(null, 0.35, 0.70)]   // unset -> default
+    [InlineData("", 0.35, 0.70)]     // blank -> default
+    [InlineData("abc", 0.35, 0.70)]  // unparseable -> default
+    [InlineData("0.70", 0.35, 0.70)] // explicit default
+    [InlineData("0.55", 0.35, 0.55)] // lower re-engage (accepted; above the disengage floor)
+    [InlineData("0.36", 0.35, 0.36)] // just above the floor (disengage 0.35 + 0.01)
+    [InlineData("0.35", 0.35, 0.70)] // AT the disengage value (not above the floor) -> default
+    [InlineData("0.30", 0.35, 0.70)] // below the floor -> default
+    [InlineData("0.95", 0.35, 0.95)] // max (accepted)
+    [InlineData("0.99", 0.35, 0.95)] // above max -> clamped
+    [InlineData("0.15", 0.14, 0.15)] // float-jitter boundary: 0.14+0.01==0.15000000000000002; "0.15" still accepted
+    [InlineData("0.06", 0.05, 0.06)] // another at-floor boundary
+    public void ResolveCombatReengageHealthFraction_DefaultsAndClamps(string? env, double disengage, double expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveCombatReengageHealthFraction(env, disengage));
+    }
+
+    [Theory]
+    // A HIGH disengage fraction raises the re-engage FLOOR so the invariant holds:
+    [InlineData("0.60", 0.65, 0.70)] // env below the raised floor (0.66) -> default (0.70, > disengage)
+    [InlineData("0.67", 0.65, 0.67)] // env above the raised floor -> accepted
+    [InlineData(null, 0.65, 0.70)]   // default 0.70 already > disengage 0.65
+    public void ResolveCombatReengageHealthFraction_StaysAboveHighDisengage(string? env, double disengage, double expected)
+    {
+        Assert.Equal(expected, HandshakeDriver.ResolveCombatReengageHealthFraction(env, disengage));
+    }
+
+    [Theory]
+    [InlineData(0.05)]
+    [InlineData(0.35)]
+    [InlineData(0.50)]
+    [InlineData(0.65)]
+    public void ResolveCombatReengageHealthFraction_AlwaysStrictlyAboveDisengage(double disengage)
+    {
+        // For ANY env value (including attempts to set it AT or BELOW the disengage), the
+        // resolved re-engage fraction must stay strictly above the disengage so the
+        // disengage/re-engage hysteresis cannot invert into oscillation.
+        var envs = new string?[] { null, "", "abc", "0.01", "0.40", "0.99",
+            disengage.ToString(System.Globalization.CultureInfo.InvariantCulture) };
+        foreach (var env in envs)
+        {
+            var re = HandshakeDriver.ResolveCombatReengageHealthFraction(env, disengage);
+            Assert.True(re > disengage,
+                $"re-engage {re} must be strictly > disengage {disengage} (env={env ?? "null"})");
+        }
+    }
+
+    [Fact]
+    public void StrategyCombatChainGate_SharesMotorResolvedReengageFraction()
+    {
+        // The autonomous combat-chain gate (LlmGoalPolicy) MUST use the SAME env-resolved
+        // re-engage fraction the Motor (HandshakeDriver) uses, or the chain mints Attacks
+        // the Motor then refuses (the mint->REFUSE->MISS->re-mint loop the gate prevents).
+        // Assert LlmGoalPolicy's resolved value equals the resolver output for the current
+        // process env — proving the Strategy gate is wired to the shared resolved value,
+        // not the fixed default.
+        var expected = HandshakeDriver.ResolveCombatReengageHealthFraction(
+            System.Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_REENGAGE_HEALTH_FRACTION"),
+            HandshakeDriver.ResolveCombatDisengageHealthFraction(
+                System.Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION")));
+        Assert.Equal(expected, HeadlessAcClient.Strategy.LlmGoalPolicy.CombatReengageHealthFraction);
+    }
+
+    [Fact]
+    public void ChainCombatSelfHealthSuppressed_GatesOnResolvedReengageFraction()
+    {
+        // The combat-chain gate helper must suppress Attacks exactly when self-health is
+        // below the RESOLVED re-engage fraction of max -- proving it reads the shared
+        // CombatReengageHealthFraction (a revert to a fixed default would change this).
+        var frac = HeadlessAcClient.Strategy.LlmGoalPolicy.CombatReengageHealthFraction;
+        var thresholdHp = (int)(frac * 100.0);
+        Assert.True(HeadlessAcClient.Strategy.LlmGoalPolicy.ChainCombatSelfHealthSuppressed(thresholdHp - 5, 100));  // well below -> suppressed
+        Assert.False(HeadlessAcClient.Strategy.LlmGoalPolicy.ChainCombatSelfHealthSuppressed(thresholdHp + 5, 100)); // well above -> not suppressed
+        Assert.False(HeadlessAcClient.Strategy.LlmGoalPolicy.ChainCombatSelfHealthSuppressed(null, 100));            // unknown current -> not suppressed
+        Assert.False(HeadlessAcClient.Strategy.LlmGoalPolicy.ChainCombatSelfHealthSuppressed(80, 0));                // zero/unknown max -> not suppressed
+    }
+
+    [Theory]
     [InlineData(null, 5)]       // unset -> default
     [InlineData("", 5)]         // blank -> default
     [InlineData("abc", 5)]      // unparseable -> default
