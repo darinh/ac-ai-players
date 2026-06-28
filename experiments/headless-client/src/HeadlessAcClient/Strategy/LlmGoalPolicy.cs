@@ -14197,6 +14197,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : "";
             sb.AppendLine($"- deaths (server-tracked): {nd}{recency}");
         }
+        if (world.SelfVitaeMultiplier is double vitae && vitae < 1.0)
+        {
+            // death-vitae: accumulated deaths multiply the effective max vitals by
+            // `vitae` (< 1.0). The observed max HP/stamina already reflect this, so they
+            // read as a low ceiling with NO visible cause — the LLM cannot otherwise tell
+            // a naturally-low pool from a death-suppressed one. Surface the cause + that
+            // XP recovers it, so the LLM can attribute the glass-jaw (be more cautious,
+            // prioritise XP) instead of misreading it. Raw fact; the LLM owns the response.
+            var penaltyPct = (int)System.Math.Round((1.0 - vitae) * 100.0);
+            if (penaltyPct >= 1)
+                sb.AppendLine(
+                    $"- vitae penalty: your effective max vitals (incl. max health/stamina) are " +
+                    $"reduced ~{penaltyPct}% by recent deaths; this recovers as you earn XP");
+        }
     }
 
     /// <summary>

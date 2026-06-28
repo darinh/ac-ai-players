@@ -789,4 +789,22 @@ public class WorldStateTests
         Assert.NotNull(proj);
         Assert.Equal(2, proj!.Self.CurrentLandblockDeaths);
     }
+
+    // death-vitae store: ApplySelfVitae records the vitae multiplier only when it is a
+    // valid (0, 1] factor, updates on each observation (incl. a recovered-to-1.0 value
+    // that the prompt surface then omits), and ignores out-of-range wire noise.
+    [Fact]
+    public void ApplySelfVitae_StoresInRange_Updates_AndIgnoresOutOfRange()
+    {
+        var ws = new WorldState();
+        Assert.Null(ws.SelfVitaeMultiplier);          // unobserved this session
+        ws.ApplySelfVitae(0.90f);                     // a 10% death penalty
+        Assert.Equal((double)0.90f, ws.SelfVitaeMultiplier!.Value);
+        ws.ApplySelfVitae(1.0f);                      // recovered: stored (surface omits at >= 1.0)
+        Assert.Equal(1.0, ws.SelfVitaeMultiplier!.Value);
+        ws.ApplySelfVitae(0f);                        // out of (0,1] -> ignored
+        ws.ApplySelfVitae(1.5f);                      // out of (0,1] -> ignored
+        ws.ApplySelfVitae(-0.5f);                     // out of (0,1] -> ignored
+        Assert.Equal(1.0, ws.SelfVitaeMultiplier!.Value); // unchanged by the noise
+    }
 }

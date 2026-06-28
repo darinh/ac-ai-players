@@ -770,6 +770,26 @@ internal sealed class WorldState
     public int? SelfCoinValue =>
         Self?.PropertyInts is { } p && p.TryGetValue(20u, out var v) ? v : null;
 
+    // Death-vitae multiplier: the StatModValue of the player's vitae enchantment — the
+    // factor in (0, 1] by which deaths suppress the player's effective vitals (1.0 = no
+    // penalty; below 1.0 the effective max health/stamina/mana are reduced by
+    // (1 - value)). Set from GameEventMagicUpdateEnchantment for the vitae enchantment so
+    // the prompt can surface the post-death glass-jaw the LLM otherwise cannot perceive.
+    // Null until a vitae enchantment is observed this session. RAW recorded fact.
+    private double? _selfVitaeMultiplier;
+    public double? SelfVitaeMultiplier => _selfVitaeMultiplier;
+
+    /// <summary>
+    /// Record the player's current death-vitae multiplier (StatModValue of the vitae
+    /// enchantment, in (0, 1]). The caller has already confirmed this is the vitae
+    /// enchantment, addressed to self. Values outside (0, 1] are ignored as wire noise.
+    /// </summary>
+    public void ApplySelfVitae(float multiplier)
+    {
+        if (multiplier > 0f && multiplier <= 1f)
+            _selfVitaeMultiplier = multiplier;
+    }
+
     /// <summary>
     /// Item-type gate: a vendor advertises the ItemType bitmask it will buy
     /// (MerchandiseItemTypes); an item's ItemType is a single type bit. Returns

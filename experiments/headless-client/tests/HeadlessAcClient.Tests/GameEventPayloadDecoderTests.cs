@@ -25,6 +25,69 @@ public class GameEventPayloadDecoderTests
         Assert.Equal("WeenieError(0x12345678)", p.WeenieError.ToString());
     }
 
+    // Builds a GameEventMagicUpdateEnchantment body matching the ACE-bots
+    // Enchantment.Write wire order: SpellID u16, Layer u16, SpellCategory u16,
+    // HasSpellSetID u16, PowerLevel u32, StartTime f64, Duration f64, CasterGuid u32,
+    // DegradeModifier f32, DegradeLimit f32, LastTimeDegraded f64, StatModType u32,
+    // StatModKey u32, StatModValue f32 (offset 56). HasSpellSetID=0 -> no trailing SpellSetID.
+    private static byte[] BuildEnchantmentBody(ushort spellId, uint statModType, float statModValue)
+    {
+        var b = new byte[60];
+        BinaryPrimitives.WriteUInt16LittleEndian(b.AsSpan(0, 2), spellId);
+        BinaryPrimitives.WriteUInt32LittleEndian(b.AsSpan(48, 4), statModType);
+        BinaryPrimitives.WriteSingleLittleEndian(b.AsSpan(56, 4), statModValue);
+        return b;
+    }
+
+    [Fact]
+    public void Decode_MagicUpdateEnchantment_ReadsSpellIdTypeAndStatModValue()
+    {
+        // A vitae enchantment: SpellID 666, a stat-mod type, and the vital multiplier
+        // 0.90 (a 10% penalty) at offset 56.
+        var body = BuildEnchantmentBody(spellId: 666, statModType: 0x00010000u, statModValue: 0.90f);
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.MagicUpdateEnchantment);
+        Assert.NotNull(p?.MagicUpdateEnchantment);
+        Assert.Equal((ushort)666, p!.MagicUpdateEnchantment!.SpellId);
+        Assert.Equal(0x00010000u, p.MagicUpdateEnchantment.StatModType);
+        Assert.Equal(0.90f, p.MagicUpdateEnchantment.StatModValue); // bit-identical round-trip
+    }
+
+    [Fact]
+    public void Decode_MagicUpdateEnchantment_StatModValueIsAtOffset56_NotAnEarlierFloat()
+    {
+        // Offset guard: a different float at an EARLIER field (DegradeModifier, offset 32)
+        // must NOT be mistaken for StatModValue (offset 56).
+        var body = BuildEnchantmentBody(spellId: 1, statModType: 0u, statModValue: 0.75f);
+        BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(32, 4), 999.0f); // DegradeModifier decoy
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.MagicUpdateEnchantment);
+        Assert.Equal(0.75f, p!.MagicUpdateEnchantment!.StatModValue);
+    }
+
+    [Fact]
+    public void Decode_MagicUpdateEnchantment_TooShort_ReturnsNull()
+    {
+        // Body shorter than StatModValue's offset+4 -> the decoder throws -> Decode
+        // catches and returns null (caller falls back to raw bytes).
+        var p = GameEventPayloadDecoder.Decode(new byte[40], GameEventType.MagicUpdateEnchantment);
+        Assert.Null(p);
+    }
+
+    [Fact]
+    public void Decode_MagicUpdateEnchantment_RealPacketWithTrailingSpellSetId_DecodesFirst60()
+    {
+        // Real packets set HasSpellSetID != 0 (server default), appending a u32 SpellSetID
+        // after StatModValue (a 64-byte body). The decoder reads only the first 60 bytes,
+        // so the trailing field is ignored and SpellID/StatModValue still decode correctly.
+        var body = new byte[64];
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(0, 2), 666);
+        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(6, 2), 1);        // HasSpellSetID != 0
+        BinaryPrimitives.WriteSingleLittleEndian(body.AsSpan(56, 4), 0.85f);   // StatModValue
+        BinaryPrimitives.WriteUInt32LittleEndian(body.AsSpan(60, 4), 12345u);  // trailing SpellSetID (ignored)
+        var p = GameEventPayloadDecoder.Decode(body, GameEventType.MagicUpdateEnchantment);
+        Assert.Equal((ushort)666, p!.MagicUpdateEnchantment!.SpellId);
+        Assert.Equal(0.85f, p.MagicUpdateEnchantment.StatModValue);
+    }
+
     [Fact]
     public void Decode_WeenieErrorWithString_ReadsCodeAndMessage()
     {
