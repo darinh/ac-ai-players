@@ -2899,16 +2899,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // fraction). Without this the chain keeps minting Attacks the Motor
                 // then refuses — a mint -> REFUSE -> MISS -> re-mint loop while the
                 // bot drifts away from the target, never yielding to recover. The
-                // LLM/fallback owns the flee/heal decision, so yield to it. Use the
-                // SAME integer current/max + IsCombatSuppressed the Motor uses (the
-                // projection's HealthObservedPeak carries the live max HP) for exact
-                // parity — a float-fraction compare would diverge by one HP tick at
-                // the boundary.
-                selfHealthSuppressed:
-                    world.Self.HealthCurrent is int selfHc &&
-                    world.Self.HealthObservedPeak is int selfHm && selfHm > 0 &&
-                    CombatDisengage.IsCombatSuppressed(
-                        (uint)selfHc, (uint)selfHm, CombatDisengage.DefaultReengageHealthFraction));
+                // LLM/fallback owns the flee/heal decision, so yield to it. The
+                // helper uses the SAME integer current/max + IsCombatSuppressed +
+                // env-resolved re-engage fraction the Motor uses, so a configured
+                // (lower) gate takes effect here too — not the fixed default.
+                selfHealthSuppressed: ChainCombatSelfHealthSuppressed(
+                    world.Self.HealthCurrent, world.Self.HealthObservedPeak));
             if (chainTarget is not null)
             {
                 _combatChainCount++;
@@ -12708,6 +12704,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // unseen) stays small.
     internal static readonly int MaxCombatChainAttacks =
         ResolveMaxCombatChainAttacks(Environment.GetEnvironmentVariable("AC_BOTS_MAX_COMBAT_CHAIN"));
+
+    // The mid-fight RE-ENGAGE health fraction, resolved from the SAME env vars (via the
+    // SAME resolvers) the Motor uses, so the autonomous combat-chain gate and the Motor's
+    // dispatch REFUSE share ONE effective threshold. A divergence (e.g. the chain on a
+    // fixed 0.70 while the Motor honors a lower configured value) would re-introduce the
+    // mint -> REFUSE -> MISS -> re-mint loop the gate exists to prevent. Read once at
+    // type-load (the env is set before process start), identical to the Motor's per-run
+    // resolution. HandshakeDriver's resolvers are pure static methods with no static
+    // dependency on this type, so there is no static-init cycle.
+    internal static readonly double CombatReengageHealthFraction =
+        HeadlessAcClient.Protocol.HandshakeDriver.ResolveCombatReengageHealthFraction(
+            Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_REENGAGE_HEALTH_FRACTION"),
+            HeadlessAcClient.Protocol.HandshakeDriver.ResolveCombatDisengageHealthFraction(
+                Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION")));
+
+    // The autonomous combat-chain gate's self-health suppression: mirrors the Motor's
+    // dispatch REFUSE so the chain does not mint Attacks the Motor then refuses. Uses the
+    // SAME integer current/max + IsCombatSuppressed + env-resolved re-engage fraction
+    // (CombatReengageHealthFraction) the Motor uses, for exact parity. Extracted as a
+    // helper so it is unit-testable AND so the gate's threshold source stays the shared
+    // resolved field (not the fixed default). Self HP only; no target, no game knowledge.
+    internal static bool ChainCombatSelfHealthSuppressed(int? healthCurrent, int? healthObservedPeak)
+        => healthCurrent is int hc && healthObservedPeak is int peak && peak > 0 &&
+           CombatDisengage.IsCombatSuppressed((uint)hc, (uint)peak, CombatReengageHealthFraction);
 
     // Parse AC_BOTS_MAX_COMBAT_CHAIN. A positive integer is used (clamped to
     // [1, 12]); anything else (unset/blank/unparseable/<1) falls back to 6.

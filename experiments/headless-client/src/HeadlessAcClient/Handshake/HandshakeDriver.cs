@@ -240,6 +240,34 @@ internal sealed class HandshakeDriver : IDisposable
         return Default;
     }
 
+    // Resolve the mid-fight RE-ENGAGE health fraction from the env var: the bot must
+    // NOT (re)start melee until its health recovers to at least this fraction of max
+    // (anti-oscillation hysteresis vs the lower disengage fraction). Falls back to the
+    // default (0.70) for an unset/blank/invalid/below-floor value; clamps to
+    // [disengageFraction + 0.01, 0.95]. The floor is tied to the RESOLVED disengage
+    // fraction (not a fixed constant) so the invariant "re-engage strictly above
+    // disengage" holds for ANY disengage config — a re-engage at or below the disengage
+    // point would let a bot that healed just past the disengage threshold immediately
+    // re-engage and drop back below it (oscillation). The default is itself raised above
+    // the floor if a high disengage value would otherwise meet it. Default 0.70 is
+    // byte-identical to the prior fixed const for the default disengage (0.35).
+    internal static double ResolveCombatReengageHealthFraction(string? envValue, double disengageFraction)
+    {
+        const double Max = 0.95;
+        // The 0.01 margin guarantees re-engage > disengage. Compare with a tiny
+        // tolerance so binary-float jitter in (disengageFraction + 0.01) — e.g.
+        // 0.14 + 0.01 == 0.15000000000000002 — does not spuriously reject an env
+        // value EXACTLY at the documented inclusive floor (e.g. "0.15"). The
+        // tolerance (1e-9) is far smaller than the 0.01 margin, so a value at the
+        // floor still resolves strictly above disengage.
+        const double FloorTolerance = 1e-9;
+        var floor = disengageFraction + 0.01;
+        if (double.TryParse(envValue, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= floor - FloorTolerance)
+            return Math.Min(v, Max);
+        return Math.Max(CombatDisengage.DefaultReengageHealthFraction, floor);
+    }
+
     // Resolve the escalating-backoff cap for the out-of-reach interaction
     // suppression from the env var. Falls back to 5 for an unset/blank/invalid/
     // below-min value; clamps to [1, 20]. 1 disables escalation (fixed base
@@ -1004,8 +1032,10 @@ internal sealed class HandshakeDriver : IDisposable
         // fight; this only prevents dying mid-swing).
         // Env-tunable (AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION /
         // AC_BOTS_COMBAT_DISENGAGE_CRITICAL_HP_FLOOR); defaults 0.35 / 2 are
-        // byte-identical to the prior fixed consts. The fraction is clamped strictly
-        // below the 0.70 re-engage fraction so the hysteresis holds for any value.
+        // byte-identical to the prior fixed consts. The fraction is clamped to a
+        // 0.65 ceiling; the re-engage fraction (below) is in turn clamped strictly
+        // ABOVE this resolved disengage value, so the disengage<re-engage hysteresis
+        // holds for any combination of the two env vars.
         double               CombatDisengageHealthFraction = ResolveCombatDisengageHealthFraction(
                                  Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_DISENGAGE_HEALTH_FRACTION"));
         uint                 CombatDisengageCriticalHpFloor = ResolveCombatDisengageCriticalHpFloor(
@@ -1062,7 +1092,16 @@ internal sealed class HandshakeDriver : IDisposable
         const int            LosingExchangeMinSwings = 4;
         const double         LosingExchangeSelfHealthLostFraction = 0.50;
         const double         LosingExchangeMaxTargetHealthLostFraction = 0.15;
-        const double         CombatReengageHealthFraction = CombatDisengage.DefaultReengageHealthFraction;
+        // Env-tunable RE-ENGAGE gate (AC_BOTS_COMBAT_REENGAGE_HEALTH_FRACTION): the bot
+        // will not (re)start melee until its health recovers to this fraction of max.
+        // Default 0.70 is byte-identical to the prior fixed const; the resolver clamps it
+        // strictly ABOVE the resolved disengage fraction so the anti-oscillation
+        // hysteresis holds for any config. A LOWER value lets a (now-armed, capable) bot
+        // resume fighting at a lower health rather than fleeing a winnable fight while
+        // still well above the disengage floor. Own health only; no target, no game knowledge.
+        double               CombatReengageHealthFraction = ResolveCombatReengageHealthFraction(
+                                 Environment.GetEnvironmentVariable("AC_BOTS_COMBAT_REENGAGE_HEALTH_FRACTION"),
+                                 CombatDisengageHealthFraction);
         const float          CombatFleeDistanceUnits = 15f;
         var                  combatAvoidCooldown = TimeSpan.FromSeconds(30);
         var                  combatAvoidUntil = new Dictionary<uint, DateTime>();
