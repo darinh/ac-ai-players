@@ -39,6 +39,12 @@ internal sealed class CombatFeelLedger
         public int Deaths;
         public int NearDeaths;
         public int Ineffective;
+        // Subset of Ineffective fights in which the bot SWUNG (>=1 swing landed
+        // or evaded) yet dealt 0 total damage — the strongest single signal the
+        // kind out-defends/out-armors the bot's CURRENT offense. Excludes a
+        // no-swing can't-close abandon (a pathing miss against one individual,
+        // NOT evidence about the KIND).
+        public int SwungZeroDamage;
         public int Fights;
         public string LastOutcome = "";
         public long LastOutcomeOrder;
@@ -101,9 +107,12 @@ internal sealed class CombatFeelLedger
     /// fight it could not make progress in (the Motor's no-progress abandon —
     /// 0 damage over the watchdog window, or all swings evaded) WITHOUT a
     /// kill or death. Lets the LLM learn the KIND out-defends it without the
-    /// bot having to die first. RAW recorded fact; no avoidance decision.
+    /// bot having to die first. When <paramref name="swungZeroDamage"/> is set
+    /// the bot SWUNG yet dealt 0 damage (a stronger, can't-hurt-this-kind signal
+    /// than a no-swing can't-close abandon). RAW recorded fact; no avoidance decision.
     /// </summary>
-    public void RecordIneffective(MobIdentity id, int? botLevel = null) => Bump(id, e => { e.Ineffective++; }, "ineffective", botLevel);
+    public void RecordIneffective(MobIdentity id, int? botLevel = null, bool swungZeroDamage = false) =>
+        Bump(id, e => { e.Ineffective++; if (swungZeroDamage) e.SwungZeroDamage++; }, "ineffective", botLevel);
 
     /// <summary>
     /// Records the START of an engagement against a monster kind (the
@@ -166,7 +175,8 @@ internal sealed class CombatFeelLedger
                 Ineffective: e.Ineffective,
                 Fights: e.Fights,
                 LastOutcome: e.LastOutcome,
-                MaxLossBotLevel: e.MaxLossBotLevel))
+                MaxLossBotLevel: e.MaxLossBotLevel,
+                SwungZeroDamage: e.SwungZeroDamage))
             .ToList();
         return significant.Count == 0 ? null : significant;
     }
@@ -190,7 +200,11 @@ internal sealed class CombatFeelLedger
     private sealed record EntryDto(
         string Key, string? DisplayName, uint? Wcid,
         int Kills, int Deaths, int NearDeaths, int Ineffective, int Fights,
-        string LastOutcome, long LastOutcomeOrder, int? MaxLossBotLevel = null);
+        string LastOutcome, long LastOutcomeOrder, int? MaxLossBotLevel = null,
+        // Optional: absent in ledgers written before this field existed (old JSON
+        // deserializes it to 0, so the swung-zero-damage veto simply never fires
+        // on legacy data until the kind is re-observed — old behavior preserved).
+        int SwungZeroDamage = 0);
 
     private sealed record LedgerDto(int Version, long Order, List<EntryDto> Entries);
 
@@ -204,7 +218,8 @@ internal sealed class CombatFeelLedger
                 kv.Key, kv.Value.DisplayName, kv.Value.Wcid,
                 kv.Value.Kills, kv.Value.Deaths, kv.Value.NearDeaths,
                 kv.Value.Ineffective, kv.Value.Fights,
-                kv.Value.LastOutcome, kv.Value.LastOutcomeOrder, kv.Value.MaxLossBotLevel))
+                kv.Value.LastOutcome, kv.Value.LastOutcomeOrder, kv.Value.MaxLossBotLevel,
+                kv.Value.SwungZeroDamage))
             .ToList();
         return JsonSerializer.Serialize(new LedgerDto(PersistVersion, _order, entries), JsonOpts);
     }
@@ -244,6 +259,7 @@ internal sealed class CombatFeelLedger
                 // null MaxLossBotLevel disables the level-aware re-test, so old
                 // data behaves EXACTLY as before — a permanent beaten verdict.
                 MaxLossBotLevel = d.MaxLossBotLevel,
+                SwungZeroDamage = d.SwungZeroDamage,
             };
         }
         // Resume the recency counter past the highest persisted order so newly
@@ -280,6 +296,7 @@ internal sealed class CombatFeelLedger
                     LastOutcome = o.LastOutcome,
                     LastOutcomeOrder = o.LastOutcomeOrder,
                     MaxLossBotLevel = o.MaxLossBotLevel,
+                    SwungZeroDamage = o.SwungZeroDamage,
                 };
                 Dirty = true;
                 continue;
@@ -288,6 +305,7 @@ internal sealed class CombatFeelLedger
             if (o.Deaths > e.Deaths) { e.Deaths = o.Deaths; Dirty = true; }
             if (o.NearDeaths > e.NearDeaths) { e.NearDeaths = o.NearDeaths; Dirty = true; }
             if (o.Ineffective > e.Ineffective) { e.Ineffective = o.Ineffective; Dirty = true; }
+            if (o.SwungZeroDamage > e.SwungZeroDamage) { e.SwungZeroDamage = o.SwungZeroDamage; Dirty = true; }
             if (o.Fights > e.Fights) { e.Fights = o.Fights; Dirty = true; }
             // Max-merge the loss level (monotonic, like the counts) so a richer
             // on-disk record's higher loss level is never lost on rewrite.

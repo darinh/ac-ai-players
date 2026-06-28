@@ -4669,9 +4669,19 @@ internal sealed class HandshakeDriver : IDisposable
                         // Per-KIND raw fact; source makes no avoidance decision.
                         if (lastCombatFoe is { } abandonFoe)
                         {
+                            // A SWUNG-zero-damage abandon (the bot swung >=1 time yet
+                            // dealt 0 TOTAL damage this fight) is the strongest
+                            // can't-hurt-this-KIND signal. CombatRetry encodes the
+                            // precise test: it excludes a no-swing can't-close abandon
+                            // (a pathing miss vs one individual) AND a fight where the
+                            // bot dealt some damage then stalled (the no-damage watchdog
+                            // fires on no-damage-RECENTLY, not 0-damage-this-fight).
+                            var swungZeroDamage = CombatRetry.IsSwungZeroDamageFight(
+                                combatSwingsLanded, combatSwingsEvaded, combatDamageDealt);
                             combatFeel.RecordIneffective(
                                 new CombatFeelLedger.MobIdentity(abandonFoe.Wcid, abandonFoe.Name),
-                                ReadSelfLevel(worldState));
+                                ReadSelfLevel(worldState),
+                                swungZeroDamage: swungZeroDamage);
                             PublishCombatHistory();
                         }
                         visitedTargetGuids.Add(ctgWatch);

@@ -288,6 +288,26 @@ internal static class CombatRetry
         => swingsLanded >= minLandedSwings && damageDealt == 0u;
 
     /// <summary>
+    /// True when a just-abandoned fight is SWUNG-ZERO-DAMAGE: the bot SWUNG at the
+    /// target at least once (a landed OR evaded swing — so it reached melee) yet
+    /// dealt zero TOTAL damage over the whole fight. This is the precise
+    /// can't-hurt-this-KIND signal the combat-feel ledger records (and the
+    /// out-defended veto keys on), distinct from two NON-signals:
+    /// - a no-swing CAN'T-CLOSE abandon (0 swings — a pathing miss against one
+    ///   individual, not evidence about the KIND), excluded by the swing check; and
+    /// - a fight in which the bot dealt SOME damage then stalled (the absolute
+    ///   no-damage watchdog abandons on "no damage RECENTLY", not "0 damage this
+    ///   fight"), excluded by the total-damage check.
+    /// Mechanical: keys ONLY on the bot's own swing outcomes and its own total
+    /// damage dealt — no monster KIND, name, wcid, landblock, or server text.
+    /// </summary>
+    /// <param name="swingsLanded">Swings that landed a hit this fight.</param>
+    /// <param name="swingsEvaded">Swings the target evaded this fight.</param>
+    /// <param name="damageDealt">Total damage dealt to the target this fight.</param>
+    public static bool IsSwungZeroDamageFight(int swingsLanded, int swingsEvaded, uint damageDealt)
+        => (swingsLanded + swingsEvaded) > 0 && damageDealt == 0u;
+
+    /// <summary>
     /// True when the bot should abandon a NO-PROGRESS STALEMATE: it IS landing
     /// hits on the target (so the all-evaded <see cref="ShouldAbandonUnbeatable"/>
     /// does NOT apply) over a sustained run of swings, yet the target's OBSERVED
