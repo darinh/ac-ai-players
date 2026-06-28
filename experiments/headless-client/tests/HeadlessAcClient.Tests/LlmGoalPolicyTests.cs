@@ -2061,6 +2061,111 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.TryResolveUseWorldObjectInItemField(noItem, world));
     }
 
+    // ---- TryResolveUseCorpseInItemField (Use{item=<visible corpse>, no target} -> Use{target=corpse}) ----
+
+    private static VisibleObjectProjection CorpseVisible(uint guid, string name)
+        => new() { Guid = guid, Name = name, IsCreature = true, IsMonster = false, IsCorpse = true };
+
+    [Fact]
+    public void UseItemCorpse_VisibleCorpseMisfiledInItemField_ResolvesToGuid()
+    {
+        // The live gap: a model emits Use{item="Corpse of Chicken", no target} to loot a corpse;
+        // a corpse is not an inventory item so the self-Use MISSes. The vendor/NPC use-world-object
+        // rewrite excludes corpses, so this sibling moves the corpse name into the target field.
+        var world = WorldWithVisible(CorpseVisible(0x800000C1u, "Corpse of Chicken"));
+        Assert.Equal(0x800000C1u,
+            LlmGoalPolicy.TryResolveUseCorpseInItemField(UseItemGoal("Corpse of Chicken"), world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_WordSubsequenceName_ResolvesViaFuzzy()
+    {
+        // A model that names the monster (a contiguous trailing word-window of the corpse name)
+        // still resolves via the unique whole-word subsequence match the resolver shares.
+        var world = WorldWithVisible(CorpseVisible(0x800000C2u, "Corpse of Black Rabbit"));
+        Assert.Equal(0x800000C2u,
+            LlmGoalPolicy.TryResolveUseCorpseInItemField(UseItemGoal("Black Rabbit"), world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_OwnedInventoryItem_ReturnsNull()
+    {
+        // If the item-field name is a plausible owned item, it is a legitimate self-Use; the rewrite
+        // must NOT hijack it (even though a same-name corpse is also in view).
+        var world = WorldWithVisible(CorpseVisible(0x800000C3u, "Letter From Home")) with
+        {
+            Inventory = new[]
+            {
+                new InventoryItemProjection { Guid = 0xDEFu, Name = "Letter From Home", Wcid = 1u },
+            },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(UseItemGoal("Letter From Home"), world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_TwoObjectUse_NonEmptyTarget_ReturnsNull()
+    {
+        // Use{target=container, item=key} carries a real world target -> not the misfile shape.
+        var world = WorldWithVisible(CorpseVisible(0x800000C4u, "Corpse of Cow"));
+        var twoObject = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Name = "Chest" },
+            Item = new Selector { Name = "Corpse of Cow" },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(twoObject, world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_TwoObjectUse_GuidTarget_ReturnsNull()
+    {
+        // A GUID target (not just a Name) also counts as non-empty -> the two-object Use shape
+        // Use{target=guid, item=key} is excluded by the empty-target gate.
+        var world = WorldWithVisible(CorpseVisible(0x800000C9u, "Corpse of Cow"));
+        var twoObject = new Goal
+        {
+            Kind = GoalKind.Use,
+            Target = new Selector { Guid = 0x7A9B7777u },
+            Item = new Selector { Name = "Corpse of Cow" },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(twoObject, world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_NonUseGoal_ReturnsNull()
+    {
+        var world = WorldWithVisible(CorpseVisible(0x800000C5u, "Corpse of Cow"));
+        var give = new Goal { Kind = GoalKind.Give, Target = new Selector(), Item = new Selector { Name = "Corpse of Cow" } };
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(give, world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_NoVisibleCorpse_OnlyVendor_ReturnsNull()
+    {
+        // The resolver pools corpses only; a visible vendor (handled by use-world-object) is not a
+        // corpse, so a name binding only the vendor does not produce a corpse rewrite.
+        var world = WorldWithVisible(VendorVisible(0x7A9B500Bu, "Merchant"));
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(UseItemGoal("Merchant"), world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_AmbiguousTwoCorpses_ReturnsNull()
+    {
+        // Two corpses share the name -> ambiguous; stays unresolved so the LLM re-decides.
+        var world = WorldWithVisible(
+            CorpseVisible(0x800000C6u, "Corpse of Chicken"),
+            CorpseVisible(0x800000C7u, "Corpse of Chicken"));
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(UseItemGoal("Corpse of Chicken"), world));
+    }
+
+    [Fact]
+    public void UseItemCorpse_EmptyItem_ReturnsNull()
+    {
+        var world = WorldWithVisible(CorpseVisible(0x800000C8u, "Corpse of Cow"));
+        var noItem = new Goal { Kind = GoalKind.Use, Target = new Selector(), Item = new Selector() };
+        Assert.Null(LlmGoalPolicy.TryResolveUseCorpseInItemField(noItem, world));
+    }
+
     // ---- TryResolveUseItemVendorOffering (Use{item=<open-vendor offering>, no target} -> Buy) ----
 
     [Fact]

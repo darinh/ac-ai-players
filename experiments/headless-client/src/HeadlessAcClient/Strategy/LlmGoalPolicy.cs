@@ -2268,6 +2268,50 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return world.Visible is null ? null : ResolveUniqueVisibleUseTargetByName(world.Visible, itemName);
     }
 
+    // The GUID of the unique visible CORPSE whose name resolves to NAME (exact / role-stripped /
+    // unique whole-word subsequence — the SAME SelectorResolver semantics the Motor's Use target
+    // resolves with). A corpse is looted by Use{target=corpse} (the Motor's Use handler opens it
+    // and pulls items — the same path the Pickup-corpse->Use rewrite reaches). This is the corpse
+    // counterpart of ResolveUniqueVisibleUseTargetByName (which excludes corpses): a model that
+    // mis-files a corpse name into a Use goal's ITEM field needs the name moved into the TARGET
+    // field, but the vendor/NPC resolver skips corpses, so the loot loops as a MISS. Returns null
+    // when 0 or >1 corpses match (ambiguous stays unresolved so the LLM re-decides). Pure name
+    // resolution over perception; no game knowledge, no autonomous target choice.
+    private static uint? ResolveUniqueVisibleCorpseByName(
+        IReadOnlyList<VisibleObjectProjection> visible, string name)
+    {
+        var pool = visible.Where(v => v.IsCorpse && v.Name is not null).ToList();
+        if (pool.Count == 0) return null;
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        var exact = pool.Where(v =>
+            string.Equals(v.Name, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v.Name, bare, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count == 1) return exact[0].Guid;
+        if (exact.Count > 1) return null;
+        var fuzzy = pool.Where(v =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, name)).ToList();
+        return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
+    }
+
+    // Use{item=<corpse>, no world target} -> the GUID of that visible corpse, so the misfiled name
+    // can be moved into the TARGET field (Use{target=corpse} loots it). The self-Use shape
+    // Use{item=X, no target} is for activating an OWNED inventory item; a model sometimes mis-files
+    // a VISIBLE corpse it wants to loot into that item field with no target, but the Motor's
+    // self-Use only dispatches an in-bag item, so it resolves to MISS and the loot loops. Fire ONLY
+    // when the item-field name is NOT a plausible owned item (so a true self-Use is never hijacked)
+    // AND uniquely resolves to a visible corpse. The LLM chose WHICH corpse; the Motor only corrects
+    // the field. A two-object Use{target=container, item=key} carries a non-empty target and is
+    // excluded. Sibling of TryResolveUseWorldObjectInItemField (vendors/NPCs); no game knowledge.
+    internal static uint? TryResolveUseCorpseInItemField(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Use) return null;
+        if (goal.Target is { IsEmpty: false }) return null;
+        var itemName = goal.Item?.Name;
+        if (string.IsNullOrWhiteSpace(itemName)) return null;
+        if (world.Inventory is not null && InventoryResolvesName(world.Inventory, itemName)) return null;
+        return world.Visible is null ? null : ResolveUniqueVisibleCorpseByName(world.Visible, itemName);
+    }
+
     // Returns the EXACT open-vendor offering name to Buy when a Use goal mis-files an
     // open-vendor FOR-SALE item into its `item` field with no world target, or null. The
     // self-Use shape Use{item=X, no target} is for activating an OWNED inventory item; a
@@ -4347,6 +4391,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = useWorldObjGuid },
+                Item = null,
+            };
+        }
+
+        // Use{item=<corpse>, no target} -> Use{target=corpse} (mechanical field correction). The
+        // self-Use shape Use{item=X, no target} is for activating an OWNED inventory item; a model
+        // sometimes mis-files a VISIBLE corpse it wants to loot into that item field with no target,
+        // but the Motor's self-Use only resolves an in-bag item, so the corpse MISSes and the loot
+        // loops. A corpse is looted by Use{target=corpse} (the same Motor Use path the Pickup-corpse
+        // ->Use rewrite reaches). The vendor/NPC use-item-world-object rewrite above skips corpses,
+        // so this sibling covers the loot case. Fire only when the item-field name is NOT a plausible
+        // owned item AND uniquely resolves to a visible corpse; the LLM chose WHICH corpse, the Motor
+        // only moves the name into the target field. No autonomous target pick, no game knowledge.
+        if (TryResolveUseCorpseInItemField(goal, world) is uint useCorpseGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] use-item-corpse -> target: item={goal.Item}" +
+                $" guid=0x{useCorpseGuid:X8} — a visible corpse was mis-filed into the Use item" +
+                " field; looting it as the target (self-Use only acts on an in-bag item).");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = useCorpseGuid },
                 Item = null,
             };
         }
