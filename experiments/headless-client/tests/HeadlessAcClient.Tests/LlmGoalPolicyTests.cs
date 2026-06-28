@@ -23227,6 +23227,29 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("deaths (server-tracked)", p);
     }
 
+    // death-vitae perception: a vitae multiplier < 1.0 surfaces the death-suppressed-
+    // vitals line so the LLM can attribute its low effective max HP to deaths (and that
+    // earning XP recovers it), instead of misreading a glass-jaw as a natural low pool.
+    [Fact]
+    public void BuildUserPrompt_VitaePenalty_ShownWhenSuppressed()
+    {
+        var world = BuildExitTokenWorld() with { SelfVitaeMultiplier = 0.90 };
+        var p = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("vitae penalty:", p);
+        Assert.Contains("~10%", p);
+        Assert.Contains("recovers as you earn XP", p);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_VitaePenalty_OmittedWhenNoPenalty()
+    {
+        // multiplier 1.0 (fully recovered) and null (never observed) both omit the line.
+        var full = BuildExitTokenWorld() with { SelfVitaeMultiplier = 1.0 };
+        Assert.DoesNotContain("vitae penalty:", LlmGoalPolicy.BuildUserPrompt(full, new EventStream(), null));
+        var none = BuildExitTokenWorld(); // SelfVitaeMultiplier null by default
+        Assert.DoesNotContain("vitae penalty:", LlmGoalPolicy.BuildUserPrompt(none, new EventStream(), null));
+    }
+
     // death-recency tracking logic (the stateful half, reflected directly so
     // the anchoring/increment-only/no-retro-stamp invariants are asserted
     // without going through the async LLM HTTP path or prompt coalescing).

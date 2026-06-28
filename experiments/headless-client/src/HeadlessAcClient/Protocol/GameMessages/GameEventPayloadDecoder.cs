@@ -467,6 +467,20 @@ internal sealed record UpdateHealthPayload(uint ObjectId, float HealthFraction)
         $"UpdateHealth(objectId=0x{ObjectId:X8} healthFraction={HealthFraction:F3} ({(int)(HealthFraction * 100)}%))";
 }
 
+/// <summary>
+/// Decoded GameEventMagicUpdateEnchantment (0x02C2): a single enchantment applied to
+/// the player. Only the fields needed to identify the enchantment and read the stat
+/// modifier it applies are surfaced (SpellId selects WHICH enchantment; StatModValue is
+/// the multiplier it applies to the modified vital/stat). The death-vitae penalty is one
+/// such enchantment (SpellId == the vitae spell); its StatModValue is the vital
+/// multiplier (&lt; 1.0 while penalized). RAW wire decode — no game-content interpretation.
+/// </summary>
+internal sealed record MagicUpdateEnchantmentPayload(ushort SpellId, uint StatModType, float StatModValue)
+{
+    public override string ToString() =>
+        $"MagicUpdateEnchantment(spellId={SpellId} statModType=0x{StatModType:X8} statModValue={StatModValue:F4})";
+}
+
 internal sealed record AttackDonePayload(uint ErrorCode)
 {
     public override string ToString() =>
@@ -715,6 +729,7 @@ internal sealed record GameEventPayload(
     BookDataResponsePayload?             BookDataResponse,
     BookPageDataResponsePayload?         BookPageDataResponse,
     UpdateHealthPayload?                 UpdateHealth,
+    MagicUpdateEnchantmentPayload?       MagicUpdateEnchantment,
     AttackDonePayload?                   AttackDone,
     AttackerNotificationPayload?         AttackerNotification,
     EvasionAttackerNotificationPayload?  EvasionAttackerNotification,
@@ -745,6 +760,7 @@ internal sealed record GameEventPayload(
         GameEventType.BookDataResponse             when BookDataResponse           is { } x => x.ToString(),
         GameEventType.BookPageDataResponse         when BookPageDataResponse       is { } x => x.ToString(),
         GameEventType.UpdateHealth                 when UpdateHealth               is { } x => x.ToString(),
+        GameEventType.MagicUpdateEnchantment       when MagicUpdateEnchantment     is { } x => x.ToString(),
         GameEventType.AttackDone                   when AttackDone                 is { } x => x.ToString(),
         GameEventType.AttackerNotification         when AttackerNotification       is { } x => x.ToString(),
         GameEventType.EvasionAttackerNotification  when EvasionAttackerNotification is { } x => x.ToString(),
@@ -801,6 +817,8 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { BookPageDataResponse = DecodeBookPageDataResponse(body) },
                 GameEventType.UpdateHealth =>
                     Empty(eventType) with { UpdateHealth = DecodeUpdateHealth(body) },
+                GameEventType.MagicUpdateEnchantment =>
+                    Empty(eventType) with { MagicUpdateEnchantment = DecodeMagicUpdateEnchantment(body) },
                 GameEventType.AttackDone =>
                     Empty(eventType) with { AttackDone = DecodeAttackDone(body) },
                 GameEventType.AttackerNotification =>
@@ -858,6 +876,7 @@ internal static class GameEventPayloadDecoder
             BookDataResponse: null,
             BookPageDataResponse: null,
             UpdateHealth: null,
+            MagicUpdateEnchantment: null,
             AttackDone: null,
             AttackerNotification: null,
             EvasionAttackerNotification: null,
@@ -1721,6 +1740,37 @@ internal static class GameEventPayloadDecoder
         var objectId = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4));
         var health   = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(4, 4));
         return new UpdateHealthPayload(objectId, health);
+    }
+
+    private static MagicUpdateEnchantmentPayload DecodeMagicUpdateEnchantment(ReadOnlySpan<byte> body)
+    {
+        // GameEventMagicUpdateEnchantment (0x02C2) carries ONE Enchantment struct.
+        // Wire order per ACE-bots Network/Structure/Enchantment.cs Write extension
+        // (NOTE: differs from the C# field declaration order — SpellCategory + HasSpellSetID
+        // are swapped on the wire):
+        //   off 0  u16 SpellID
+        //   off 2  u16 Layer
+        //   off 4  u16 SpellCategory
+        //   off 6  u16 HasSpellSetID
+        //   off 8  u32 PowerLevel
+        //   off 12 f64 StartTime
+        //   off 20 f64 Duration
+        //   off 28 u32 CasterGuid
+        //   off 32 f32 DegradeModifier
+        //   off 36 f32 DegradeLimit
+        //   off 40 f64 LastTimeDegraded
+        //   off 48 u32 StatModType
+        //   off 52 u32 StatModKey
+        //   off 56 f32 StatModValue
+        //   off 60 u32 SpellSetID   (only if HasSpellSetID != 0)
+        // We read only SpellID (which enchantment), StatModType (which stat class), and
+        // StatModValue (the multiplier applied). 60 bytes covers through StatModValue.
+        if (body.Length < 60)
+            throw new InvalidOperationException("body too short for MagicUpdateEnchantment");
+        var spellId      = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(0, 2));
+        var statModType  = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(48, 4));
+        var statModValue = BinaryPrimitives.ReadSingleLittleEndian(body.Slice(56, 4));
+        return new MagicUpdateEnchantmentPayload(spellId, statModType, statModValue);
     }
 
     private static AttackDonePayload DecodeAttackDone(ReadOnlySpan<byte> body)

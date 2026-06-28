@@ -415,6 +415,17 @@ internal sealed record WorldStateProjection
     [JsonPropertyName("self")]
     public required SelfProjection Self { get; init; }
 
+    /// <summary>
+    /// death-vitae perception: the multiplier (in (0, 1]) by which accumulated deaths
+    /// currently suppress the player's effective vitals (1.0 = no penalty; below 1.0 the
+    /// effective max health/stamina/mana are reduced by (1 - value)), or null when no
+    /// vitae enchantment has been observed this session. Copied from
+    /// <see cref="WorldState.SelfVitaeMultiplier"/>; the "## Self" capsule renders the
+    /// resulting penalty so the LLM perceives its post-death glass-jaw. Raw fact only.
+    /// </summary>
+    [JsonPropertyName("self_vitae_multiplier")]
+    public double? SelfVitaeMultiplier { get; init; }
+
     [JsonPropertyName("inventory")]
     public required IReadOnlyList<InventoryItemProjection> Inventory { get; init; }
 
@@ -1053,6 +1064,7 @@ internal sealed record WorldStateProjection
             Fellowship = fellowshipProj,
             Contracts = contractProj,
             Vendor = vendorProj,
+            SelfVitaeMultiplier = world.SelfVitaeMultiplier,
             CurrentFight = world.CurrentFight,
             CumulativeSwingsLanded = world.CumulativeSwingsLanded,
             CumulativeSwingsEvaded = world.CumulativeSwingsEvaded,

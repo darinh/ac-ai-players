@@ -53,6 +53,15 @@ internal sealed class HandshakeDriver : IDisposable
     internal static readonly int ObserveSeconds =
         ResolveObserveSeconds(Environment.GetEnvironmentVariable("AC_BOTS_OBSERVE_SECONDS"));
 
+    // Wire SpellId of the death-vitae enchantment (ACE-bots Enum/SpellId.cs, positional
+    // value 666). The GameEventMagicUpdateEnchantment (0x02C2) carries many enchantment
+    // kinds; this protocol ID selects the vitae one so its StatModValue can be decoded
+    // into the death-vitae perception (a survivability vital projection — the post-death
+    // glass-jaw). A wire-protocol constant like an opcode, used to decode a message into
+    // a named projection — not a strategic choice, list, or priority. Verified against the
+    // server enum (Undef=0 ... Vitae = 666).
+    internal const ushort VitaeSpellId = 666;
+
     // Outer cancellation headroom (seconds) added on top of ObserveSeconds so the
     // process-level budget always exceeds the observe loop PLUS the worst-case
     // pre-observe handshake — including the login resilience loop's full backoff
@@ -2612,6 +2621,27 @@ internal sealed class HandshakeDriver : IDisposable
                                             $"[contract] update: contract={contractUpdate.Entry.ContractId} " +
                                             $"stage={contractUpdate.Entry.Stage}" +
                                             (contractUpdate.DeleteContract ? " (removed)" : ""));
+                                }
+                                // death-vitae perception: the vitae enchantment (a
+                                // recognised wire SpellId) multiplies the player's vitals
+                                // by StatModValue (< 1.0 while penalized) — the post-death
+                                // glass-jaw the LLM otherwise cannot perceive. Project it so
+                                // the "## Self" capsule can surface the suppressed effective
+                                // max HP and the bot recovers it by earning XP. Other
+                                // enchantments are decoded but not projected. Self-addressed
+                                // (the enchantment is applied to OUR character); raw wire
+                                // fact, no decision here.
+                                else if (ge.Payload?.MagicUpdateEnchantment is { } ench &&
+                                         worldState.SelfGuid is uint enchSelf &&
+                                         ge.ReceiverGuid == enchSelf)
+                                {
+                                    if (ench.SpellId == VitaeSpellId)
+                                    {
+                                        worldState.ApplySelfVitae(ench.StatModValue);
+                                        Console.WriteLine(
+                                            $"[vitae] self vitae multiplier={ench.StatModValue:F3} " +
+                                            $"(effective vitals -{(1f - ench.StatModValue) * 100f:F0}%)");
+                                    }
                                 }
                                 // Vendor trade panel (ApproachVendor 0x0062) -> WorldState
                                 // so the LLM prompt can perceive what the vendor sells
