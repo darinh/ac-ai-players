@@ -5218,14 +5218,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
+    // Threshold of SWUNG-zero-damage fights (the bot landed/evaded >=1 swing yet dealt 0 total
+    // damage) at which a never-killed kind is treated as unwinnable with the bot's CURRENT
+    // offense. LOWER than ExhaustedIneffectiveFightsThreshold because a swung-zero-damage fight is
+    // the STRONGEST single signal that the kind out-defends/out-armors the bot — vs the broader
+    // Ineffective count, which ALSO includes no-swing can't-close abandons (a pathing miss against
+    // one individual, not the KIND) and slow-but-DAMAGING stalemates (winnable as the bot grows).
+    internal const int SwungZeroDamageUnwinnableThreshold = 4;
+
+    // A kind the bot has NEVER killed yet, against which it SWUNG repeatedly and dealt 0 total
+    // damage EVERY time — its current offense simply cannot hurt this kind. A tighter, EARLIER
+    // complement to IsExhaustedIneffectiveKind (which fires later, on the broader/noisier
+    // Ineffective count). Re-testable once the bot OUT-LEVELS the level it kept failing at (mirrors
+    // the other beaten verdicts' out-level re-test), so growing stronger re-opens the kind; a record
+    // with no failing level (pre-field or unknown-level loss) is re-tested once. Aggregate own
+    // ledger (own swing outcomes) + own level only; no game knowledge.
+    internal static bool IsOutDefendedUnwinnableKind(
+        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
+    {
+        var record = FindCombatRecord(history, wcid, name);
+        if (record is not { Kills: 0 }) return false;
+        if (record.SwungZeroDamage < SwungZeroDamageUnwinnableThreshold) return false;
+        if (record.MaxLossBotLevel is not int maxLoss) return false; // no failing level on record -> re-test once
+        if (currentLevel is int cur && cur > maxLoss) return false; // out-levelled the futile attempts -> re-testable
+        return true;
+    }
+
     // The combined "decline this OPTIONAL engagement" verdict: a kind the bot's own ledger shows
-    // it cannot win against right now — either a LETHAL-beaten kind (it died to it) OR an
-    // EXHAUSTED-INEFFECTIVE kind (it cannot damage it after many tries). Shared by the explicit-
-    // Attack veto AND the stalemate egress gate so the two never disagree about which kinds count.
+    // it cannot win against right now — a LETHAL-beaten kind (it died to it), an
+    // EXHAUSTED-INEFFECTIVE kind (it cannot damage it after many tries), OR an OUT-DEFENDED kind
+    // (it swung repeatedly for 0 damage). Shared by the explicit-Attack veto AND the stalemate
+    // egress gate so the two never disagree about which kinds count.
     internal static bool IsAvoidBeatenKind(
         IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
         => IsLethalBeatenKind(history, wcid, name, currentLevel)
-           || IsExhaustedIneffectiveKind(history, wcid, name, currentLevel);
+           || IsExhaustedIneffectiveKind(history, wcid, name, currentLevel)
+           || IsOutDefendedUnwinnableKind(history, wcid, name, currentLevel);
 
     /// <summary>
     /// True iff a <see cref="EventKind.PickerArrivedNoAction"/> event for
@@ -13379,7 +13407,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (key is null) return null;
         var normName = CombatFeelLedger.NormalizeName(name);
 
-        int fights = 0, kills = 0, deaths = 0, nearDeaths = 0, ineffective = 0;
+        int fights = 0, kills = 0, deaths = 0, nearDeaths = 0, ineffective = 0, swungZeroDamage = 0;
         int? maxLossBotLevel = null; // highest loss level across matched rows
         string? lastOutcome = null;   // history is recency-ordered: first match is newest
         string? displayName = null;   // representative name: first (newest) matched row
@@ -13397,6 +13425,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             deaths += h.Deaths;
             nearDeaths += h.NearDeaths;
             ineffective += h.Ineffective;
+            swungZeroDamage += h.SwungZeroDamage;
             if (h.MaxLossBotLevel is int hl)
                 maxLossBotLevel = maxLossBotLevel is int cur ? (hl > cur ? hl : cur) : hl;
             lastOutcome ??= h.LastOutcome;
@@ -13412,7 +13441,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Ineffective: ineffective,
             Fights: fights,
             LastOutcome: lastOutcome ?? "",
-            MaxLossBotLevel: maxLossBotLevel);
+            MaxLossBotLevel: maxLossBotLevel,
+            SwungZeroDamage: swungZeroDamage);
     }
 
     /// <summary>

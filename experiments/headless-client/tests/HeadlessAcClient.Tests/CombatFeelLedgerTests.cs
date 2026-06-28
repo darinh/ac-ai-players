@@ -387,4 +387,65 @@ public class CombatFeelLedgerTests
         mine.MergeFrom(lower);
         Assert.Equal(7, Assert.Single(mine.Snapshot()!).MaxLossBotLevel);
     }
+
+    // ---- SwungZeroDamage (out-defended signal) ------------------------
+
+    [Fact]
+    public void RecordIneffective_SwungZeroDamage_BumpsBothCounters()
+    {
+        // A swung-but-0-damage abandon bumps BOTH Ineffective and the tighter
+        // SwungZeroDamage; a plain ineffective (e.g. a no-swing can't-close
+        // abandon) bumps ONLY Ineffective.
+        var l = new CombatFeelLedger();
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"), swungZeroDamage: true);
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"), swungZeroDamage: true);
+        l.RecordIneffective(Wcid(20u, "Auroch Bull")); // can't-close: not swung-zero-damage
+        var e = Assert.Single(l.Snapshot()!);
+        Assert.Equal(3, e.Ineffective);
+        Assert.Equal(2, e.SwungZeroDamage);
+    }
+
+    [Fact]
+    public void JsonRoundTrip_PreservesSwungZeroDamage()
+    {
+        var l = new CombatFeelLedger();
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"), botLevel: 11, swungZeroDamage: true);
+        var restored = CombatFeelLedger.FromJson(l.ToJson());
+        Assert.Equal(1, Assert.Single(restored.Snapshot()!).SwungZeroDamage);
+    }
+
+    [Fact]
+    public void FromJson_OldLedgerWithoutSwungZeroDamageField_DeserializesToZero()
+    {
+        // A ledger persisted before SwungZeroDamage existed has no such key. The
+        // optional DTO field must deserialize to 0 (NOT crash) so old learning
+        // survives the upgrade and the new veto simply does not fire on it.
+        const string oldJson =
+            "{\"Version\":1,\"Order\":1,\"Entries\":[{\"Key\":\"w:211\"," +
+            "\"DisplayName\":\"Mudlurk Mosswart\",\"Wcid\":211,\"Kills\":0," +
+            "\"Deaths\":0,\"NearDeaths\":0,\"Ineffective\":8,\"Fights\":8," +
+            "\"LastOutcome\":\"ineffective\",\"LastOutcomeOrder\":8,\"MaxLossBotLevel\":15}]}";
+        var restored = CombatFeelLedger.FromJson(oldJson);
+        var e = Assert.Single(restored.Snapshot()!);
+        Assert.Equal(8, e.Ineffective);     // entry preserved
+        Assert.Equal(0, e.SwungZeroDamage); // missing field -> 0
+    }
+
+    [Fact]
+    public void MergeFrom_MaxMergesSwungZeroDamage()
+    {
+        var mine = new CombatFeelLedger();
+        mine.RecordIneffective(Wcid(7u, "Drudge"), swungZeroDamage: true); // 1
+        var other = new CombatFeelLedger();
+        other.RecordIneffective(Wcid(7u, "Drudge"), swungZeroDamage: true);
+        other.RecordIneffective(Wcid(7u, "Drudge"), swungZeroDamage: true); // 2 (higher)
+        mine.MergeFrom(other);
+        Assert.Equal(2, Assert.Single(mine.Snapshot()!).SwungZeroDamage);
+
+        // Reverse direction must not lower it.
+        var lower = new CombatFeelLedger();
+        lower.RecordIneffective(Wcid(7u, "Drudge"), swungZeroDamage: true); // 1
+        mine.MergeFrom(lower);
+        Assert.Equal(2, Assert.Single(mine.Snapshot()!).SwungZeroDamage);
+    }
 }

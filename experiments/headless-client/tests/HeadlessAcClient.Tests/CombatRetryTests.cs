@@ -364,6 +364,36 @@ public class CombatRetryTests
         => Assert.False(CombatRetry.ShouldAbandonArmorAbsorbed(
             swingsLanded: 0, damageDealt: 0u, MinLanded));
 
+    // --- IsSwungZeroDamageFight (the out-defended ledger signal) -------------
+
+    [Fact]
+    public void SwungZeroDamage_AllEvaded_True()
+        // Swung (evaded) >=1, 0 damage -> the kind out-defends the bot's offense.
+        => Assert.True(CombatRetry.IsSwungZeroDamageFight(
+            swingsLanded: 0, swingsEvaded: 9, damageDealt: 0u));
+
+    [Fact]
+    public void SwungZeroDamage_ArmorAbsorbed_True()
+        // Landed swings, 0 damage -> armor fully absorbs; still out-defended.
+        => Assert.True(CombatRetry.IsSwungZeroDamageFight(
+            swingsLanded: 12, swingsEvaded: 0, damageDealt: 0u));
+
+    [Fact]
+    public void SwungZeroDamage_DealtSomeDamageThenStalled_False()
+        // The no-damage WATCHDOG abandons on "no damage RECENTLY", not "0 damage this
+        // fight": a fight where the bot damaged the target earlier then stalled for the
+        // watchdog window has damageDealt > 0, so it must NOT count as swung-zero-damage
+        // (the bot demonstrably CAN hurt this kind).
+        => Assert.False(CombatRetry.IsSwungZeroDamageFight(
+            swingsLanded: 5, swingsEvaded: 2, damageDealt: 7u));
+
+    [Fact]
+    public void SwungZeroDamage_CantCloseNoSwing_False()
+        // A no-swing can't-close abandon (0 landed, 0 evaded) is a pathing miss against
+        // one individual, NOT evidence the KIND out-defends the bot — excluded.
+        => Assert.False(CombatRetry.IsSwungZeroDamageFight(
+            swingsLanded: 0, swingsEvaded: 0, damageDealt: 0u));
+
     // --- ShouldAbandonStalemate (lands hits but target won't die) -----------
     private const int StaleMinSwings = 18;
     private const int StaleMinLanded = 4;

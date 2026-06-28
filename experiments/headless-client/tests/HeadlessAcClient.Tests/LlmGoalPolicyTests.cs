@@ -16423,6 +16423,69 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
     }
 
+    // A kind the bot SWUNG at repeatedly for 0 total damage (the precise out-defended signal,
+    // distinct from the broader Ineffective which also counts no-swing can't-close abandons).
+    private static CombatHistoryEntry[] OutDefended(
+        string name, uint wcid, int swungZeroDamage = 4, int? ineffective = null, int? maxLossLevel = 15)
+        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
+            Fights: Math.Max(swungZeroDamage, ineffective ?? swungZeroDamage),
+            LastOutcome: "ineffective", Ineffective: ineffective ?? swungZeroDamage,
+            MaxLossBotLevel: maxLossLevel, SwungZeroDamage: swungZeroDamage) };
+
+    [Fact]
+    public void IsOutDefendedUnwinnableKind_FiresAtThreshold_NotBelow()
+    {
+        var below = OutDefended("Gnawer Shreth", 99u,
+            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold - 1);
+        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(below, 99u, "Gnawer Shreth", 15));
+        var at = OutDefended("Gnawer Shreth", 99u,
+            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold);
+        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(at, 99u, "Gnawer Shreth", 15));
+    }
+
+    [Fact]
+    public void IsOutDefendedUnwinnableKind_NotWhenKindHasAKill()
+    {
+        // A kill -> the bot CAN damage it, so it is not an out-defended wedge.
+        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
+            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15,
+            SwungZeroDamage: 8) };
+        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hasKill, 99u, "X", 15));
+    }
+
+    [Fact]
+    public void IsOutDefendedUnwinnableKind_FiresEarlierThanIneffectiveThreshold()
+    {
+        // The whole point: a kind SWUNG at for 0 damage SwungZeroDamageUnwinnableThreshold times,
+        // but with Ineffective still BELOW ExhaustedIneffectiveFightsThreshold, is vetoed by the
+        // tighter swung-zero-damage verdict EARLIER than IsExhaustedIneffectiveKind would fire.
+        Assert.True(LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold
+            < LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
+        var hist = OutDefended("Gnawer Shreth", 99u,
+            swungZeroDamage: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold,
+            ineffective: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold); // < the ineffective threshold
+        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
+        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
+        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
+    }
+
+    [Fact]
+    public void IsOutDefendedUnwinnableKind_RetestableOnceOutLevelled()
+    {
+        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: 15);
+        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));  // same level
+        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
+    }
+
+    [Fact]
+    public void IsOutDefendedUnwinnableKind_NoFailingLevelRecorded_RetestsOnce()
+    {
+        // A loss recorded with no failing level deserializes null -> re-test once (mirrors the
+        // IsExhaustedIneffectiveKind re-test) rather than bar the kind forever.
+        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: null);
+        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
+    }
+
     [Fact]
     public void IsOptionalAttackOnBeatenKind_IneffectiveExhaustedKind_Vetoes()
     {

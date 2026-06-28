@@ -100,7 +100,11 @@ internal sealed record CombatHistoryEntry(
     // Highest bot level at which a LOSS to this kind was recorded (null when
     // unknown — e.g. ledgers persisted before this field existed). Drives the
     // fallback's adaptive beaten-kind re-test; never rendered to the LLM.
-    int? MaxLossBotLevel = null);
+    int? MaxLossBotLevel = null,
+    // Subset of Ineffective in which the bot SWUNG (>=1 swing) yet dealt 0 total
+    // damage — the kind out-defends/out-armors the bot's current offense.
+    // Excludes no-swing can't-close abandons. Drives the swung-zero-damage veto.
+    int SwungZeroDamage = 0);
 
 internal sealed class WorldState
 {
