@@ -1742,6 +1742,159 @@ public class LlmGoalPolicyTests
             WieldGoalTo("Training Spadone"), world, es));
     }
 
+    // ---- TryResolveWieldWearableInTargetField (Wield{target=<owned un-worn wearable>} -> item) ----
+
+    // A bagged, un-worn, equippable wearable. ValidLocations 0x1 (Head slot) is a
+    // clothing/armor bit — NOT in the weapon/shield/ammo masks HeldUnequippedWearables
+    // excludes — so the piece is a wearable. wieldedAt non-null/non-zero marks it WORN.
+    private static InventoryItemProjection Wearable(
+        uint guid, string name, uint validLocations = 0x1u, uint? wieldedAt = null)
+        => new()
+        {
+            Guid = guid, Name = name, Wcid = 7777u, ItemType = 0x2u,
+            ValidLocations = validLocations, WieldedAt = wieldedAt,
+        };
+
+    private static WorldStateProjection WorldWithInventory(params InventoryItemProjection[] inv)
+        => WorldWithVisible() with { Inventory = inv };
+
+    [Fact]
+    public void WieldWearable_BaggedUnwornWearableMisfiledInTargetField_ResolvesToGuid()
+    {
+        // The live gap: the "## Un-equipped gear" cue says to Wield a carried piece
+        // "(target that item by name)", so a model emits Wield{target="Shirt", no item};
+        // Wield equips an ITEM-field in-bag piece, so the target-field name loops as MISS.
+        var world = WorldWithInventory(Wearable(0x500000A1u, "Shirt"));
+        Assert.Equal(0x500000A1u,
+            LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Shirt"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_WornAndBaggedSameName_ResolvesToBaggedGuid()
+    {
+        // The exact live scenario: the bot already WEARS a Shirt and carries a second
+        // un-worn one. The Motor's target-fallback binds the worn copy (not in the bag) ->
+        // unresolved loop; this resolver pins the BAGGED copy (HeldUnequippedWearables drops
+        // the worn one via WieldedAt), so the wield reaches the proven in-bag path.
+        var world = WorldWithInventory(
+            Wearable(0x500000B0u, "Shirt", wieldedAt: 0x1u),   // worn
+            Wearable(0x500000B1u, "Shirt"));                   // bagged, un-worn
+        Assert.Equal(0x500000B1u,
+            LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Shirt"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_AlreadyWornCopyOnly_ReturnsNull()
+    {
+        // Only a WORN copy matches -> nothing un-worn to equip; stays unresolved (the LLM
+        // re-decides) rather than re-wielding an already-equipped piece.
+        var world = WorldWithInventory(Wearable(0x500000C0u, "Shirt", wieldedAt: 0x1u));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Shirt"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_ItemFieldAlreadySet_ReturnsNull()
+    {
+        // A canonical Wield{item=...} (or a two-object wield) is left untouched -- the
+        // rewrite only corrects the misfile shape (item field empty, name in target).
+        var world = WorldWithInventory(Wearable(0x500000D0u, "Shirt"));
+        var canonical = new Goal
+        {
+            Kind = GoalKind.Wield,
+            Target = new Selector { Name = "Shirt" },
+            Item = new Selector { Name = "Shirt" },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(canonical, world));
+    }
+
+    [Fact]
+    public void WieldWearable_WeaponSlotItem_ReturnsNull()
+    {
+        // A bagged item in a WEAPON slot is NOT a wearable (HeldUnequippedWearables excludes
+        // weapon/shield/ammo) -- arming a weapon keeps its own wield/swap paths.
+        var world = WorldWithInventory(
+            Wearable(0x500000E0u, "Spadone", validLocations: WeaponSwap.MainWeaponSlotMask));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Spadone"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_NonEquippableBagItem_ReturnsNull()
+    {
+        // A same-named bag item with no equip slot (e.g. a quest item) is not wieldable.
+        var world = WorldWithInventory(Wearable(0x500000F0u, "Relic", validLocations: 0u));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Relic"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_AmbiguousTwoBaggedWearables_ReturnsNull()
+    {
+        // Two un-worn bag wearables share the name -> ambiguous; stays unresolved so the
+        // Motor never autonomously picks one of several candidates.
+        var world = WorldWithInventory(
+            Wearable(0x50000101u, "Shirt"),
+            Wearable(0x50000102u, "Shirt"));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Shirt"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_WordSubsequenceName_ResolvesViaFuzzy()
+    {
+        // A model that names a contiguous trailing word-window resolves via the unique
+        // whole-word subsequence match the field-correction resolvers share.
+        var world = WorldWithInventory(Wearable(0x50000111u, "Leather Cap"));
+        Assert.Equal(0x50000111u,
+            LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Cap"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_NotOwned_ReturnsNull()
+    {
+        // The target name matches no owned wearable -> nothing to correct.
+        var world = WorldWithInventory(Wearable(0x50000121u, "Boots"));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Helmet"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_NonWieldGoal_ReturnsNull()
+    {
+        var world = WorldWithInventory(Wearable(0x50000131u, "Shirt"));
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Shirt" } };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(use, world));
+    }
+
+    [Fact]
+    public void WieldWearable_EmptyTarget_ReturnsNull()
+    {
+        var world = WorldWithInventory(Wearable(0x50000141u, "Shirt"));
+        var noTarget = new Goal { Kind = GoalKind.Wield, Target = new Selector(), Item = new Selector() };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(noTarget, world));
+    }
+
+    [Fact]
+    public void WieldWearable_SameNameVisibleGroundWeapon_DefersReturnsNull()
+    {
+        // A same-named visible GROUND weapon plus a same-named bag wearable: the arming
+        // (wield-ground-weapon -> Pickup) path owns this; rewriting to the bag wearable
+        // would divert a legitimate "arm from that ground weapon" Wield. Defer (null).
+        var world = WorldWithInventory(Wearable(0x50000151u, "Buckler")) with
+        {
+            Visible = new[] { GroundMeleeWeapon(0xABC1u, "Buckler") },
+        };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Buckler"), world));
+    }
+
+    [Fact]
+    public void WieldWearable_DifferentNameVisibleWeapon_StillResolves()
+    {
+        // A visible weapon with a DIFFERENT name does not veto a wearable rewrite.
+        var world = WorldWithInventory(Wearable(0x50000161u, "Cap")) with
+        {
+            Visible = new[] { GroundMeleeWeapon(0xABC2u, "Spadone") },
+        };
+        Assert.Equal(0x50000161u,
+            LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Cap"), world));
+    }
+
     // ---- TryResolvePickupUseContainer (pickup-of-corpse-or-chest -> Use) ----
 
     private static VisibleObjectProjection CorpseObj(uint guid, string name)
