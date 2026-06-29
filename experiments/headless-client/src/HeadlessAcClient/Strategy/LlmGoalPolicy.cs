@@ -2405,6 +2405,52 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return ResolveUniqueUnwornWearableByName(world.Inventory, targetName);
     }
 
+    // The GUID of the unique owned item named NAME that is NOT equippable into any slot
+    // (ValidLocations null or 0). A Wield can only equip an item with at least one valid
+    // wear slot; an owned consumable / tool / reagent (no slot) named in a Wield resolves
+    // unequippable and loops. Returns null when 0 or >1 match. Used to redirect a Wield of
+    // such an item to a Use. Pure inventory + equip-slot-bit resolution; no game knowledge.
+    private static uint? ResolveNonEquippableOwnedByName(
+        IReadOnlyList<InventoryItemProjection> inventory, string name)
+    {
+        var pool = inventory.Where(i => i.Name is not null
+            && (i.ValidLocations is not uint vl || vl == 0)).ToList();
+        if (pool.Count == 0) return null;
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        // Non-equippables (consumables/tools) are commonly stacked, so identical copies are
+        // interchangeable: pick the first match rather than demanding a unique one (a unique
+        // requirement would re-loop the very stacked-consumable case this fixes). This mirrors
+        // the Motor's own Use resolution (ResolveSingleNearest picks first/nearest) so it adds
+        // no autonomous choice beyond what a correctly-emitted Use already does.
+        var exact = pool.Where(i =>
+            string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(i.Name, bare, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count > 0) return exact[0].Guid;
+        var fuzzy = pool.Where(i =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(i.Name, name)).ToList();
+        return fuzzy.Count > 0 ? fuzzy[0].Guid : (uint?)null;
+    }
+
+    // Wield{target=<owned NON-equippable item>, no item} -> the GUID of that inventory item,
+    // so the goal can be re-verbed to a self-Use. A model sometimes emits Wield for an owned
+    // item that has NO wear slot (a consumable / tool / reagent); the Motor's Wield can only
+    // equip an item with a valid slot, so it resolves unequippable and loops
+    // ("unresolved -- item=MISS target=ok"), burning an LLM call each cycle. The
+    // mechanically-correct verb for an owned non-equippable is Use (self-activate). Fire ONLY
+    // when item empty, the target uniquely binds an owned non-equippable item, AND it is NOT a
+    // wearable (the wearable rewrite owns that). The LLM chose WHICH item; the Motor only
+    // substitutes the verb (like the use-item / pickup-container rewrites). No game knowledge.
+    internal static uint? TryResolveWieldNonEquippableUse(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Wield) return null;
+        if (goal.Item is { IsEmpty: false }) return null;
+        var targetName = goal.Target?.Name;
+        if (string.IsNullOrWhiteSpace(targetName)) return null;
+        if (world.Inventory is null) return null;
+        if (TryResolveWieldWearableInTargetField(goal, world) is not null) return null;
+        return ResolveNonEquippableOwnedByName(world.Inventory, targetName);
+    }
+
     // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
     // vendor-panel item rather than a takeable ground object, or null. A Pickup takes
     // only ground items, so a Pickup whose target is one of the open vendor's for-sale
@@ -4362,6 +4408,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Item = new Selector { Guid = wieldWearableGuid },
                 Target = new Selector(),
+            };
+        }
+
+        // Wield{target=<owned non-equippable item>, no item} -> Use{target=<that item>}
+        // (mechanical verb correction, reduce-llm-call-volume). A model sometimes emits Wield
+        // for an owned item that has NO wear slot (a consumable / tool / reagent); the Motor's
+        // Wield can only equip an item with a valid slot, so it resolves unequippable and loops
+        // ("unresolved -- item=MISS target=ok"). The mechanically-correct verb for an owned
+        // non-equippable is Use (self-activate); a Use target that resolves to an in-bag item
+        // dispatches straight to the inventory-USE path. When the target uniquely binds an owned
+        // non-equippable (and is not a wearable, handled above), re-verb to Use of that SAME
+        // item. The LLM chose WHICH item; the Motor only substitutes the verb (like the
+        // use-item / pickup-container rewrites; no autonomous target pick, no game knowledge).
+        if (TryResolveWieldNonEquippableUse(goal, world) is uint wieldUseGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] wield-nonequip -> use: target={goal.Target}" +
+                $" guid=0x{wieldUseGuid:X8} — an owned non-equippable item was named in a Wield;" +
+                " Use activates it (Wield equips only items with a wear slot).");
+            return goal with
+            {
+                Kind = GoalKind.Use,
+                Target = new Selector { Guid = wieldUseGuid },
+                Item = null,
             };
         }
 
@@ -14838,3 +14908,4 @@ internal sealed record TrainingDecision
     public required string LlmRawResponse { get; init; }
     public required string? LlmError { get; init; }
 }
+

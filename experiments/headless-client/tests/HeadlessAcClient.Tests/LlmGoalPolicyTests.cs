@@ -1895,6 +1895,72 @@ public class LlmGoalPolicyTests
             LlmGoalPolicy.TryResolveWieldWearableInTargetField(WieldGoalTo("Cap"), world));
     }
 
+    // ---- TryResolveWieldNonEquippableUse (Wield{target=<non-equippable owned>} -> Use) ----
+
+    // An owned NON-equippable item (no wear slot): ValidLocations 0. itemType 0x80 is a
+    // consumable/tool; the bot would Use it, never wield it.
+    private static InventoryItemProjection NonEquip(uint guid, string name)
+        => new() { Guid = guid, Name = name, Wcid = 629u, ItemType = 0x80u, ValidLocations = 0u };
+
+    [Fact]
+    public void WieldNonEquip_NonEquippableOwnedItem_ResolvesToGuid()
+    {
+        // The live gap: a model emits Wield{target="Adept Healing Kit", no item}; a healing
+        // kit has no wear slot so Wield MISSes and loops. Use is the correct verb.
+        var world = WorldWithInventory(NonEquip(0x800040B3u, "Adept Healing Kit"));
+        Assert.Equal(0x800040B3u,
+            LlmGoalPolicy.TryResolveWieldNonEquippableUse(WieldGoalTo("Adept Healing Kit"), world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_EquippableWearable_ReturnsNull()
+    {
+        // An equippable wearable is wieldable -> the wearable rewrite owns it, not this.
+        var world = WorldWithInventory(Wearable(0x50000201u, "Shirt"));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldNonEquippableUse(WieldGoalTo("Shirt"), world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_FuzzyName_ResolvesViaSubsequence()
+    {
+        var world = WorldWithInventory(NonEquip(0x800040B4u, "Adept Healing Kit"));
+        Assert.Equal(0x800040B4u,
+            LlmGoalPolicy.TryResolveWieldNonEquippableUse(WieldGoalTo("Healing Kit"), world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_ItemFieldSet_ReturnsNull()
+    {
+        var world = WorldWithInventory(NonEquip(0x800040B5u, "Kit"));
+        var withItem = new Goal { Kind = GoalKind.Wield, Target = new Selector { Name = "Kit" }, Item = new Selector { Name = "Kit" } };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldNonEquippableUse(withItem, world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_StackedDuplicates_PicksFirst()
+    {
+        // Bots stack consumables; identical copies are interchangeable, so a Wield of a
+        // stacked kit picks the first (mirrors the Motor's Use first-nearest), not a re-loop.
+        var world = WorldWithInventory(NonEquip(0x801u, "Healing Kit"), NonEquip(0x802u, "Healing Kit"));
+        Assert.Equal(0x801u,
+            LlmGoalPolicy.TryResolveWieldNonEquippableUse(WieldGoalTo("Healing Kit"), world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_NotOwned_ReturnsNull()
+    {
+        var world = WorldWithInventory(NonEquip(0x803u, "Healing Kit"));
+        Assert.Null(LlmGoalPolicy.TryResolveWieldNonEquippableUse(WieldGoalTo("Ointment"), world));
+    }
+
+    [Fact]
+    public void WieldNonEquip_NonWieldGoal_ReturnsNull()
+    {
+        var world = WorldWithInventory(NonEquip(0x804u, "Kit"));
+        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Kit" } };
+        Assert.Null(LlmGoalPolicy.TryResolveWieldNonEquippableUse(use, world));
+    }
+
     // ---- TryResolvePickupUseContainer (pickup-of-corpse-or-chest -> Use) ----
 
     private static VisibleObjectProjection CorpseObj(uint guid, string name)
