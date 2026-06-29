@@ -2343,6 +2343,68 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return null;
     }
 
+    // The GUID of the unique owned, UN-WORN, equippable WEARABLE (armor/clothing/jewelry)
+    // whose name resolves to NAME (exact / role-stripped / unique whole-word subsequence —
+    // the SAME SelectorResolver semantics the use-item field-correction resolvers use). The
+    // pool is HeldUnequippedWearables, which already excludes already-worn pieces
+    // (WieldedAt != 0), non-equippables (ValidLocations == 0), AND weapons / shields / ammo
+    // (those keep their own wield / arming paths) — so this only ever resolves the
+    // armor/clothing the "## Un-equipped gear" cue surfaces. Returns null when 0 or >1 match
+    // (an ambiguous partial stays unresolved so the LLM re-decides). Used to move a wearable
+    // a model mis-filed into a Wield goal's TARGET field into the ITEM field. Pure name
+    // resolution over the bot's OWN inventory; no game knowledge, no autonomous item choice.
+    private static uint? ResolveUniqueUnwornWearableByName(
+        IReadOnlyList<InventoryItemProjection> inventory, string name)
+    {
+        var pool = HeldUnequippedWearables(inventory).Where(i => i.Name is not null).ToList();
+        if (pool.Count == 0) return null;
+        var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(name) ?? name;
+        var exact = pool.Where(i =>
+            string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(i.Name, bare, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (exact.Count == 1) return exact[0].Guid;
+        if (exact.Count > 1) return null;
+        var fuzzy = pool.Where(i =>
+            HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(i.Name, name)).ToList();
+        return fuzzy.Count == 1 ? fuzzy[0].Guid : (uint?)null;
+    }
+
+    // Wield{target=<owned un-worn wearable>, no item} -> the GUID of that inventory item, so
+    // the misfiled name can be moved into the ITEM field. The canonical Wield shape carries
+    // the item in the ITEM field (the Motor's goalCarriesItem path resolves it to an IN-BAG
+    // item and equips the lowest valid slot); the "## Un-equipped gear" cue, however, tells
+    // the LLM to `Wield` a carried piece "(target that item by name)", so a model places the
+    // wearable NAME in the TARGET field with no item. The Motor's target-fallback then
+    // resolves that name with the world/tactics resolver, which can bind a same-named
+    // ALREADY-WORN copy (a wielder, not a bag item) instead of the un-worn bag piece, so the
+    // wield resolves unequippable and loops ("unresolved -- item=MISS target=ok"). Fire ONLY
+    // when the item field is empty AND the target name uniquely resolves to an owned,
+    // un-worn, equippable wearable (HeldUnequippedWearables excludes weapons/shields/ammo,
+    // which keep their own paths). The LLM chose WHICH item; the Motor only corrects the
+    // field (like the use-item-world-object / -corpse rewrites). A Wield already carrying an
+    // item selector is left untouched. No game knowledge, no autonomous item choice.
+    internal static uint? TryResolveWieldWearableInTargetField(Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.Wield) return null;
+        if (goal.Item is { IsEmpty: false }) return null;
+        var targetName = goal.Target?.Name;
+        if (string.IsNullOrWhiteSpace(targetName)) return null;
+        if (world.Inventory is null) return null;
+        // If the SAME name also uniquely binds a visible ground weapon, defer: the
+        // wield-ground-weapon -> Pickup path (which suppresses itself whenever ANY
+        // equippable bag item matches, including a wearable) owns the arming case.
+        // Rewriting to the bag wearable here would divert a legitimate "arm from that
+        // ground weapon" Wield. Stay unresolved so that path / the LLM re-decides.
+        if (world.Visible is not null && world.Visible.Any(v =>
+                !v.IsMonster && !v.IsCorpse &&
+                v.ItemType is uint vit && (vit & ItemTypeMasks.MeleeWeapon) != 0 &&
+                v.Name is not null &&
+                (string.Equals(v.Name, targetName, StringComparison.OrdinalIgnoreCase)
+                 || HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(v.Name, targetName))))
+            return null;
+        return ResolveUniqueUnwornWearableByName(world.Inventory, targetName);
+    }
+
     // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
     // vendor-panel item rather than a takeable ground object, or null. A Pickup takes
     // only ground items, so a Pickup whose target is one of the open vendor's for-sale
@@ -4273,6 +4335,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 Kind = GoalKind.Pickup,
                 Target = new Selector { Guid = groundWeaponGuid },
                 Item = null,
+            };
+        }
+
+        // Wield{target=<owned un-worn wearable>, no item} -> Wield{item=<that item>}
+        // (mechanical field correction, reduce-llm-call-volume). The "## Un-equipped gear"
+        // cue tells the LLM to `Wield` a carried piece "(target that item by name)", so a
+        // model emits the wearable NAME in the TARGET field with no item; but the Motor's
+        // canonical Wield equips an item named in the ITEM field, and its target-fallback
+        // can bind a same-named ALREADY-WORN copy instead of the un-worn bag piece, so the
+        // wield resolves unequippable and loops ("unresolved -- item=MISS target=ok"). When
+        // the target name uniquely resolves to an owned, un-worn, equippable wearable, move
+        // it into the ITEM field (the proven in-bag wield path equips it). Pinned by GUID so
+        // the exact bag copy is wielded, not a worn duplicate. The LLM chose WHICH item; the
+        // Motor only corrects the field (like the use-item-world-object / -corpse rewrites;
+        // no autonomous target pick, no game knowledge — keyed on the bot's OWN equippable
+        // inventory). Weapons / shields / ammo are excluded (HeldUnequippedWearables), so the
+        // weapon-arming guards below are unaffected.
+        if (TryResolveWieldWearableInTargetField(goal, world) is uint wieldWearableGuid)
+        {
+            Console.WriteLine(
+                $"[llm-override] wield-wearable -> item: target={goal.Target}" +
+                $" guid=0x{wieldWearableGuid:X8} — an owned un-worn wearable was mis-filed into" +
+                " the Wield target field; equipping it via the item field (Wield equips an in-bag item).");
+            return goal with
+            {
+                Item = new Selector { Guid = wieldWearableGuid },
+                Target = new Selector(),
             };
         }
 
