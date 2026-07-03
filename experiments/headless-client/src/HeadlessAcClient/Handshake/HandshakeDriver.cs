@@ -7778,6 +7778,18 @@ internal sealed class HandshakeDriver : IDisposable
                                                 motionRememberedSightingId = farA.Id;
                                                 crossLbAdvanceCooldownUntil[boundaryA.Id] =
                                                     nowWallA + crossLbAdvanceCooldown;
+                                                // Progress-clear: this cross-LB Attack target is now
+                                                // advancing on a real route prefix, so a prior
+                                                // route-blocked signal for THIS sighting is stale —
+                                                // clear it (mirrors the Explore route-stuck
+                                                // progress-clear) so the `## Attack loop` route-blocked
+                                                // cue does not keep telling the LLM a now-reachable
+                                                // target is unreachable while freshness ages out.
+                                                if (crossLbBlockedSightingId == farA.Id)
+                                                {
+                                                    llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(null);
+                                                    crossLbBlockedSightingId = null;
+                                                }
                                                 frontier = new WorldObjectSnapshot(0u)
                                                 {
                                                     Name = farA.Name,
@@ -7841,6 +7853,17 @@ internal sealed class HandshakeDriver : IDisposable
                                                     rememberedSightedCooldownUntil[farA.Id] =
                                                         nowWallA + rememberedSightedRevisitCooldown;
                                                     frontier = destFarA;
+                                                    // Progress-clear: the bot is now steering straight
+                                                    // toward this outdoor-adjacent target, so a prior
+                                                    // route-blocked signal for THIS sighting is stale —
+                                                    // clear it (mirrors the Advance + Explore
+                                                    // progress-clear) so the route-blocked cue stops
+                                                    // once the target is being approached.
+                                                    if (crossLbBlockedSightingId == farA.Id)
+                                                    {
+                                                        llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(null);
+                                                        crossLbBlockedSightingId = null;
+                                                    }
                                                     Console.WriteLine(
                                                         $"[strategy] LLM-GOAL Attack{{target}} '{farA.Name}' is " +
                                                         $"cross-landblock (lb 0x{(farA.CellId >> 16):X4}); {planA.Kind} " +
@@ -7853,6 +7876,31 @@ internal sealed class HandshakeDriver : IDisposable
                                             {
                                                 rememberedSightedCooldownUntil[farA.Id] =
                                                     nowWallA + rememberedSightedRevisitCooldown;
+                                                // Surface the route-blocked signal to the Strategy
+                                                // layer for a genuinely NoRoute cross-landblock Attack
+                                                // target (the LLM has no on-foot way to reach it from
+                                                // this area, and it is not outdoor-adjacent-steerable
+                                                // handled above). This is the Attack counterpart of the
+                                                // Explore cross-LB route-stuck signal: without it the
+                                                // `## Attack loop` cue tells the LLM to "keep travelling,
+                                                // Attack walks you there" — wrong for a target it cannot
+                                                // route to — so it re-emits the same unreachable Attack.
+                                                // Freshness-aged (re-stamped each re-observation while
+                                                // stuck, ages out once the bot moves on). Advance /
+                                                // TransitionPending are NOT blocked (a valid pending
+                                                // crossing), so only NoRoute sets it. The LLM still
+                                                // decides; mechanical navigation observation only.
+                                                if (planA.Kind == RouteWaypointKind.NoRoute)
+                                                {
+                                                    llmPolicyForPickerSurface?.SetCurrentRouteBlockedTarget(farA.Name);
+                                                    // Tag the blocked sighting so the Explore path's
+                                                    // progress-clear (which fires when THIS sighting
+                                                    // later advances/converges) also clears an
+                                                    // Attack-set block — uniform clearing, not only
+                                                    // freshness-aging. Same field + sighting-id
+                                                    // semantics the Explore route-stuck branch uses.
+                                                    crossLbBlockedSightingId = farA.Id;
+                                                }
                                                 // The straight-steer refusal reason only applies when
                                                 // the plan was NoRoute (the steer is gated on NoRoute +
                                                 // ShouldStraightSteerOutdoor above). For Advance (on its

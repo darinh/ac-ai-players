@@ -12242,14 +12242,36 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Attack loop (target not in view)");
-            sb.AppendLine(
-                $"- you have tried to `Attack` `{loopedAttackDisplay}` several times recently but NO monster " +
-                $"named `{loopedAttackDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING " +
-                $"toward `{loopedAttackDisplay}` and closing in (your `landblock`/position is changing as you go), " +
-                "keep going — `Attack` walks you to a target, and it will come into view. But if your position is " +
-                $"NOT changing, or `{loopedAttackDisplay}` has died or you have travelled PAST it, re-`Attack`-ing " +
-                "makes no progress: `Attack` a DIFFERENT monster that IS visible in `## Nearest objects`, or pursue " +
-                $"a DIFFERENT objective, instead of re-`Attack`-ing `{loopedAttackDisplay}`.");
+            // Route-blocked variant: the Motor's own cross-landblock route toward this monster
+            // keeps returning NoRoute from the bot's current area (HandshakeDriver set
+            // routeBlockedTarget) — the monster is visible across a landblock seam the bot has
+            // no explored on-foot route across (e.g. it is INDOORS and the monster is outdoors,
+            // or the two areas are non-adjacent). Unlike a departed target the monster is not
+            // "just out of view along the way": walking will NOT bring it into reach, so the
+            // default "keep going, Attack walks you there" wording is wrong and the bot loops
+            // the same unreachable Attack. Match the blocked target name (role-suffix-normalized)
+            // to the looped Attack name. The Motor's mechanical navigation observation; the LLM
+            // decides what to do instead. Sibling of the Explore loop's route-blocked branch.
+            var loopedAttackRouteBlocked = routeBlockedTarget is string rbAtkName
+                && string.Equals(NormalizeEmittedTargetName(rbAtkName), loopedAttackName, StringComparison.OrdinalIgnoreCase);
+            if (loopedAttackRouteBlocked)
+                sb.AppendLine(
+                    $"- you have tried to `Attack` `{loopedAttackDisplay}` several times, but it is across a " +
+                    "landblock boundary you have NO on-foot route across from your current area — walking will " +
+                    $"NOT bring `{loopedAttackDisplay}` into reach, and re-`Attack`-ing it just wastes this turn. " +
+                    $"`{loopedAttackDisplay}` is NOT reachable from here right now. To make progress, `Attack` a " +
+                    "DIFFERENT monster that IS visible in `## Nearest objects`, or emit " +
+                    "`Explore{target: {name: \"anywhere\"}}` to travel toward open ground (you may find a way " +
+                    $"around), instead of re-`Attack`-ing `{loopedAttackDisplay}`.");
+            else
+                sb.AppendLine(
+                    $"- you have tried to `Attack` `{loopedAttackDisplay}` several times recently but NO monster " +
+                    $"named `{loopedAttackDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING " +
+                    $"toward `{loopedAttackDisplay}` and closing in (your `landblock`/position is changing as you go), " +
+                    "keep going — `Attack` walks you to a target, and it will come into view. But if your position is " +
+                    $"NOT changing, or `{loopedAttackDisplay}` has died or you have travelled PAST it, re-`Attack`-ing " +
+                    "makes no progress: `Attack` a DIFFERENT monster that IS visible in `## Nearest objects`, or pursue " +
+                    $"a DIFFERENT objective, instead of re-`Attack`-ing `{loopedAttackDisplay}`.");
         }
 
         // ── ## Use loop (target not in view) — sibling of the Attack/Explore loops ──

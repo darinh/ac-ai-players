@@ -4602,6 +4602,50 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Attack loop (target not in view)", prompt);
     }
 
+    [Fact]
+    public void BuildUserPrompt_AttackLoop_RouteBlockedBranch_RendersWhenTargetRouteBlocked()
+    {
+        // The Motor reported the cross-LB route to the looped Attack target NoRoute from the
+        // bot's area (routeBlockedTarget). The Attack-loop cue renders the route-blocked variant
+        // (unreachable across a boundary), NOT the default "keep going, it will come into view"
+        // wording (walking will not bring an unreachable cross-LB monster into reach).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("Gnawer Shreth", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVisibleWorld(), es, currentGoal: null, stack: null, pickerActivity: null, explorationCandidates: null,
+            routeBlockedTarget: "Gnawer Shreth");
+        Assert.Contains("## Attack loop (target not in view)", prompt);
+        Assert.Contains("across a landblock boundary you have NO on-foot route across", prompt);
+        Assert.DoesNotContain("keep going", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AttackLoop_DefaultBranch_WhenRouteBlockedTargetIsDifferent()
+    {
+        // routeBlockedTarget names a DIFFERENT monster -> the route-blocked branch does NOT fire
+        // for this looped target; the default "keep going if travelling" wording renders.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("Gnawer Shreth", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildVisibleWorld(), es, currentGoal: null, stack: null, pickerActivity: null, explorationCandidates: null,
+            routeBlockedTarget: "Some Other Monster");
+        Assert.Contains("## Attack loop (target not in view)", prompt);
+        Assert.DoesNotContain("across a landblock boundary you have NO on-foot route across", prompt);
+        Assert.Contains("keep going", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AttackLoop_DefaultBranch_WhenNoRouteBlockedTarget()
+    {
+        // No route-blocked signal at all -> the default departed-target wording renders.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackEmissions("Gnawer Shreth", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Attack loop (target not in view)", prompt);
+        Assert.DoesNotContain("across a landblock boundary you have NO on-foot route across", prompt);
+        Assert.Contains("keep going", prompt);
+    }
+
     private static EventStream UseEmissions(string name, int count, System.DateTimeOffset utc)
     {
         var es = new EventStream();
