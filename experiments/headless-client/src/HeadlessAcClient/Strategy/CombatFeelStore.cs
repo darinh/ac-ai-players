@@ -156,14 +156,21 @@ internal static class CombatFeelStore
 
                 var tmp = path + ".tmp";
                 File.WriteAllText(tmp, ledger.ToJson());
-                if (File.Exists(path))
-                    File.Replace(tmp, path, destinationBackupFileName: null);
-                else
-                    File.Move(tmp, path);
-                ledger.MarkClean();
+                if (TryPlaceTempFile(tmp, path))
+                    ledger.MarkClean();
+                else if (!_writeFailureLogged)
+                {
+                    _writeFailureLogged = true;
+                    Console.Error.WriteLine(
+                        $"[combat-feel] WARN save failed after retries ({Path.GetFileName(path)}); " +
+                        "ledger stays dirty and retries on the next combat outcome; future failures suppressed");
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
+                // The tmp WRITE (or the merge-reload above) itself failed — distinct from a
+                // place/replace failure, which TryPlaceTempFile owns. Leave the ledger dirty
+                // so the next outcome retries; log once.
                 if (!_writeFailureLogged)
                 {
                     _writeFailureLogged = true;
@@ -181,6 +188,59 @@ internal static class CombatFeelStore
             }
             mutex?.Dispose();
         }
+    }
+
+    // Default place-file retry policy: Windows File.Replace is prone to a
+    // transient "Unable to remove the file to be replaced" IOException when an
+    // AV / indexer / another handle momentarily locks the destination. A short
+    // bounded retry usually rides it out.
+    private const int DefaultPlaceMaxAttempts = 3;
+    private const int DefaultPlaceBackoffMs = 40;
+
+    /// <summary>
+    /// Atomically move <paramref name="tmp"/> onto <paramref name="path"/> with a
+    /// bounded retry, returning true on success. Uses <c>File.Replace</c> when the
+    /// destination exists (else <c>File.Move</c>); on a transient
+    /// IOException/UnauthorizedAccessException it backs off linearly and retries up
+    /// to <paramref name="maxAttempts"/> times. Every attempt is ATOMIC — a failed
+    /// <c>File.Replace</c> leaves the existing destination untouched, so a total
+    /// failure never destroys the prior on-disk ledger (the caller then leaves the
+    /// in-memory ledger dirty to rewrite on the next combat outcome). Returns false
+    /// only if every attempt fails. The <paramref name="sleep"/> delegate is
+    /// injectable so tests drive the retry deterministically without real waits.
+    /// Pure file bookkeeping; no game data.
+    /// </summary>
+    internal static bool TryPlaceTempFile(
+        string tmp, string path,
+        int maxAttempts = DefaultPlaceMaxAttempts,
+        int backoffMs = DefaultPlaceBackoffMs,
+        Action<int>? sleep = null)
+    {
+        if (maxAttempts < 1) maxAttempts = 1;
+        var doSleep = sleep ?? (ms => Thread.Sleep(ms));
+        for (int attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                if (File.Exists(path))
+                    File.Replace(tmp, path, destinationBackupFileName: null);
+                else
+                    File.Move(tmp, path);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (attempt >= maxAttempts) break;
+                doSleep(backoffMs * attempt); // linear backoff before the next attempt
+            }
+        }
+        // Deliberately NO delete+move fallback: File.Delete + File.Move is
+        // non-atomic — a delete that succeeds then a move that fails would destroy
+        // the prior ledger, a durability REGRESSION vs the atomic File.Replace
+        // (which preserves the destination on every failure). The bounded retry
+        // above is the safe, standard fix; a persistent lock just returns false and
+        // the caller keeps the ledger dirty to retry on the next combat outcome.
+        return false;
     }
 
     /// <summary>

@@ -183,4 +183,93 @@ public class CombatFeelStoreTests : IDisposable
             Environment.SetEnvironmentVariable("AC_BOTS_STATE_DIR", prev);
         }
     }
+
+    // ---- TryPlaceTempFile (bounded atomic retry) ----
+
+    [Fact]
+    public void TryPlaceTempFile_NoExistingDestination_Moves()
+    {
+        var path = PathFor("place-new");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, "hello");
+        Assert.True(CombatFeelStore.TryPlaceTempFile(tmp, path, sleep: _ => { }));
+        Assert.Equal("hello", File.ReadAllText(path));
+        Assert.False(File.Exists(tmp));
+    }
+
+    [Fact]
+    public void TryPlaceTempFile_ExistingDestination_Replaces()
+    {
+        var path = PathFor("place-replace");
+        File.WriteAllText(path, "old");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, "new");
+        Assert.True(CombatFeelStore.TryPlaceTempFile(tmp, path, sleep: _ => { }));
+        Assert.Equal("new", File.ReadAllText(path));
+        Assert.False(File.Exists(tmp));
+    }
+
+    [Fact]
+    public void TryPlaceTempFile_LockedDestination_RetriesThenFails()
+    {
+        // Hold the destination open with an exclusive (no-share) lock so File.Replace
+        // fails every attempt: the helper must exhaust its bounded retries (backing
+        // off each time) and return false, leaving the caller to keep the ledger
+        // dirty for the next outcome. Each attempt is atomic, so the destination is
+        // never destroyed.
+        var path = PathFor("place-locked");
+        File.WriteAllText(path, "locked-old");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, "locked-new");
+        int sleeps = 0;
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            Assert.False(CombatFeelStore.TryPlaceTempFile(
+                tmp, path, maxAttempts: 3, backoffMs: 1, sleep: _ => sleeps++));
+        }
+        Assert.Equal(2, sleeps); // backed off between attempts 1->2 and 2->3 (not after the last)
+    }
+
+    [Fact]
+    public void SaveIfDirty_PlaceFailsUnderLock_StaysDirty_PreservesDestination()
+    {
+        // Safety-net regression: when the atomic place fails (destination locked),
+        // SaveIfDirty must NOT MarkClean (ledger stays dirty to retry next outcome)
+        // AND the prior on-disk ledger must be preserved (atomic Replace never
+        // destroys it). Once the lock releases, the next save succeeds.
+        var path = PathFor("saveifdirty-locked");
+        var seed = new CombatFeelLedger();
+        seed.RecordKill(Wcid(1u, "Prior Kind"));
+        CombatFeelStore.SaveIfDirty(seed, path);
+        var priorOnDisk = File.ReadAllText(path);
+
+        var ledger = new CombatFeelLedger();
+        ledger.RecordDeath(Wcid(2u, "New Kind"));
+        Assert.True(ledger.Dirty);
+        // FileShare.Read: the test can still read the destination to prove it is
+        // preserved, but File.Replace (which must REMOVE the destination) still
+        // fails because the handle grants no delete/write share.
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            CombatFeelStore.SaveIfDirty(ledger, path); // place fails under the lock
+            Assert.True(ledger.Dirty);                 // NOT marked clean -> will retry
+            Assert.Equal(priorOnDisk, File.ReadAllText(path)); // prior ledger preserved
+        }
+        CombatFeelStore.SaveIfDirty(ledger, path);     // lock gone -> succeeds
+        Assert.False(ledger.Dirty);
+    }
+
+    [Fact]
+    public void TryPlaceTempFile_LockReleasedBeforeCall_Succeeds()
+    {
+        // Sanity: once the lock is gone, the same inputs place successfully — proving
+        // the failure above was the transient lock, not a logic error.
+        var path = PathFor("place-unlocked");
+        File.WriteAllText(path, "old");
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, "new");
+        using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+        Assert.True(CombatFeelStore.TryPlaceTempFile(tmp, path, backoffMs: 1, sleep: _ => { }));
+        Assert.Equal("new", File.ReadAllText(path));
+    }
 }
