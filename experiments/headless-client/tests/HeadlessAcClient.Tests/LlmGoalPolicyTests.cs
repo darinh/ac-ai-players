@@ -12161,6 +12161,12 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("levels everyone faster", prompt);
         // The recruit uniqueness hedge must be present (recruit fails on 0/N matches).
         Assert.Contains("only when exactly one visible", prompt);
+        // HK cleanup: the WHEN/WHETHER value judgment ("only worth it if...; skip it if
+        // you are pursuing a solo objective") was removed — WHETHER to group is the LLM's
+        // decision, not a hardcoded rule of thumb. The neutral OPTIONAL framing remains.
+        Assert.DoesNotContain("only worth it if", prompt);
+        Assert.DoesNotContain("skip it if you are pursuing a solo", prompt);
+        Assert.Contains("you decide whether to group or stay solo", prompt);
     }
 
     [Fact]
