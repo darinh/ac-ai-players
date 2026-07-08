@@ -300,6 +300,17 @@ internal sealed record Goal
     public string? Message { get; init; }
 
     /// <summary>
+    /// Optional chat CHANNEL for a <see cref="GoalKind.Say"/> goal: "fellowship" routes
+    /// the <see cref="Message"/> to the fellowship channel instead of speaking it aloud
+    /// locally; null/blank (the default) means a LOCAL say. The Motor maps the name to
+    /// the wire Channel value; a non-blank name it does not recognise FAILS the goal
+    /// (it is never downgraded to a local say, so group-intended text cannot leak).
+    /// Ignored by every other verb.
+    /// </summary>
+    [JsonPropertyName("channel")]
+    public string? Channel { get; init; }
+
+    /// <summary>
     /// Free-form rationale from Strategy. Used for log readability
     /// and training-data audit ("why did the LLM pick this?").
     /// </summary>
