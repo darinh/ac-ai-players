@@ -34,6 +34,11 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Install top-level crash sinks FIRST so a crash on ANY thread (incl. a
+        // background thread or an unobserved Task that bypasses the try/catch below)
+        // logs its full stack instead of ending the run silently. See CrashDiagnostics.
+        CrashDiagnostics.Install();
+
         if (args.Length < 4)
         {
             Console.Error.WriteLine("usage: HeadlessAcClient <host> <port> <account> <password> [character-name]");
@@ -132,7 +137,10 @@ internal static class Program
         }
         catch (Exception ex)
         {
+            // Full stack (ToString), not just the message — a run that dies here must
+            // leave a diagnosable trace (the run-end cause was previously invisible).
             Console.Error.WriteLine($"[main] PHASE 1 FAIL: {ex.GetType().Name}: {ex.Message}");
+            Console.Error.WriteLine($"[main] PHASE 1 FAIL stack: {ex}");
             return 1;
         }
     }
