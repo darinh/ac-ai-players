@@ -2,7 +2,7 @@
 // Byte-exact wire + channel-resolver tests for the group-channel chat GameAction:
 //
 //   ChatChannel (0x0147) — say a line on a named group chat channel (fellowship,
-//   allegiance) rather than aloud locally.
+//   monarch, vassals) rather than aloud locally.
 //
 // Standard GameAction wire prelude:
 //   u32 envelope opcode (0xF7B1 GameAction)
@@ -36,14 +36,24 @@ public class GameActionChatChannelMessageTests
     }
 
     [Fact]
+    public void Resolve_MapsAllegianceRelationshipChannels()
+    {
+        // Permission-free per-relationship allegiance channels.
+        Assert.Equal(0x00004000u, GameActionChatChannelMessage.ResolveChannel("monarch"));
+        Assert.Equal(0x00004000u, GameActionChatChannelMessage.ResolveChannel("Monarch"));
+        Assert.Equal(0x00001000u, GameActionChatChannelMessage.ResolveChannel("vassals"));
+        Assert.Equal(0x00001000u, GameActionChatChannelMessage.ResolveChannel("vassal"));
+    }
+
+    [Fact]
     public void Resolve_UnknownOrBlank_ReturnsNull()
     {
         Assert.Null(GameActionChatChannelMessage.ResolveChannel(null));
         Assert.Null(GameActionChatChannelMessage.ResolveChannel(""));
         Assert.Null(GameActionChatChannelMessage.ResolveChannel("general"));
         Assert.Null(GameActionChatChannelMessage.ResolveChannel("trade"));
-        // allegiance channels are a deliberate follow-up -> not mapped (must NOT
-        // silently become a local say; the motor fails a non-blank unmapped channel).
+        // "allegiance" (whole-allegiance broadcast) stays UNMAPPED — it needs a server
+        // Speaker rank, so it must NOT silently become a local say; the motor fails it.
         Assert.Null(GameActionChatChannelMessage.ResolveChannel("allegiance"));
         Assert.Null(GameActionChatChannelMessage.ResolveChannel("felloship"));   // typo
     }

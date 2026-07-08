@@ -94,6 +94,30 @@ public class SayRoutingTests
         Assert.Null(r.FailReason);
     }
 
+    [Theory]
+    [InlineData("monarch")]
+    [InlineData("Monarch")]
+    public void MonarchChannel_RoutesChannel(string channel)
+    {
+        var r = SayRouting.Decide("orders received", channel);
+        Assert.Equal(SayRouteKind.Channel, r.Kind);
+        Assert.Equal("orders received", r.Text);
+        Assert.Equal(GameActionChatChannelMessage.MonarchChannel, r.Channel);
+        Assert.Null(r.FailReason);
+    }
+
+    [Theory]
+    [InlineData("vassals")]
+    [InlineData("vassal")]
+    public void VassalsChannel_RoutesChannel(string channel)
+    {
+        var r = SayRouting.Decide("regroup", channel);
+        Assert.Equal(SayRouteKind.Channel, r.Kind);
+        Assert.Equal("regroup", r.Text);
+        Assert.Equal(GameActionChatChannelMessage.VassalsChannel, r.Channel);
+        Assert.Null(r.FailReason);
+    }
+
     // ---- Message sanitisation flows through ----
 
     [Fact]

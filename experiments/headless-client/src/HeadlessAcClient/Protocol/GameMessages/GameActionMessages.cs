@@ -611,21 +611,23 @@ internal static class GameActionTalkMessage
 /// </summary>
 internal static class GameActionChatChannelMessage
 {
-    // The group channel a bot coordinates on. Wire value is an
-    // ACE.Entity.Enum.Channel member (verified against ACE-bots). Only the
-    // fellowship channel is mapped today: it is permission-free for any fellowship
-    // member (the team-coordination channel for the multi-bot criteria). The
-    // allegiance channels are intentionally NOT mapped yet — the only whole-
-    // allegiance channel (AllegianceBroadcast) requires a server-side Speaker rank,
-    // so a plain vassal bot would be silently muted; per-rank allegiance routing is
-    // a separate follow-up.
-    public const uint FellowChannel = 0x00000800;              // Channel.Fellow (@f)
+    // Group channels a bot coordinates on. Wire values are ACE.Entity.Enum.Channel
+    // members (verified against ACE-bots). Only PERMISSION-FREE channels are mapped —
+    // ones any member of the relevant group can use without a server-side rank:
+    //   Fellow   (@f)  — any fellowship member.
+    //   Monarch (/monarch) — a vassal messages its monarch (up the tree).
+    //   Vassals (/vassals) — a monarch/patron messages its vassals (down the tree).
+    // The whole-allegiance broadcast (AllegianceBroadcast) is deliberately NOT mapped:
+    // it needs a server Speaker rank, so a plain vassal would be silently muted.
+    public const uint FellowChannel  = 0x00000800;  // Channel.Fellow
+    public const uint MonarchChannel = 0x00004000;  // Channel.Monarch
+    public const uint VassalsChannel = 0x00001000;  // Channel.Vassals
 
     /// <summary>
     /// Map an LLM-supplied channel NAME to its wire Channel value, or null when the
-    /// name is unknown/blank. Only the fellowship channel is mapped; the motor
-    /// invents no channel. Callers must treat a non-blank name that returns null as
-    /// an INVALID request (not a local-say downgrade) so group-intended text never
+    /// name is unknown/blank. Only the permission-free group channels are mapped; the
+    /// motor invents no channel. Callers must treat a non-blank name that returns null
+    /// as an INVALID request (not a local-say downgrade) so group-intended text never
     /// leaks to local chat.
     /// </summary>
     public static uint? ResolveChannel(string? name)
@@ -634,6 +636,8 @@ internal static class GameActionChatChannelMessage
         return name.Trim().ToLowerInvariant() switch
         {
             "fellowship" or "fellow" => FellowChannel,
+            "monarch" => MonarchChannel,
+            "vassals" or "vassal" => VassalsChannel,
             _ => null,
         };
     }
