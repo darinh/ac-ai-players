@@ -2084,8 +2084,19 @@ internal sealed class HandshakeDriver : IDisposable
         }
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
+        // Start the process-level liveness watchdog covering this long-running
+        // observe phase. If the loop body ever blocks past the stall timeout (a
+        // hung network/LLM await the in-loop watchdogs cannot catch, since the loop
+        // that runs them is itself blocked), the watchdog force-exits so the
+        // supervisor relaunches a fresh process. Idempotent — safe across reconnect
+        // re-entries. RecordProgress() below bumps the heartbeat every iteration.
+        LivenessWatchdog.Start();
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
+            // Heartbeat for the liveness watchdog: every normal iteration (a packet
+            // received OR a walk-tick wake) bumps this. A gap longer than the stall
+            // timeout means the loop body is wedged -> the watchdog force-exits.
+            LivenessWatchdog.RecordProgress();
             if (reconnectRequested) break;
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero) break;
