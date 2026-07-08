@@ -69,4 +69,25 @@ internal static class InboundDamageWindow
         DateTime? previousHitUtc, DateTime hitUtc, double windowSeconds)
         => previousHitUtc is not DateTime prev
            || (hitUtc - prev).TotalSeconds >= windowSeconds;
+
+    /// <summary>
+    /// Decide whether a newly-landed inbound hit warrants emitting a fresh
+    /// <c>InboundDamageTaken</c> event. Emit on a new hit-lull EPISODE (<see
+    /// cref="BeginsNewInboundEpisode"/>) OR when the (normalized) attacker
+    /// changes from the one the last event was emitted for. The latter is what
+    /// surfaces a FOREIGN / additional attacker that joins DURING an active
+    /// episode (no lull) — without it the swarm-add would never wake the LLM,
+    /// since episode dedup alone coalesces all mid-fight hits into one event.
+    /// Same-attacker continuous hits still coalesce (episode false + attacker
+    /// unchanged). Callers pass attacker keys already normalized (e.g. via
+    /// CombatFeelLedger.NormalizeName) so this stays a pure, dependency-free
+    /// decision. An unknown current attacker (<c>null</c> key) never forces an
+    /// attacker-change emit; only the episode gate can emit for it.
+    /// </summary>
+    internal static bool ShouldEmitInboundDamageEvent(
+        DateTime? previousHitUtc, DateTime hitUtc, double windowSeconds,
+        string? currentAttackerNorm, string? lastEmittedAttackerNorm)
+        => BeginsNewInboundEpisode(previousHitUtc, hitUtc, windowSeconds)
+           || (currentAttackerNorm is not null
+               && !string.Equals(currentAttackerNorm, lastEmittedAttackerNorm, StringComparison.Ordinal));
 }
