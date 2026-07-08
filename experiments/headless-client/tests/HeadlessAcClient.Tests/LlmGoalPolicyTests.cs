@@ -868,6 +868,90 @@ public class LlmGoalPolicyTests
         Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Rat"));
     }
 
+    // ---- HasMultipleDistinctInboundAttackersSince (swarm interrupt) ----
+
+    [Fact]
+    public void MultiAttacker_TwoDistinctAttackers_True()
+    {
+        // Two different foes landing inbound damage since the floor = a swarm.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Chicken", Text = "hit" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "hit" });
+        Assert.True(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, 0));
+    }
+
+    [Fact]
+    public void MultiAttacker_SameAttackerTwice_False()
+    {
+        // One foe hitting repeatedly is a normal single-target fight, not a swarm.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "hit" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "hit" });
+        Assert.False(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, 0));
+    }
+
+    [Fact]
+    public void MultiAttacker_SingleAttacker_False()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Chicken", Text = "hit" });
+        Assert.False(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, 0));
+    }
+
+    [Fact]
+    public void MultiAttacker_UnknownAttackersNotCounted_False()
+    {
+        // Nameless inbound hits cannot be counted as distinct foes.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = null, Text = "hit" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "", Text = "hit" });
+        Assert.False(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, 0));
+    }
+
+    [Fact]
+    public void MultiAttacker_SecondAttackerBelowFloor_False()
+    {
+        // A distinct earlier attacker below the floor (already considered) does not combine
+        // with a new one above the floor to fabricate a swarm.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Chicken", Text = "old" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "new" });
+        Assert.False(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, floor));
+    }
+
+    [Fact]
+    public void MultiAttacker_NonDamageEventsIgnored_False()
+    {
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Name = "Chicken", Text = "slain" });
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.NpcDialog, Name = "Drudge Skulker", Text = "hi" });
+        Assert.False(LlmGoalPolicy.HasMultipleDistinctInboundAttackersSince(es, 0));
+    }
+
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("", true)]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("off", false)]
+    [InlineData("no", false)]
+    public void ResolveChainInterruptOnMultiAttacker_ParsesFlag(string? env, bool expected)
+        => Assert.Equal(expected, LlmGoalPolicy.ResolveChainInterruptOnMultiAttacker(env));
+
 
     [Fact]
     public void FirstChainInterruptingKindSince_RepeatedPopupAlreadySeen_NotInterrupting()
