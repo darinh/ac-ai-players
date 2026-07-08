@@ -59,6 +59,7 @@ internal enum GameActionType : uint
     FellowshipRecruit   = 0x00A5,
     SwearAllegiance     = 0x001D,
     BreakAllegiance     = 0x001E,
+    Talk                = 0x0015,
 }
 
 /// <summary>
@@ -529,6 +530,70 @@ internal static class GameActionBreakAllegianceMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.BreakAllegiance, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// Talk (0x0015): the local "say" — the player speaks a line ALOUD, heard by
+/// nearby players/creatures as HearSpeech. Mirrors ACE-bots GameActionTalk.Handle,
+/// which reads, after the GameAction header:
+///   String16L message
+/// and re-broadcasts it as local chat. The message TEXT is authored by the LLM
+/// (this only packs the bytes). Note: the server treats a message beginning with
+/// '@' as a slash/admin COMMAND, so <see cref="SanitizeMessage"/> strips a leading
+/// '@' to keep a Say strictly chat, and clamps to printable ASCII + a length cap
+/// (WriteString16L casts each char to one byte, so non-ASCII would pack wrong).
+/// </summary>
+internal static class GameActionTalkMessage
+{
+    /// <summary>AC caps a local-say line well under this; clamp to keep the packet bounded.</summary>
+    public const int MaxMessageChars = 256;
+
+    /// <summary>
+    /// Clamp an LLM-authored say line to printable ASCII, strip a leading '@' (so it
+    /// is never parsed as a server command), collapse to empty-safe, and cap length.
+    /// Returns null when nothing sayable remains (caller should not send).
+    /// </summary>
+    public static string? SanitizeMessage(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        // Strip leading whitespace and command-'@' markers FIRST, BEFORE the length
+        // cap, so a line that merely starts with a run of them is not consumed by the
+        // cap and wrongly dropped. The server parses a leading '@' as a slash command.
+        var start = 0;
+        while (start < raw.Length && (raw[start] == '@' || char.IsWhiteSpace(raw[start])))
+            start++;
+        if (start >= raw.Length) return null;
+
+        var src = raw.AsSpan(start);
+        Span<char> buf = stackalloc char[Math.Min(src.Length, MaxMessageChars)];
+        var n = 0;
+        foreach (var ch in src)
+        {
+            if (n >= MaxMessageChars) break;
+            if (ch >= 0x20 && ch <= 0x7E) buf[n++] = ch;
+        }
+        var cleaned = new string(buf[..n]).Trim();
+        // A '@' can still be leading if a dropped non-ASCII char preceded it above;
+        // strip once more so the sanitized line is never parsed as a command.
+        while (cleaned.StartsWith("@", StringComparison.Ordinal))
+            cleaned = cleaned[1..].TrimStart();
+        return cleaned.Length == 0 ? null : cleaned;
+    }
+
+    /// <summary>Packed size for a given (already-sanitized) message: header + String16L.</summary>
+    public static int MeasureSize(ReadOnlySpan<char> message) =>
+        GameActionMessage.HeaderSize + AcStrings.MeasureString16L(message);
+
+    public static int Pack(Span<byte> dest, ReadOnlySpan<char> message, uint actionSequence = 1)
+    {
+        var need = MeasureSize(message);
+        if (dest.Length < need)
+            throw new ArgumentException($"buffer too small: need {need}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.Talk, actionSequence);
+        cursor += AcStrings.WriteString16L(dest.Slice(cursor), message);
         return cursor;
     }
 }

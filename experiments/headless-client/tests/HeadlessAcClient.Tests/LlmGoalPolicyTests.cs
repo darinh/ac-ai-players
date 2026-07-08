@@ -130,6 +130,26 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_SayRequiresMessage()
+    {
+        // Say is a self-broadcast (no world target) but its payload IS the message;
+        // a Say with no message must be rejected.
+        var json = """{"kind":"Say","rationale":"greet","priority":3}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("message", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_SayWithMessageParses_NoTargetNeeded()
+    {
+        // Say carries no target (self-broadcast); the message is the payload.
+        var json = """{"kind":"Say","message":"Well met, traveler!","rationale":"be social","priority":3}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Say, g!.Kind);
+        Assert.Equal("Well met, traveler!", g.Message);
+    }
+
+    [Fact]
     public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
     {
         // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
@@ -12051,6 +12071,29 @@ public class LlmGoalPolicyTests
         Assert.Contains("vassal", prompt);
         // Not in an allegiance -> no BreakAllegiance cue (nothing to sever).
         Assert.DoesNotContain("`BreakAllegiance`", prompt);
+        // A visible player also surfaces the optional Say (local chat) cue.
+        Assert.Contains("## Chat", prompt);
+        Assert.Contains("`Say`", prompt);
+    }
+
+    [Fact]
+    public void ChatGuidance_Solo_NoPlayerInView_Omitted()
+    {
+        // No player in view -> no ## Chat cue (nobody to hear it) -> zero static cost.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Chat", prompt);
+        Assert.DoesNotContain("`Say`", prompt);
     }
 
     [Fact]
@@ -22015,14 +22058,20 @@ public class LlmGoalPolicyTests
     // stack-null and stack-present goal-shape blocks). Multi-bot social capability;
     // static-floor only, does not move the runtime 413 risk (per-tick WORLD/visible
     // sections), and the ceiling is a regression guard, not a runtime size.
+    // Bumped 19400 -> 19500 (chat-say) for the new "Say" verb + its `message`
+    // field added to BOTH JSON goal-shape blocks the static floor renders (the
+    // stack-null and stack-present variants). Outbound local-chat capability
+    // (criterion #9 "sharing chat"); static-floor only, does not move the runtime
+    // 413 risk (per-tick WORLD/visible sections), and the ceiling is a regression
+    // guard, not a runtime size.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 19400,
-            $"static prompt floor grew to {prompt.Length} chars (budget 19400)");
+        Assert.True(prompt.Length <= 19500,
+            $"static prompt floor grew to {prompt.Length} chars (budget 19500)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----
