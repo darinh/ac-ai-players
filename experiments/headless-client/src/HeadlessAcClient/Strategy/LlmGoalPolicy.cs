@@ -7233,6 +7233,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // a descriptor selector — this is the descriptor sibling.
     private static readonly TimeSpan RepeatedDescriptorPickupWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedDescriptorPickupThreshold = 3;
+    // Sibling: repeated-Wield-of-a-fuzzy-DESCRIPTOR window + threshold. Like the Pickup
+    // descriptor sibling above but for Wield, whose weapon selector rides the item field: a
+    // Wield carrying a type-descriptor (short_desc~= / name_contains, e.g. a category word
+    // like "weapon") rather than a concrete weapon name expresses "wield any weapon matching
+    // this description"; the dispatch only equips a SPECIFIC owned item, so when nothing owned
+    // matches it fails every time and the bot stays unarmed. The name-keyed Wield-loop
+    // detector parses only name="...", so it cannot see a descriptor selector — this is its
+    // descriptor sibling.
+    private static readonly TimeSpan RepeatedDescriptorWieldWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedDescriptorWieldThreshold = 3;
     // Sibling: repeated-Pickup-of-a-departed-NAME window + threshold. A name-keyed `Pickup`
     // (a concrete ground item or a monster corpse) whose named object has left the distance-
     // bounded `## Visible` (the item/corpse decayed, was taken, or the bot travelled past it)
@@ -7522,6 +7532,79 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return null;
     }
 
+    // Sibling for Wield: the fuzzy type-DESCRIPTOR (short_desc~= / name_contains) the bot has
+    // tried to `Wield` >= threshold times within the window that NO OWNED equippable weapon
+    // matches. A descriptor Wield says "wield any weapon matching this description" (e.g. the
+    // category word "weapon") instead of naming a concrete owned item; the Wield dispatch only
+    // equips a SPECIFIC item already in the bag, so when nothing owned matches, the goal resolves
+    // to MISS, clears, and a fresh no-current-goal call re-emits the SAME descriptor Wield — a
+    // call storm that leaves the bot unarmed (live: an unarmed bot re-emitting item=name_contains
+    // ="weapon"). The name-keyed Wield detector (RepeatedUnownedWieldName via
+    // CountRecentEmittedTargetNames) parses only name="...", so a descriptor selector is invisible
+    // to it; this is the descriptor sibling, mirroring RepeatedDescriptorPickup. Wield carries its
+    // weapon selector in the ITEM field (canonical shape target=<self> item=<selector>), so the
+    // descriptor is read from the item segment, falling back to the target segment (some models
+    // emit the weapon there). Like the name-keyed detector (which skips a name
+    // InventoryResolvesWieldable binds), this skips a descriptor an OWNED equippable item matches
+    // (its Name/ShortDesc binds the selector) so the cue fires only on a genuine no-match loop,
+    // never while a wieldable the bot owns matches. Returns the descriptor VALUE (the bot's own
+    // emitted selector text) or null. A concrete name=/guid=/wcid Wield is handled by the
+    // name-keyed detector + Motor rewrites, not here. Pure: own emission history + own inventory;
+    // no game knowledge, no priority, no target choice.
+    internal static string? RepeatedDescriptorWield(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (events is null) return null;
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in events.RecentGoalEmissions().Where(e => !string.IsNullOrEmpty(e.Text)))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Wield", StringComparison.Ordinal)) continue;
+            // Read the descriptor from the ITEM segment first (the canonical Wield weapon slot),
+            // then fall back to the TARGET segment. Count by descriptor VALUE regardless of whether
+            // it was emitted as short_desc~= or name_contains, so the same intent under either kind
+            // accumulates as one loop.
+            string? value = null;
+            var ii = txt.IndexOf(" item=", StringComparison.Ordinal);
+            if (ii >= 0)
+            {
+                var srcAfterItem = txt.IndexOf(" source=", ii, StringComparison.Ordinal);
+                int iEnd = srcAfterItem >= 0 ? srcAfterItem : txt.Length;
+                value = DescriptorValueInSegment(txt.Substring(ii, iEnd - ii));
+            }
+            if (value is null && !EmissionHasPopulatedItem(txt))
+            {
+                // Fall back to the TARGET segment ONLY when the item field is EMPTY/missing.
+                // A POPULATED item field carries the weapon: a concrete name is a name-keyed
+                // Wield (the executor equips it; RepeatedUnownedWieldName owns that path), so
+                // its presence must never divert to a fuzzy target and count a valid
+                // concrete-item Wield as a descriptor loop. Mirrors the name-keyed detector's
+                // "item field when present, else target" preference (preferItemName).
+                var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+                if (ti < 0) continue;
+                var itemIdx = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
+                var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
+                int tEnd = itemIdx >= 0 ? itemIdx : (srcIdx >= 0 ? srcIdx : txt.Length);
+                value = DescriptorValueInSegment(txt.Substring(ti, tEnd - ti));
+            }
+            if (value is null) continue;
+            counts[value] = counts.TryGetValue(value, out var c) ? c + 1 : 1;
+        }
+        foreach (var kv in counts.OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < RepeatedDescriptorWieldThreshold) break;
+            // An OWNED equippable item whose Name OR ShortDesc contains the value — the Wield could
+            // still resolve to it, so the dispatch owns it; do not surface the no-match cue (mirrors
+            // RepeatedUnownedWieldName skipping InventoryResolvesWieldable, and
+            // RepeatedDescriptorPickup skipping a visible match).
+            if (world?.Inventory is not null && InventoryWieldableMatchesDescriptor(world.Inventory, kv.Key))
+                continue;
+            return kv.Key;
+        }
+        return null;
+    }
+
     // The fuzzy type-DESCRIPTOR value of a target segment — the quoted value of short_desc~="..."
     // or name_contains="..." (the selector forms that match an item by DESCRIPTION rather than by
     // exact name), or null if the segment carries neither (a concrete name=/guid=/wcid target).
@@ -7679,6 +7762,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return true;
         return wieldable.Count(i =>
             HeadlessAcClient.Tactics.SelectorResolver.MatchesNameWordSubsequence(i.Name, name)) == 1;
+    }
+
+    // True when the bot OWNS an equippable (or already-wielded) item whose Name OR ShortDesc
+    // CONTAINS the fuzzy descriptor value (case-insensitive substring — the same semantics the
+    // name_contains / short_desc~= selectors resolve with). Used by the descriptor-Wield detector
+    // so a wieldable the bot already owns that would bind the descriptor is NOT counted as a
+    // no-match Wield loop (mirrors InventoryResolvesWieldable for the name path, and
+    // VisibleMatchesDescriptor for the Pickup descriptor path). Pure string/flag comparison on
+    // owned inventory; no game knowledge.
+    private static bool InventoryWieldableMatchesDescriptor(
+        IReadOnlyList<InventoryItemProjection> inventory, string value)
+    {
+        foreach (var i in inventory)
+        {
+            var equippable = (i.ValidLocations is uint vl && vl != 0) || (i.WieldedAt is uint wa && wa != 0);
+            if (!equippable) continue;
+            if ((!string.IsNullOrEmpty(i.Name) && i.Name.Contains(value, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrEmpty(i.ShortDesc) && i.ShortDesc.Contains(value, StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+        return false;
     }
 
     // True when a goal-emission text carries a populated `item=` field — i.e. a
@@ -12627,6 +12731,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"`{loopedWieldDisplay}` is for sale at a vendor, `Buy` it FIRST; if it is on the ground, " +
                 "`Pickup` it FIRST. Otherwise `Wield` a weapon that IS listed in your `## Inventory`, or acquire " +
                 $"one, instead of re-`Wield`-ing `{loopedWieldDisplay}`.");
+        }
+
+        // ── ## Wield loop (repeated weapon-description Wield) — descriptor sibling of the Wield cue ──
+        // The bot re-emits `Wield` carrying a fuzzy type-DESCRIPTOR (short_desc~= / name_contains,
+        // e.g. the category word "weapon") in the item field instead of a concrete owned weapon
+        // name; the Wield dispatch equips only a SPECIFIC in-bag item, so when nothing owned matches
+        // the goal resolves to MISS, clears, and a fresh no-current-goal call re-emits the SAME
+        // descriptor Wield (live: an unarmed bot re-emitting item=name_contains="weapon"). The
+        // name-keyed Wield cue above parses only name="...", so a descriptor selector trips none of
+        // it; this is the descriptor sibling of that cue, mirroring the Pickup descriptor sibling
+        // below. RepeatedDescriptorWield returns a looped descriptor ONLY when NO owned equippable
+        // item's Name/ShortDesc matches it, so the cue fires on a genuine no-match loop, never while
+        // a wieldable the bot owns matches. Informational, NOT a hard drop. No game knowledge (the
+        // descriptor is the bot's own emitted goal text echoed back), no priority, no target choice.
+        if (RepeatedDescriptorWield(
+                world, events, DateTimeOffset.UtcNow - RepeatedDescriptorWieldWindow) is string loopedWieldDesc
+            && OneLine(loopedWieldDesc) is string loopedWieldDescDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Wield loop (repeated weapon-description Wield)");
+            sb.AppendLine(
+                $"- you have tried several times to `Wield` a weapon matching the description `{loopedWieldDescDisplay}`, " +
+                "but NO equippable weapon matching it is in your `## Inventory` — `Wield` only equips a SPECIFIC weapon " +
+                "you already OWN, named by its exact `name`, not a category word. Re-emitting the same description makes " +
+                "no progress: `Wield` a specific weapon that IS listed in your `## Inventory` by its exact `name`, or " +
+                "acquire one — hunt a monster and loot its corpse, or `Buy` a weapon from a vendor — instead of " +
+                "re-`Wield`-ing a description nothing you own matches.");
         }
 
         // ── ## Pickup loop (repeated item-description Pickup) — descriptor sibling of the loop cues ──
