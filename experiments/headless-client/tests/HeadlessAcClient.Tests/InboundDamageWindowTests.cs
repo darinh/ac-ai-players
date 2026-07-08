@@ -123,4 +123,53 @@ public class InboundDamageWindowTests
         var prev = Now.AddSeconds(-12);
         Assert.True(InboundDamageWindow.BeginsNewInboundEpisode(prev, Now, 12.0));
     }
+
+    // ---- ShouldEmitInboundDamageEvent (episode OR attacker-name change) ----
+
+    [Fact]
+    public void ShouldEmit_NewEpisode_SameAttacker_True()
+    {
+        // A new hit-lull episode always emits (even for the same attacker).
+        Assert.True(InboundDamageWindow.ShouldEmitInboundDamageEvent(
+            null, Now, 12.0, "drudge skulker", "drudge skulker"));
+    }
+
+    [Fact]
+    public void ShouldEmit_SameEpisode_SameAttacker_False()
+    {
+        // Within an episode, the SAME attacker hitting again coalesces (no emit).
+        var prev = Now.AddSeconds(-2);
+        Assert.False(InboundDamageWindow.ShouldEmitInboundDamageEvent(
+            prev, Now, 12.0, "drudge skulker", "drudge skulker"));
+    }
+
+    [Fact]
+    public void ShouldEmit_SameEpisode_AttackerChanged_True()
+    {
+        // A DIFFERENT attacker joining mid-episode (no lull) surfaces a fresh event —
+        // the case that makes the foreign/multi-attacker chain interrupts work.
+        var prev = Now.AddSeconds(-2);
+        Assert.True(InboundDamageWindow.ShouldEmitInboundDamageEvent(
+            prev, Now, 12.0, "chicken", "drudge skulker"));
+    }
+
+    [Fact]
+    public void ShouldEmit_SameEpisode_FirstKnownAfterUnknown_True()
+    {
+        // The last-emitted attacker was unknown (null); the first KNOWN attacker within
+        // the episode differs from null -> emit so it is not swallowed.
+        var prev = Now.AddSeconds(-2);
+        Assert.True(InboundDamageWindow.ShouldEmitInboundDamageEvent(
+            prev, Now, 12.0, "chicken", null));
+    }
+
+    [Fact]
+    public void ShouldEmit_SameEpisode_UnknownCurrentAttacker_False()
+    {
+        // An unknown CURRENT attacker (null key) within an episode does not force an
+        // attacker-change emit (only the episode gate could emit for it).
+        var prev = Now.AddSeconds(-2);
+        Assert.False(InboundDamageWindow.ShouldEmitInboundDamageEvent(
+            prev, Now, 12.0, null, "drudge skulker"));
+    }
 }

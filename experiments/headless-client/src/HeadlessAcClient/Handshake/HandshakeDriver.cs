@@ -3521,16 +3521,16 @@ internal sealed class HandshakeDriver : IDisposable
                                     // Emit a fresh InboundDamageTaken on a new hit-lull EPISODE
                                     // OR when the attacker NAME changed from the one the last
                                     // event was emitted for — the latter surfaces a FOREIGN add
-                                    // that joins mid-episode (no lull) so the foreign-attacker
-                                    // chain interrupt can see it. Same-attacker continuous hits
-                                    // still coalesce to one event per episode.
-                                    var inboundAttackerChanged =
-                                        CombatFeelLedger.NormalizeName(hostileName) is string curInboundKey
-                                        && curInboundKey != CombatFeelLedger.NormalizeName(lastInboundEpisodeAttacker);
-                                    if (InboundDamageWindow.BeginsNewInboundEpisode(
+                                    // that joins mid-episode (no lull) so the foreign/multi-
+                                    // attacker chain interrupts can see it. Same-attacker
+                                    // continuous hits still coalesce to one event per episode.
+                                    // (Decision extracted to InboundDamageWindow.ShouldEmitInboundDamageEvent
+                                    // so the episode-OR-attacker-change contract is unit-tested.)
+                                    if (InboundDamageWindow.ShouldEmitInboundDamageEvent(
                                             prevInboundHitUtc, inboundHitUtc,
-                                            InboundDamageWindowSeconds)
-                                        || inboundAttackerChanged)
+                                            InboundDamageWindowSeconds,
+                                            CombatFeelLedger.NormalizeName(hostileName),
+                                            CombatFeelLedger.NormalizeName(lastInboundEpisodeAttacker)))
                                     {
                                         var inboundFromName =
                                             string.IsNullOrEmpty(hostileName)
