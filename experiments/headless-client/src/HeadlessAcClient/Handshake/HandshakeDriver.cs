@@ -6716,6 +6716,56 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("fellowship-recruit dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.SwearAllegiance)
+                    {
+                        // Social action: swear allegiance to a named PLAYER (a patron/
+                        // monarch), making the bot their vassal. The LLM named the target (a
+                        // `player` in Visible nearby); the motor resolves it to the UNIQUE
+                        // matching player other than self and packs SwearAllegiance (0x001D).
+                        // A player-directed swear must be unambiguous: 0 or several matches
+                        // both Fail (Strategy re-decides with a sharper name) rather than the
+                        // motor picking one on its own. It picks no target of its own.
+                        WorldObjectSnapshot? patronPlayer = null;
+                        var patronMatchCount = 0;
+                        if (goal.Target is { } psel)
+                            patronPlayer = Tactics.SelectorResolver.ResolveUniquePlayerOtherThanActor(
+                                psel, worldState, tacticsSelf, out patronMatchCount);
+                        if (patronPlayer is null)
+                        {
+                            var swearFailReason = patronMatchCount == 0
+                                ? "swear-allegiance: no visible player matches the target"
+                                : "swear-allegiance: target ambiguous (multiple players match)";
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL SwearAllegiance: target {goal.Target} resolved to " +
+                                $"{patronMatchCount} player(s) (need exactly 1); not sending. source={goal.Source}");
+                            tactics.Fail(swearFailReason, eventStream);
+                        }
+                        else
+                        {
+                            var saPktSeq  = nextOutboundPacketSequence++;
+                            var saFragSeq = nextOutboundFragmentSequence++;
+                            var saBuf = new byte[GameActionSwearAllegianceMessage.PackedSize];
+                            var saLen = GameActionSwearAllegianceMessage.Pack(saBuf, patronPlayer.Guid);
+                            var saMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                saMsg.AddAckSequence(lastReceivedSeq);
+                            saMsg.AddBlobFragment(
+                                fragSequence: saFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: saBuf.AsSpan(0, saLen));
+                            var saSent = saMsg.Pack(sendBuf, myClientId,
+                                                    sequence: saPktSeq, iteration: 1,
+                                                    encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, saSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL SwearAllegiance: patron '{patronPlayer.Name}' " +
+                                $"guid=0x{patronPlayer.Guid:X8} source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={saPktSeq} fragSeq={saFragSeq} bytes={saSent}");
+                            tactics.Clear("swear-allegiance dispatched", eventStream);
+                        }
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that

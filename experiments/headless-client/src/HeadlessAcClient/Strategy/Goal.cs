@@ -141,6 +141,15 @@ internal enum GoalKind
     /// makes NO decision about WHO/WHETHER to recruit (Strategy owns that).
     /// </summary>
     FellowshipRecruit = 18,
+
+    /// <summary>
+    /// Swear allegiance to another player (the LLM-named target, a `player` in
+    /// Visible nearby), becoming their vassal. The motor resolves the named target
+    /// to its guid, validates it is a player, and packs the SwearAllegiance wire
+    /// action; it makes NO decision about WHO/WHETHER to swear to (Strategy owns
+    /// that). Mirrors FellowshipRecruit — a player-directed social action.
+    /// </summary>
+    SwearAllegiance = 19,
 }
 
 /// <summary>
