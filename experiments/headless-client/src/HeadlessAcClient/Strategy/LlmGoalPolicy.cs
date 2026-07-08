@@ -10444,8 +10444,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "XP among members hunting near each other when its settings and level spread allow, which " +
                     "can speed leveling. You MAY `FellowshipCreate` (you become leader) then `FellowshipRecruit` " +
                     "that `player` by name (only when exactly one visible `player` matches that name) to invite " +
-                    "them. OPTIONAL — only worth it if you will hunt together; skip it if you are pursuing a " +
-                    "solo objective.");
+                    "them. OPTIONAL — you decide whether to group or stay solo.");
             }
         }
 
