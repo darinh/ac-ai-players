@@ -90,6 +90,6 @@ public class LivenessWatchdogTests
             log: _ => { },
             onStall: msg => { message = msg; fired.Set(); });
         Assert.True(fired.Wait(TimeSpan.FromSeconds(5)), "watchdog did not fire onStall for a stale heartbeat");
-        Assert.Contains("STALLED", message);
+        Assert.Contains("NO PROGRESS", message);
     }
 }

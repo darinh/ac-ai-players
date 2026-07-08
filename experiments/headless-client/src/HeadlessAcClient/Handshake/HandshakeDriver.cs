@@ -2085,18 +2085,22 @@ internal sealed class HandshakeDriver : IDisposable
 
         Console.WriteLine($"[observe] listening for post-handshake packets for {seconds}s; will send acks + timesync echoes ...");
         // Start the process-level liveness watchdog covering this long-running
-        // observe phase. If the loop body ever blocks past the stall timeout (a
-        // hung network/LLM await the in-loop watchdogs cannot catch, since the loop
-        // that runs them is itself blocked), the watchdog force-exits so the
-        // supervisor relaunches a fresh process. Idempotent — safe across reconnect
-        // re-entries. RecordProgress() below bumps the heartbeat every iteration.
+        // observe phase. Its heartbeat means "an inbound server packet arrived"
+        // (see RecordProgress at the CRC-valid packet path below), NOT "the loop
+        // iterated" — so it force-exits BOTH a blocked loop (no packets processed)
+        // AND a zombie loop that keeps spinning on the walk-tick timer after the
+        // server session died (no packets received). Idempotent — safe across
+        // reconnect re-entries.
         LivenessWatchdog.Start();
+        // Reaching a fresh observe phase IS progress: reset the heartbeat here so a
+        // reconnect's no-game-packet window (starvation detect + reconnect ladder,
+        // during which the inbound-packet heartbeat is NOT bumped) does not carry a
+        // stale heartbeat into the new session and false-trip the watchdog before the
+        // first post-reconnect packet arrives. Start()'s own initial bump is skipped
+        // on the idempotent reconnect re-entry, so this unconditional bump is needed.
+        LivenessWatchdog.RecordProgress();
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
-            // Heartbeat for the liveness watchdog: every normal iteration (a packet
-            // received OR a walk-tick wake) bumps this. A gap longer than the stall
-            // timeout means the loop body is wedged -> the watchdog force-exits.
-            LivenessWatchdog.RecordProgress();
             if (reconnectRequested) break;
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero) break;
@@ -2157,6 +2161,12 @@ internal sealed class HandshakeDriver : IDisposable
                 // `continue` above without ever re-arming a decision.
                 lastInboundPacketAt = DateTime.UtcNow;
                 consecutiveStarvationPokes = 0;
+                // Same signal feeds the process-level LivenessWatchdog: a CRC-valid
+                // inbound packet is REAL progress (the server session is alive). Bump
+                // here — NOT per loop iteration — so a zombie loop that keeps spinning
+                // after the session dies (no packets) still ages the heartbeat and gets
+                // force-exited for relaunch.
+                LivenessWatchdog.RecordProgress();
 
                 foreach (var (fh, data) in pkt.Fragments)
                 {
