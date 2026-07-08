@@ -12124,7 +12124,59 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Chat", prompt);
         Assert.Contains("channel`=\"fellowship\"", prompt);
         Assert.DoesNotContain("A `player` is in view", prompt);   // no local-say line (no listener)
-        Assert.DoesNotContain("channel`=\"allegiance\"", prompt);  // allegiance channel not offered
+        Assert.DoesNotContain("channel`=\"allegiance\"", prompt);  // whole-allegiance channel not offered
+    }
+
+    [Fact]
+    public void ChatGuidance_Vassal_NoPlayerNoFellowship_SuggestsMonarchChannel()
+    {
+        // A vassal (MonarchGuid set, not self) may message its monarch on the permission-
+        // free monarch channel even with no player in view and no fellowship. The vassals
+        // channel (monarch->down) is NOT proactively cued (the client cannot observe
+        // whether this bot has direct vassals), though it stays in the goal schema.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = 0x5000ABCDu,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Chat", prompt);
+        Assert.Contains("channel`=\"monarch\"", prompt);
+        Assert.DoesNotContain("channel`=\"vassals\"", prompt);       // vassals not proactively cued
+        Assert.DoesNotContain("channel`=\"fellowship\"", prompt);    // not in a fellowship
+        Assert.DoesNotContain("A `player` is in view", prompt);      // no local-say line
+    }
+
+    [Fact]
+    public void ChatGuidance_OwnMonarch_NoPlayerNoFellowship_NoChatBlock()
+    {
+        // The top monarch of an allegiance (MonarchGuid == self) has no observable
+        // has-vassals signal, so the vassals channel is NOT cued; the monarch channel is
+        // excluded (a top monarch has no monarch above it). With no player and no
+        // fellowship there is therefore nothing to say -> no ## Chat block renders.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = SelfGuid,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Chat", prompt);
+        Assert.DoesNotContain("channel`=\"vassals\"", prompt);
+        Assert.DoesNotContain("channel`=\"monarch\"", prompt);
     }
 
     [Fact]

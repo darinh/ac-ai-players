@@ -8678,7 +8678,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
   "message": string | null,   // Say only: REQUIRED line to speak ALOUD as local chat (nearby players hear it)
-  "channel": "fellowship"|null,   // Say only: route to your fellowship channel; omit = LOCAL say
+  "channel": "fellowship"|"monarch"|"vassals"|null,   // Say only: route to that group channel; omit = LOCAL say
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null
@@ -8698,7 +8698,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
   "message": string | null,   // Say only: REQUIRED line to speak ALOUD as local chat (nearby players hear it)
-  "channel": "fellowship"|null,   // Say only: route to your fellowship channel; omit = LOCAL say
+  "channel": "fellowship"|"monarch"|"vassals"|null,   // Say only: route to that group channel; omit = LOCAL say
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null,
@@ -10493,17 +10493,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "with whom, or skip it.");
         }
 
-        // ── ## Chat (optional say — local aloud and/or the fellowship channel) ─
-        // Surfaces the `Say` capability and its optional fellowship-channel routing,
+        // ── ## Chat (optional say — local aloud and/or a group channel) ───────
+        // Surfaces the `Say` capability and its optional group-channel routing,
         // mechanically only: it names the action, its payload (a `message` you write),
-        // and where the line goes (nearby players hear a LOCAL say; fellowship members
-        // hear a channel say). Each line is gated on its precondition — a player in view
-        // for a local say; being in a fellowship for the fellowship channel — OPTIONAL,
-        // with WHETHER and WHAT to say left to the LLM. No scripted lines, no policy, no
-        // lore. (Allegiance channels are a deliberate follow-up: the only whole-allegiance
-        // channel needs a server Speaker rank, so it is not offered yet.)
+        // and where the line goes (nearby players hear a LOCAL say; a channel say reaches
+        // that group's members). Each line is gated on a precondition we can OBSERVE — a
+        // player in view for a local say; being in a fellowship for the fellowship channel;
+        // being a non-top member of an allegiance for the monarch channel — OPTIONAL, with
+        // WHETHER and WHAT to say left to the LLM. No scripted lines, no policy, no lore.
+        // The "vassals" channel stays in the schema (the motor can route it) but is NOT
+        // proactively cued: the server gates it on HAVING direct vassals, which the client
+        // does not yet observe, so there is no accurate precondition to gate a cue on. The
+        // whole-allegiance broadcast is likewise not offered (it needs a server Speaker rank).
         var inFellowshipForChat = world.Fellowship is not null;
-        if (aPlayerIsInView || inFellowshipForChat)
+        var canTellMonarch = world.Self.IsInAllegiance && !world.Self.IsOwnMonarch;
+        if (aPlayerIsInView || inFellowshipForChat || canTellMonarch)
         {
             sb.AppendLine();
             sb.AppendLine("## Chat");
@@ -10515,6 +10519,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     "- You are in a fellowship. You MAY `Say` with `channel`=\"fellowship\" to send `message` to " +
                     "your fellowship members (wherever they are). OPTIONAL — you decide whether and what.");
+            if (canTellMonarch)
+                sb.AppendLine(
+                    "- You are a vassal in an allegiance. You MAY `Say` with `channel`=\"monarch\" to send " +
+                    "`message` to your monarch. OPTIONAL — you decide whether and what.");
         }
 
         // ── ## Recent rejections + ## Recent goal outcomes (anti-repeat, protected tail) ─
