@@ -150,6 +150,15 @@ internal enum GoalKind
     /// that). Mirrors FellowshipRecruit — a player-directed social action.
     /// </summary>
     SwearAllegiance = 19,
+
+    /// <summary>
+    /// Break allegiance with another player (the LLM-named target — a `player` in
+    /// Visible nearby). The motor resolves the named target to its guid, validates it
+    /// is a player, and packs the BreakAllegiance wire action; it makes NO decision
+    /// about WHO or WHETHER to break (Strategy owns that). Mirrors SwearAllegiance — a
+    /// player-directed social action.
+    /// </summary>
+    BreakAllegiance = 20,
 }
 
 /// <summary>

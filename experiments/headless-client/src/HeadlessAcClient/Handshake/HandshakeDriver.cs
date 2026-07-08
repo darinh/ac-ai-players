@@ -6766,6 +6766,55 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("swear-allegiance dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.BreakAllegiance)
+                    {
+                        // Social action: break allegiance with a named PLAYER. The LLM named
+                        // the target (a `player` in Visible nearby); the motor resolves it to
+                        // the UNIQUE matching player other than self and packs BreakAllegiance
+                        // (0x001E). A player-directed break must be unambiguous: 0 or several
+                        // matches both Fail (Strategy re-decides with a sharper name) rather
+                        // than the motor picking one on its own. It picks no target of its own.
+                        WorldObjectSnapshot? breakPlayer = null;
+                        var breakMatchCount = 0;
+                        if (goal.Target is { } bsel)
+                            breakPlayer = Tactics.SelectorResolver.ResolveUniquePlayerOtherThanActor(
+                                bsel, worldState, tacticsSelf, out breakMatchCount);
+                        if (breakPlayer is null)
+                        {
+                            var breakFailReason = breakMatchCount == 0
+                                ? "break-allegiance: no visible player matches the target"
+                                : "break-allegiance: target ambiguous (multiple players match)";
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL BreakAllegiance: target {goal.Target} resolved to " +
+                                $"{breakMatchCount} player(s) (need exactly 1); not sending. source={goal.Source}");
+                            tactics.Fail(breakFailReason, eventStream);
+                        }
+                        else
+                        {
+                            var baPktSeq  = nextOutboundPacketSequence++;
+                            var baFragSeq = nextOutboundFragmentSequence++;
+                            var baBuf = new byte[GameActionBreakAllegianceMessage.PackedSize];
+                            var baLen = GameActionBreakAllegianceMessage.Pack(baBuf, breakPlayer.Guid);
+                            var baMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                baMsg.AddAckSequence(lastReceivedSeq);
+                            baMsg.AddBlobFragment(
+                                fragSequence: baFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: baBuf.AsSpan(0, baLen));
+                            var baSent = baMsg.Pack(sendBuf, myClientId,
+                                                    sequence: baPktSeq, iteration: 1,
+                                                    encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, baSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL BreakAllegiance: player '{breakPlayer.Name}' " +
+                                $"guid=0x{breakPlayer.Guid:X8} source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={baPktSeq} fragSeq={baFragSeq} bytes={baSent}");
+                            tactics.Clear("break-allegiance dispatched", eventStream);
+                        }
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that

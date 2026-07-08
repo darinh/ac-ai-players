@@ -58,6 +58,7 @@ internal enum GameActionType : uint
     FellowshipQuit      = 0x00A3,
     FellowshipRecruit   = 0x00A5,
     SwearAllegiance     = 0x001D,
+    BreakAllegiance     = 0x001E,
 }
 
 /// <summary>
@@ -503,6 +504,30 @@ internal static class GameActionSwearAllegianceMessage
             throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.SwearAllegiance, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// BreakAllegiance (0x001E): sever the allegiance link with a target player.
+/// Mirrors ACE-bots GameActionAllegianceBreakAllegiance.Handle, which reads,
+/// after the GameAction header:
+///   u32 targetGuid   (the player on the other end of the allegiance link)
+/// then calls Player.HandleActionBreakAllegiance(targetGuid). The LLM chose WHICH
+/// player; this only packs the wire bytes. Same shape as SwearAllegiance (a single
+/// player-guid payload).
+/// </summary>
+internal static class GameActionBreakAllegianceMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.BreakAllegiance, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
         return cursor;
     }

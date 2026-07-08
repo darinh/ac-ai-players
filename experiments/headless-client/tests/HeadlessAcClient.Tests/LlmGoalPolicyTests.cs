@@ -110,6 +110,26 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_BreakAllegianceRequiresTarget()
+    {
+        // BreakAllegiance is a player-DIRECTED action (sever the bond with a specific
+        // party): NOT exempt from the empty-target rejection, so a targetless break must
+        // be rejected (you cannot break allegiance with nobody).
+        var json = """{"kind":"BreakAllegiance","rationale":"leave this patron","priority":4}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_BreakAllegianceWithTargetParses()
+    {
+        var json = """{"kind":"BreakAllegiance","target":{"name":"Patronbot"},"rationale":"sever the bond","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.BreakAllegiance, g!.Kind);
+        Assert.Equal("Patronbot", g.Target.Name);
+    }
+
+    [Fact]
     public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
     {
         // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
