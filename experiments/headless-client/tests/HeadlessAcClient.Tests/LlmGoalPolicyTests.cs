@@ -5526,6 +5526,134 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Wield loop (you do not own that weapon)", prompt);
     }
 
+    // Descriptor-Wield sibling: the weapon selector rides the item field as a fuzzy descriptor
+    // (short_desc~= / name_contains) rather than a concrete name — the live "item=name_contains=
+    // \"weapon\"" shape an unarmed bot emits.
+    private static EventStream WieldDescriptorEmissions(string itemSeg, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Wield target=<empty> item={itemSeg} source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_ReturnsValueForRepeatedNameContainsWield()
+    {
+        // The live shape: 3 Wield emissions carrying item=name_contains="weapon" (a category word)
+        // with NO owned equippable weapon matching -> the looped descriptor value.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldDescriptorEmissions("name_contains=\"weapon\"", 3, now);
+        Assert.Equal("weapon",
+            LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_ReturnsValueForRepeatedShortDescWield()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldDescriptorEmissions("short_desc~=\"melee weapon\"", 3, now);
+        Assert.Equal("melee weapon",
+            LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_NullWhenOwnedWieldableNameMatches()
+    {
+        // The bot OWNS an equippable item whose Name CONTAINS the descriptor value -> the Wield
+        // could resolve to it, so the no-match cue is suppressed (mirrors the name/visible skips).
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(OwnedEquippable("Practice Weapon"));
+        var es = WieldDescriptorEmissions("name_contains=\"weapon\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorWield(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_NullForConcreteNameWield()
+    {
+        // A concrete name= Wield is NOT a fuzzy descriptor (handled by the name-keyed detector),
+        // so the descriptor sibling ignores it.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldDescriptorEmissions("name=\"Shortbow\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_NullWhenConcreteItemWithFuzzyTarget()
+    {
+        // A CONCRETE item with a fuzzy TARGET is an item-driven Wield (the executor equips the
+        // named item, name-keyed detector owns it); the descriptor sibling must NOT divert to the
+        // target's fuzzy selector and count it as a descriptor loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Wield target=name_contains=\"weapon\" item=name=\"Shortbow\" source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_CountsFuzzyTargetWhenItemEmpty()
+    {
+        // When the item field is EMPTY, the weapon selector rides the target; a fuzzy target
+        // descriptor with no owned match IS a descriptor loop (the target-fallback path).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Wield target=name_contains=\"weapon\" item=<empty> source=llm:test",
+            });
+        Assert.Equal("weapon",
+            LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldDescriptorEmissions("name_contains=\"weapon\"", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorWield_IgnoresNonWieldVerbWithSameDescriptor()
+    {
+        // Only Wield emissions count; a Pickup carrying the same descriptor is not a Wield loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name_contains=\"weapon\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorWield(BuildInventoryWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WieldDescriptorLoopCapsule_RendersForRepeatedDescriptorWield()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = WieldDescriptorEmissions("name_contains=\"weapon\"", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
+        Assert.Contains("## Wield loop (repeated weapon-description Wield)", prompt);
+        Assert.Contains("weapon", prompt);
+        Assert.Contains("not a category word", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_WieldDescriptorLoopCapsule_OmittedWhenOwnedWieldableMatches()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildInventoryWorld(OwnedEquippable("Practice Weapon"));
+        var es = WieldDescriptorEmissions("name_contains=\"weapon\"", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.DoesNotContain("## Wield loop (repeated weapon-description Wield)", prompt);
+    }
+
     private static EventStream PickupEmissions(string targetSeg, int count, System.DateTimeOffset utc)
     {
         var es = new EventStream();
