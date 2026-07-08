@@ -6822,46 +6822,34 @@ internal sealed class HandshakeDriver : IDisposable
                     else if (goal is not null && goal.Kind == GoalKind.Say)
                     {
                         // Social action: say a line as chat. The LLM authored the line in
-                        // goal.Message; the motor sanitizes it (printable ASCII, no leading
-                        // command '@', length-capped) and packs it. With no goal.Channel it
-                        // is a LOCAL say (Talk 0x0015, heard by nearby players/creatures as
-                        // HearSpeech); with a resolved channel (fellowship/allegiance) it goes
-                        // to that group chat channel (ChatChannel 0x0147). It invents no text
-                        // and no channel; an empty/unsayable line just Fails.
-                        var sayText = GameActionTalkMessage.SanitizeMessage(goal.Message);
-                        var sayChannel = GameActionChatChannelMessage.ResolveChannel(goal.Channel);
-                        if (sayText is null)
+                        // goal.Message; SayRouting.Decide sanitizes it and resolves the optional
+                        // goal.Channel into a route: Fail (empty message, or a non-blank channel
+                        // the motor cannot resolve -> NOT downgraded to local, so group-intended
+                        // text never leaks to nearby players), Local (Talk 0x0015, heard nearby
+                        // as HearSpeech), or Channel (ChatChannel 0x0147). The motor only packs
+                        // the bytes; it invents no text and no channel.
+                        var sayRoute = SayRouting.Decide(goal.Message, goal.Channel);
+                        if (sayRoute.Kind == SayRouteKind.Fail)
                         {
                             Console.WriteLine(
-                                $"[strategy] LLM-GOAL Say: empty/unsayable message; not sending. source={goal.Source}");
-                            tactics.Fail("say: empty or unsayable message", eventStream);
-                        }
-                        else if (sayChannel is null && !string.IsNullOrWhiteSpace(goal.Channel))
-                        {
-                            // The LLM named a channel the motor does not route (a typo, or the
-                            // not-yet-supported allegiance channels). Do NOT silently downgrade
-                            // to a LOCAL say — that would leak group-intended text to nearby
-                            // players. Fail so Strategy re-decides (say locally with no channel,
-                            // or pick a supported channel).
-                            Console.WriteLine(
-                                $"[strategy] LLM-GOAL Say: unrecognized channel '{goal.Channel}'; not sending. source={goal.Source}");
-                            tactics.Fail("say: unrecognized channel", eventStream);
+                                $"[strategy] LLM-GOAL Say not sent ({sayRoute.FailReason})" +
+                                (string.IsNullOrWhiteSpace(goal.Channel) ? "" : $" channel='{goal.Channel}'") +
+                                $"; source={goal.Source}");
+                            tactics.Fail(sayRoute.FailReason!, eventStream);
                         }
                         else
                         {
+                            var sayText = sayRoute.Text!;
                             var sayPktSeq  = nextOutboundPacketSequence++;
                             var sayFragSeq = nextOutboundFragmentSequence++;
-                            // Route to the resolved group channel, else a LOCAL say. The server
-                            // rejects a channel line if the bot is not in that group / lacks
-                            // permission (harmless, no local leak).
                             byte[] sayBuf;
                             int sayLen;
                             string sayWhere;
-                            if (sayChannel is uint chan)
+                            if (sayRoute.Kind == SayRouteKind.Channel)
                             {
                                 sayBuf = new byte[GameActionChatChannelMessage.MeasureSize(sayText)];
-                                sayLen = GameActionChatChannelMessage.Pack(sayBuf, chan, sayText);
-                                sayWhere = $"channel=0x{chan:X8}";
+                                sayLen = GameActionChatChannelMessage.Pack(sayBuf, sayRoute.Channel, sayText);
+                                sayWhere = $"channel=0x{sayRoute.Channel:X8}";
                             }
                             else
                             {
