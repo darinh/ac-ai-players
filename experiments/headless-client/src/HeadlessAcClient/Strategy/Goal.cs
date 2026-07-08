@@ -159,6 +159,15 @@ internal enum GoalKind
     /// player-directed social action.
     /// </summary>
     BreakAllegiance = 20,
+
+    /// <summary>
+    /// Say a line ALOUD as local chat (heard by nearby players/creatures). A
+    /// self-broadcast with no world target: the LLM authors the line in
+    /// <see cref="Goal.Message"/>; the motor sanitizes it (printable ASCII, no
+    /// leading command '@', length-capped) and packs the Talk (0x0015) wire action.
+    /// The motor invents NO text of its own (Strategy owns WHAT to say and WHETHER).
+    /// </summary>
+    Say = 21,
 }
 
 /// <summary>
@@ -280,6 +289,15 @@ internal sealed record Goal
     /// </summary>
     [JsonPropertyName("direction")]
     public string? Direction { get; init; }
+
+    /// <summary>
+    /// The chat line to speak, for a <see cref="GoalKind.Say"/> goal only. The LLM
+    /// authors this free text; the Motor sanitizes it (printable ASCII, no leading
+    /// command '@', length-capped) and packs the Talk wire action. Null/empty for
+    /// every other verb; a Say with no Message is rejected at parse time.
+    /// </summary>
+    [JsonPropertyName("message")]
+    public string? Message { get; init; }
 
     /// <summary>
     /// Free-form rationale from Strategy. Used for log readability

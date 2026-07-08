@@ -8672,11 +8672,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
+  "message": string | null,   // Say only: REQUIRED line to speak ALOUD as local chat (nearby players hear it)
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null
@@ -8690,11 +8691,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
+  "message": string | null,   // Say only: REQUIRED line to speak ALOUD as local chat (nearby players hear it)
   "rationale": string,
   "priority": 1..10,
   "expires_in_seconds": number | null,
@@ -10487,6 +10489,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "from a visible `player` by name (only when exactly one visible `player` matches that " +
                     "name); this severs your allegiance bond with them. OPTIONAL — you decide whether and " +
                     "with whom, or skip it.");
+        }
+
+        // ── ## Chat (optional local say, gated on a player in view) ───────────
+        // Surfaces the `Say` capability when another `player` is present to hear it,
+        // mechanically only: it names the action, its payload (a `message` you write),
+        // and its mechanical result (nearby players/creatures hear it as local chat).
+        // Marked OPTIONAL with the decision — WHETHER to speak and WHAT to say — left
+        // entirely to the LLM. No scripted lines, no WHEN/WHETHER policy, no lore. The
+        // Motor sanitizes + sends whatever text the LLM authored; it invents none.
+        if (aPlayerIsInView)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Chat");
+            sb.AppendLine(
+                "- A `player` is in view. You MAY `Say` a line ALOUD (put the words in `message`); nearby " +
+                "players and creatures hear it as local chat. OPTIONAL — you decide whether to speak and " +
+                "what to say, or stay silent.");
         }
 
         // ── ## Recent rejections + ## Recent goal outcomes (anti-repeat, protected tail) ─
@@ -14939,14 +14958,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (parsed.Kind != GoalKind.Recall
                 && parsed.Kind != GoalKind.FellowshipCreate
                 && parsed.Kind != GoalKind.FellowshipQuit
+                && parsed.Kind != GoalKind.Say
                 && parsed.Target.IsEmpty)
             {
                 // Recall and the fellowship self/social actions (FellowshipCreate /
                 // FellowshipQuit) are SELF-actions with no world target — like Recall,
                 // they legitimately carry an empty target (FellowshipCreate's name
                 // rides in target.name when given, but an unnamed create falls back to
-                // a default; FellowshipQuit carries nothing). Accept them rather than
-                // discarding the LLM's decision to the heuristic fallback.
+                // a default; FellowshipQuit carries nothing). Say is likewise a
+                // self-broadcast (local chat) with no world target — its payload is the
+                // `message`, validated below. Accept them rather than discarding the
+                // LLM's decision to the heuristic fallback.
                 //
                 // Wield's wielded object is logically the `item`, not the
                 // `target`: the Motor's Wield dispatch reads goal.Item (or an
@@ -14978,6 +15000,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (parsed.Kind == GoalKind.Give && (parsed.Item is null || parsed.Item.IsEmpty))
             {
                 error = "Give goal requires non-empty item selector";
+                return false;
+            }
+            if (parsed.Kind == GoalKind.Say && string.IsNullOrWhiteSpace(parsed.Message))
+            {
+                error = "Say goal requires a non-empty message";
                 return false;
             }
             goal = parsed;

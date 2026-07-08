@@ -6819,6 +6819,46 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("break-allegiance dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null && goal.Kind == GoalKind.Say)
+                    {
+                        // Social action: say a line ALOUD as local chat (heard by nearby
+                        // players/creatures as HearSpeech). Self-broadcast, no target. The
+                        // LLM authored the line in goal.Message; the motor sanitizes it
+                        // (printable ASCII, no leading command '@', length-capped) and packs
+                        // Talk (0x0015). It invents no text of its own; an empty/unsayable
+                        // line just Fails rather than sending nothing.
+                        var sayText = GameActionTalkMessage.SanitizeMessage(goal.Message);
+                        if (sayText is null)
+                        {
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Say: empty/unsayable message; not sending. source={goal.Source}");
+                            tactics.Fail("say: empty or unsayable message", eventStream);
+                        }
+                        else
+                        {
+                            var sayPktSeq  = nextOutboundPacketSequence++;
+                            var sayFragSeq = nextOutboundFragmentSequence++;
+                            var sayBuf = new byte[GameActionTalkMessage.MeasureSize(sayText)];
+                            var sayLen = GameActionTalkMessage.Pack(sayBuf, sayText);
+                            var sayMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                sayMsg.AddAckSequence(lastReceivedSeq);
+                            sayMsg.AddBlobFragment(
+                                fragSequence: sayFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: sayBuf.AsSpan(0, sayLen));
+                            var saySent = sayMsg.Pack(sendBuf, myClientId,
+                                                      sequence: sayPktSeq, iteration: 1,
+                                                      encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, saySent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Say: \"{sayText}\" source={goal.Source} " +
+                                $"pktSeq={sayPktSeq} fragSeq={sayFragSeq} bytes={saySent}");
+                            tactics.Clear("say dispatched", eventStream);
+                        }
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
                     {
                         // `Explore{target}`, honor it: walk to that
