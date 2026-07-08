@@ -121,6 +121,37 @@ internal static class PickerSelection
         => (s.ContainerGuid is uint cg && cg == selfGuid)
         || (s.WielderGuid is uint wg && wg == selfGuid);
 
+    /// <summary>
+    /// AGENTS.md autonomous-interaction invariant: the picker MUST NOT walk the
+    /// bot to a dialog NPC — a creature that is not a monster
+    /// (<see cref="EntityKind.NPC"/>) — that the LLM never named. AGENTS.md lists
+    /// "the picker autonomously walking to the nearest NPC" verbatim as a FORBIDDEN
+    /// autonomous interaction. Callers apply this to the AUTONOMOUS pick branches
+    /// ONLY; it is NOT a type PRIORITY (nothing is ranked, no NPC-vs-item ordering),
+    /// it removes ONE wire-classified category from the aimless approach. An NPC the
+    /// LLM explicitly names is still resolved by the Motor's name-override path, and
+    /// every NPC stays visible to the LLM in the world/exploration projection, so no
+    /// capability is lost — only the Motor deciding ON ITS OWN to approach an NPC.
+    /// Pure wire classification via <see cref="EntityClassifier.ClassifySighting(uint,uint,uint,uint)"/>
+    /// (guid-aware: a player is never an NPC); no hardcoded name/wcid/landblock.
+    /// </summary>
+    internal static bool IsAutonomousApproachDialogNpc(WorldObjectSnapshot s)
+    {
+        // A corpse retains creature bits (Creature[+Attackable]) but is NOT a
+        // dialog NPC — it is a lootable object. Like a monster or an item it stays
+        // autonomously approachable (pre-positioning for a Loot/Use the LLM may
+        // name); only true dialog NPCs/fixtures are gated out. Excluding corpses
+        // here matches the projection's own dialog-NPC concept
+        // (CountUntalkedNpcsInView requires !IsCorpse). Wire flag only, no priority.
+        if (((s.ObjectDescriptionFlags ?? 0u) & (uint)ObjectDescriptionFlag.Corpse) != 0)
+            return false;
+        return EntityClassifier.ClassifySighting(
+                   s.Guid,
+                   s.ItemType ?? 0u,
+                   s.ObjectDescriptionFlags ?? 0u,
+                   s.WeenieFlags ?? 0u) == EntityKind.NPC;
+    }
+
     // Mechanical self-identity filter — the SAME class as the IsAttachedToSelf
     // filter above (drop objects that ARE the bot's own). Drops a Corpse-flagged
     // object (wire ObjectDescriptionFlag bit 0x2000) whose name is the bot's OWN

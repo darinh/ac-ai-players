@@ -8508,8 +8508,24 @@ internal sealed class HandshakeDriver : IDisposable
                         // No type-based bumps. No corpse-loot bump. No
                         // door preference. No wearable preference. Those
                         // are strategic — owned by the LLM.
+                        //
+                        // gate-autonomous-npc-approach: exclude dialog NPCs
+                        // (wire EntityKind.NPC — a creature that is not a
+                        // monster) from THIS autonomous pick. AGENTS.md names
+                        // "the picker autonomously walking to the nearest NPC"
+                        // as forbidden autonomous interaction; the aimless
+                        // nearest-object pick otherwise walks the bot to the
+                        // nearest NPC-classified fixture the LLM never named
+                        // (and cycles a cluster of them, arriving with no verb).
+                        // NOT a priority (nothing is ranked). The combat-target
+                        // and LLM-name-override branches above keep the FULL
+                        // inRange set, so an NPC the LLM explicitly names is
+                        // still approached; NPCs also stay in the world
+                        // projection the LLM sees. Monsters + items remain
+                        // autonomously approachable (pre-positioning for a
+                        // likely Attack/Use the LLM has not yet named).
                         candidate = PickerSelection.PickNearest(
-                            inRange,
+                            inRange.Where(s => !PickerSelection.IsAutonomousApproachDialogNpc(s)),
                             self,
                             chosenCharacterGuid);
                         if (candidate is not null)
@@ -8642,14 +8658,30 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                         else if (ranked.Count > 0)
                         {
-                            candidate = ranked[0].snap;
-                            pickerSourceForActivity = "fallback";
-                            pickerReasonForActivity = "no candidates in radius; mechanical nearest known object in current landblock";
-                            Console.WriteLine(
-                                $"[motion] EXPLORATION FALLBACK — no candidates in {MotionSearchRadius}u; " +
-                                $"mechanical nearest in landblock 0x{selfLandblock:X8}: " +
-                                $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' dist={ranked[0].distance:F2}u " +
-                                $"(of {ranked.Count} candidates)");
+                            // gate-autonomous-npc-approach (fallback arm): the SAME
+                            // AGENTS.md invariant as the in-range pick above — the
+                            // autonomous fallback must not walk the bot to a dialog
+                            // NPC (EntityKind.NPC) the LLM never named. Pick the
+                            // nearest NON-NPC known object. NPCs remain in the
+                            // `ranked` list that feeds the "## Exploration
+                            // candidates" LLM surface below (so the LLM can still
+                            // choose to approach one by name); they are only left
+                            // out of the AUTONOMOUS selection. If every fallback
+                            // candidate is an NPC the pick stays null and the bot
+                            // waits for an LLM goal rather than auto-approaching one.
+                            var approachable = ranked.FirstOrDefault(
+                                t => !PickerSelection.IsAutonomousApproachDialogNpc(t.snap));
+                            if (approachable.snap is not null)
+                            {
+                                candidate = approachable.snap;
+                                pickerSourceForActivity = "fallback";
+                                pickerReasonForActivity = "no candidates in radius; mechanical nearest known object in current landblock";
+                                Console.WriteLine(
+                                    $"[motion] EXPLORATION FALLBACK — no candidates in {MotionSearchRadius}u; " +
+                                    $"mechanical nearest in landblock 0x{selfLandblock:X8}: " +
+                                    $"guid=0x{candidate.Guid:X8} name='{candidate.Name}' dist={approachable.distance:F2}u " +
+                                    $"(of {ranked.Count} candidates)");
+                            }
                         }
 
                         // Surface candidate set to the LLM (top

@@ -36,6 +36,7 @@ public class PickerSelectionTests
     // ObjectDescriptionFlag bits.
     private const uint FlagDoor = (uint)ObjectDescriptionFlag.Door;
     private const uint FlagCorpse = (uint)ObjectDescriptionFlag.Corpse;
+    private const uint FlagAttackable = (uint)ObjectDescriptionFlag.Attackable;
 
     private static WorldObjectSnapshot Self() =>
         new(SelfGuid) { CellId = CellId, Position = Vector3.Zero, Name = "Bot" };
@@ -171,6 +172,101 @@ public class PickerSelectionTests
             new[] { theirSword, farNpc }, Self(), SelfGuid);
         Assert.NotNull(picked);
         Assert.Equal(0xB00u, picked!.Guid);
+    }
+
+    // =============================================================
+    // gate-autonomous-npc-approach — the picker MUST NOT autonomously
+    // walk the bot to a dialog NPC (EntityKind.NPC: a creature that is
+    // not a monster) the LLM never named. AGENTS.md lists that exact
+    // behavior as forbidden autonomous interaction. These test the
+    // pure wire classifier the two autonomous pick branches apply;
+    // they do NOT assert any type ORDERING (distance stays the only
+    // ordering signal within the approachable set).
+    // =============================================================
+
+    private const uint PlayerGuid = 0x50000042u;
+
+    [Fact]
+    public void AutonomousNpc_TrueForNonMonsterCreature()
+    {
+        // A creature with no Attackable flag is a dialog NPC (a Fishing
+        // Hole, vendor, or quest-giver share this wire profile).
+        var npc = Snap(0x600, "Fixture", x: 5f, itemType: ItemTypeCreature);
+        Assert.True(PickerSelection.IsAutonomousApproachDialogNpc(npc));
+    }
+
+    [Fact]
+    public void AutonomousNpc_FalseForMonster()
+    {
+        // An Attackable creature is a monster (Mob), not a dialog NPC —
+        // pre-positioning for a likely Attack stays allowed.
+        var mob = Snap(0x601, "Critter", x: 5f,
+            itemType: ItemTypeCreature, descFlags: FlagAttackable);
+        Assert.False(PickerSelection.IsAutonomousApproachDialogNpc(mob));
+    }
+
+    [Fact]
+    public void AutonomousNpc_FalseForItemAndDoor()
+    {
+        var item = Snap(0x602, "Apple", x: 5f, itemType: ItemTypeMeleeWeapon);
+        var door = Snap(0x603, "Door", x: 5f, descFlags: FlagDoor);
+        Assert.False(PickerSelection.IsAutonomousApproachDialogNpc(item));
+        Assert.False(PickerSelection.IsAutonomousApproachDialogNpc(door));
+    }
+
+    [Fact]
+    public void AutonomousNpc_FalseForPlayerBandCreature()
+    {
+        // A player shares the creature wire profile but its guid band
+        // makes it NOT an NPC (guid-aware classifier) — players are
+        // handled by their own paths, never the autonomous NPC gate.
+        var player = Snap(PlayerGuid, "Otherbot", x: 5f, itemType: ItemTypeCreature);
+        Assert.False(PickerSelection.IsAutonomousApproachDialogNpc(player));
+    }
+
+    [Fact]
+    public void AutonomousNpc_FalseForCorpseCreature()
+    {
+        // A corpse retains Creature[+Attackable] bits (so ClassifySighting maps it
+        // to EntityKind.NPC) but is a lootable object, NOT a dialog NPC. It must
+        // stay autonomously approachable (a Loot/Use target the LLM may name), so
+        // the dialog-NPC gate excludes it.
+        var corpse = Snap(0x604, "Corpse of Critter", x: 5f,
+            itemType: ItemTypeCreature, descFlags: FlagCorpse | FlagAttackable);
+        Assert.False(PickerSelection.IsAutonomousApproachDialogNpc(corpse));
+    }
+
+    [Fact]
+    public void AutonomousPick_ExcludingNpcs_PicksFartherMonsterOverCloserNpc()
+    {
+        // Mirrors the Motor's autonomous branch: filtering out dialog
+        // NPCs before PickNearest makes a closer NPC (Fishing Hole) NOT
+        // divert the bot; the farther huntable monster is picked. Within
+        // the approachable set, distance is still the only signal.
+        var closeNpc = Snap(0x700, "Fishing Hole", x: 3f, itemType: ItemTypeCreature);
+        var farMob = Snap(0x701, "Rabbit", x: 12f,
+            itemType: ItemTypeCreature, descFlags: FlagAttackable);
+        var filtered = new[] { closeNpc, farMob }
+            .Where(s => !PickerSelection.IsAutonomousApproachDialogNpc(s));
+        var picked = PickerSelection.PickNearest(filtered, Self(), SelfGuid);
+        Assert.NotNull(picked);
+        Assert.Equal(0x701u, picked!.Guid);
+    }
+
+    [Fact]
+    public void AutonomousPick_ExcludingNpcs_ReturnsNullWhenOnlyNpcs()
+    {
+        // A cluster of same-named NPC fixtures (the live Fishing-Hole
+        // cycle): after excluding NPCs there is nothing to auto-approach,
+        // so the picker returns null and the Motor waits for an LLM goal /
+        // steers a frontier probe instead of cycling the fixtures.
+        var a = Snap(0x710, "Fishing Hole", x: 3f, itemType: ItemTypeCreature);
+        var b = Snap(0x711, "Fishing Hole", x: 4f, itemType: ItemTypeCreature);
+        var c = Snap(0x712, "Fishing Hole", x: 5f, itemType: ItemTypeCreature);
+        var filtered = new[] { a, b, c }
+            .Where(s => !PickerSelection.IsAutonomousApproachDialogNpc(s));
+        var picked = PickerSelection.PickNearest(filtered, Self(), SelfGuid);
+        Assert.Null(picked);
     }
 
     // =============================================================
