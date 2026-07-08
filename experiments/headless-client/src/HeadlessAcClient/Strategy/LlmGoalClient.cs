@@ -69,9 +69,15 @@ internal sealed class LlmGoalClient
     // decisions the instant it 429'd. gpt-4o-mini was noted as chronically
     // 429-prone, which is exactly why a rotation, not a single fixed model, is the
     // right default.)
-    private const string DefaultModel = "openai/gpt-4o";
-    private const string DefaultFallbackModels =
-        "openai/gpt-4.1-mini;mistral-ai/mistral-small-2503;meta/llama-3.3-70b-instruct";
+    internal const string DefaultModel = "openai/gpt-4o";
+    // Diverse-by-PROVIDER so a per-model-per-day 429 wall on one provider's models
+    // rotates onto a DIFFERENT provider's separate daily-quota bucket, not just the
+    // next model in the same bucket. Spans OpenAI, Microsoft, Mistral, Cohere, Meta
+    // (all probed 200 OK on the running server and accept the ~26KB bot prompt). See
+    // the provider-diversity regression test that guards this from collapsing to one
+    // bucket. Override the whole chain with AC_BOTS_LLM_FALLBACK_MODELS.
+    internal const string DefaultFallbackModels =
+        "openai/gpt-4.1-mini;microsoft/phi-4;mistral-ai/mistral-small-2503;cohere/cohere-command-a;meta/llama-3.3-70b-instruct";
 
     private readonly HttpClient _http;
     private readonly string _endpoint;

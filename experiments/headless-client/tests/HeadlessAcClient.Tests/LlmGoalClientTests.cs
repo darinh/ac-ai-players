@@ -29,6 +29,39 @@ public class LlmGoalClientTests
 {
     private const string Endpoint = "https://test.example/chat";
 
+    // ---- default fallback chain: provider diversity (quota-bucket) guard ----
+
+    [Fact]
+    public void DefaultFallbackChain_SpansMultipleProviders_ForSeparateQuotaBuckets()
+    {
+        // GitHub Models rate-limits per-model-per-day; models from the SAME provider
+        // often share a bucket, so a fallback chain confined to one provider can wall
+        // ALL at once. The default chain must span several distinct providers so a
+        // 429 on one provider rotates onto a DIFFERENT daily-quota bucket. This guards
+        // the documented regression where a single-provider default degraded the bot
+        // to weak decisions the instant it 429'd.
+        var chain = (LlmGoalClient.DefaultModel + ";" + LlmGoalClient.DefaultFallbackModels)
+            .Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        Assert.True(chain.Length >= 4, $"default chain has only {chain.Length} models");
+
+        // Provider = the token before '/' (e.g. "openai" in "openai/gpt-4o"). Every
+        // entry must be provider-qualified.
+        foreach (var m in chain)
+            Assert.Contains('/', m);
+
+        var providers = chain
+            .Select(m => m.Split('/', 2)[0].ToLowerInvariant())
+            .Distinct()
+            .ToArray();
+        Assert.True(providers.Length >= 4,
+            $"default chain spans only {providers.Length} providers ({string.Join(",", providers)}); " +
+            "want >= 4 distinct daily-quota buckets");
+
+        // The primary must be first and part of the chain.
+        Assert.Equal(LlmGoalClient.DefaultModel, chain[0]);
+    }
+
     // ---- single-model (no fallback) = unchanged behaviour ----
 
     [Fact]
