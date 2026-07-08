@@ -91,6 +91,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_SwearAllegianceRequiresTarget()
+    {
+        // SwearAllegiance is a player-DIRECTED action: NOT exempt from the empty-target
+        // rejection, so a targetless swear must be rejected (you cannot swear to nobody).
+        var json = """{"kind":"SwearAllegiance","rationale":"pledge loyalty","priority":4}""";
+        Assert.False(LlmGoalPolicy.TryParseGoal(json, out _, out var err));
+        Assert.Contains("target", err);
+    }
+
+    [Fact]
+    public void TryParseGoal_SwearAllegianceWithTargetParses()
+    {
+        var json = """{"kind":"SwearAllegiance","target":{"name":"Monarchbot"},"rationale":"join their allegiance","priority":4}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.SwearAllegiance, g!.Kind);
+        Assert.Equal("Monarchbot", g.Target.Name);
+    }
+
+    [Fact]
     public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
     {
         // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
@@ -11975,6 +11994,41 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(null), new EventStream(), null);
         Assert.DoesNotContain("## Fellowship guidance", prompt);
         Assert.DoesNotContain("you are NOT in a fellowship", prompt);
+    }
+
+    [Fact]
+    public void AllegianceGuidance_Solo_NoPlayerInView_Omitted()
+    {
+        // Solo (no player in view) renders no allegiance guidance section -> zero
+        // static-floor cost. ("SwearAllegiance" still appears in the goal schema kind
+        // list, which always renders; only the guidance capsule is player-gated.)
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(null), new EventStream(), null);
+        Assert.DoesNotContain("## Allegiance guidance", prompt);
+    }
+
+    [Fact]
+    public void AllegianceGuidance_PlayerInView_SuggestsSwear()
+    {
+        // A visible player surfaces the optional SwearAllegiance cue (gated on player-in-view).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x500000A1u, Name = "Otherbot", IsCreature = true, IsPlayer = true, Distance = 8f },
+            },
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Allegiance guidance", prompt);
+        Assert.Contains("`SwearAllegiance`", prompt);
+        Assert.Contains("vassal", prompt);
     }
 
     [Fact]

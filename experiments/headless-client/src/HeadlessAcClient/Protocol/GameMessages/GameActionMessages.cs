@@ -57,6 +57,7 @@ internal enum GameActionType : uint
     FellowshipCreate    = 0x00A2,
     FellowshipQuit      = 0x00A3,
     FellowshipRecruit   = 0x00A5,
+    SwearAllegiance     = 0x001D,
 }
 
 /// <summary>
@@ -479,6 +480,30 @@ internal static class GameActionFellowshipRecruitMessage
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.FellowshipRecruit, actionSequence);
         BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), newMemberGuid); cursor += 4;
+        return cursor;
+    }
+}
+
+/// <summary>
+/// SwearAllegiance (0x001D): swear allegiance to a target PATRON, making the bot
+/// their vassal. Mirrors ACE-bots GameActionAllegianceSwearAllegiance.Handle,
+/// which reads, after the GameAction header:
+///   u32 targetGuid   (the player to swear allegiance to)
+/// then calls Player.HandleActionSwearAllegiance(targetGuid). The LLM chose WHICH
+/// player to swear to; this only packs the wire bytes. Same shape as
+/// FellowshipRecruit (a single player-guid payload).
+/// </summary>
+internal static class GameActionSwearAllegianceMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 4;  // 16 bytes
+
+    public static int Pack(Span<byte> dest, uint targetGuid, uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.SwearAllegiance, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), targetGuid); cursor += 4;
         return cursor;
     }
 }

@@ -8672,7 +8672,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -8690,7 +8690,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -10447,6 +10447,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "them. OPTIONAL — only worth it if you will hunt together; skip it if you are pursuing a " +
                     "solo objective.");
             }
+        }
+
+        // ── ## Allegiance guidance (optional social action, gated on a player in view) ──
+        // Surfaces the WHEN-a-player-is-present affordance for the `SwearAllegiance`
+        // verb, mechanically only: it names the action, its unique-target rule, and its
+        // mechanical result (you become the target's vassal), and marks it OPTIONAL with
+        // the decision left to the LLM. No WHEN/WHETHER policy, no priority, no
+        // hierarchy/lore framing. Rendered ONLY when a `player` is in view, so it costs
+        // nothing solo. The Motor resolves the named player + sends the opcode; it never
+        // picks a target on its own.
+        if (aPlayerIsInView)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Allegiance guidance");
+            sb.AppendLine(
+                "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
+                "(only when exactly one visible `player` matches that name); this makes you that " +
+                "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
         }
 
         // ── ## Recent rejections + ## Recent goal outcomes (anti-repeat, protected tail) ─
