@@ -262,6 +262,22 @@ internal sealed record SelfProjection
     [JsonPropertyName("coin_value")] public int? CoinValue { get; init; }
 
     /// <summary>
+    /// The guid at the TOP of the bot's allegiance tree, decoded from the self
+    /// object's ObjectCreate weenie-header Monarch field. null = the bot is in no
+    /// allegiance; == <see cref="Guid"/> = the bot is its own monarch; any other
+    /// value = the bot is a vassal under that monarch guid. A raw wire fact the
+    /// LLM reads to know whether it has an allegiance to act on (Swear/Break); no
+    /// value/priority label, no hierarchy interpretation.
+    /// </summary>
+    [JsonPropertyName("monarch_guid")] public uint? MonarchGuid { get; init; }
+
+    /// <summary>True when the bot belongs to any allegiance (Monarch field present and non-zero).</summary>
+    [JsonIgnore] public bool IsInAllegiance => MonarchGuid is uint m && m != 0;
+
+    /// <summary>True when the bot is its own monarch (top of its allegiance tree).</summary>
+    [JsonIgnore] public bool IsOwnMonarch => MonarchGuid is uint m && m != 0 && m == Guid;
+
+    /// <summary>
     /// Character-sheet attribute base values (StartingValue + raised Ranks),
     /// seeded from the login PlayerDescription and kept live thereafter by
     /// PrivateUpdateAttribute (0x02E3): a RaiseAttribute updates the affected
@@ -1056,6 +1072,7 @@ internal sealed record WorldStateProjection
                 NumDeaths = numDeaths,
                 CurrentLandblockDeaths = landblock is uint lbForDeaths ? world.DeathsInLandblock(lbForDeaths) : 0,
                 CoinValue = coinValue,
+                MonarchGuid = self.MonarchGuid,
                 Attributes = attrProj,
                 TrainedSkills = skillProj,
             },

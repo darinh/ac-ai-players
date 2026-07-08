@@ -62,13 +62,19 @@ internal sealed class WorldObjectSnapshot
     public uint? CurrentWieldedLocation { get; internal set; }
 
     // Container / wielder linkage (populated by ObjectCreate from the
-    // server's CreateObject serializer). For items the bot is given at
-    // character creation (Training Spadone, Healing Kit, etc.), the
-    // ObjectCreate carries ContainerGuid = self and WielderGuid = null
-    // - i.e. "in your bag, not yet equipped". The startup equip-from-
-    // inventory pass uses these to decide what to wield.
+    // server's CreateObject serializer). For an un-equipped item carried
+    // in the bot's inventory, the ObjectCreate carries ContainerGuid = self
+    // and WielderGuid = null - i.e. "in your bag, not yet equipped". The
+    // startup equip-from-inventory pass uses these to decide what to wield.
     public uint? ContainerGuid { get; internal set; }
     public uint? WielderGuid { get; internal set; }
+
+    // ObjectCreate weenie-header Monarch field (WeenieHeaderFlag.Monarch): the
+    // guid at the TOP of this object's allegiance tree, when present. For the
+    // self player it decodes the bot's own allegiance membership: null/absent =
+    // unaffiliated; == this object's own guid = it is its own monarch; any other
+    // guid = it is a vassal under that monarch. Wire fact only; no interpretation.
+    public uint? MonarchGuid { get; internal set; }
 
     // Spatial state.
     public uint? CellId { get; internal set; }

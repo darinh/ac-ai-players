@@ -10449,6 +10449,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
 
+        // ── ## Allegiance state (self-fact, rendered when the bot is in an allegiance) ──
+        // A raw self-state fact decoded from the self object's Monarch wire field: it
+        // states, mechanically, whether the bot belongs to an allegiance and whether it
+        // is its own monarch or a vassal (monarch guid != own guid). This is the state
+        // counterpart to the SwearAllegiance affordance below: it is what lets the LLM
+        // know it HAS an allegiance it could act on (e.g. BreakAllegiance). No priority,
+        // no WHEN/WHETHER policy, no decision — just the decoded fact.
+        if (world.Self.IsInAllegiance)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Allegiance state");
+            sb.AppendLine(world.Self.IsOwnMonarch
+                ? "- allegiance: you are the monarch of your own allegiance (monarch guid = your own guid)."
+                : $"- allegiance: you are a vassal in an allegiance (monarch guid 0x{world.Self.MonarchGuid!.Value:X8}).");
+        }
+
         // ── ## Allegiance guidance (optional social action, gated on a player in view) ──
         // Surfaces the WHEN-a-player-is-present affordance for the `SwearAllegiance`
         // verb, mechanically only: it names the action, its unique-target rule, and its

@@ -945,6 +945,11 @@ internal sealed class WorldState
         // server re-emits ObjectCreate when the linkage changes.
         snap.ContainerGuid = oc.Weenie.ContainerGuid;
         snap.WielderGuid = oc.Weenie.WielderGuid;
+        // Allegiance monarch (weenie-header Monarch field): present on player
+        // objects that belong to an allegiance. Refreshed like the other
+        // identity fields; absence overwrites with null (this is a full weenie
+        // snapshot, so no Monarch flag genuinely means "no allegiance").
+        snap.MonarchGuid = oc.Weenie.MonarchGuid;
 
         // Spatial/physics fields are gated by SeqObjectPosition
         // within the same instance epoch. After a ResetForNewInstance,
