@@ -76,6 +76,14 @@ internal sealed class WorldObjectSnapshot
     // guid = it is a vassal under that monarch. Wire fact only; no interpretation.
     public uint? MonarchGuid { get; internal set; }
 
+    // Per-property 1-byte high-water marks for this object's PublicUpdateInstanceId
+    // (0x02DA) stream, keyed by PropertyInstanceId. Lives ON the snapshot (not a
+    // global WorldState map) so it is GC'd when the object is ObjectDeleted and is
+    // CLEARED by ResetForNewInstance when the server starts a new instance epoch
+    // (whose per-object sequence counters restart at 0). Null until the first such
+    // update for this object. See WorldState.ApplyPublicInstanceId.
+    internal Dictionary<uint, byte>? InstanceIdByteSeqs { get; set; }
+
     // Spatial state.
     public uint? CellId { get; internal set; }
     public Vector3 Position { get; internal set; }
@@ -181,6 +189,10 @@ internal sealed class WorldObjectSnapshot
         SeqServerControl = null;
         SeqVisualDesc = null;
         SeqVector = null;
+        // New instance epoch -> the server restarts this object's per-property
+        // InstanceId sequence counters at 0, so drop our high-water marks or a
+        // valid seq-0 update in the new epoch would be falsely rejected as stale.
+        InstanceIdByteSeqs = null;
     }
 
     // ---- Sequence advance helpers ----

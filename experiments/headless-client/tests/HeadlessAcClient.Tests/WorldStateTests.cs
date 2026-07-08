@@ -646,6 +646,95 @@ public class WorldStateTests
         Assert.Null(ws.Self!.MonarchGuid);
     }
 
+    [Fact]
+    public void PublicUpdateInstanceId_MonarchClear_UpdatesSelfWithoutNewObjectCreate()
+    {
+        // The staleness fix: ObjectCreate seeds a monarch (vassal state), then a
+        // live PublicUpdateInstanceId Monarch=0 (an allegiance break) clears it
+        // WITHOUT waiting for a fresh ObjectCreate to resend the weenie header.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", monarchGuid: OtherGuid));
+        Assert.Equal(OtherGuid, ws.Self!.MonarchGuid);
+
+        var wire = new byte[PublicUpdateInstanceIdMessage.PackedSize];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(0), (uint)GameMessageOpcode.PublicUpdateInstanceId);
+        wire[4] = 1;                                                                          // sequence
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(5), TestGuid);   // objectGuid = self
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(9), 26u);        // PropertyInstanceId.Monarch
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(13), 0u);        // value 0 = removed
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(wire)!));
+        Assert.Null(ws.Self!.MonarchGuid);
+    }
+
+    private static byte[] BuildMonarchUpdate(byte sequence, uint objectGuid, uint value)
+    {
+        var wire = new byte[PublicUpdateInstanceIdMessage.PackedSize];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(0), (uint)GameMessageOpcode.PublicUpdateInstanceId);
+        wire[4] = sequence;
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(5), objectGuid);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(9), 26u); // Monarch
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(wire.AsSpan(13), value);
+        return wire;
+    }
+
+    [Fact]
+    public void PublicUpdateInstanceId_SeqTrackerGoesWithSnapshot_OnDelete()
+    {
+        // The InstanceId sequence high-water lives ON the snapshot, so ObjectDelete
+        // drops it (no global-map leak, no cross-epoch stale-rejection): after the
+        // object is deleted, a fresh seq-0 update for the same guid is accepted.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(OtherGuid, name: "Pal", seqInstance: 0));
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(5, OtherGuid, 0x5000AAAAu))!));
+        Assert.Equal(0x5000AAAAu, ws.TryGet(OtherGuid)!.MonarchGuid);
+
+        Assert.True(ws.Apply(new ObjectDeleteMessage(OtherGuid, 0)));
+        Assert.Null(ws.TryGet(OtherGuid));
+
+        // Re-appears with the server's per-object sequence restarted at 0 -> accepted.
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(0, OtherGuid, 0x5000BBBBu))!));
+        Assert.Equal(0x5000BBBBu, ws.TryGet(OtherGuid)!.MonarchGuid);
+    }
+
+    [Fact]
+    public void PublicUpdateInstanceId_NewInstanceEpoch_AcceptsSeqZero()
+    {
+        // A new instance epoch (advanced-instance ObjectCreate) resets the server's
+        // per-object InstanceId sequence to 0. ResetForNewInstance clears our tracker
+        // so the new epoch's seq-0 Monarch update is not falsely rejected as stale.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 1));
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(5, TestGuid, 0x50000099u))!));
+        Assert.Equal(0x50000099u, ws.Self!.MonarchGuid);
+
+        // New epoch (instance advances) -> tracker cleared.
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 2));
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(0, TestGuid, 0x5000CCCCu))!));
+        Assert.Equal(0x5000CCCCu, ws.Self!.MonarchGuid);
+    }
+
+    [Fact]
+    public void ObjectCreate_DoesNotClobberLiveMonarchUpdate_SameInstance()
+    {
+        // A same-epoch ObjectCreate header must NOT overwrite a fresher discrete
+        // Monarch update (guards against out-of-order same-instance delivery).
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 1, monarchGuid: OtherGuid));
+        Assert.Equal(OtherGuid, ws.Self!.MonarchGuid);
+
+        // Live update lands (discrete Monarch seq now exists this epoch).
+        Assert.True(ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(1, TestGuid, 0x5000DDDDu))!));
+        Assert.Equal(0x5000DDDDu, ws.Self!.MonarchGuid);
+
+        // A same-instance ObjectCreate carrying a stale header must be ignored for Monarch.
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 1, monarchGuid: OtherGuid));
+        Assert.Equal(0x5000DDDDu, ws.Self!.MonarchGuid);
+    }
+
     // ---- Fellowship membership ----
 
     private static FellowshipFullUpdatePayload BuildFellowship(

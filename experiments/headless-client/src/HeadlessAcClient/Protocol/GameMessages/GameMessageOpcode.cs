@@ -43,6 +43,15 @@ internal enum GameMessageOpcode : uint
     // StartingValue | u32 ExperienceSpent. See
     // ACE GameMessagePrivateUpdateAttribute.
     PrivateUpdateAttribute   = 0x02E3,
+    // Public per-object InstanceId (guid-valued) property update. Unlike the
+    // Private* self-updates it CARRIES the target object's guid, so it reports a
+    // named-object-guid property change (e.g. PropertyInstanceId.Monarch=26 when a
+    // player's allegiance monarch changes on swear/break). Layout: u8 seq | u32
+    // objectGuid | u32 property | u32 value (value 0 = property removed). Server
+    // encoder: GameMessagePublicUpdateInstanceID (UIQueue, 17 bytes). The server's
+    // UpdateProperty(PropertyInstanceId,...) sends THIS (the Public variant), not
+    // the Private one, for allegiance Monarch changes.
+    PublicUpdateInstanceId   = 0x02DA,
     HearSpeech               = 0x02BB,
     CharacterCreateResponse  = 0xF643,
     CharacterList            = 0xF658,
