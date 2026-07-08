@@ -1960,6 +1960,14 @@ internal sealed class HandshakeDriver : IDisposable
         // swinging at — a swarm add, or a mob that aggroed mid-travel. Reset
         // after each attributed death.
         (uint? Wcid, string? Name, DateTime At)? lastInboundDamager = null;
+        // The attacker NAME the most-recent InboundDamageTaken event was emitted for.
+        // InboundDamageTaken is otherwise deduped to one event per hit-lull EPISODE, so a
+        // FOREIGN add that joins DURING an active episode (no lull) would surface no fresh
+        // event and the foreign-attacker chain interrupt could never see it. Emitting also
+        // when the attacker name CHANGES from this last-emitted name catches the mid-episode
+        // add, while same-attacker continuous hits still coalesce to one event. Reset on
+        // landblock change with the inbound window so a new area re-arms.
+        string?              lastInboundEpisodeAttacker = null;
         var                  selfDeathAttributed = false;
         // Last self position observed while alive (HP>0) via ORDINARY ON-FOOT
         // movement; the death-location capture reads it. Refreshed off the
@@ -3510,13 +3518,24 @@ internal sealed class HandshakeDriver : IDisposable
                                     // last actively-fought foe is stale at death.
                                     if (CombatFeelLedger.NormalizeName(hostileName) is not null)
                                         lastInboundDamager = (null, hostileName, inboundHitUtc);
+                                    // Emit a fresh InboundDamageTaken on a new hit-lull EPISODE
+                                    // OR when the attacker NAME changed from the one the last
+                                    // event was emitted for — the latter surfaces a FOREIGN add
+                                    // that joins mid-episode (no lull) so the foreign-attacker
+                                    // chain interrupt can see it. Same-attacker continuous hits
+                                    // still coalesce to one event per episode.
+                                    var inboundAttackerChanged =
+                                        CombatFeelLedger.NormalizeName(hostileName) is string curInboundKey
+                                        && curInboundKey != CombatFeelLedger.NormalizeName(lastInboundEpisodeAttacker);
                                     if (InboundDamageWindow.BeginsNewInboundEpisode(
                                             prevInboundHitUtc, inboundHitUtc,
-                                            InboundDamageWindowSeconds))
+                                            InboundDamageWindowSeconds)
+                                        || inboundAttackerChanged)
                                     {
                                         var inboundFromName =
                                             string.IsNullOrEmpty(hostileName)
                                                 ? "an attacker" : hostileName;
+                                        lastInboundEpisodeAttacker = hostileName;
                                         eventStream.Append(new StreamEvent
                                         {
                                             Sequence = 0,
@@ -4165,6 +4184,9 @@ internal sealed class HandshakeDriver : IDisposable
                             // prior area must not bleed into the new one's "recent
                             // inbound damage" line.
                             recentInboundHits.Clear();
+                            // The new area re-arms inbound-episode detection: forget the
+                            // last-emitted attacker so the first hit here surfaces an event.
+                            lastInboundEpisodeAttacker = null;
                             // cold-start egress: a new landblock is a fresh hunt
                             // zone — the per-dwell killed-kind set must not carry
                             // across the seam (mirrors the dwell/level reset in

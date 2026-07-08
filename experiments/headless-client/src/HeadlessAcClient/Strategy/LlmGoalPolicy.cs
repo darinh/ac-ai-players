@@ -3029,9 +3029,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // non-matching pick (an NPC, a portal, a different kind) yields no chain
         // target, so ChooseCombatChainTarget returns null and control falls
         // through to the LLM, which still weighs the discovery.
-        var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out _);
+        var chainCommitmentActive = CombatCommitment.IsActiveKillCommitment(_stack?.Top, out var chainCommitmentNameFilter);
         var chainInterruptingKind = FirstChainInterruptingKindSince(events, _lastEventConsideredSequence);
-        var chainInterrupting = chainInterruptingKind is not null;
+        // Foreign-attacker interrupt: a DIFFERENT-kind attacker landing inbound damage
+        // mid-chain (a swarm add) forces an LLM fight-vs-flee re-decision, since the base
+        // chain-interrupting kind set does not include taking damage. Scoped to a
+        // name-filtered kill commitment so "different name = an unengaged second kind" is
+        // unambiguous, and gated by the config flag (default ON). The committed kind hitting
+        // back is NOT foreign, so a normal single-kind fight keeps its chain tempo.
+        var foreignAttackerInterrupt =
+            ChainInterruptOnForeignAttacker
+            && chainCommitmentActive
+            && HasForeignAttackerInboundDamageSince(
+                   events, _lastEventConsideredSequence, chainCommitmentNameFilter);
+        var chainInterrupting = chainInterruptingKind is not null || foreignAttackerInterrupt;
         string? chainNoMintReason = null;
         if (currentGoal is null && !chainInterrupting)
         {
@@ -3109,7 +3120,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // gates (see above), so they are not reasons here.
             chainNoMintReason =
                 currentGoal is not null ? "gate:sticky-goal-redrive"
-                : $"gate:chain-interrupting-event:{chainInterruptingKind}";
+                : chainInterruptingKind is not null
+                    ? $"gate:chain-interrupting-event:{chainInterruptingKind}"
+                    : "gate:foreign-attacker-inbound-damage";
         }
         if (chainNoMintReason is not null && chainNoMintReason != _lastChainNoMintReason)
         {
@@ -6928,6 +6941,59 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 return e.Kind;
         }
         return null;
+    }
+
+    // Config flag (default ON): whether a FOREIGN attacker landing inbound damage
+    // mid-chain interrupts the autonomous combat chain to force an LLM re-decision.
+    // A "swarm add" of a DIFFERENT kind piling on while the bot autonomously grinds
+    // a committed kind is exactly the ambush the LLM's fight-vs-flee judgment should
+    // weigh, but InboundDamageTaken is NOT in the base chain-interrupting kind set,
+    // so the chain kept minting up to MaxCombatChainAttacks swings at the committed
+    // kind while a second kind killed it. Env AC_BOTS_CHAIN_INTERRUPT_FOREIGN_ATTACKER
+    // = 0/false disables (byte-identical to the pre-existing behaviour) for A/B.
+    internal static readonly bool ChainInterruptOnForeignAttacker =
+        ResolveChainInterruptOnForeignAttacker(
+            Environment.GetEnvironmentVariable("AC_BOTS_CHAIN_INTERRUPT_FOREIGN_ATTACKER"));
+
+    internal static bool ResolveChainInterruptOnForeignAttacker(string? envValue)
+    {
+        if (string.IsNullOrWhiteSpace(envValue)) return true; // default ON
+        var v = envValue.Trim();
+        return !(string.Equals(v, "0", StringComparison.Ordinal)
+              || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "no", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // True iff, since `floorSeq`, the bot took inbound damage from an attacker whose
+    // display name does NOT match the committed kill-kind name filter — a FOREIGN
+    // attacker (a swarm add of a different kind) joining the fight while the
+    // autonomous chain grinds the committed kind. Scoped to a name-filtered kill
+    // commitment (`nameFilter` non-null): only then is "different name = a second,
+    // unengaged kind" unambiguous; a kind-agnostic (total-kill) commitment has no
+    // name to compare against, so a hit could be the very target being fought, and
+    // interrupting every damage episode would defeat single-target tempo — that case
+    // is left to the MaxCombatChainAttacks + self-health-suppression bounds. The
+    // attacker-vs-filter test mirrors the kill-count NameContains match (case-
+    // insensitive substring) so "foreign" is the exact complement of "counts toward
+    // the commitment". InboundDamageTaken is emitted once per damage EPISODE (deduped
+    // by the Motor), so this is not per-swing spam. Own perception + the LLM-authored
+    // filter only; no game knowledge, no priority, no source-side target choice.
+    internal static bool HasForeignAttackerInboundDamageSince(
+        EventStream events, long floorSeq, string? nameFilter)
+    {
+        if (string.IsNullOrWhiteSpace(nameFilter)) return false;
+        var filter = nameFilter.Trim();
+        foreach (var e in events.Recent())
+        {
+            if (e.Sequence < floorSeq) break;
+            if (e.Kind != EventKind.InboundDamageTaken) continue;
+            var attacker = e.Name;
+            if (string.IsNullOrWhiteSpace(attacker)) continue; // unknown attacker: cannot call it foreign
+            if (attacker.IndexOf(filter, StringComparison.OrdinalIgnoreCase) < 0)
+                return true; // attacker name does not contain the committed kind filter -> foreign
+        }
+        return false;
     }
 
     // Untargeted-Explore discriminator (call-volume reduction): true iff the
