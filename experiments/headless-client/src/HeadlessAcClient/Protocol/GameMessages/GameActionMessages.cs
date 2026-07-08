@@ -60,6 +60,7 @@ internal enum GameActionType : uint
     SwearAllegiance     = 0x001D,
     BreakAllegiance     = 0x001E,
     Talk                = 0x0015,
+    ChatChannel         = 0x0147,
 }
 
 /// <summary>
@@ -593,6 +594,62 @@ internal static class GameActionTalkMessage
             throw new ArgumentException($"buffer too small: need {need}, got {dest.Length}");
 
         var cursor = GameActionMessage.Pack(dest, GameActionType.Talk, actionSequence);
+        cursor += AcStrings.WriteString16L(dest.Slice(cursor), message);
+        return cursor;
+    }
+}
+
+/// <summary>
+/// ChatChannel (0x0147): say a line on a named group chat CHANNEL (fellowship,
+/// allegiance, etc.) rather than aloud locally. Mirrors ACE-bots
+/// GameActionChatChannel.Handle, which reads, after the GameAction header:
+///   u32 channel   (ACE.Entity.Enum.Channel bitmask value)
+///   String16L message
+/// and broadcasts the line to that channel's members (the server rejects it if
+/// the bot is not in the relevant fellowship/allegiance or lacks permission).
+/// The message TEXT is authored by the LLM; this only packs the bytes.
+/// </summary>
+internal static class GameActionChatChannelMessage
+{
+    // The group channel a bot coordinates on. Wire value is an
+    // ACE.Entity.Enum.Channel member (verified against ACE-bots). Only the
+    // fellowship channel is mapped today: it is permission-free for any fellowship
+    // member (the team-coordination channel for the multi-bot criteria). The
+    // allegiance channels are intentionally NOT mapped yet — the only whole-
+    // allegiance channel (AllegianceBroadcast) requires a server-side Speaker rank,
+    // so a plain vassal bot would be silently muted; per-rank allegiance routing is
+    // a separate follow-up.
+    public const uint FellowChannel = 0x00000800;              // Channel.Fellow (@f)
+
+    /// <summary>
+    /// Map an LLM-supplied channel NAME to its wire Channel value, or null when the
+    /// name is unknown/blank. Only the fellowship channel is mapped; the motor
+    /// invents no channel. Callers must treat a non-blank name that returns null as
+    /// an INVALID request (not a local-say downgrade) so group-intended text never
+    /// leaks to local chat.
+    /// </summary>
+    public static uint? ResolveChannel(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return null;
+        return name.Trim().ToLowerInvariant() switch
+        {
+            "fellowship" or "fellow" => FellowChannel,
+            _ => null,
+        };
+    }
+
+    /// <summary>Packed size for a given (already-sanitized) message: header + u32 channel + String16L.</summary>
+    public static int MeasureSize(ReadOnlySpan<char> message) =>
+        GameActionMessage.HeaderSize + 4 + AcStrings.MeasureString16L(message);
+
+    public static int Pack(Span<byte> dest, uint channel, ReadOnlySpan<char> message, uint actionSequence = 1)
+    {
+        var need = MeasureSize(message);
+        if (dest.Length < need)
+            throw new ArgumentException($"buffer too small: need {need}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.ChatChannel, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), channel); cursor += 4;
         cursor += AcStrings.WriteString16L(dest.Slice(cursor), message);
         return cursor;
     }

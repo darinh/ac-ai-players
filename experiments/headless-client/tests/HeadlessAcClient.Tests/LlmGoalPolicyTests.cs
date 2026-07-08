@@ -150,6 +150,16 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void TryParseGoal_SayWithChannelParses()
+    {
+        var json = """{"kind":"Say","message":"forming up","channel":"fellowship","rationale":"coordinate","priority":3}""";
+        Assert.True(LlmGoalPolicy.TryParseGoal(json, out var g, out var err), err);
+        Assert.Equal(GoalKind.Say, g!.Kind);
+        Assert.Equal("forming up", g.Message);
+        Assert.Equal("fellowship", g.Channel);
+    }
+
+    [Fact]
     public void TryParseGoal_FellowshipCreateParsesWithoutTarget()
     {
         // An unnamed FellowshipCreate must parse (the dispatch defaults the name);
@@ -12094,6 +12104,27 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.DoesNotContain("## Chat", prompt);
         Assert.DoesNotContain("`Say`", prompt);
+    }
+
+    [Fact]
+    public void ChatGuidance_InFellowship_NoPlayerInView_SuggestsFellowshipChannel()
+    {
+        // In a fellowship (members may be remote) surfaces the fellowship channel Say,
+        // even with no player in view; not the local line (no listener), not allegiance.
+        var fellow = new FellowshipProjection
+        {
+            Name = "Crew", AmLeader = true, LeaderName = "Headless", MemberCount = 1,
+            Members = new[]
+            {
+                new FellowshipMemberProjection { Name = "Headless", Level = 10u, IsSelf = true, IsLeader = true },
+            },
+            ShareXp = true, EvenShare = false, Open = true, Locked = false,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildFellowshipWorld(fellow), new EventStream(), null);
+        Assert.Contains("## Chat", prompt);
+        Assert.Contains("channel`=\"fellowship\"", prompt);
+        Assert.DoesNotContain("A `player` is in view", prompt);   // no local-say line (no listener)
+        Assert.DoesNotContain("channel`=\"allegiance\"", prompt);  // allegiance channel not offered
     }
 
     [Fact]

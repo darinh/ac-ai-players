@@ -6821,25 +6821,54 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Say)
                     {
-                        // Social action: say a line ALOUD as local chat (heard by nearby
-                        // players/creatures as HearSpeech). Self-broadcast, no target. The
-                        // LLM authored the line in goal.Message; the motor sanitizes it
-                        // (printable ASCII, no leading command '@', length-capped) and packs
-                        // Talk (0x0015). It invents no text of its own; an empty/unsayable
-                        // line just Fails rather than sending nothing.
+                        // Social action: say a line as chat. The LLM authored the line in
+                        // goal.Message; the motor sanitizes it (printable ASCII, no leading
+                        // command '@', length-capped) and packs it. With no goal.Channel it
+                        // is a LOCAL say (Talk 0x0015, heard by nearby players/creatures as
+                        // HearSpeech); with a resolved channel (fellowship/allegiance) it goes
+                        // to that group chat channel (ChatChannel 0x0147). It invents no text
+                        // and no channel; an empty/unsayable line just Fails.
                         var sayText = GameActionTalkMessage.SanitizeMessage(goal.Message);
+                        var sayChannel = GameActionChatChannelMessage.ResolveChannel(goal.Channel);
                         if (sayText is null)
                         {
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL Say: empty/unsayable message; not sending. source={goal.Source}");
                             tactics.Fail("say: empty or unsayable message", eventStream);
                         }
+                        else if (sayChannel is null && !string.IsNullOrWhiteSpace(goal.Channel))
+                        {
+                            // The LLM named a channel the motor does not route (a typo, or the
+                            // not-yet-supported allegiance channels). Do NOT silently downgrade
+                            // to a LOCAL say — that would leak group-intended text to nearby
+                            // players. Fail so Strategy re-decides (say locally with no channel,
+                            // or pick a supported channel).
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL Say: unrecognized channel '{goal.Channel}'; not sending. source={goal.Source}");
+                            tactics.Fail("say: unrecognized channel", eventStream);
+                        }
                         else
                         {
                             var sayPktSeq  = nextOutboundPacketSequence++;
                             var sayFragSeq = nextOutboundFragmentSequence++;
-                            var sayBuf = new byte[GameActionTalkMessage.MeasureSize(sayText)];
-                            var sayLen = GameActionTalkMessage.Pack(sayBuf, sayText);
+                            // Route to the resolved group channel, else a LOCAL say. The server
+                            // rejects a channel line if the bot is not in that group / lacks
+                            // permission (harmless, no local leak).
+                            byte[] sayBuf;
+                            int sayLen;
+                            string sayWhere;
+                            if (sayChannel is uint chan)
+                            {
+                                sayBuf = new byte[GameActionChatChannelMessage.MeasureSize(sayText)];
+                                sayLen = GameActionChatChannelMessage.Pack(sayBuf, chan, sayText);
+                                sayWhere = $"channel=0x{chan:X8}";
+                            }
+                            else
+                            {
+                                sayBuf = new byte[GameActionTalkMessage.MeasureSize(sayText)];
+                                sayLen = GameActionTalkMessage.Pack(sayBuf, sayText);
+                                sayWhere = "local";
+                            }
                             var sayMsg = new OutboundPacket();
                             if (lastReceivedSeq != 0)
                                 sayMsg.AddAckSequence(lastReceivedSeq);
@@ -6854,7 +6883,7 @@ internal sealed class HandshakeDriver : IDisposable
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, saySent),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                             Console.WriteLine(
-                                $"[strategy] LLM-GOAL Say: \"{sayText}\" source={goal.Source} " +
+                                $"[strategy] LLM-GOAL Say ({sayWhere}): \"{sayText}\" source={goal.Source} " +
                                 $"pktSeq={sayPktSeq} fragSeq={sayFragSeq} bytes={saySent}");
                             tactics.Clear("say dispatched", eventStream);
                         }
