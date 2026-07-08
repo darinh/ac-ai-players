@@ -10464,14 +10464,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : $"- allegiance: you are a vassal in an allegiance (monarch guid 0x{world.Self.MonarchGuid!.Value:X8}).");
         }
 
-        // ── ## Allegiance guidance (optional social action, gated on a player in view) ──
-        // Surfaces the WHEN-a-player-is-present affordance for the `SwearAllegiance`
-        // verb, mechanically only: it names the action, its unique-target rule, and its
-        // mechanical result (you become the target's vassal), and marks it OPTIONAL with
-        // the decision left to the LLM. No WHEN/WHETHER policy, no priority, no
-        // hierarchy/lore framing. Rendered ONLY when a `player` is in view, so it costs
-        // nothing solo. The Motor resolves the named player + sends the opcode; it never
-        // picks a target on its own.
+        // ── ## Allegiance guidance (optional social actions, gated on a player in view) ──
+        // Surfaces the WHEN-a-player-is-present affordances for the allegiance verbs,
+        // mechanically only: each names the action, its unique-target rule, and its
+        // mechanical result, and is marked OPTIONAL with the decision left to the LLM.
+        // `SwearAllegiance` always renders here; `BreakAllegiance` renders ONLY when the
+        // bot is already in an allegiance (there is a bond to sever). No WHEN/WHETHER
+        // policy, no priority, no hierarchy/lore framing. Rendered ONLY when a `player`
+        // is in view, so it costs nothing solo. The Motor resolves the named player +
+        // sends the opcode; it never picks a target on its own.
         if (aPlayerIsInView)
         {
             sb.AppendLine();
@@ -10480,6 +10481,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
                 "(only when exactly one visible `player` matches that name); this makes you that " +
                 "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
+            if (world.Self.IsInAllegiance)
+                sb.AppendLine(
+                    "- You ARE in an allegiance (see `## Allegiance state`). You MAY `BreakAllegiance` " +
+                    "from a visible `player` by name (only when exactly one visible `player` matches that " +
+                    "name); this severs your allegiance bond with them. OPTIONAL — you decide whether and " +
+                    "with whom, or skip it.");
         }
 
         // ── ## Recent rejections + ## Recent goal outcomes (anti-repeat, protected tail) ─

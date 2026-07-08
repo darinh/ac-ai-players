@@ -12049,6 +12049,59 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Allegiance guidance", prompt);
         Assert.Contains("`SwearAllegiance`", prompt);
         Assert.Contains("vassal", prompt);
+        // Not in an allegiance -> no BreakAllegiance cue (nothing to sever).
+        Assert.DoesNotContain("`BreakAllegiance`", prompt);
+    }
+
+    [Fact]
+    public void AllegianceGuidance_InAllegiance_PlayerInView_SuggestsBreak()
+    {
+        // In an allegiance + a visible player (a possible target) -> the optional
+        // BreakAllegiance cue renders alongside Swear.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = 0x5000ABCDu,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                { Guid = 0x500000A1u, Name = "Otherbot", IsCreature = true, IsPlayer = true, Distance = 8f },
+            },
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Allegiance guidance", prompt);
+        Assert.Contains("`BreakAllegiance`", prompt);
+        Assert.Contains("`SwearAllegiance`", prompt);
+    }
+
+    [Fact]
+    public void AllegianceGuidance_InAllegiance_NoPlayerInView_NoBreakCue()
+    {
+        // In an allegiance but no player in view -> the guidance block (player-gated)
+        // does not render, so no BreakAllegiance cue (there is no target to break with).
+        // The self-state fact still renders.
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = 0x5000ABCDu,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Allegiance guidance", prompt);
+        Assert.DoesNotContain("`BreakAllegiance`", prompt);
+        Assert.Contains("## Allegiance state", prompt);
     }
 
     [Fact]
