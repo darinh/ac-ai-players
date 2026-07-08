@@ -1,21 +1,27 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// LivenessWatchdog — a process-level stall detector that force-exits the bot
-// when its main loop stops making progress, so the restart supervisor can
-// relaunch a fresh process.
+// LivenessWatchdog — a process-level liveness detector that force-exits the bot
+// when it stops making REAL progress (receiving server packets), so the restart
+// supervisor can relaunch a fresh process.
 //
-// Motivation (live incident): the observe/tick loop can BLOCK inside its body —
-// most often on a network/LLM `await` that never returns (a stuck TCP
-// connection the outer multi-hour CancellationToken does not promptly cancel).
-// A blocked loop stops producing output but the PROCESS stays alive, so the
-// supervisor (which only relaunches on process EXIT) cannot recover it: a bot
-// was found frozen mid-walk for ~2.7 hours. An IN-loop watchdog cannot help —
-// the loop that would run it is itself blocked — so only a SEPARATE thread can
-// detect the stall and force the process to exit.
+// Motivation (live incidents): the network client can wedge in two ways the
+// restart supervisor (which only relaunches on process EXIT) cannot recover:
+//   1. BLOCKED loop — the observe/tick loop blocks inside its body on a
+//      network/LLM `await` that never returns; the process stays alive but does
+//      nothing (a bot was found frozen mid-walk for ~2.7 hours).
+//   2. ZOMBIE loop — the server session dies (server stops sending) but the loop
+//      keeps ITERATING quietly (the 250ms walk-tick timer wakes it, minimal CPU,
+//      no packets, no actions); a bot sat in this state ~15 min. A heartbeat that
+//      bumps on every loop ITERATION is defeated by this case, because the loop
+//      IS iterating — it is just not making progress.
+// An IN-loop watchdog cannot help either case (the loop is blocked, or spinning
+// uselessly), so only a SEPARATE thread can detect the stall and force the exit.
 //
-// This runs a background thread that reads a heartbeat the main loop bumps
-// each iteration and, when the heartbeat is older than the stall timeout, logs
-// and calls Environment.Exit so the supervisor relaunches. Pure process
-// liveness — no game knowledge, no decision-making, no target choice.
+// The fix for BOTH: the heartbeat means "the server session delivered a packet"
+// (real progress / proof the connection is live), NOT "the loop iterated". The
+// caller bumps it on each inbound CRC-valid datagram; a blocked loop processes no
+// packets and a zombie session receives none, so either wedge ages the heartbeat
+// past the timeout and the monitor thread force-exits. Pure process liveness —
+// no game knowledge, no decision-making, no target choice.
 
 using System;
 using System.Threading;
@@ -26,12 +32,12 @@ internal static class LivenessWatchdog
 {
     // Heartbeat: a MONOTONIC timestamp (Environment.TickCount64 — milliseconds
     // since boot, immune to wall-clock/NTP/VM time corrections) of the last
-    // recorded main-loop progress. Written by the loop thread and read by the
-    // monitor thread; a single 64-bit long read/write is atomic, and Volatile
-    // guards visibility/ordering so the monitor never sees a torn or stale value.
-    // Monotonic (not DateTime.UtcNow): a forward clock jump larger than the timeout
-    // must not make a healthy bot look stalled and force-exit, and a backward jump
-    // must not mask a real stall.
+    // recorded REAL progress (an inbound server packet). Written by the loop thread
+    // and read by the monitor thread; a single 64-bit long read/write is atomic,
+    // and Volatile guards visibility/ordering so the monitor never sees a torn or
+    // stale value. Monotonic (not DateTime.UtcNow): a forward clock jump larger than
+    // the timeout must not make a healthy bot look stalled and force-exit, and a
+    // backward jump must not mask a real stall.
     private static long _lastProgressMs = Environment.TickCount64;
     private static int _started; // 0/1 guard so Start is idempotent.
 
@@ -41,11 +47,12 @@ internal static class LivenessWatchdog
     // AC_BOTS_STALL_TIMEOUT_SECONDS (clamped [MinStallTimeoutSeconds, 3600]).
     public const int DefaultStallTimeoutSeconds = 300;
 
-    // Minimum stall timeout. RecordProgress runs ONLY inside the observe loop, so a
-    // legitimate reconnect/backoff/handshake recovery (bounded by the driver's
-    // reconnect constants, ~165s worst case) leaves the heartbeat un-bumped for that
-    // whole window. The floor sits safely ABOVE that gap so no env override can make
-    // a normal reconnect look like a stall.
+    // Minimum stall timeout. The heartbeat bumps on an inbound server packet inside
+    // the observe loop, so a legitimate reconnect/backoff/handshake recovery (bounded
+    // by the driver's reconnect constants, ~165s worst case — during which the game
+    // socket delivers no packets) leaves the heartbeat un-bumped for that whole
+    // window. The floor sits safely ABOVE that gap so no env override can make a
+    // normal reconnect look like a stall.
     public const int MinStallTimeoutSeconds = 200;
 
     // Exit code the supervisor sees on a stall-exit — distinct from a clean 0 so a
@@ -53,7 +60,19 @@ internal static class LivenessWatchdog
     // exit, so the exact value is informational.
     public const int StallExitCode = 42;
 
-    /// <summary>Record that the main loop made progress (bump the monotonic heartbeat).</summary>
+    // Grace period after the watchdog requests a graceful exit before it escalates
+    // to a HARD kill. Environment.Exit runs finalizers + module unload, which can
+    // themselves BLOCK on a wedged process (leaving it alive despite the exit
+    // request); the hard-kill guard guarantees termination so the supervisor always
+    // relaunches.
+    public const int HardKillGraceSeconds = 10;
+
+    /// <summary>
+    /// Record REAL progress (an inbound server packet was received) — bump the
+    /// monotonic heartbeat. Call this on genuine session activity, NOT on every loop
+    /// iteration: a loop that keeps iterating with a dead session (no packets) must
+    /// still age the heartbeat so the monitor can force-exit the zombie.
+    /// </summary>
     public static void RecordProgress()
         => Volatile.Write(ref _lastProgressMs, Environment.TickCount64);
 
@@ -85,8 +104,9 @@ internal static class LivenessWatchdog
     /// <summary>
     /// Start the background stall monitor ONCE. Records an initial heartbeat, then a
     /// background thread checks staleness every <paramref name="pollInterval"/> and,
-    /// on a stall, invokes <paramref name="onStall"/> (default: log to stderr +
-    /// Environment.Exit(<see cref="StallExitCode"/>)). Idempotent — a second call is
+    /// on a stall, invokes <paramref name="onStall"/> (default: log to stderr, arm a
+    /// hard-kill guard, then Environment.Exit(<see cref="StallExitCode"/>) — so the
+    /// process terminates even if graceful exit blocks). Idempotent — a second call is
     /// a no-op. The monitor thread is a background thread so it never blocks a normal
     /// process exit.
     /// </summary>
@@ -104,6 +124,19 @@ internal static class LivenessWatchdog
         var stall = onStall ?? (msg =>
         {
             Console.Error.WriteLine(msg);
+            Console.Error.Flush();
+            // Guarantee termination: Environment.Exit runs finalizers/module unload,
+            // which can themselves block on a wedged process. Arm a background hard-kill
+            // that fires after the grace period regardless, THEN request the graceful
+            // exit — whichever completes first ends the process so the supervisor relaunches.
+            var killer = new Thread(() =>
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(HardKillGraceSeconds));
+                try { System.Diagnostics.Process.GetCurrentProcess().Kill(); }
+                catch { /* nothing left to do if even Kill fails */ }
+            })
+            { IsBackground = true, Name = "liveness-watchdog-hardkill" };
+            killer.Start();
             Environment.Exit(StallExitCode);
         });
         RecordProgress();
@@ -118,10 +151,10 @@ internal static class LivenessWatchdog
                 if (IsStalled(last, now, timeout))
                 {
                     var ageSeconds = (int)Math.Max(0L, (now - last) / 1000L);
-                    stall($"[watchdog] MAIN LOOP STALLED — no progress for {ageSeconds}s " +
-                          $"(timeout {(int)timeout.TotalSeconds}s); force-exiting so the supervisor relaunches");
-                    // onStall normally Environment.Exit's and never returns; if a test
-                    // hook returns instead, stop the monitor rather than spin.
+                    stall($"[watchdog] NO PROGRESS (no inbound packet) for {ageSeconds}s " +
+                          $"(timeout {(int)timeout.TotalSeconds}s) — session wedged/dead; force-exiting so the supervisor relaunches");
+                    // onStall normally exits and never returns; if a test hook returns
+                    // instead, stop the monitor rather than spin.
                     return;
                 }
             }
