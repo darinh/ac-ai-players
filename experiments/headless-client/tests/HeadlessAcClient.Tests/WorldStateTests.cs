@@ -562,7 +562,8 @@ public class WorldStateTests
         ushort seqInstance = 0,
         ushort seqPosition = 0,
         ObjectPosition? position = null,
-        ObjectDescriptionFlag descriptionFlags = 0)
+        ObjectDescriptionFlag descriptionFlags = 0,
+        uint? monarchGuid = null)
     {
         var model = new ObjectModelData(
             PaletteId: null,
@@ -592,11 +593,57 @@ public class WorldStateTests
             CombatUse: null, Structure: null, MaxStructure: null, StackSize: null, MaxStackSize: null,
             ContainerGuid: null, WielderGuid: null, ValidLocations: null, CurrentlyWieldedLocation: null,
             Priority: null, RadarBlipColor: null, RadarBehavior: null, PScript: null, Workmanship: null,
-            Burden: null, Spell: null, HouseOwner: null, HookItemTypes: null, MonarchGuid: null,
+            Burden: null, Spell: null, HouseOwner: null, HookItemTypes: null, MonarchGuid: monarchGuid,
             HookType: null, IconOverlay: null, IconUnderlay: null, MaterialType: null,
             CooldownId: null, CooldownDuration: null, PetOwner: null);
 
         return new ObjectCreateMessage(guid, model, physics, weenie);
+    }
+
+    // ---- Allegiance monarch (weenie-header Monarch field) ----
+
+    [Fact]
+    public void ObjectCreate_StoresMonarchGuid_OnSelfSnapshot()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        Assert.True(ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", monarchGuid: OtherGuid)));
+        // Self object's ObjectCreate carried a Monarch guid other than its own ->
+        // the bot is a vassal in an allegiance topped by OtherGuid.
+        Assert.Equal(OtherGuid, ws.Self!.MonarchGuid);
+    }
+
+    [Fact]
+    public void ObjectCreate_MonarchEqualsOwnGuid_IsPreserved()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        // Monarch == own guid: the bot is its own monarch (top of its allegiance).
+        Assert.True(ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", monarchGuid: TestGuid)));
+        Assert.Equal(TestGuid, ws.Self!.MonarchGuid);
+    }
+
+    [Fact]
+    public void ObjectCreate_AbsentMonarch_LeavesMonarchGuidNull()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        // No Monarch field on the wire (full weenie snapshot) => not in an allegiance.
+        Assert.True(ws.Apply(BuildObjectCreate(TestGuid, name: "Headless")));
+        Assert.Null(ws.Self!.MonarchGuid);
+    }
+
+    [Fact]
+    public void ObjectCreate_AbsentMonarch_ClearsPriorMonarchGuid()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        // First ObjectCreate carries a monarch; a later one (advanced instance) omits
+        // it -> the field clears, since ObjectCreate is a full weenie snapshot.
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 1, monarchGuid: OtherGuid));
+        Assert.Equal(OtherGuid, ws.Self!.MonarchGuid);
+        ws.Apply(BuildObjectCreate(TestGuid, name: "Headless", seqInstance: 2));
+        Assert.Null(ws.Self!.MonarchGuid);
     }
 
     // ---- Fellowship membership ----

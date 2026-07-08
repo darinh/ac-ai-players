@@ -12052,6 +12052,89 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void SelfProjection_AllegianceDerivations_MatchMonarchGuid()
+    {
+        // MonarchGuid drives IsInAllegiance / IsOwnMonarch (pure mechanical derivations).
+        var none = new SelfProjection { Guid = SelfGuid, MonarchGuid = null };
+        Assert.False(none.IsInAllegiance);
+        Assert.False(none.IsOwnMonarch);
+
+        var zero = new SelfProjection { Guid = SelfGuid, MonarchGuid = 0u };
+        Assert.False(zero.IsInAllegiance);
+        Assert.False(zero.IsOwnMonarch);
+
+        var vassal = new SelfProjection { Guid = SelfGuid, MonarchGuid = 0x50000099u };
+        Assert.True(vassal.IsInAllegiance);
+        Assert.False(vassal.IsOwnMonarch);
+
+        var ownMonarch = new SelfProjection { Guid = SelfGuid, MonarchGuid = SelfGuid };
+        Assert.True(ownMonarch.IsInAllegiance);
+        Assert.True(ownMonarch.IsOwnMonarch);
+    }
+
+    [Fact]
+    public void AllegianceState_Vassal_RendersMonarchGuidFact()
+    {
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = 0x5000ABCDu,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Allegiance state", prompt);
+        Assert.Contains("you are a vassal in an allegiance", prompt);
+        Assert.Contains("0x5000ABCD", prompt);
+    }
+
+    [Fact]
+    public void AllegianceState_OwnMonarch_RendersOwnMonarchFact()
+    {
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = SelfGuid,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.Contains("## Allegiance state", prompt);
+        Assert.Contains("you are the monarch of your own allegiance", prompt);
+    }
+
+    [Fact]
+    public void AllegianceState_NoAllegiance_Omitted()
+    {
+        // No Monarch field -> the bot is unaffiliated -> no allegiance-state section
+        // (zero static-floor cost, like the other conditional self-state capsules).
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xAAB5u, CellId = 0xAAB50003u,
+                PositionX = 1f, PositionY = 2f, PositionZ = 3f, HealthFraction = 1.0f,
+                MonarchGuid = null,
+            },
+            Inventory = System.Array.Empty<InventoryItemProjection>(),
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+            Fellowship = null,
+        };
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
+        Assert.DoesNotContain("## Allegiance state", prompt);
+    }
+
+    [Fact]
     public void FellowshipGuidance_PlayerInView_NotInFellowship_SuggestsForm()
     {
         var world = new WorldStateProjection
