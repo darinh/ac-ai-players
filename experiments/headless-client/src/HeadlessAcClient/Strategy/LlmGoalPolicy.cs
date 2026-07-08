@@ -3042,7 +3042,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && chainCommitmentActive
             && HasForeignAttackerInboundDamageSince(
                    events, _lastEventConsideredSequence, chainCommitmentNameFilter);
-        var chainInterrupting = chainInterruptingKind is not null || foreignAttackerInterrupt;
+        // Multi-attacker swarm interrupt: 2+ DISTINCT attackers landing inbound damage
+        // during ANY active kill commitment is a swarm the LLM should weigh (pull singly /
+        // flee). Complements the foreign-attacker interrupt by ALSO covering a kind-agnostic
+        // total-kill hunt (no name filter, so "foreign" cannot apply). Config-flagged
+        // (default ON). A single attacker is a normal fight and does not trip it.
+        var multiAttackerInterrupt =
+            ChainInterruptOnMultiAttacker
+            && chainCommitmentActive
+            && HasMultipleDistinctInboundAttackersSince(events, _lastEventConsideredSequence);
+        var chainInterrupting = chainInterruptingKind is not null
+            || foreignAttackerInterrupt || multiAttackerInterrupt;
         string? chainNoMintReason = null;
         if (currentGoal is null && !chainInterrupting)
         {
@@ -3122,7 +3132,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 currentGoal is not null ? "gate:sticky-goal-redrive"
                 : chainInterruptingKind is not null
                     ? $"gate:chain-interrupting-event:{chainInterruptingKind}"
-                    : "gate:foreign-attacker-inbound-damage";
+                    : foreignAttackerInterrupt
+                        ? "gate:foreign-attacker-inbound-damage"
+                        : "gate:multi-attacker-swarm";
         }
         if (chainNoMintReason is not null && chainNoMintReason != _lastChainNoMintReason)
         {
@@ -6996,8 +7008,74 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
-    // Untargeted-Explore discriminator (call-volume reduction): true iff the
-    // goal is an Explore whose target is the schema "anywhere" sentinel — it
+    // Config flag (default ON): whether a multi-attacker SWARM (>= 2 distinct attacker
+    // names landing inbound damage since the floor) interrupts the autonomous combat
+    // chain during ANY active kill commitment. Complements the foreign-attacker interrupt,
+    // which is scoped to NAME-FILTERED commitments (a kind-agnostic "kill N of anything"
+    // total-kill hunt has no filter to call an attacker "foreign", so a swarm add there was
+    // previously only bounded by the MaxCombatChainAttacks + self-health caps). Distinct
+    // attacker NAMES are a mechanical swarm proxy: the wire gives an attacker name (no guid),
+    // so 2+ distinct names = at least two different foes are actively hitting the bot -> a
+    // multi-attacker situation the LLM should weigh (pull singly / flee). Env
+    // AC_BOTS_CHAIN_INTERRUPT_MULTI_ATTACKER = 0/false disables (byte-identical revert).
+    internal static readonly bool ChainInterruptOnMultiAttacker =
+        ResolveChainInterruptOnMultiAttacker(
+            Environment.GetEnvironmentVariable("AC_BOTS_CHAIN_INTERRUPT_MULTI_ATTACKER"));
+
+    internal static bool ResolveChainInterruptOnMultiAttacker(string? envValue)
+    {
+        if (string.IsNullOrWhiteSpace(envValue)) return true; // default ON
+        var v = envValue.Trim();
+        return !(string.Equals(v, "0", StringComparison.Ordinal)
+              || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "no", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // True iff, since `floorSeq`, inbound damage arrived from at least two DISTINCT attacker
+    // names — a multi-attacker swarm (two different foes actively hitting the bot; a single
+    // attacker is a normal fight). Unlike
+    // the foreign-attacker test this needs NO commitment name filter, so it also protects a
+    // kind-agnostic total-kill hunt (where every kind is a valid target and "foreign" has no
+    // meaning, yet being hit by two foes at once is still a fight-vs-flee decision). The
+    // Motor emits an InboundDamageTaken on a new hit-lull episode OR when the attacker name
+    // changes, so a second foe joining mid-fight surfaces its distinct name here. A single
+    // attacker (however many hits) yields one distinct name and does NOT trip this. Own
+    // perception only (attacker display names the server sent); no game knowledge, no
+    // priority, no source-side target choice.
+    internal static bool HasMultipleDistinctInboundAttackersSince(
+        EventStream events, long floorSeq)
+    {
+        // Perf: this runs every tick in the combat-chain hot path, and during a normal
+        // single-attacker fight the floor is static so every inbound hit stays in range.
+        // Cache the first seen attacker (raw + normalized) and fast-path an exact raw-name
+        // match on subsequent hits, so the common single-foe case allocates nothing and
+        // normalizes at most once. Only a raw-name mismatch pays the NormalizeName cost.
+        string? firstSeenRaw = null;
+        string? firstSeenNorm = null;
+        foreach (var e in events.Recent())
+        {
+            if (e.Sequence < floorSeq) break;
+            if (e.Kind != EventKind.InboundDamageTaken) continue;
+            if (firstSeenRaw is null)
+            {
+                var key = CombatFeelLedger.NormalizeName(e.Name);
+                if (key is null) continue; // unknown attacker: cannot count as a distinct foe
+                firstSeenRaw = e.Name;
+                firstSeenNorm = key;
+                continue;
+            }
+            // Fast path: identical raw name is the same foe (common single-attacker case).
+            if (string.Equals(firstSeenRaw, e.Name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            var key2 = CombatFeelLedger.NormalizeName(e.Name);
+            if (key2 is null) continue;
+            if (!string.Equals(firstSeenNorm, key2, StringComparison.Ordinal))
+                return true; // a second DISTINCT attacker -> swarm
+        }
+        return false;
+    }
+
     // carries NO resolved object selector (no guid/wcid/name_contains/
     // item_type/short_desc, and any Name is the literal schema token
     // "anywhere"). Such a goal is a Motor-owned traversal with nothing to
