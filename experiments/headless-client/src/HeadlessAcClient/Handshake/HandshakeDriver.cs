@@ -3720,6 +3720,10 @@ internal sealed class HandshakeDriver : IDisposable
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt: {pup.PropertyName} = {pup.Value} (seq={pup.Sequence})");
                             break;
+                        case PublicUpdateInstanceIdMessage iid:
+                            Console.WriteLine(
+                                $"[observe]   -> PublicUpdateInstanceId: guid=0x{iid.ObjectGuid:X8} {iid.PropertyName} = 0x{iid.Value:X8} (seq={iid.Sequence})");
+                            break;
                         case PrivateUpdatePropertyInt64Message pup64:
                             Console.WriteLine(
                                 $"[observe]   -> PrivateUpdatePropertyInt64: {pup64.PropertyName} = {pup64.Value} (seq={pup64.Sequence})");

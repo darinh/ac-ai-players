@@ -60,6 +60,7 @@ internal static class GameMessageDecoder
             GameMessageOpcode.PrivateUpdateAttribute2ndLevel => DecodePrivateUpdateAttribute2ndLevel(payload),
             GameMessageOpcode.PrivateUpdateSkill => DecodePrivateUpdateSkill(payload),
             GameMessageOpcode.PrivateUpdateAttribute => DecodePrivateUpdateAttribute(payload),
+            GameMessageOpcode.PublicUpdateInstanceId => DecodePublicUpdateInstanceId(payload),
             _ => null,
         };
     }
@@ -236,6 +237,24 @@ internal static class GameMessageDecoder
             var prop = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
             var val  = BinaryPrimitives.ReadInt32LittleEndian(p.Slice(cursor));
             return new PrivateUpdatePropertyIntMessage(seq, prop, val);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static PublicUpdateInstanceIdMessage? DecodePublicUpdateInstanceId(ReadOnlySpan<byte> p)
+    {
+        try
+        {
+            if (p.Length < PublicUpdateInstanceIdMessage.PackedSize) return null;
+            var cursor = sizeof(uint); // skip opcode
+            var seq  = p[cursor]; cursor += 1;
+            var guid = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var prop = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor)); cursor += 4;
+            var val  = BinaryPrimitives.ReadUInt32LittleEndian(p.Slice(cursor));
+            return new PublicUpdateInstanceIdMessage(seq, guid, prop, val);
         }
         catch
         {

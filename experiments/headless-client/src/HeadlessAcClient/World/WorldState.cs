@@ -563,6 +563,7 @@ internal sealed class WorldState
             PrivateUpdateAttribute2ndLevelMessage a => ApplyPrivateVitalLevel(a),
             PrivateUpdateSkillMessage sk      => ApplyPrivateSkill(sk),
             PrivateUpdateAttributeMessage at  => ApplyPrivateAttribute(at),
+            PublicUpdateInstanceIdMessage iid => ApplyPublicInstanceId(iid),
             PlayerCreateMessage pc            => ApplyPlayerCreate(pc),
             _                                 => false,
         };
@@ -946,10 +947,18 @@ internal sealed class WorldState
         snap.ContainerGuid = oc.Weenie.ContainerGuid;
         snap.WielderGuid = oc.Weenie.WielderGuid;
         // Allegiance monarch (weenie-header Monarch field): present on player
-        // objects that belong to an allegiance. Refreshed like the other
-        // identity fields; absence overwrites with null (this is a full weenie
-        // snapshot, so no Monarch flag genuinely means "no allegiance").
-        snap.MonarchGuid = oc.Weenie.MonarchGuid;
+        // objects that belong to an allegiance. Seed it like the other identity
+        // fields, BUT do not let a (possibly out-of-order, same-epoch) ObjectCreate
+        // header clobber a fresher discrete PublicUpdateInstanceId(Monarch) update:
+        // once a discrete Monarch update has landed this epoch, it wins. A new
+        // instance epoch clears InstanceIdByteSeqs (ResetForNewInstance above), so
+        // the header re-seeds normally there. Absence overwrites null (full snapshot
+        // => no Monarch flag means "no allegiance").
+        if (snap.InstanceIdByteSeqs is null ||
+            !snap.InstanceIdByteSeqs.ContainsKey(PublicUpdateInstanceIdMessage.MonarchProperty))
+        {
+            snap.MonarchGuid = oc.Weenie.MonarchGuid;
+        }
 
         // Spatial/physics fields are gated by SeqObjectPosition
         // within the same instance epoch. After a ResetForNewInstance,
@@ -1102,6 +1111,35 @@ internal sealed class WorldState
         var snap = GetOrCreateSnapshot(selfGuid);
         snap.PropertyInts ??= new Dictionary<uint, int>();
         snap.PropertyInts[pup.Property] = pup.Value;
+        snap.Touch();
+        return true;
+    }
+
+    /// <summary>
+    /// Apply a PublicUpdateInstanceId (0x02DA): a guid-valued property changed on
+    /// the NAMED object (msg.ObjectGuid). Only the allegiance Monarch property is
+    /// consumed today - it lands on the target object's MonarchGuid so the self
+    /// projection's allegiance state stays live after a swear/break WITHOUT waiting
+    /// for a fresh ObjectCreate (the server sends this Public variant from
+    /// UpdateProperty(PropertyInstanceId.Monarch, ...)). value 0 = the property was
+    /// removed (e.g. allegiance broken) -> clear MonarchGuid. Stale-gated per
+    /// property via the target snapshot's InstanceIdByteSeqs (which is reset on a
+    /// new instance epoch and GC'd when the object is deleted). Other InstanceId
+    /// properties are decoded and sequence-tracked but not stored (no consumer yet).
+    /// </summary>
+    private bool ApplyPublicInstanceId(PublicUpdateInstanceIdMessage msg)
+    {
+        var snap = GetOrCreateSnapshot(msg.ObjectGuid);
+        snap.InstanceIdByteSeqs ??= new Dictionary<uint, byte>();
+        byte? prevSeq = snap.InstanceIdByteSeqs.TryGetValue(msg.Property, out var s) ? s : (byte?)null;
+        if (!SequenceCompare.IsCurrentOrNewer(msg.Sequence, prevSeq))
+            return false;
+        snap.InstanceIdByteSeqs[msg.Property] = msg.Sequence;
+
+        if (msg.Property != PublicUpdateInstanceIdMessage.MonarchProperty)
+            return false;
+
+        snap.MonarchGuid = msg.Value == 0 ? (uint?)null : msg.Value;
         snap.Touch();
         return true;
     }
