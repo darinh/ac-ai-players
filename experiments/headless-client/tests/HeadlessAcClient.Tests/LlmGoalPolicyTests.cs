@@ -763,6 +763,112 @@ public class LlmGoalPolicyTests
         Assert.Equal(EventKind.PopupString, LlmGoalPolicy.FirstChainInterruptingKindSince(es, 0));
     }
 
+    // ---- HasForeignAttackerInboundDamageSince (swarm-add chain interrupt) ----
+
+    [Fact]
+    public void ForeignAttackerInbound_DifferentKindHit_True()
+    {
+        // While committed to hunt "Chicken", a Drudge lands inbound damage -> a foreign
+        // swarm add: the chain must interrupt so the LLM weighs fight-vs-flee.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "inbound hit" });
+        Assert.True(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Chicken"));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_CommittedKindHit_False()
+    {
+        // The committed kind hitting back is a NORMAL single-target fight, not foreign:
+        // interrupting it would defeat the chain tempo. Substring match (case-insensitive).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Black Rabbit", Text = "inbound hit" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Rabbit"));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_NoNameFilter_False()
+    {
+        // A kind-agnostic (total-kill) commitment has no name to compare, so a hit could
+        // be the very target being fought; leave that to the chain caps (returns false).
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "inbound hit" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, null));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_UnknownAttacker_False()
+    {
+        // An inbound hit with no attacker name cannot be classified foreign.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = null, Text = "inbound hit" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Chicken"));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_NonDamageEvent_False()
+    {
+        // Only InboundDamageTaken events are considered; other kinds are ignored here.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Name = "Drudge Skulker", Text = "you have slain" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Chicken"));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_RespectsFloor()
+    {
+        // A foreign hit BELOW the floor (already considered at the last LLM look) is not new.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Skulker", Text = "old hit" });
+        var floor = es.NextSequence;
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ServerMessage, Text = "noise" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, floor, "Chicken"));
+    }
+
+    [Theory]
+    [InlineData(null, true)]     // default -> ON
+    [InlineData("", true)]       // blank -> ON
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("off", false)]
+    [InlineData("no", false)]
+    public void ResolveChainInterruptOnForeignAttacker_ParsesFlag(string? env, bool expected)
+        => Assert.Equal(expected, LlmGoalPolicy.ResolveChainInterruptOnForeignAttacker(env));
+
+    [Fact]
+    public void ForeignAttackerInbound_CommittedSuperstring_NotForeign()
+    {
+        // The foreign test is the EXACT complement of the kill-count NameContains
+        // (substring) match: an attacker whose name CONTAINS the filter counts toward
+        // the commitment, so it is NOT foreign. "The Chicken" contains "Chicken".
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "The Chicken", Text = "hit" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Chicken"));
+    }
+
+    [Fact]
+    public void ForeignAttackerInbound_BroadFilterSubstring_NotForeign()
+    {
+        // A broad filter is the LLM's own choice: "Rat" is a substring of "Drudge Ferrat",
+        // so a Ferrat hit is treated as committed (not foreign) — identical to how the
+        // kill counter would credit it. This intentional breadth belongs to the
+        // name_contains API; the interrupt stays synchronized with it.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        { Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.InboundDamageTaken, Name = "Drudge Ferrat", Text = "hit" });
+        Assert.False(LlmGoalPolicy.HasForeignAttackerInboundDamageSince(es, 0, "Rat"));
+    }
+
+
     [Fact]
     public void FirstChainInterruptingKindSince_RepeatedPopupAlreadySeen_NotInterrupting()
     {
