@@ -175,7 +175,18 @@ internal static class OutboundSelfCheck
         // mode is opaque).
         var opt = new GameMessages.CharacterCreateMessage.Options(
             Account: "headless-test",
-            Name:    "Headless01");
+            Name:    "Headless01",
+            // Explicit, DISTINCT per-attribute values so the round-trip
+            // verifies field ORDER + offsets (not just that all six are
+            // equal), independent of the Options defaults (whose values are
+            // pinned separately in CharacterCreateMessageTests). Sum 231 is
+            // within the per-attribute [10,100] gate and any heritage budget.
+            StrengthAbility:     11,
+            EnduranceAbility:    22,
+            CoordinationAbility: 33,
+            QuicknessAbility:    44,
+            FocusAbility:        55,
+            SelfAbility:         66);
 
         var size = GameMessages.CharacterCreateMessage.MeasurePackedSize(opt);
         if (size > 448)
@@ -224,11 +235,13 @@ internal static class OutboundSelfCheck
         var templateOption = (int)ReadU32(buf, ref cur);
         Require(templateOption == 0, $"CharacterCreate templateOption={templateOption}");
 
-        // 6 abilities - default is all-10s per rubber-duck recommendation.
+        // 6 abilities in Pack order: Strength, Endurance, Coordination,
+        // Quickness, Focus, Self. Distinct expected values catch a field swap.
+        var expectedAbilities = new uint[] { 11, 22, 33, 44, 55, 66 };
         for (var i = 0; i < 6; i++)
         {
             var v = ReadU32(buf, ref cur);
-            Require(v == 10, $"CharacterCreate ability[{i}]={v}");
+            Require(v == expectedAbilities[i], $"CharacterCreate ability[{i}]={v}");
         }
 
         var slot    = ReadU32(buf, ref cur);

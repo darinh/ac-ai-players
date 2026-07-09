@@ -120,16 +120,19 @@ internal static class CharacterCreateMessage
         uint   Heritage        = HeritageAluvian,
         uint   Gender          = GenderMale,
         int    TemplateOption  = 0,
-        // Aluvian.AttributeCredits is 330 in vanilla DAT but we
-        // intentionally minimize the sum here for safety per the
-        // rubber-duck recommendation: all-10s = 60 total, well under
-        // any heritage's AttributeCredits (>= 290).
-        uint   StrengthAbility     = 10,
-        uint   EnduranceAbility    = 10,
-        uint   CoordinationAbility = 10,
-        uint   QuicknessAbility    = 10,
-        uint   FocusAbility        = 10,
-        uint   SelfAbility         = 10,
+        // Spend the attribute-credit budget instead of the all-minimum
+        // [10,10,10,10,10,10]. Server gate
+        // (PlayerFactory.ValidateAttributeCredits): each attribute in [10,100]
+        // and their sum <= the selected heritage's AttributeCredits. 6 x 45 =
+        // 270 stays under the smallest heritage budget floor (>= 290) with
+        // margin and is within the per-attribute range. Even across all six
+        // attributes so none is favored by this default.
+        uint   StrengthAbility     = 45,
+        uint   EnduranceAbility    = 45,
+        uint   CoordinationAbility = 45,
+        uint   QuicknessAbility    = 45,
+        uint   FocusAbility        = 45,
+        uint   SelfAbility         = 45,
         uint   CharacterSlot       = 0,
         uint   ClassId             = 0,
         // Per-slot SkillAdvancementClass override. If non-null, every
