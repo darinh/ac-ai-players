@@ -469,4 +469,59 @@ public class CombatRetryTests
             swingsLanded: 8, swingsEvaded: 14, StaleMinSwings, StaleMinLanded,
             targetHealthAtStart: 1.0, targetHealthNow: 0.95, StaleMaxLost,
             secondsSinceLastHealthObservation: double.MaxValue, StaleMaxAge));
+
+    // --- IsPersistentSwingLoopCancel (consecutive swing-loop-cancel cap) ----
+    // Distinguishes a TRANSIENT swing-loop cancel (the drop a fast re-send
+    // recovers) from a PERSISTENT one (a durable cause the re-send cannot fix,
+    // which would otherwise spin a tight cancel/re-send loop).
+
+    [Fact]
+    public void PersistentCancel_BelowCap_IsTransient()
+    {
+        // The first several back-to-back cancels are still treated as the
+        // transient loop-drop the fast re-send is designed to recover.
+        Assert.False(CombatRetry.IsPersistentSwingLoopCancel(1, CombatRetry.MaxConsecutiveSwingLoopCancels));
+        Assert.False(CombatRetry.IsPersistentSwingLoopCancel(
+            CombatRetry.MaxConsecutiveSwingLoopCancels - 1,
+            CombatRetry.MaxConsecutiveSwingLoopCancels));
+    }
+
+    [Fact]
+    public void PersistentCancel_AtCap_IsPersistent()
+        // Reaching the cap flips the classification: stop arming the fast retry.
+        => Assert.True(CombatRetry.IsPersistentSwingLoopCancel(
+            CombatRetry.MaxConsecutiveSwingLoopCancels,
+            CombatRetry.MaxConsecutiveSwingLoopCancels));
+
+    [Fact]
+    public void PersistentCancel_PastCap_StaysPersistent()
+        => Assert.True(CombatRetry.IsPersistentSwingLoopCancel(
+            CombatRetry.MaxConsecutiveSwingLoopCancels + 50,
+            CombatRetry.MaxConsecutiveSwingLoopCancels));
+
+    [Fact]
+    public void PersistentCancel_CapAllowsAtLeastOneFastRetry()
+        // The cap must exceed 1 so a SINGLE transient cancel (the common,
+        // recoverable case) always still gets its fast re-send.
+        => Assert.True(CombatRetry.MaxConsecutiveSwingLoopCancels > 1);
+
+    [Fact]
+    public void PersistentCancel_ZeroCancels_IsTransient()
+        // No cancels observed yet — never persistent regardless of cap.
+        => Assert.False(CombatRetry.IsPersistentSwingLoopCancel(0, CombatRetry.MaxConsecutiveSwingLoopCancels));
+
+    [Fact]
+    public void PersistentCancel_ResetReEnablesFastRetry()
+    {
+        // Models the driver lifecycle at the predicate level: a streak that
+        // reached the cap (persistent → fast-retry suppressed) must, after real
+        // progress resets the count to 0, immediately be transient again so the
+        // NEXT cancel re-arms the fast retry. This is why the driver resets the
+        // count on a landed/evaded swing, an AttackDone(None) keep-alive, and an
+        // observed target-health drop.
+        var cap = CombatRetry.MaxConsecutiveSwingLoopCancels;
+        Assert.True(CombatRetry.IsPersistentSwingLoopCancel(cap, cap));   // at cap: suppressed
+        var afterProgress = 0;                                            // progress resets the streak
+        Assert.False(CombatRetry.IsPersistentSwingLoopCancel(afterProgress + 1, cap)); // next cancel re-arms
+    }
 }
