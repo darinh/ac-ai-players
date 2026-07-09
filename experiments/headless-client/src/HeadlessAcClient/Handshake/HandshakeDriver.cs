@@ -1197,6 +1197,19 @@ internal sealed class HandshakeDriver : IDisposable
         // active combat target; consumed by the Phase 7f.2 loop-keeper to
         // re-send the melee attack early. Cleared on send + combat reset.
         var                  combatFastRetryRequested = false;
+        // Consecutive AttackDone(ActionCancelled) swing-loop cancels seen
+        // back-to-back since the last real progress (a landed/evaded swing, an
+        // AttackDone(None) between-swings keep-alive, or an observed target-health
+        // drop — each resets this, as do a target change and any combat reset via
+        // ClearCombatFightStats). While low, a cancel is the transient loop-drop
+        // the Phase 7f.2 FAST re-send recovers; once it reaches
+        // CombatRetry.MaxConsecutiveSwingLoopCancels the cancel is PERSISTENT (a
+        // durable cause), so the fast-retry stops arming (the loop-keeper falls
+        // back to the slow CombatRetryIntervalSec safety-net instead of spinning a
+        // tight cancel/re-send loop) and each further persistent cancel counts as
+        // a swing refusal so the early-flee reflex can disengage. Mechanical
+        // loop-keeping bookkeeping; no game knowledge.
+        var                  combatConsecutiveSwingLoopCancels = 0;
         DateTime?            lastDamageAt = null;
         float?               lastObservedTargetHealthFraction = null;
         // Wall-clock of the most recent target-health observation (paired with
@@ -2060,6 +2073,7 @@ internal sealed class HandshakeDriver : IDisposable
             combatSwingsEvaded = 0;
             combatDamageDealt = 0;
             combatAttacksRefused = 0;
+            combatConsecutiveSwingLoopCancels = 0;
             combatPeakSelfHealthFraction = null;
             combatFeedbackSent = false;
             combatTargetName = null;
@@ -3104,6 +3118,15 @@ internal sealed class HandshakeDriver : IDisposable
                                         // quiescence clock (see
                                         // CombatActivityQuiescenceSec).
                                         lastServerCombatActivityAt = DateTime.UtcNow;
+                                        // A confirmed target-health drop is real
+                                        // combat progress (a swing reached and
+                                        // damaged the target), so any prior
+                                        // swing-loop cancels were transient — reset
+                                        // the consecutive-cancel streak so a still-
+                                        // winnable fight is never wrongly capped when
+                                        // a landed/evaded notification is missed but
+                                        // the health drop is observed.
+                                        combatConsecutiveSwingLoopCancels = 0;
                                     }
                                     lastObservedTargetHealthFraction = updHealth.HealthFraction;
                                     lastObservedTargetHealthAt = DateTime.UtcNow;
@@ -3248,7 +3271,42 @@ internal sealed class HandshakeDriver : IDisposable
                                     if (atkDone.ErrorCode == 0x0036u &&
                                         combatTargetGuid is not null &&
                                         !ctgStickActive)
-                                        combatFastRetryRequested = true;
+                                    {
+                                        // Count this swing-loop cancel. Arm a FAST
+                                        // re-send only while the cancel still looks
+                                        // TRANSIENT (below the cap); once it recurs
+                                        // back-to-back past the cap the re-send is
+                                        // futile (a durable cause, not a dropped
+                                        // loop) and continuing to fast-retry would
+                                        // spin a tight cancel/re-send loop. Reset on
+                                        // real progress (the None keep-alive, a
+                                        // landed/evaded swing, or an observed
+                                        // target-health drop).
+                                        combatConsecutiveSwingLoopCancels++;
+                                        if (!CombatRetry.IsPersistentSwingLoopCancel(
+                                                combatConsecutiveSwingLoopCancels,
+                                                CombatRetry.MaxConsecutiveSwingLoopCancels))
+                                        {
+                                            combatFastRetryRequested = true;
+                                        }
+                                        else
+                                        {
+                                            // Past the cap the cancel has proven
+                                            // PERSISTENT (a durable cause the re-send
+                                            // cannot fix), not the transient loop-drop
+                                            // the fast retry recovers. Stop arming the
+                                            // fast retry AND count it as a swing
+                                            // refusal — the same "cannot connect"
+                                            // evidence a semantic AttackDone error
+                                            // feeds — so the existing early-flee reflex
+                                            // (refused swings + health loss) can
+                                            // disengage a low-max-HP bot instead of
+                                            // standing still until the ~60s no-damage
+                                            // watchdog. Mechanical loop-keeping
+                                            // bookkeeping; no game knowledge.
+                                            combatAttacksRefused++;
+                                        }
+                                    }
 
                                     // Surface the refusal as an LLM learning
                                     // signal — EXCEPT a trailing
@@ -3296,6 +3354,10 @@ internal sealed class HandshakeDriver : IDisposable
                                     // OPPOSITE (loop dropped) and must NOT
                                     // refresh this.
                                     lastServerCombatActivityAt = DateTime.UtcNow;
+                                    // A None keep-alive proves the swing loop is
+                                    // alive, so any prior cancels were transient —
+                                    // reset the consecutive-cancel streak.
+                                    combatConsecutiveSwingLoopCancels = 0;
                                 }
                             }
                             // combat-damage-output — swing-outcome tracking.
@@ -3324,6 +3386,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     combatSwingsEvaded = 0;
                                     combatDamageDealt = 0;
                                     combatAttacksRefused = 0;
+                                    combatConsecutiveSwingLoopCancels = 0;
                                     combatFeedbackSent = false;
                                     combatTargetName = null;
                                     combatStatsForGuid = cnTarget;
@@ -3335,6 +3398,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 // transient, e.g. while closing distance). Reset so only a
                                 // target the bot NEVER reaches accumulates refusals.
                                 combatAttacksRefused = 0;
+                                // A resolved swing likewise proves the swing loop reached
+                                // the target, so any prior cancels were transient — reset
+                                // the consecutive swing-loop-cancel streak too.
+                                combatConsecutiveSwingLoopCancels = 0;
 
                                 // A landed/evaded swing notification means the
                                 // server's auto-repeat loop just RESOLVED a swing

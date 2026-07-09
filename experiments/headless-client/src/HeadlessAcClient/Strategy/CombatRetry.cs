@@ -223,6 +223,41 @@ internal static class CombatRetry
            && attackDoneErrorCode != YoureTooBusy;
 
     /// <summary>
+    /// Cap on consecutive <see cref="AttackDoneActionCancelled"/> swing-loop
+    /// cancels — counted since the last real progress (a landed/evaded swing or
+    /// an AttackDone(None) between-swings keep-alive, both of which reset the
+    /// count) — before the loop-keeper stops arming the FAST re-send.
+    ///
+    /// A single cancel normally means the server's auto-repeat swing loop
+    /// briefly dropped, and ONE fast re-send restarts it. But when the same
+    /// cancel recurs back-to-back this many times with no intervening progress,
+    /// the re-send is futile: the cause is durable (not the transient drop the
+    /// fast-retry was designed for), and continuing to fast-retry just spins a
+    /// tight cancel/re-send loop (observed live: 200+ back-to-back cancel pairs
+    /// against a single target, 0 damage dealt, while the bot kept taking hits).
+    /// Past the cap the motor falls back to the slow <c>CombatRetryIntervalSec</c>
+    /// safety-net re-send and lets the existing no-damage / low-health reflexes
+    /// end the engagement. Pure bookkeeping threshold; no game knowledge.
+    /// </summary>
+    public const int MaxConsecutiveSwingLoopCancels = 6;
+
+    /// <summary>
+    /// True once consecutive swing-loop cancels have reached
+    /// <paramref name="cap"/> — i.e. the <see cref="AttackDoneActionCancelled"/>
+    /// is PERSISTENT (a durable cause) rather than the transient loop-drop a
+    /// re-send recovers. Callers stop arming the fast re-send at this point.
+    /// Mechanical counter threshold; no game knowledge, no target choice.
+    /// </summary>
+    /// <param name="consecutiveCancels">
+    /// Swing-loop cancels observed back-to-back since the last real progress.
+    /// </param>
+    /// <param name="cap">
+    /// The threshold, normally <see cref="MaxConsecutiveSwingLoopCancels"/>.
+    /// </param>
+    public static bool IsPersistentSwingLoopCancel(int consecutiveCancels, int cap)
+        => consecutiveCancels >= cap;
+
+    /// <summary>
     /// Decide whether to abandon the current melee target EARLY because the
     /// bot demonstrably cannot damage it: every swing this fight has been
     /// evaded and zero damage has been dealt. This is a liveness/tempo guard
