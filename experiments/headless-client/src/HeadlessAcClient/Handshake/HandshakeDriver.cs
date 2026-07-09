@@ -978,6 +978,15 @@ internal sealed class HandshakeDriver : IDisposable
         // mistaken for a dropped loop.
         const double         CombatActivityQuiescenceSec = 4.0;
         DateTime?            lastServerCombatActivityAt = null;
+        // combat-hold-in-swing-range: when set, the walk-tick STOPS approaching
+        // the motion target while the server's melee auto-repeat swing loop is
+        // demonstrably alive against it (see CombatActivityQuiescenceSec) — a
+        // further approach step cancels the in-progress swing. Config-gated
+        // (AC_BOTS_SUPPRESS_WALK_WHILE_SWINGING), default OFF, so the behavior
+        // ships dormant until deliberately enabled for live validation.
+        var                  suppressWalkWhileSwinging =
+            (Environment.GetEnvironmentVariable("AC_BOTS_SUPPRESS_WALK_WHILE_SWINGING") ?? string.Empty)
+                .Trim().ToLowerInvariant() is "1" or "true" or "yes" or "on";
         double               AbandonOnNoDamageSec   = AbandonOnNoDamageSeconds;
         // Phase 7f — EARLY zero-progress abandon. The no-damage watchdog
         // above is the ultimate backstop; this trips sooner once enough
@@ -10292,7 +10301,43 @@ internal sealed class HandshakeDriver : IDisposable
                     }
                 }
 
+                // combat-hold-in-swing-range (config AC_BOTS_SUPPRESS_WALK_WHILE_SWINGING,
+                // default off): true while the server's melee auto-repeat swing loop is
+                // demonstrably ALIVE (a between-swings AttackDone(None), a landed/evaded
+                // swing, or a target-health drop within CombatActivityQuiescenceSec — all
+                // refresh lastServerCombatActivityAt) against the SAME target we are moving
+                // to and attacking. While true the walk-tick below SKIPS its per-tick
+                // autonomous-position advance so the bot's own motion does not cancel the
+                // in-progress swing (AttackDone ActionCancelled) — no STOP, no motionDone
+                // latch, so when the loop goes quiescent it clears and the advance resumes
+                // on the next tick (the server StickToObject keeps the bot in melee range
+                // meanwhile). Fires only while engaged with the motion target, so ordinary
+                // navigation is unaffected. Mechanical loop-keeping; no game knowledge.
+                var holdForSwingLoop =
+                    suppressWalkWhileSwinging &&
+                    motionTarget is not null &&
+                    combatTargetGuid is uint swingCtg &&
+                    motionTarget.Guid == swingCtg &&
+                    lastServerCombatActivityAt is DateTime swingAct &&
+                    CombatRetry.IsSwingLoopActive(
+                        (DateTime.UtcNow - swingAct).TotalSeconds, CombatActivityQuiescenceSec);
+
+                // While holding for the swing loop, keep the blocked-motion detector
+                // state clear so the FIRST tick after the hold releases starts a fresh
+                // AP sample instead of comparing the (unchanged, because we paused)
+                // position against the pre-hold prevSelfBeforeAp — otherwise a held
+                // pause could be misread as physically blocked and wrongly abandon the
+                // target as unreachable.
+                if (holdForSwingLoop)
+                {
+                    consecutiveBlockedTicks = 0;
+                    prevSelfBeforeAp = null;
+                    prevSelfCellBeforeAp = null;
+                    prevExpectedStepLen = 0f;
+                }
+
                 if (!motionDone &&
+                    !holdForSwingLoop &&
                     moveToStateStartSent && !moveToStateStopSent &&
                     motionTarget is not null &&
                     motionRotation is Quaternion lockedRot &&
