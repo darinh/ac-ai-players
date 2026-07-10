@@ -298,6 +298,36 @@ public class TeammateCoordinationTests
             world, new EventStream(), new HashSet<string>(new[] { "Mbb", "Mbc" }, StringComparer.OrdinalIgnoreCase));
         Assert.Contains("designated leader", prompt);
         Assert.Contains("Mbc", prompt);            // recruit the NEXT teammate
+        Assert.Contains("1 configured teammate(s) still to add", prompt);  // roster-completion count
+    }
+
+    [Fact]
+    public void Prompt_LeaderRecruitDirective_ShowsRemainingRosterCount()
+    {
+        // 6-bot roster (self listed); self + Mbb joined; only Mbc visible to recruit next.
+        // The directive must name Mbc AND report that 4 configured teammates remain, so a
+        // weak model sees the whole roster is still forming (not just the next one).
+        var world = LeaderInFellowshipSeeing(
+            "Mba", new[] { "Mba", "Mbb" }, "Mbc");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(),
+            new HashSet<string>(new[] { "Mba", "Mbb", "Mbc", "Mbd", "Mbe", "Mbf" }, StringComparer.OrdinalIgnoreCase));
+        Assert.Contains("Mbc", prompt);
+        Assert.Contains("4 configured teammate(s) still to add", prompt);   // Mbc,Mbd,Mbe,Mbf
+        Assert.Contains("until your whole team is grouped", prompt);
+    }
+
+    [Fact]
+    public void Prompt_LeaderRecruitCount_TwoBotStartup_FoldsInSelf()
+    {
+        // 2-bot harness startup shape: operator config is the OTHER bot only, the freshly
+        // created fellowship contains only self, and the other bot is visible to recruit.
+        // Folding self into the roster must read "1 still to add" (not 0).
+        var world = LeaderInFellowshipSeeing("Mba", new[] { "Mba" }, "Mbb");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mbb" }, StringComparer.OrdinalIgnoreCase));
+        Assert.Contains("Mbb", prompt);
+        Assert.Contains("1 configured teammate(s) still to add", prompt);
     }
 
     [Fact]
