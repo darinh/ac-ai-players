@@ -22333,14 +22333,21 @@ public class LlmGoalPolicyTests
     // (criterion #9 "sharing chat"); static-floor only, does not move the runtime
     // 413 risk (per-tick WORLD/visible sections), and the ceiling is a regression
     // guard, not a runtime size.
+    // Bumped 19500 -> 19700 (fellowship-invite-accept) for the new "FellowshipAccept"
+    // verb added to BOTH JSON `kind` enumerations the static floor renders (the
+    // stack-null and stack-present goal-shape blocks). The accept-invite cue itself
+    // is CONDITIONAL (renders only when an invite is pending), so it does not affect
+    // the floor. Receiving side of criterion #5 (fellowship); static-floor only, does
+    // not move the runtime 413 risk (per-tick WORLD/visible sections), and the
+    // ceiling is a regression guard, not a runtime size.
     [Fact]
     public void BuildUserPrompt_StaticFloor_StaysWithinBudget()
     {
         var world = BuildExitTokenWorld();
         var events = new EventStream();
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.True(prompt.Length <= 19500,
-            $"static prompt floor grew to {prompt.Length} chars (budget 19500)");
+        Assert.True(prompt.Length <= 19700,
+            $"static prompt floor grew to {prompt.Length} chars (budget 19700)");
     }
 
     // ---- XP-spend salience (xp-spend-salience) ----

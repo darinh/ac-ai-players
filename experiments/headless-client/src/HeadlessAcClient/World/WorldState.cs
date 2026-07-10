@@ -227,6 +227,16 @@ internal sealed class WorldState
     public FellowshipMembership? Fellowship { get; private set; }
 
     /// <summary>
+    /// A fellowship-invite prompt the server has sent the bot and it has not yet
+    /// answered, or null when none is outstanding. Set from a
+    /// CharacterConfirmationRequest (0x0274) of type Fellowship; cleared on the
+    /// matching CharacterConfirmationDone (0x0276), when a response is sent, or
+    /// when the bot enters a fellowship. Pure perception; the LLM owns the accept
+    /// decision.
+    /// </summary>
+    public PendingFellowshipInvite? PendingFellowshipInvite { get; private set; }
+
+    /// <summary>
     /// The bot's currently tracked contracts/objectives, set from the server's
     /// SendClientContractTrackerTable (0x0314) full snapshot and upserted/removed
     /// by SendClientContractTracker (0x0315). Empty when none are tracked. Pure
@@ -595,6 +605,10 @@ internal sealed class WorldState
             payload.EvenShare,
             payload.Open,
             payload.IsLocked);
+        // The bot is now in a fellowship, so any invite it was weighing is
+        // resolved; drop it (the server also sends a matching Done, but clearing
+        // here keeps the perception consistent regardless of event ordering).
+        PendingFellowshipInvite = null;
         return true;
     }
 
@@ -630,6 +644,50 @@ internal sealed class WorldState
         if (Fellowship is null)
             return false;
         Fellowship = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Record a fellowship-invite prompt from a CharacterConfirmationRequest
+    /// (0x0274). Only <c>ConfirmationType.Fellowship</c> prompts are tracked (the
+    /// prompt kind the Strategy layer has an accept action for); any other type is
+    /// ignored (returns false). A new fellowship prompt replaces any prior pending
+    /// one. Returns true when a fellowship invite was stored.
+    /// </summary>
+    public bool ApplyConfirmationRequest(ConfirmationRequestPayload payload)
+    {
+        if (payload.ConfirmationType != (uint)ConfirmationType.Fellowship)
+            return false;
+        PendingFellowshipInvite = new PendingFellowshipInvite(payload.Context, payload.Text);
+        return true;
+    }
+
+    /// <summary>
+    /// Clear the pending fellowship invite when the server closes it with a
+    /// CharacterConfirmationDone (0x0276). Only clears when the done event's type
+    /// is Fellowship AND its context matches the tracked invite — a stale Done for
+    /// a superseded context must not drop a newer pending invite. Returns true when
+    /// a matching pending invite was cleared.
+    /// </summary>
+    public bool ApplyConfirmationDone(ConfirmationDonePayload payload)
+    {
+        if (payload.ConfirmationType != (uint)ConfirmationType.Fellowship)
+            return false;
+        if (PendingFellowshipInvite is null || PendingFellowshipInvite.Context != payload.Context)
+            return false;
+        PendingFellowshipInvite = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Drop any pending fellowship invite (e.g. optimistically after a response is
+    /// sent, before the server's Done arrives). Returns false if none was pending.
+    /// </summary>
+    public bool ClearPendingFellowshipInvite()
+    {
+        if (PendingFellowshipInvite is null)
+            return false;
+        PendingFellowshipInvite = null;
         return true;
     }
 

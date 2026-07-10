@@ -168,6 +168,16 @@ internal enum GoalKind
     /// The motor invents NO text of its own (Strategy owns WHAT to say and WHETHER).
     /// </summary>
     Say = 21,
+
+    /// <summary>
+    /// Accept a pending fellowship invite the bot has been sent (surfaced as
+    /// <c>pending_fellowship_invite</c> in the projection). A self-action with no
+    /// world target: the motor looks up the outstanding invite's context and packs
+    /// a ConfirmationResponse (0x0275) accepting it; it makes NO decision about
+    /// WHETHER to accept (Strategy owns that — it only emits this when it wants to
+    /// join). Fails cleanly when no invite is pending.
+    /// </summary>
+    FellowshipAccept = 22,
 }
 
 /// <summary>

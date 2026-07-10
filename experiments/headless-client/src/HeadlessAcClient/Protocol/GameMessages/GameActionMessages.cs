@@ -61,6 +61,27 @@ internal enum GameActionType : uint
     BreakAllegiance     = 0x001E,
     Talk                = 0x0015,
     ChatChannel         = 0x0147,
+    ConfirmationResponse = 0x0275,
+}
+
+/// <summary>
+/// Subset of ACE's <c>ConfirmationType</c> enum
+/// (Source/ACE.Server/Entity/ConfirmationType.cs) that the headless client
+/// recognizes. The server queues a confirmation prompt
+/// (GameEventConfirmationRequest 0x0274) carrying one of these type codes plus a
+/// context id; the client echoes the same type + context back in a
+/// ConfirmationResponse (0x0275) with an accept/decline flag. The numeric value
+/// is the wire code the server reads — verified against the ACE-bots enum.
+/// </summary>
+internal enum ConfirmationType : uint
+{
+    SwearAllegiance  = 0x01,
+    AlterSkill       = 0x02,
+    AlterAttribute   = 0x03,
+    Fellowship       = 0x04,
+    CraftInteraction = 0x05,
+    Augmentation     = 0x06,
+    YesNo            = 0x07,
 }
 
 /// <summary>
@@ -1373,5 +1394,40 @@ internal static class GameActionMoveToStateMessage
                 count += 4;
         }
         return count;
+    }
+}
+
+/// <summary>
+/// ConfirmationResponse (0x0275): reply to a server confirmation prompt
+/// (GameEventConfirmationRequest 0x0274). Mirrors ACE-bots
+/// GameActionConfirmationResponse.Handle, which reads, after the GameAction
+/// header:
+///   i32 confirmationType   (the <see cref="ConfirmationType"/> being answered)
+///   u32 context            (the context id the request carried — echoed back)
+///   i32 response           (Convert.ToBoolean: 0 = decline, nonzero = accept)
+/// and calls ConfirmationManager.HandleResponse(type, context, response). The
+/// client MUST echo the exact type + context from the request so the server
+/// matches the reply to the queued prompt. Strategy owns the accept/decline
+/// decision (WHETHER to say yes); this only packs the wire bytes.
+/// </summary>
+internal static class GameActionConfirmationResponseMessage
+{
+    public const int PackedSize = GameActionMessage.HeaderSize + 12;  // 24 bytes
+
+    public static int Pack(
+        Span<byte> dest,
+        ConfirmationType confirmationType,
+        uint context,
+        bool accept,
+        uint actionSequence = 1)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        var cursor = GameActionMessage.Pack(dest, GameActionType.ConfirmationResponse, actionSequence);
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), (uint)confirmationType); cursor += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(dest.Slice(cursor), context); cursor += 4;
+        BinaryPrimitives.WriteInt32LittleEndian(dest.Slice(cursor), accept ? 1 : 0); cursor += 4;
+        return cursor;
     }
 }

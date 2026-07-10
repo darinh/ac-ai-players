@@ -2695,6 +2695,23 @@ internal sealed class HandshakeDriver : IDisposable
                                     if (worldState.ApplyFellowshipDeparture(fellowDismiss.DismissedGuid))
                                         Console.WriteLine($"[fellowship] dismissed: 0x{fellowDismiss.DismissedGuid:X8}");
                                 }
+                                // Confirmation prompt (0x0274) / done (0x0276) -> WorldState
+                                // so the LLM prompt can perceive "you have a pending fellowship
+                                // invite" and choose to emit a FellowshipAccept. Perception
+                                // only; source never decides whether to accept.
+                                else if (ge.Payload?.ConfirmationRequest is { } confirmReq)
+                                {
+                                    if (worldState.ApplyConfirmationRequest(confirmReq))
+                                        Console.WriteLine(
+                                            $"[fellowship] invite pending: context={confirmReq.Context} " +
+                                            $"text=\"{confirmReq.Text}\"");
+                                }
+                                else if (ge.Payload?.ConfirmationDone is { } confirmDone)
+                                {
+                                    if (worldState.ApplyConfirmationDone(confirmDone))
+                                        Console.WriteLine(
+                                            $"[fellowship] invite closed: context={confirmDone.Context}");
+                                }
                                 // Contract tracker (0x0314 full table / 0x0315 single
                                 // update) -> WorldState so the LLM prompt can perceive
                                 // "you have a tracked objective at stage X". Same
@@ -7039,6 +7056,51 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"[strategy] LLM-GOAL Say ({sayWhere}): \"{sayText}\" source={goal.Source} " +
                                 $"pktSeq={sayPktSeq} fragSeq={sayFragSeq} bytes={saySent}");
                             tactics.Clear("say dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.FellowshipAccept)
+                    {
+                        // Social self-action: accept a pending fellowship invite. The LLM
+                        // chose to join (it sees the pending invite in the projection); the
+                        // motor looks up the outstanding invite's echoed context and packs a
+                        // ConfirmationResponse (0x0275) accepting it. It makes NO decision
+                        // about WHETHER to accept, and fails cleanly when none is pending.
+                        var acceptDecision = FellowshipInviteResponse.Decide(worldState.PendingFellowshipInvite);
+                        if (acceptDecision.Kind == FellowshipInviteResponse.ResultKind.Fail)
+                        {
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL FellowshipAccept not sent ({acceptDecision.FailReason}); " +
+                                $"source={goal.Source}");
+                            tactics.Fail(acceptDecision.FailReason!, eventStream);
+                        }
+                        else
+                        {
+                            var faPktSeq  = nextOutboundPacketSequence++;
+                            var faFragSeq = nextOutboundFragmentSequence++;
+                            var faBuf = new byte[GameActionConfirmationResponseMessage.PackedSize];
+                            var faLen = GameActionConfirmationResponseMessage.Pack(
+                                faBuf, ConfirmationType.Fellowship, acceptDecision.Context, accept: true);
+                            var faMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                faMsg.AddAckSequence(lastReceivedSeq);
+                            faMsg.AddBlobFragment(
+                                fragSequence: faFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: faBuf.AsSpan(0, faLen));
+                            var faSent = faMsg.Pack(sendBuf, myClientId,
+                                                    sequence: faPktSeq, iteration: 1,
+                                                    encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, faSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            // Optimistically drop the pending invite so a slow server Done
+                            // does not leave the cue up and re-mint another accept.
+                            worldState.ClearPendingFellowshipInvite();
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL FellowshipAccept: context={acceptDecision.Context} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={faPktSeq} fragSeq={faFragSeq} bytes={faSent}");
+                            tactics.Clear("fellowship-accept dispatched", eventStream);
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)

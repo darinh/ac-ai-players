@@ -349,6 +349,17 @@ internal sealed record FellowshipProjection
 }
 
 /// <summary>
+/// pending-fellowship-invite perception: an outstanding fellowship invite the bot
+/// has been sent and not yet answered. Null on the parent projection ⇒ no pending
+/// invite. Built from <see cref="WorldState.PendingFellowshipInvite"/>. Raw fact
+/// only (the server's prompt text); source assigns no advice about whether to accept.
+/// </summary>
+internal sealed record PendingFellowshipInviteProjection
+{
+    [JsonPropertyName("text")] public required string Text { get; init; }
+}
+
+/// <summary>
 /// contract-perception: one tracked objective surfaced to the LLM — its numeric
 /// id and the raw wire ContractStage code. Built from <see cref="WorldState.Contracts"/>.
 /// Surfaced in the "## Contracts" prompt section as raw facts; source assigns no
@@ -457,6 +468,16 @@ internal sealed record WorldStateProjection
     /// </summary>
     [JsonPropertyName("fellowship")]
     public FellowshipProjection? Fellowship { get; init; }
+
+    /// <summary>
+    /// pending-fellowship-invite perception: an outstanding fellowship invite sent
+    /// to the bot (null when none). Built from
+    /// <see cref="WorldState.PendingFellowshipInvite"/> and rendered in the
+    /// fellowship prompt section so the LLM can choose to emit a FellowshipAccept.
+    /// Raw fact only.
+    /// </summary>
+    [JsonPropertyName("pending_fellowship_invite")]
+    public PendingFellowshipInviteProjection? PendingFellowshipInvite { get; init; }
 
     /// <summary>
     /// contract-perception: the bot's currently tracked contracts/objectives
@@ -967,6 +988,14 @@ internal sealed record WorldStateProjection
             };
         }
 
+        // pending-fellowship-invite perception: surface an outstanding invite (its
+        // server prompt text) so the LLM can choose to emit a FellowshipAccept. Null
+        // when none is pending. Raw fact only; no advice.
+        PendingFellowshipInviteProjection? pendingInviteProj =
+            world.PendingFellowshipInvite is { } pfi
+                ? new PendingFellowshipInviteProjection { Text = pfi.Text }
+                : null;
+
         // contract-perception: project the tracked contracts (id + raw stage),
         // enriched with the human-readable objective from the dat ContractTable
         // (ContractCatalog) when available — so the LLM can see what each tracked
@@ -1079,6 +1108,7 @@ internal sealed record WorldStateProjection
             Inventory = inv,
             Visible = visible,
             Fellowship = fellowshipProj,
+            PendingFellowshipInvite = pendingInviteProj,
             Contracts = contractProj,
             Vendor = vendorProj,
             SelfVitaeMultiplier = world.SelfVitaeMultiplier,
