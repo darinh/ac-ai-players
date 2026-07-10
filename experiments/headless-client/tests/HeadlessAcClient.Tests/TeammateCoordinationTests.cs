@@ -422,4 +422,87 @@ public class TeammateCoordinationTests
         Assert.Contains("INVITED you", invite);
         Assert.Contains("DIRECTED team coordination", invite);
     }
+
+    // ---- ## Allegiance guidance: vassal-swear directive ----
+
+    private static WorldStateProjection AllegianceProjection(
+        string ownName, uint? monarchGuid, params string[] visiblePlayerNames)
+    {
+        var visible = visiblePlayerNames
+            .Select((n, i) => new VisibleObjectProjection
+            {
+                Guid = 0x50000180u + (uint)i, Name = n, IsPlayer = true, Distance = 6f,
+            })
+            .ToArray();
+        return new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = 0x5000000Bu, Name = ownName, HealthFraction = 1.0f, MonarchGuid = monarchGuid,
+            },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = visible,
+        };
+    }
+
+    [Fact]
+    public void Prompt_Follower_NotYetVassal_IsDirectedToSwear()
+    {
+        // Own is its own monarch (MonarchGuid == own guid) => not yet anyone's vassal.
+        var world = AllegianceProjection("Mbb", monarchGuid: 0x5000000Bu, "Mba");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("SwearAllegiance", sec);
+        Assert.Contains("your team's leader", sec);
+        Assert.Contains("Mba", sec);
+        Assert.Contains("DIRECTED team coordination", sec);
+    }
+
+    [Fact]
+    public void Prompt_Leader_IsNotDirectedToSwear()
+    {
+        // The leader is the monarch, not a vassal -> no swear directive for it.
+        var world = AllegianceProjection("Mba", monarchGuid: 0x5000000Bu, "Mbb");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mbb" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.DoesNotContain("your team's leader", sec);
+    }
+
+    [Fact]
+    public void Prompt_Follower_AlreadyVassal_IsNotDirectedToSwear()
+    {
+        // MonarchGuid is a DIFFERENT guid (already someone's vassal) -> no re-swear.
+        var world = AllegianceProjection("Mbb", monarchGuid: 0x50000199u, "Mba");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.DoesNotContain("your team's leader", sec);
+    }
+
+    [Fact]
+    public void Prompt_Follower_Unaffiliated_IsDirectedToSwear()
+    {
+        // Truly unaffiliated (MonarchGuid null) -> IsInAllegiance false -> still directed.
+        var world = AllegianceProjection("Mbb", monarchGuid: null, "Mba");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("your team's leader", sec);
+        Assert.Contains("SwearAllegiance", sec);
+    }
+
+    [Fact]
+    public void Prompt_AlreadyVassal_GenericSwearCueSuppressed()
+    {
+        // Once a vassal (monarch = another guid), the generic "swear to anyone" cue is
+        // suppressed (an existing vassal must BreakAllegiance first).
+        var world = AllegianceProjection("Solo", monarchGuid: 0x50000199u, "SomePlayer");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(Array.Empty<string>(), StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.DoesNotContain("You MAY `SwearAllegiance`", sec);
+        Assert.Contains("BreakAllegiance", sec);   // but break is still offered
+    }
 }
