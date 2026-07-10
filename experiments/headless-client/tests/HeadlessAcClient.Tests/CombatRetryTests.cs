@@ -524,4 +524,33 @@ public class CombatRetryTests
         var afterProgress = 0;                                            // progress resets the streak
         Assert.False(CombatRetry.IsPersistentSwingLoopCancel(afterProgress + 1, cap)); // next cancel re-arms
     }
+
+    // --- IsSwingLoopActive (combat-hold-in-swing-range gate) ----------------
+    private const double Quies = 4.0;
+
+    [Fact]
+    public void SwingLoopActive_RecentActivity_IsActive()
+    {
+        Assert.True(CombatRetry.IsSwingLoopActive(0.0, Quies));   // just observed
+        Assert.True(CombatRetry.IsSwingLoopActive(1.5, Quies));   // within window
+    }
+
+    [Fact]
+    public void SwingLoopActive_AtOrPastQuiescence_IsNotActive()
+    {
+        Assert.False(CombatRetry.IsSwingLoopActive(Quies, Quies));       // boundary: loop dropped
+        Assert.False(CombatRetry.IsSwingLoopActive(Quies + 2.0, Quies)); // well past
+    }
+
+    [Fact]
+    public void SwingLoopActive_NoActivityObserved_IsNotActive()
+        // Null == no server combat signal yet: the loop is not known alive, so
+        // the walk-tick must be free to approach (do not suppress).
+        => Assert.False(CombatRetry.IsSwingLoopActive(null, Quies));
+
+    [Fact]
+    public void SwingLoopActive_NegativeAge_IsNotActive()
+        // Clock skew must not read as "active" (which would wrongly freeze the
+        // approach); fall through to not-active.
+        => Assert.False(CombatRetry.IsSwingLoopActive(-1.0, Quies));
 }

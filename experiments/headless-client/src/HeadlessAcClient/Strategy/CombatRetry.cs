@@ -258,6 +258,28 @@ internal static class CombatRetry
         => consecutiveCancels >= cap;
 
     /// <summary>
+    /// True when the server's melee auto-repeat swing loop is demonstrably
+    /// ACTIVE — a normal AttackDone(None) between-swings keep-alive, a
+    /// landed/evaded swing, or a target-health drop was observed within
+    /// <paramref name="quiescenceSec"/> (the same signal
+    /// <see cref="ShouldReattack"/> uses to suppress a re-send). While active,
+    /// the bot is in swing range: it should neither re-send the attack (which
+    /// the server rejects YoureTooBusy and cancels its own loop) nor take a
+    /// further approach step (which cancels the in-progress swing). Null (no
+    /// activity observed yet) or a negative age (clock skew) is treated as NOT
+    /// active. Mechanical timing predicate; no game knowledge.
+    /// </summary>
+    /// <param name="secondsSinceServerCombatActivity">
+    /// Seconds since the last observed server combat-loop signal, or null if
+    /// none has been observed for this engagement.
+    /// </param>
+    /// <param name="quiescenceSec">
+    /// How long the loop must be silent before it is considered dropped.
+    /// </param>
+    public static bool IsSwingLoopActive(double? secondsSinceServerCombatActivity, double quiescenceSec)
+        => secondsSinceServerCombatActivity is double s && s >= 0 && s < quiescenceSec;
+
+    /// <summary>
     /// Decide whether to abandon the current melee target EARLY because the
     /// bot demonstrably cannot damage it: every swing this fight has been
     /// evaded and zero damage has been dealt. This is a liveness/tempo guard
