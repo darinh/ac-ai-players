@@ -178,6 +178,15 @@ internal enum GoalKind
     /// join). Fails cleanly when no invite is pending.
     /// </summary>
     FellowshipAccept = 22,
+
+    /// <summary>
+    /// Approve a pending swear-allegiance request from a prospective vassal (surfaced
+    /// as <c>pending_allegiance_request</c> in the projection). A self-action with no
+    /// world target: the motor looks up the outstanding request's context and packs a
+    /// ConfirmationResponse (0x0275) approving it; it makes NO decision about WHETHER to
+    /// approve (Strategy owns that). Fails cleanly when no request is pending.
+    /// </summary>
+    AllegianceApprove = 23,
 }
 
 /// <summary>

@@ -360,6 +360,18 @@ internal sealed record PendingFellowshipInviteProjection
 }
 
 /// <summary>
+/// pending-allegiance-request perception: an outstanding swear-allegiance request the
+/// bot has been sent (as prospective patron) and not yet answered. Null on the parent
+/// projection ⇒ none. Built from <see cref="WorldState.PendingAllegianceRequest"/>. Raw
+/// fact only (the server's prompt text = the would-be vassal's name); source assigns no
+/// advice about whether to approve.
+/// </summary>
+internal sealed record PendingAllegianceRequestProjection
+{
+    [JsonPropertyName("text")] public required string Text { get; init; }
+}
+
+/// <summary>
 /// contract-perception: one tracked objective surfaced to the LLM — its numeric
 /// id and the raw wire ContractStage code. Built from <see cref="WorldState.Contracts"/>.
 /// Surfaced in the "## Contracts" prompt section as raw facts; source assigns no
@@ -478,6 +490,15 @@ internal sealed record WorldStateProjection
     /// </summary>
     [JsonPropertyName("pending_fellowship_invite")]
     public PendingFellowshipInviteProjection? PendingFellowshipInvite { get; init; }
+
+    /// <summary>
+    /// pending-allegiance-request perception: an outstanding swear-allegiance request
+    /// sent to the bot as prospective patron (null when none). Built from
+    /// <see cref="WorldState.PendingAllegianceRequest"/> and rendered in the allegiance
+    /// prompt section so the LLM can choose to emit an AllegianceApprove. Raw fact only.
+    /// </summary>
+    [JsonPropertyName("pending_allegiance_request")]
+    public PendingAllegianceRequestProjection? PendingAllegianceRequest { get; init; }
 
     /// <summary>
     /// contract-perception: the bot's currently tracked contracts/objectives
@@ -996,6 +1017,13 @@ internal sealed record WorldStateProjection
                 ? new PendingFellowshipInviteProjection { Text = pfi.Text }
                 : null;
 
+        // pending-allegiance-request perception: surface an outstanding swear request
+        // (the would-be vassal's name) so the LLM can choose to emit an AllegianceApprove.
+        PendingAllegianceRequestProjection? pendingAllegianceProj =
+            world.PendingAllegianceRequest is { } par
+                ? new PendingAllegianceRequestProjection { Text = par.Text }
+                : null;
+
         // contract-perception: project the tracked contracts (id + raw stage),
         // enriched with the human-readable objective from the dat ContractTable
         // (ContractCatalog) when available — so the LLM can see what each tracked
@@ -1109,6 +1137,7 @@ internal sealed record WorldStateProjection
             Visible = visible,
             Fellowship = fellowshipProj,
             PendingFellowshipInvite = pendingInviteProj,
+            PendingAllegianceRequest = pendingAllegianceProj,
             Contracts = contractProj,
             Vendor = vendorProj,
             SelfVitaeMultiplier = world.SelfVitaeMultiplier,

@@ -87,6 +87,27 @@ public class GameActionConfirmationResponseMessageTests
     }
 
     [Fact]
+    public void Pack_ApproveSwearAllegiance_WritesType01ContextAccept1()
+    {
+        // The monarch's AllegianceApprove path: ConfirmationResponse(type=SwearAllegiance=1,
+        // echoed context, response=1).
+        var dest = new byte[GameActionConfirmationResponseMessage.PackedSize];
+        var written = GameActionConfirmationResponseMessage.Pack(
+            dest, ConfirmationType.SwearAllegiance, context: 88u, accept: true, actionSequence: 4u);
+
+        Assert.Equal(24, written);
+        var expected = new byte[24];
+        var c = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), GameActionEnvelopeOpcode); c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 4u);                        c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x0275u);                   c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x01u);                     c += 4; // SwearAllegiance
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 88u);                       c += 4; // context
+        BinaryPrimitives.WriteInt32LittleEndian(expected.AsSpan(c), 1);                          c += 4; // approve
+        Assert.Equal(expected, dest);
+    }
+
+    [Fact]
     public void Pack_RejectsTooSmallBuffer()
     {
         var tooSmall = new byte[GameActionConfirmationResponseMessage.PackedSize - 1];
