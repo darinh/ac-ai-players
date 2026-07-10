@@ -446,6 +446,119 @@ public class LlmGoalClientTests
         Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), LlmGoalClient.ResolveHttpTimeout(env));
     }
 
+    [Theory]
+    // (env, primarySeconds, expectedSeconds) — a fallback attempt's tighter budget.
+    [InlineData(null, 40, 18)]   // unset -> default (well under the 40s primary)
+    [InlineData("", 40, 18)]     // blank -> default
+    [InlineData("abc", 40, 18)]  // unparseable -> default
+    [InlineData("18", 40, 18)]   // valid override
+    [InlineData("1", 40, 1)]     // min bound
+    [InlineData("40", 40, 40)]   // max bound == primary budget
+    [InlineData("0", 40, 18)]    // below min -> default
+    [InlineData("41", 40, 18)]   // above the primary budget -> rejected -> default
+    [InlineData("10", 40, 10)]   // valid mid override
+    [InlineData(null, 10, 10)]   // small primary: default min(18,primary) -> primary
+    [InlineData("10", 10, 10)]   // valid == small primary
+    [InlineData("11", 10, 10)]   // above small primary -> rejected -> default(=primary)
+    public void ResolveFallbackHttpTimeout_ClampedAtOrUnderPrimary(
+        string? env, int primarySeconds, int expectedSeconds)
+    {
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds),
+            LlmGoalClient.ResolveFallbackHttpTimeout(env, TimeSpan.FromSeconds(primarySeconds)));
+    }
+
+    // ---- per-attempt fallback timeout: a stalled fallback rotates fast ----
+
+    [Fact]
+    public async Task FallbackAttemptTimeout_StalledFallback_RotatesToNextModel_AsFailover()
+    {
+        // A stalled fallback must be abandoned at the (short) per-attempt deadline
+        // and rotated PAST as an infrastructure failover (not surfaced as a
+        // caller-cancellation), so the chain reaches a responsive candidate quickly
+        // instead of burning the full primary budget on the stall.
+        Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", "1");
+        try
+        {
+            var handler = new DelayingModelHandler(model => model switch
+            {
+                "primary" => (TimeSpan.Zero, TooMany()),                 // rotate immediately
+                "slow"    => (TimeSpan.FromSeconds(30), Ok("late")),     // stalls past the 1s deadline
+                _         => (TimeSpan.Zero, Ok($"content-from-{model}")),
+            });
+            var llm = new LlmGoalClient(
+                new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "slow;fast");
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = await llm.CompleteAsync("sys", "user");
+            sw.Stop();
+
+            Assert.True(result.Ok);
+            Assert.Equal("content-from-fast", result.Content);
+            Assert.Equal(new[] { "primary", "slow", "fast" }, handler.RequestedModels);
+            // Abandoned near the 1s deadline, nowhere near the 30s stall.
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(15),
+                $"stalled fallback was not abandoned promptly (took {sw.Elapsed.TotalSeconds:F1}s)");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", null);
+        }
+    }
+
+    [Fact]
+    public async Task FallbackAttemptTimeout_PrimaryIsExemptFromTheTighterBudget()
+    {
+        // The configured primary keeps its full budget: a primary that answers
+        // slightly slower than the fallback deadline must NOT be cut off (that is
+        // the whole reason the tighter budget is scoped to fallbacks only).
+        Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", "1");
+        try
+        {
+            var handler = new DelayingModelHandler(model =>
+                (TimeSpan.FromSeconds(2), Ok($"content-from-{model}")));  // slower than the 1s fallback budget
+            var llm = new LlmGoalClient(
+                new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "fallback-a");
+
+            var result = await llm.CompleteAsync("sys", "user");
+
+            Assert.True(result.Ok);
+            Assert.Equal("content-from-primary", result.Content);       // primary answered, was not abandoned
+            Assert.Equal(new[] { "primary" }, handler.RequestedModels);  // never rotated to the fallback
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", null);
+        }
+    }
+
+    [Fact]
+    public async Task FallbackAttemptTimeout_CallerCancellation_DoesNotStormThroughTheRoster()
+    {
+        // A real caller cancellation (bot shutting down) must remain a no-failover
+        // exit even with the per-attempt CTS in place: it must not rotate through
+        // the whole roster on the way out.
+        Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", "1");
+        try
+        {
+            var handler = new DelayingModelHandler(_ =>
+                (TimeSpan.FromSeconds(30), Ok("never")));   // would block if ever reached
+            var llm = new LlmGoalClient(
+                new HttpClient(handler), Endpoint, "primary", "key", fallbackModels: "fallback-a;fallback-b");
+            using var cts = new CancellationTokenSource();
+            cts.Cancel();
+
+            var result = await llm.CompleteAsync("sys", "user", cts.Token);
+
+            Assert.False(result.Ok);
+            Assert.True(handler.RequestedModels.Count <= 1,
+                $"caller-cancel rotated through {handler.RequestedModels.Count} models");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS", null);
+        }
+    }
+
     [Fact]
     public async Task Cooldown_SkipsCoolingModel_EvenWhenRotationReachesIt()
     {
@@ -875,6 +988,42 @@ public class LlmGoalClientTests
             var model = ExtractModel(body);
             RequestedModels.Add(model);
             return _route(model);
+        }
+
+        private static string ExtractModel(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return "";
+            using var doc = JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "";
+        }
+    }
+
+    /// <summary>
+    /// Like <see cref="ModelRoutingHandler"/> but each route also carries a delay
+    /// that HONORS the request cancellation token, so a per-attempt timeout (a
+    /// linked-CTS CancelAfter) actually interrupts it — exercising the fallback
+    /// attempt-timeout path. The model is recorded before the delay so a timed-out
+    /// attempt still shows in RequestedModels.
+    /// </summary>
+    private sealed class DelayingModelHandler : HttpMessageHandler
+    {
+        private readonly Func<string, (TimeSpan delay, HttpResponseMessage resp)> _route;
+        public List<string> RequestedModels { get; } = new();
+
+        public DelayingModelHandler(Func<string, (TimeSpan, HttpResponseMessage)> route) => _route = route;
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = request.Content is null
+                ? ""
+                : await request.Content.ReadAsStringAsync(CancellationToken.None).ConfigureAwait(false);
+            var model = ExtractModel(body);
+            RequestedModels.Add(model);
+            var (delay, resp) = _route(model);
+            if (delay > TimeSpan.Zero)
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            return resp;
         }
 
         private static string ExtractModel(string body)
