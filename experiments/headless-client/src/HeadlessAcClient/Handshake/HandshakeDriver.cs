@@ -6927,6 +6927,25 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("sell dispatched", eventStream);
                         }
                     }
+                    else if (goal is not null
+                             && FellowshipGoalGuard.IsRedundantFellowshipCreate(
+                                    goal.Kind, projection?.Fellowship is not null))
+                    {
+                        // Guard: reject a FellowshipCreate while the bot is ALREADY in a
+                        // fellowship. The server disbands the current fellowship to create a
+                        // new one, so a re-issued create COLLAPSES a team the bot is still
+                        // forming (live 6-bot run: after a mid-run model rotation a weak model
+                        // re-emitted FellowshipCreate and dropped a 4-member fellowship back to
+                        // 1 member). Mechanical guard on wire-decoded membership — no game
+                        // knowledge; the valid in-fellowship actions are FellowshipRecruit
+                        // (add a teammate) and FellowshipQuit (leave). Recorded as a failed
+                        // goal so the LLM sees it did not take effect rather than re-emitting.
+                        Console.WriteLine(
+                            "[strategy] LLM-GOAL FellowshipCreate REJECTED: already in a fellowship " +
+                            $"(members={projection!.Fellowship!.MemberCount}); creating a new one would " +
+                            $"disband it. source={goal.Source}");
+                        tactics.Fail("fellowship-create rejected: already in a fellowship", eventStream);
+                    }
                     else if (goal is not null && goal.Kind == GoalKind.FellowshipCreate)
                     {
                         // Social self-action: form a fellowship led by the bot. The
