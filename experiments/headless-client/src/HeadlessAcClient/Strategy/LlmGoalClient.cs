@@ -58,11 +58,11 @@ internal sealed class LlmGoalClient
 
     // Default model rotation. GitHub Models is rate-limited per-model-per-day, so
     // the bot must lean on a CHAIN of models, not one. The primary is the most
-    // capable generally-available model (better quest/combat decisions); on a 429
-    // (daily quota) the client rotates to the next candidate within a single
-    // CompleteAsync call and STICKS to whatever answers, ending at a
-    // high-availability model as a last resort so the bot keeps deciding even when
-    // every capable model is quota-walled. Override via AC_BOTS_LLM_MODEL /
+    // capable generally-available model; on a 429 (daily quota) the client rotates
+    // to the next candidate within a single CompleteAsync call and STICKS to
+    // whatever answers, ending at a high-availability model as a last resort so the
+    // client keeps returning answers even when every higher-quality model is
+    // quota-walled. Override via AC_BOTS_LLM_MODEL /
     // AC_BOTS_LLM_FALLBACK_MODELS. (History: earlier single defaults of
     // openai/gpt-4o-mini, then meta/llama-3.3-70b-instruct, shipped with NO
     // fallback chain — so an unconfigured run used ONE model and degraded to weak
@@ -80,6 +80,14 @@ internal sealed class LlmGoalClient
         "openai/gpt-4.1-mini;microsoft/phi-4;mistral-ai/mistral-small-2503;cohere/cohere-command-a;meta/llama-3.3-70b-instruct";
 
     private readonly HttpClient _http;
+    // Resolved per-attempt HTTP timeouts. _httpTimeout is the primary model's
+    // full budget (also the shared HttpClient.Timeout ceiling); _fallbackHttpTimeout
+    // is the tighter budget applied to a non-primary attempt so a stalled fallback
+    // is abandoned quickly and rotation reaches a responsive model, instead of
+    // burning the full primary budget on every stalled fallback. See
+    // ResolveFallbackHttpTimeout and SendOnceAsync.
+    private readonly TimeSpan _httpTimeout;
+    private readonly TimeSpan _fallbackHttpTimeout;
     private readonly string _endpoint;
     private readonly string? _explicitApiKey;
 
@@ -181,6 +189,25 @@ internal sealed class LlmGoalClient
             : TimeSpan.FromSeconds(defaultSeconds);
     }
 
+    // Per-attempt timeout for a NON-PRIMARY (fallback) model. Held well under the
+    // primary budget so a stalled fallback is abandoned quickly and rotation
+    // reaches a responsive candidate, instead of paying the full primary budget on
+    // every stall. In practice a healthy call completes far under this; a fallback
+    // that has not answered by the deadline is not worth waiting for while the
+    // chain still has candidates to try. Clamp: [minSeconds, primaryTimeout] — a
+    // fallback is never given longer than the primary budget. Override with
+    // AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS. Pure request-infrastructure
+    // tuning; no game knowledge, model-agnostic.
+    internal static TimeSpan ResolveFallbackHttpTimeout(string? envValue, TimeSpan primaryTimeout)
+    {
+        const int minSeconds = 1;
+        var maxSeconds = (int)primaryTimeout.TotalSeconds;
+        var defaultSeconds = Math.Max(minSeconds, Math.Min(18, maxSeconds));
+        return int.TryParse(envValue, out var s) && s >= minSeconds && s <= maxSeconds
+            ? TimeSpan.FromSeconds(s)
+            : TimeSpan.FromSeconds(defaultSeconds);
+    }
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
@@ -189,13 +216,17 @@ internal sealed class LlmGoalClient
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _log = log ?? (s => Console.WriteLine(s));
+        _httpTimeout = ResolveHttpTimeout(
+            Environment.GetEnvironmentVariable("AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS"));
+        _fallbackHttpTimeout = ResolveFallbackHttpTimeout(
+            Environment.GetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_HTTP_TIMEOUT_SECONDS"),
+            _httpTimeout);
         _http = http ?? new HttpClient(new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         })
         {
-            Timeout = ResolveHttpTimeout(
-                Environment.GetEnvironmentVariable("AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS")),
+            Timeout = _httpTimeout,
         };
 
         _endpoint = endpoint
@@ -340,7 +371,11 @@ internal sealed class LlmGoalClient
         foreach (var idx in order)
         {
             var model = _models[idx];
-            var result = await SendOnceAsync(model, token, systemPrompt, userPrompt, ct).ConfigureAwait(false);
+            // The configured primary (index 0) keeps the full HttpClient.Timeout
+            // budget; every fallback gets the tighter per-attempt deadline so one
+            // stalled fallback can't burn the whole primary budget before rotating.
+            var attemptTimeout = idx == 0 ? (TimeSpan?)null : _fallbackHttpTimeout;
+            var result = await SendOnceAsync(model, token, systemPrompt, userPrompt, attemptTimeout, ct).ConfigureAwait(false);
 
             if (result.Ok)
             {
@@ -458,7 +493,8 @@ internal sealed class LlmGoalClient
     // headers, JSON body, status + Retry-After decode, latency, and response
     // parse. CompleteAsync orchestrates which model(s) this is called for.
     private async Task<LlmResult> SendOnceAsync(
-        string model, string token, string systemPrompt, string userPrompt, CancellationToken ct)
+        string model, string token, string systemPrompt, string userPrompt,
+        TimeSpan? attemptTimeout, CancellationToken ct)
     {
         var payload = new ChatRequest
         {
@@ -480,13 +516,27 @@ internal sealed class LlmGoalClient
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         req.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
 
+        // A non-primary (fallback) attempt gets a tighter per-attempt deadline via
+        // a linked CTS so a stalled fallback is abandoned quickly and rotation
+        // reaches a responsive model. When it fires the caller-supplied ct is NOT
+        // signalled, so the catch below classifies it as a Transport failure
+        // (failover) exactly like the shared HttpClient.Timeout ceiling — only a
+        // real caller cancellation (ct signalled) is a no-failover exit. The
+        // primary attempt passes attemptTimeout=null and runs under the shared
+        // HttpClient.Timeout unchanged.
+        using var attemptCts = attemptTimeout is null
+            ? null
+            : CancellationTokenSource.CreateLinkedTokenSource(ct);
+        if (attemptCts is not null) attemptCts.CancelAfter(attemptTimeout!.Value);
+        var sendToken = attemptCts?.Token ?? ct;
+
         var sw = Stopwatch.StartNew();
         HttpResponseMessage? resp = null;
         string raw;
         try
         {
-            resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
-            raw = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            resp = await _http.SendAsync(req, sendToken).ConfigureAwait(false);
+            raw = await resp.Content.ReadAsStringAsync(sendToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
