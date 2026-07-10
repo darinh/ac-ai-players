@@ -29,3 +29,13 @@ internal sealed record FellowshipMembership(
     bool EvenShare,
     bool Open,
     bool IsLocked);
+
+/// <summary>
+/// A pending fellowship-invite prompt the server has sent the bot and that it has
+/// not yet answered. Distilled from a CharacterConfirmationRequest (0x0274) whose
+/// type is <c>ConfirmationType.Fellowship</c>. <see cref="Context"/> is the
+/// server's context id, which a ConfirmationResponse (0x0275) must echo back;
+/// <see cref="Text"/> is the server-supplied prompt line (surfaced to the LLM).
+/// Pure perception memory — the LLM owns whether to accept.
+/// </summary>
+internal sealed record PendingFellowshipInvite(uint Context, string Text);

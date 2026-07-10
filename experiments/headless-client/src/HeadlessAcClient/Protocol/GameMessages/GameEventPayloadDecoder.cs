@@ -226,6 +226,33 @@ internal sealed record FellowshipDismissPayload(uint DismissedGuid)
     public override string ToString() => $"FellowshipDismiss(0x{DismissedGuid:X8})";
 }
 
+/// <summary>
+/// CharacterConfirmationRequest (0x0274) — the server is asking the character to
+/// confirm/decline a queued prompt. Wire layout (ACE-bots
+/// GameEventConfirmationRequest.cs): u32 confirmationType + u32 context +
+/// String16L text. The reply is a ConfirmationResponse (0x0275) echoing the same
+/// type + context. Pure wire-protocol projection; the consumer decides how to
+/// answer.
+/// </summary>
+internal sealed record ConfirmationRequestPayload(
+    uint ConfirmationType, uint Context, string Text)
+{
+    public override string ToString() =>
+        $"ConfirmationRequest(type={ConfirmationType} context={Context} text=\"{Text}\")";
+}
+
+/// <summary>
+/// CharacterConfirmationDone (0x0276) — the server closed a queued prompt (the
+/// character answered, or it timed out / was aborted). Wire layout (ACE-bots
+/// GameEventConfirmationDone.cs): u32 confirmationType + u32 context. The consumer
+/// clears any matching pending prompt.
+/// </summary>
+internal sealed record ConfirmationDonePayload(uint ConfirmationType, uint Context)
+{
+    public override string ToString() =>
+        $"ConfirmationDone(type={ConfirmationType} context={Context})";
+}
+
 internal sealed record SetTurbineChatChannelsPayload(
     uint Allegiance,
     uint General,
@@ -740,6 +767,8 @@ internal sealed record GameEventPayload(
     FellowshipFullUpdatePayload?         FellowshipFullUpdate,
     FellowshipQuitPayload?               FellowshipQuit,
     FellowshipDismissPayload?            FellowshipDismiss,
+    ConfirmationRequestPayload?          ConfirmationRequest,
+    ConfirmationDonePayload?             ConfirmationDone,
     VendorInfoPayload?                   VendorInfo,
     ContractTrackerPayload?              ContractTracker,
     ContractTrackerTablePayload?         ContractTrackerTable)
@@ -771,6 +800,8 @@ internal sealed record GameEventPayload(
         GameEventType.FellowshipFullUpdate         when FellowshipFullUpdate        is { } x => x.ToString(),
         GameEventType.FellowshipQuit               when FellowshipQuit              is { } x => x.ToString(),
         GameEventType.FellowshipDismiss            when FellowshipDismiss           is { } x => x.ToString(),
+        GameEventType.CharacterConfirmationRequest when ConfirmationRequest        is { } x => x.ToString(),
+        GameEventType.CharacterConfirmationDone    when ConfirmationDone           is { } x => x.ToString(),
         GameEventType.ApproachVendor               when VendorInfo                  is { } x => x.ToString(),
         GameEventType.SendClientContractTracker      when ContractTracker          is { } x => x.ToString(),
         GameEventType.SendClientContractTrackerTable when ContractTrackerTable     is { } x => x.ToString(),
@@ -838,6 +869,10 @@ internal static class GameEventPayloadDecoder
                     Empty(eventType) with { FellowshipQuit = DecodeFellowshipQuit(body) },
                 GameEventType.FellowshipDismiss =>
                     Empty(eventType) with { FellowshipDismiss = DecodeFellowshipDismiss(body) },
+                GameEventType.CharacterConfirmationRequest =>
+                    Empty(eventType) with { ConfirmationRequest = DecodeConfirmationRequest(body) },
+                GameEventType.CharacterConfirmationDone =>
+                    Empty(eventType) with { ConfirmationDone = DecodeConfirmationDone(body) },
                 // Disband carries no body (just the 16B GameEvent envelope); the
                 // EventType alone signals the fellowship dissolved. Return a
                 // non-null payload so the consumer's "decoded" check holds.
@@ -887,6 +922,8 @@ internal static class GameEventPayloadDecoder
             FellowshipFullUpdate: null,
             FellowshipQuit: null,
             FellowshipDismiss: null,
+            ConfirmationRequest: null,
+            ConfirmationDone: null,
             VendorInfo: null,
             ContractTracker: null,
             ContractTrackerTable: null);
@@ -1670,6 +1707,31 @@ internal static class GameEventPayloadDecoder
         if (body.Length < 4)
             throw new InvalidOperationException("body too short for FellowshipDismiss");
         return new FellowshipDismissPayload(BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4)));
+    }
+
+    // CharacterConfirmationRequest (0x0274) — server serializer
+    // GameEventConfirmationRequest.cs writes, in order:
+    //   u32 confirmationType, u32 context, String16L text.
+    private static ConfirmationRequestPayload DecodeConfirmationRequest(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 8)
+            throw new InvalidOperationException("body too short for ConfirmationRequest");
+        var cursor = 0;
+        var type    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var context = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(cursor, 4)); cursor += 4;
+        var text    = ReadString16L(body, ref cursor);
+        return new ConfirmationRequestPayload(type, context, text);
+    }
+
+    // CharacterConfirmationDone (0x0276) — server serializer
+    // GameEventConfirmationDone.cs writes: u32 confirmationType, u32 context.
+    private static ConfirmationDonePayload DecodeConfirmationDone(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 8)
+            throw new InvalidOperationException("body too short for ConfirmationDone");
+        var type    = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(0, 4));
+        var context = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(4, 4));
+        return new ConfirmationDonePayload(type, context);
     }
 
     private static SetTurbineChatChannelsPayload DecodeSetTurbineChatChannels(ReadOnlySpan<byte> body)

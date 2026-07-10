@@ -8793,7 +8793,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -8813,7 +8813,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -10577,6 +10577,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "that `player` by name (only when exactly one visible `player` matches that name) to invite " +
                     "them. OPTIONAL — you decide whether to group or stay solo.");
             }
+        }
+
+        // ── ## Fellowship invite (a pending invite the bot can accept) ───────
+        // Rendered ONLY when the server has sent the bot a fellowship invite it has
+        // not yet answered (perceived as pending_fellowship_invite). Surfaces the
+        // FellowshipAccept affordance mechanically: the server-supplied prompt text
+        // (a runtime value, includes who invited), and that FellowshipAccept joins
+        // while ignoring it lets it lapse. OPTIONAL — the LLM owns the accept
+        // decision; the Motor only echoes the invite's context back on accept.
+        if (world.PendingFellowshipInvite is { } pendingInvite)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Fellowship invite");
+            sb.AppendLine(
+                $"- You have a PENDING fellowship invite: \"{pendingInvite.Text}\". To JOIN, emit " +
+                "`FellowshipAccept` (no target needed). To stay solo, do nothing and it will lapse. " +
+                "OPTIONAL — you decide whether to accept.");
         }
 
         // ── ## Allegiance state (self-fact, rendered when the bot is in an allegiance) ──
@@ -15129,17 +15146,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (parsed.Kind != GoalKind.Recall
                 && parsed.Kind != GoalKind.FellowshipCreate
                 && parsed.Kind != GoalKind.FellowshipQuit
+                && parsed.Kind != GoalKind.FellowshipAccept
                 && parsed.Kind != GoalKind.Say
                 && parsed.Target.IsEmpty)
             {
                 // Recall and the fellowship self/social actions (FellowshipCreate /
-                // FellowshipQuit) are SELF-actions with no world target — like Recall,
-                // they legitimately carry an empty target (FellowshipCreate's name
-                // rides in target.name when given, but an unnamed create falls back to
-                // a default; FellowshipQuit carries nothing). Say is likewise a
-                // self-broadcast (local chat) with no world target — its payload is the
-                // `message`, validated below. Accept them rather than discarding the
-                // LLM's decision to the heuristic fallback.
+                // FellowshipQuit / FellowshipAccept) are SELF-actions with no world
+                // target — like Recall, they legitimately carry an empty target
+                // (FellowshipCreate's name rides in target.name when given, but an
+                // unnamed create falls back to a default; FellowshipQuit and
+                // FellowshipAccept carry nothing — Accept's context is looked up from
+                // the pending invite). Say is likewise a self-broadcast (local chat)
+                // with no world target — its payload is the `message`, validated
+                // below. Accept them rather than discarding the LLM's decision to the
+                // heuristic fallback.
                 //
                 // Wield's wielded object is logically the `item`, not the
                 // `target`: the Motor's Wield dispatch reads goal.Item (or an
