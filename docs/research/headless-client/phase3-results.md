@@ -213,7 +213,9 @@ total wire bytes: 460  (16 header + 16 frag header + 8 BlobFragments header + 42
   expected offsets.
 
 - **All-10s attributes pass `ValidateAttributeCredits`.** Sum =
-  60, well under Aluvian's `AttributeCredits = 290`. Rubber-duck
+  60, well under Aluvian's `AttributeCredits = 330` (live-verified:
+  the server accepts an even 6×55 = 330 with `CharacterCreateResponse:
+  Ok`; an earlier note here said 290, which was wrong). Rubber-duck
   was right to push for this over the boundary case.
 
 - **All-zero `Appearance` indices are safe.** Server's

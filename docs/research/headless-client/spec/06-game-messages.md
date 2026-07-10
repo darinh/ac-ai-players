@@ -275,7 +275,7 @@ single most opaque failure mode for this message.
 | +4 | `u32` | `gender` | 0=Female, 1=Male. Must index into `heritageGroup.Genders`. |
 | +4 | `Appearance` | `appearance` | See sub-schema below (104 bytes). |
 | +104 | `i32` | `templateOption` | Index into `heritageGroup.Templates`. 0 = first template. |
-| +4 | `u32 × 6` | `attributes` | Strength, Endurance, Coordination, Quickness, Focus, Self. Each ∈ [10, 100]. Sum ≤ `heritage.AttributeCredits` (Aluvian = 290). |
+| +4 | `u32 × 6` | `attributes` | Strength, Endurance, Coordination, Quickness, Focus, Self. Each ∈ [10, 100]. Sum ≤ `heritage.AttributeCredits` (Aluvian = 330; live-verified: `CharacterCreateResponse: Ok` for an even 6×55 = 330). |
 | +24 | `u32` | `characterSlot` | Display slot index (0-10). |
 | +4 | `u32` | `classId` | Custom class id; 0 is safe. |
 | +4 | `u32` | `numOfSkills` | **MUST be 55 exactly.** Wrong count → `ClientServerSkillsMismatch` → session terminated via `GameMessageBootAccount`. Hard runtime guard required (Debug.Assert is not enough). |

@@ -92,25 +92,13 @@ internal static class CharacterCreateMessage
     public const uint SACTrained     = 2;
     public const uint SACSpecialized = 3;
 
-    // Skill IDs that we typically train on a fresh bot character so
-    // the server's starter-gear loop (PlayerFactory.cs:225) hands the
-    // bot items the academy expects. Sourced from starterGear.json:
-    //
-    //   21 = Healing            -> Handy Healing Kit
-    //   22 = Jump               -> Pyreal x10000, Sack, Calling Stone,
-    //                              Pathwarden Token, Bread, Ust, and
-    //                              the heritage Letter From Home
-    //   41 = Two Handed Combat  -> Training Spadone (wcid 41512) - a
-    //                              real weapon, so the bot is not
-    //                              bare-handed in the academy
-    //
-    // Total skill-credit cost is well within any heritage's 52-credit
-    // budget (Olthoi=68). Verified live in phase7f4-* test runs.
-    //
-    // Mirrors ACE-bots Source/ACE.Server/Bots/BotPlayerFactory.cs
-    // DefaultTrainedSkills (which has 21,22,24) plus skill 41 added
-    // for the starter weapon since 24 (Run) grants no gear in the
-    // current starterGear.json.
+    // Skill IDs flipped to SACTrained in the 55-entry SAC vector on a fresh
+    // character (all other slots stay SACInactive). IDs are Skill enum values:
+    //   21 = Healing, 22 = Jump, 41 = Two Handed Combat.
+    // Total skill-credit cost is within any heritage's credit budget. Mirrors
+    // the server-side reference BotPlayerFactory.DefaultTrainedSkills (21, 22,
+    // 24), substituting 41 for 24. Rationale for the specific IDs is in the
+    // commit body, not here.
     public static readonly IReadOnlyList<uint> DefaultTrainedSkillIds =
         new uint[] { 21, 22, 41 };
 
@@ -120,19 +108,20 @@ internal static class CharacterCreateMessage
         uint   Heritage        = HeritageAluvian,
         uint   Gender          = GenderMale,
         int    TemplateOption  = 0,
-        // Spend the attribute-credit budget instead of the all-minimum
-        // [10,10,10,10,10,10]. Server gate
+        // Attribute-credit allocation. Server gate
         // (PlayerFactory.ValidateAttributeCredits): each attribute in [10,100]
-        // and their sum <= the selected heritage's AttributeCredits. 6 x 45 =
-        // 270 stays under the smallest heritage budget floor (>= 290) with
-        // margin and is within the per-attribute range. Even across all six
-        // attributes so none is favored by this default.
-        uint   StrengthAbility     = 45,
-        uint   EnduranceAbility    = 45,
-        uint   CoordinationAbility = 45,
-        uint   QuicknessAbility    = 45,
-        uint   FocusAbility        = 45,
-        uint   SelfAbility         = 45,
+        // and their sum <= the selected heritage's AttributeCredits. 6 x 55 =
+        // 330 is the even maximum within the standard heritage budget, matching
+        // the server-side reference BotPlayerFactory (DefaultAttributeValue = 55).
+        // Even across all six so this packer favors none; any weighting is a
+        // Strategy-layer decision, not the wire packer's. Rationale is in the
+        // commit body, not here.
+        uint   StrengthAbility     = 55,
+        uint   EnduranceAbility    = 55,
+        uint   CoordinationAbility = 55,
+        uint   QuicknessAbility    = 55,
+        uint   FocusAbility        = 55,
+        uint   SelfAbility         = 55,
         uint   CharacterSlot       = 0,
         uint   ClassId             = 0,
         // Per-slot SkillAdvancementClass override. If non-null, every
