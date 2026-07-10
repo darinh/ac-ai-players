@@ -7722,7 +7722,15 @@ public class LlmGoalPolicyTests
         Assert.Contains("## Survival caution", prompt);
         Assert.Contains("DIED 3 times", prompt);
         Assert.Contains("DEATH-SPIRAL", prompt);
-        Assert.Contains("Explore` AWAY", prompt);
+        // Escape steer distinguishes hard escape (Recall, when a pursuer can't be
+        // shaken on foot) from relocation once clear (Explore to a safer area),
+        // and warns against re-spamming a refused Recall.
+        Assert.Contains("RELIABLE", prompt);
+        Assert.Contains("`Recall`", prompt);
+        Assert.Contains("cannot shake it on foot", prompt);
+        Assert.Contains("If `Recall` is refused", prompt);
+        Assert.Contains("Once nothing is pursuing you", prompt);
+        Assert.Contains("`Explore` toward a SAFER", prompt);
         // Accurate mechanic: burns off by earning XP, NOT by passive waiting.
         Assert.Contains("earn XP", prompt);
         // Explicitly overrides the conflicting body guidance for this state.
