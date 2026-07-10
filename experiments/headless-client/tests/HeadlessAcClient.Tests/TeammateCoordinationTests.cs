@@ -482,6 +482,105 @@ public class TeammateCoordinationTests
     }
 
     [Fact]
+    public void Prompt_Follower_SwearsToFellowshipLeader_WhenMonarchNotVisible()
+    {
+        // Drifted-apart-after-grouping: no teammate is VISIBLE, but the bot is in a
+        // fellowship whose leader is its configured teammate -> the swear directive
+        // still renders (monarch resolved via fellowship membership, GoTo first).
+        var members = new[]
+        {
+            new FellowshipMemberProjection { Name = "Mba", Level = 5, IsSelf = false, IsLeader = true },
+            new FellowshipMemberProjection { Name = "Mbb", Level = 5, IsSelf = true, IsLeader = false },
+        };
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection { Guid = 0x5000000Fu, Name = "Mbb", HealthFraction = 1.0f, MonarchGuid = 0x5000000Fu },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = Array.Empty<VisibleObjectProjection>(),   // monarch NOT visible
+            Fellowship = new FellowshipProjection
+            {
+                Name = "Team", AmLeader = false, LeaderName = "Mba",
+                MemberCount = 2, Members = members,
+                ShareXp = true, EvenShare = true, Open = false, Locked = false,
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("your team's leader", sec);
+        Assert.Contains("Mba", sec);
+        Assert.Contains("SwearAllegiance", sec);
+        Assert.Contains("GoTo", sec);   // directed to approach the out-of-view monarch
+        // With no visible player the generic visible-target affordances must stay closed
+        // even though the fellowship-leader path forces the section open.
+        Assert.DoesNotContain("A `player` is in view", sec);
+        Assert.DoesNotContain("BreakAllegiance", sec);
+    }
+
+    [Fact]
+    public void Prompt_VisibleElectedMonarch_TakesPrecedenceOverFellowshipLeader()
+    {
+        // When a configured teammate is VISIBLE, the elected monarch (that visible
+        // teammate) wins over a DIFFERENT fellowship leader — the directive targets the
+        // visible-elected monarch, not the fellowship leader.
+        var members = new[]
+        {
+            new FellowshipMemberProjection { Name = "Mbz", Level = 5, IsSelf = false, IsLeader = true },
+            new FellowshipMemberProjection { Name = "Mbc", Level = 5, IsSelf = true, IsLeader = false },
+        };
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection { Guid = 0x5000000Fu, Name = "Mbc", HealthFraction = 1.0f, MonarchGuid = 0x5000000Fu },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = new[]
+            {
+                new VisibleObjectProjection { Guid = 0x50000201u, Name = "Mba", IsPlayer = true, Distance = 6f },
+            },
+            Fellowship = new FellowshipProjection
+            {
+                Name = "Team", AmLeader = false, LeaderName = "Mbz",
+                MemberCount = 2, Members = members,
+                ShareXp = true, EvenShare = true, Open = false, Locked = false,
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(),
+            new HashSet<string>(new[] { "Mba", "Mbz", "Mbc" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("Mba", sec);         // visible elected teammate wins
+        Assert.DoesNotContain("Mbz", sec);   // not the (different) fellowship leader
+        Assert.Contains("SwearAllegiance", sec);
+    }
+
+    [Fact]
+    public void Prompt_FellowshipLeader_DoesNotSwearToSelf()
+    {
+        // The fellowship LEADER (AmLeader) is the monarch, not a vassal -> no swear cue
+        // even though it is fellowshipped with a configured teammate.
+        var members = new[]
+        {
+            new FellowshipMemberProjection { Name = "Mba", Level = 5, IsSelf = true, IsLeader = true },
+            new FellowshipMemberProjection { Name = "Mbb", Level = 5, IsSelf = false, IsLeader = false },
+        };
+        var world = new WorldStateProjection
+        {
+            Self = new SelfProjection { Guid = 0x5000000Fu, Name = "Mba", HealthFraction = 1.0f, MonarchGuid = 0x5000000Fu },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = Array.Empty<VisibleObjectProjection>(),
+            Fellowship = new FellowshipProjection
+            {
+                Name = "Team", AmLeader = true, LeaderName = "Mba",
+                MemberCount = 2, Members = members,
+                ShareXp = true, EvenShare = true, Open = false, Locked = false,
+            },
+        };
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mbb" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.DoesNotContain("your team's leader", sec);
+    }
+
+    [Fact]
     public void Prompt_Follower_Unaffiliated_IsDirectedToSwear()
     {
         // Truly unaffiliated (MonarchGuid null) -> IsInAllegiance false -> still directed.

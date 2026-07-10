@@ -10718,49 +10718,51 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : $"- allegiance: you are a vassal in an allegiance (monarch guid 0x{world.Self.MonarchGuid!.Value:X8}).");
         }
 
-        // ── ## Allegiance guidance (optional social actions, gated on a player in view) ──
-        // Surfaces the WHEN-a-player-is-present affordances for the allegiance verbs,
-        // mechanically only: each names the action, its unique-target rule, and its
-        // mechanical result, and is marked OPTIONAL with the decision left to the LLM.
-        // `SwearAllegiance` always renders here; `BreakAllegiance` renders ONLY when the
-        // bot is already in an allegiance (there is a bond to sever). No WHEN/WHETHER
-        // policy, no priority, no hierarchy/lore framing. Rendered ONLY when a `player`
-        // is in view, so it costs nothing solo. The Motor resolves the named player +
-        // sends the opcode; it never picks a target on its own.
-        if (aPlayerIsInView)
+        // ── ## Allegiance guidance (team-coordination + optional social actions) ──
+        // The vassal-swear DIRECTIVE resolves the bot's monarch as either the visible
+        // elected teammate leader OR — after the team has grouped and drifted apart —
+        // the bot's FELLOWSHIP leader when that leader is a configured teammate
+        // (authoritative membership persists when the monarch is momentarily out of
+        // view, so the swear cue still renders; the bot is told to GoTo them first).
+        // The generic SwearAllegiance/BreakAllegiance cues stay gated on a visible
+        // player. No WHEN/WHETHER policy beyond the operator-config team; the Motor
+        // resolves the named player + sends the opcode and never picks a target itself.
+        var alreadyVassal = world.Self.IsInAllegiance && !world.Self.IsOwnMonarch;
+        var allyRole = TeammateCoordination.Decide(
+            world.Self.Name, EffectiveTeammateNames,
+            world.Visible.Where(v => v.IsPlayer).Select(v => v.Name));
+        string? monarchName = allyRole.Role == TeammateRole.Follower ? allyRole.CounterpartName : null;
+        if (monarchName is null
+            && world.Fellowship is { AmLeader: false, LeaderName: { } fleaderName }
+            && TeammateCoordination.IsConfiguredTeammate(fleaderName, EffectiveTeammateNames))
+        {
+            monarchName = fleaderName;   // drifted-apart-after-grouping: monarch = fellowship leader
+        }
+        var renderVassalSwear = monarchName is not null && !alreadyVassal;
+        if (aPlayerIsInView || renderVassalSwear)
         {
             sb.AppendLine();
             sb.AppendLine("## Allegiance guidance");
 
-            // Deterministic team coordination: the elected leader (see the fellowship
-            // guidance role election) is the team's monarch; a follower is DIRECTED to
-            // swear allegiance to them unless it is already someone's vassal. Operator-
-            // config orchestration only; the LLM emits the SwearAllegiance goal and the
-            // monarch still approves the resulting request.
-            var allyRole = TeammateCoordination.Decide(
-                world.Self.Name, EffectiveTeammateNames,
-                world.Visible.Where(v => v.IsPlayer).Select(v => v.Name));
-            var alreadyVassal = world.Self.IsInAllegiance && !world.Self.IsOwnMonarch;
-            if (allyRole.Role == TeammateRole.Follower
-                && allyRole.CounterpartName is { } monarchName
-                && !alreadyVassal)
+            if (renderVassalSwear)
             {
                 sb.AppendLine(
-                    $"- Your monarch `{monarchName}` (your team's leader) is nearby and you are NOT yet their " +
-                    $"vassal. `SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge to them — `GoTo` " +
-                    $"`{monarchName}` first if you are out of range. This is DIRECTED team coordination — do it " +
-                    "before an OPTIONAL hunt/explore.");
+                    $"- Your monarch is `{monarchName}` (your team's leader). You are NOT yet their vassal. " +
+                    $"`GoTo` `{monarchName}` to reach them (a swear needs you near them), then " +
+                    $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge. This is DIRECTED team " +
+                    "coordination — do it before an OPTIONAL hunt/explore.");
             }
 
             // The generic "swear to anyone" affordance is for a bot that is not already
             // a vassal (an existing vassal must BreakAllegiance first, so offering it
-            // then would loop); an own-monarch/unaffiliated bot still sees it.
-            if (!alreadyVassal)
+            // then would loop); an own-monarch/unaffiliated bot still sees it. Gated on a
+            // visible player (the Motor needs a visible target to resolve).
+            if (aPlayerIsInView && !alreadyVassal)
                 sb.AppendLine(
                     "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
                     "(only when exactly one visible `player` matches that name); this makes you that " +
                     "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
-            if (world.Self.IsInAllegiance)
+            if (aPlayerIsInView && world.Self.IsInAllegiance)
                 sb.AppendLine(
                     "- You ARE in an allegiance (see `## Allegiance state`). You MAY `BreakAllegiance` " +
                     "from a visible `player` by name (only when exactly one visible `player` matches that " +
