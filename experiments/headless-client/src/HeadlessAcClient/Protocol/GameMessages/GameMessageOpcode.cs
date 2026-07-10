@@ -75,6 +75,13 @@ internal enum GameMessageOpcode : uint
 
     // Phase 3 client → server
     CharacterDelete            = 0xF655,
+    // Client → server clean logoff (sent on a graceful shutdown so the server
+    // frees the in-world character immediately instead of waiting out the
+    // abrupt-disconnect session timeout, which otherwise makes an immediate
+    // relaunch hit CharacterError "already in world"). Server handler:
+    // CharacterHandler.cs CharacterLogOff -> session.LogOffPlayer(); it reads no
+    // payload, so this is an opcode-only message.
+    CharacterLogOff            = 0xF653,
     CharacterCreate            = 0xF656,
     // Phase 3.3 verified: 0xF657 is the CLIENT-SIDE commit message,
     // sent AFTER receiving 0xF7DF CharacterEnterWorldServerReady. The

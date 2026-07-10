@@ -50,6 +50,25 @@ internal static class CharacterEnterWorldRequestMessage
     }
 }
 
+internal static class CharacterLogOffMessage
+{
+    // CharacterLogOff (0xF653) is opcode-only - 4 bytes total. The server
+    // handler (CharacterHandler.CharacterLogOff) reads no payload; it just
+    // calls session.LogOffPlayer() to remove the character from the world.
+    public const int PackedSize = 4;
+
+    public static int Pack(Span<byte> dest)
+    {
+        if (dest.Length < PackedSize)
+            throw new ArgumentException($"buffer too small: need {PackedSize}, got {dest.Length}");
+
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            dest,
+            (uint)GameMessageOpcode.CharacterLogOff);
+        return PackedSize;
+    }
+}
+
 internal static class CharacterEnterWorldMessage
 {
     /// <summary>

@@ -321,4 +321,30 @@ public class RunBudgetConfigTests
                 System.Environment.GetEnvironmentVariable("AC_BOTS_NO_DAMAGE_ABANDON_SECONDS")),
             HandshakeDriver.AbandonOnNoDamageSeconds);
     }
+
+    [Theory]
+    // (cleanEnabled, inWorldConfirmed, reconnectRequested, socketPresent) -> expected
+    [InlineData(true,  true,  false, true,  true)]   // final graceful in-world exit -> SEND
+    [InlineData(false, true,  false, true,  false)]  // feature disabled -> no send
+    [InlineData(true,  false, false, true,  false)]  // world entry not confirmed -> no send
+    [InlineData(true,  true,  true,  true,  false)]  // reconnect (re-enters to keep playing) -> no send
+    [InlineData(true,  true,  false, false, false)]  // socket gone -> no send
+    [InlineData(true,  false, true,  false, false)]  // multiple negatives -> no send
+    public void ShouldSendCleanLogoff_OnlyOnFinalConfirmedInWorldExit(
+        bool cleanEnabled, bool inWorld, bool reconnect, bool socket, bool expected)
+    {
+        Assert.Equal(expected,
+            HandshakeDriver.ShouldSendCleanLogoff(cleanEnabled, inWorld, reconnect, socket));
+    }
+
+    [Fact]
+    public void CleanLogoffOnExit_DefaultsOnAndParsesDisable()
+    {
+        // Default-on: the static field is true unless the env explicitly disables it.
+        // (Assert the field reflects the current-process env parse, matching the
+        // other static-field wiring tests.)
+        var env = System.Environment.GetEnvironmentVariable("AC_BOTS_CLEAN_LOGOFF_ON_EXIT");
+        var expected = (env ?? "1").Trim().ToLowerInvariant() is not ("0" or "false" or "no" or "off");
+        Assert.Equal(expected, HandshakeDriver.CleanLogoffOnExit);
+    }
 }
