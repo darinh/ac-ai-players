@@ -3489,6 +3489,56 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void IsGoalRecentlyRejected_Recall_MatchesRecentRecallDidNotLand()
+    {
+        // A refused/failed Recall (Motor stamps the synthetic recall-did-not-land
+        // rejection) is a targetless self-action the generic target/item dedup
+        // cannot see; the Recall branch must treat it as recently-rejected so a
+        // re-emitted Recall is dropped instead of looping.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            Text = "Recall did not land (no landblock change)",
+            ErrorCode = RecallEscape.RecallDidNotLandRejectionCode,
+        });
+        var recall = new Goal { Kind = GoalKind.Recall };
+        Assert.True(LlmGoalPolicy.IsGoalRecentlyRejected(recall, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_Recall_NoRecallRejection_False()
+    {
+        // A first Recall (or one whose only recent rejections are UNRELATED,
+        // targeted ones) must flow — the recall-did-not-land marker is required.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow, Kind = EventKind.ActionRejected,
+            Text = "no", ErrorCode = 0x046A, Name = "Some NPC",
+        });
+        var recall = new Goal { Kind = GoalKind.Recall };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(recall, es));
+    }
+
+    [Fact]
+    public void IsGoalRecentlyRejected_Recall_AgedRecallRejection_False()
+    {
+        // Past the 90s dedup window the recall may work again (world/state may
+        // have changed — attuned since, left the training area), so let it flow.
+        var es = new EventStream();
+        es.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow - TimeSpan.FromSeconds(120),
+            Kind = EventKind.ActionRejected,
+            Text = "Recall did not land (no landblock change)",
+            ErrorCode = RecallEscape.RecallDidNotLandRejectionCode,
+        });
+        var recall = new Goal { Kind = GoalKind.Recall };
+        Assert.False(LlmGoalPolicy.IsGoalRecentlyRejected(recall, es, DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
     public void IsRepeatedDialogText_DifferentNpcSameText_False()
     {
         // A DIFFERENT speaker's first identical line is NOT a repeat — it still

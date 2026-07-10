@@ -4843,6 +4843,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // count — is what ages a rejection out so the bot can retry once it is old
         // enough that the world may have changed.
         var rejectionCutoff = (nowUtc ?? DateTimeOffset.UtcNow) - RejectionDedupRecency;
+
+        // Targetless self-action Recall: the generic target/item match below
+        // cannot see it (no target/item name), so a refused Recall would
+        // re-emit in a loop — one LLM call + a ~20s in-flight hold per cycle.
+        // Match the synthetic recall-did-not-land rejection the Motor stamps
+        // when a dispatched Recall's window closes with no teleport (the server
+        // refused it: no attuned lifestone / training area / just after PvP).
+        if (goal.Kind == GoalKind.Recall)
+        {
+            foreach (var ev in events.RecentActionRejections())   // newest-first, durable
+            {
+                if (ev.Utc < rejectionCutoff) continue;
+                if (RecallEscape.IsRecallDidNotLandRejection(ev.ErrorCode)) return true;
+            }
+            return false;
+        }
+
         var targetName = goal.Target?.Name;
         var itemName   = goal.Item?.Name;
         var itemWcid   = goal.Item?.Wcid;
