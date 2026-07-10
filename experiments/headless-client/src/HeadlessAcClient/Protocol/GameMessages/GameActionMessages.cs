@@ -114,6 +114,16 @@ internal enum CharacterOption : uint
     /// ACE.Entity CharacterOption.IgnoreFellowshipRequests.
     /// </summary>
     IgnoreFellowshipRequests = 0x02,
+
+    /// <summary>
+    /// When enabled, the server AUTO-ADDS this character to a fellowship on recruit
+    /// without sending a confirmation prompt (Fellowship.AddFellowshipMember: if
+    /// GetCharacterOption(AutomaticallyAcceptFellowshipRequests) → AddConfirmedMember
+    /// immediately). A cooperating bot team sets this (behind an operator flag) so the
+    /// recruited bot joins reliably instead of depending on the LLM to answer the
+    /// invite prompt in time. Wire id from ACE.Entity CharacterOption.
+    /// </summary>
+    AutomaticallyAcceptFellowshipRequests = 0x12,
 }
 
 /// <summary>

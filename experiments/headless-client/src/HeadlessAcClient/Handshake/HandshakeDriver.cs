@@ -1346,6 +1346,14 @@ internal sealed class HandshakeDriver : IDisposable
         // login so a fellowship recruit can reach this bot (else the server refuses it
         // and never sends the invite). The LLM still decides whether to accept.
         var ignoreFellowshipCleared = false;
+        // One-shot: when the operator enables AC_BOTS_AUTO_TEAM, set
+        // AutomaticallyAcceptFellowshipRequests at login so a recruited bot joins the
+        // fellowship reliably (the server auto-adds it) instead of depending on the LLM
+        // to answer the invite prompt in time. Default off = the LLM decides (unchanged).
+        var autoTeamEnabled =
+            (Environment.GetEnvironmentVariable("AC_BOTS_AUTO_TEAM") ?? string.Empty)
+                .Trim().ToLowerInvariant() is "1" or "true" or "yes" or "on";
+        var autoAcceptFellowshipConfigured = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
         // more inbound packets after LC" so the server has time to
@@ -4585,6 +4593,41 @@ internal sealed class HandshakeDriver : IDisposable
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ifrSent),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     Console.WriteLine($"[observe]   -> PHASE7F.0b SEND: SetSingleCharacterOption(IgnoreFellowshipRequests=off) pktSeq={ifrPacketSeq} fragSeq={ifrFragSeq} totalBytes={ifrSent}");
+                }
+
+                // Phase 7f.0c — set AutomaticallyAcceptFellowshipRequests to match the
+                // AC_BOTS_AUTO_TEAM flag once at login (ALWAYS sent, like the 7f.0b
+                // IgnoreFellowshipRequests clear): true so the server auto-adds this bot
+                // when a teammate recruits it (no invite-prompt round-trip through the
+                // LLM), or false to clear it (the server persists character options, so
+                // sending false is required to reverse a previously-enabled character
+                // when the flag is unset). Default off => LLM-driven accept path unchanged.
+                // Mechanical client configuration, gated on operator config.
+                if (loginCompleteSent && !autoAcceptFellowshipConfigured)
+                {
+                    autoAcceptFellowshipConfigured = true;
+                    var aafPacketSeq = nextOutboundPacketSequence++;
+                    var aafFragSeq   = nextOutboundFragmentSequence++;
+
+                    var aafBuf = new byte[GameActionSetSingleCharacterOptionMessage.PackedSize];
+                    var aafLen = GameActionSetSingleCharacterOptionMessage.Pack(
+                        aafBuf, CharacterOption.AutomaticallyAcceptFellowshipRequests, value: autoTeamEnabled);
+
+                    var aafMsg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        aafMsg.AddAckSequence(lastReceivedSeq);
+                    aafMsg.AddBlobFragment(
+                        fragSequence: aafFragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: aafBuf.AsSpan(0, aafLen));
+
+                    var aafSent = aafMsg.Pack(sendBuf, myClientId,
+                                              sequence: aafPacketSeq, iteration: 1,
+                                              encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, aafSent),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE7F.0c SEND: SetSingleCharacterOption(AutomaticallyAcceptFellowshipRequests={(autoTeamEnabled ? "on" : "off")}) pktSeq={aafPacketSeq} fragSeq={aafFragSeq} totalBytes={aafSent}");
                 }
 
                 // Phase 7f.H — update this engagement's self-health high-water
