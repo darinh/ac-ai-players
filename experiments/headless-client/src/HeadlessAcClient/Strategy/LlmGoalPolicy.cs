@@ -10731,10 +10731,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Allegiance guidance");
-            sb.AppendLine(
-                "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
-                "(only when exactly one visible `player` matches that name); this makes you that " +
-                "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
+
+            // Deterministic team coordination: the elected leader (see the fellowship
+            // guidance role election) is the team's monarch; a follower is DIRECTED to
+            // swear allegiance to them unless it is already someone's vassal. Operator-
+            // config orchestration only; the LLM emits the SwearAllegiance goal and the
+            // monarch still approves the resulting request.
+            var allyRole = TeammateCoordination.Decide(
+                world.Self.Name, EffectiveTeammateNames,
+                world.Visible.Where(v => v.IsPlayer).Select(v => v.Name));
+            var alreadyVassal = world.Self.IsInAllegiance && !world.Self.IsOwnMonarch;
+            if (allyRole.Role == TeammateRole.Follower
+                && allyRole.CounterpartName is { } monarchName
+                && !alreadyVassal)
+            {
+                sb.AppendLine(
+                    $"- Your monarch `{monarchName}` (your team's leader) is nearby and you are NOT yet their " +
+                    $"vassal. `SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge to them — `GoTo` " +
+                    $"`{monarchName}` first if you are out of range. This is DIRECTED team coordination — do it " +
+                    "before an OPTIONAL hunt/explore.");
+            }
+
+            // The generic "swear to anyone" affordance is for a bot that is not already
+            // a vassal (an existing vassal must BreakAllegiance first, so offering it
+            // then would loop); an own-monarch/unaffiliated bot still sees it.
+            if (!alreadyVassal)
+                sb.AppendLine(
+                    "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
+                    "(only when exactly one visible `player` matches that name); this makes you that " +
+                    "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
             if (world.Self.IsInAllegiance)
                 sb.AppendLine(
                     "- You ARE in an allegiance (see `## Allegiance state`). You MAY `BreakAllegiance` " +

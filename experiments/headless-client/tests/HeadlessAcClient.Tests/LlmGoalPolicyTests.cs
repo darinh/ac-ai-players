@@ -12368,8 +12368,9 @@ public class LlmGoalPolicyTests
     [Fact]
     public void AllegianceGuidance_InAllegiance_PlayerInView_SuggestsBreak()
     {
-        // In an allegiance + a visible player (a possible target) -> the optional
-        // BreakAllegiance cue renders alongside Swear.
+        // In an allegiance AS A VASSAL (monarch is another guid) + a visible player ->
+        // the BreakAllegiance cue renders; the generic SwearAllegiance cue is suppressed
+        // (a vassal must BreakAllegiance before swearing elsewhere).
         var world = new WorldStateProjection
         {
             Self = new SelfProjection
@@ -12389,7 +12390,7 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("## Allegiance guidance", prompt);
         Assert.Contains("`BreakAllegiance`", prompt);
-        Assert.Contains("`SwearAllegiance`", prompt);
+        Assert.DoesNotContain("You MAY `SwearAllegiance`", prompt);
     }
 
     [Fact]
