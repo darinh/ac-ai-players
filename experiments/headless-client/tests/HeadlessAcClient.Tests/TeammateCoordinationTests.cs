@@ -342,4 +342,84 @@ public class TeammateCoordinationTests
         Assert.Contains("NOT the leader", guidance);
         Assert.DoesNotContain("FellowshipRecruit", guidance);
     }
+
+    // ---- IsConfiguredTeammate ----
+
+    [Fact]
+    public void IsConfiguredTeammate_MatchesCaseInsensitively()
+    {
+        var team = new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase);
+        Assert.True(TeammateCoordination.IsConfiguredTeammate("Mba", team));
+        Assert.True(TeammateCoordination.IsConfiguredTeammate("mba", team));
+        Assert.False(TeammateCoordination.IsConfiguredTeammate("Stranger", team));
+    }
+
+    [Fact]
+    public void IsConfiguredTeammate_FalseForBlankOrEmptyConfig()
+    {
+        Assert.False(TeammateCoordination.IsConfiguredTeammate(null, new[] { "Mba" }));
+        Assert.False(TeammateCoordination.IsConfiguredTeammate("  ", new[] { "Mba" }));
+        Assert.False(TeammateCoordination.IsConfiguredTeammate("Mba", Array.Empty<string>()));
+    }
+
+    [Fact]
+    public void IsConfiguredTeammate_TrimsPaddedServerText()
+    {
+        // Defensive against a padded/decorated invite text: the match trims first.
+        var team = new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase);
+        Assert.True(TeammateCoordination.IsConfiguredTeammate("  Mba ", team));
+    }
+
+    // ---- ## Fellowship invite: directive vs optional ----
+
+    private static WorldStateProjection ProjectionWithPendingInvite(string ownName, string inviteText) =>
+        new()
+        {
+            Self = new SelfProjection { Guid = 0x5000000Du, Name = ownName, HealthFraction = 1.0f },
+            Inventory = Array.Empty<InventoryItemProjection>(),
+            Visible = Array.Empty<VisibleObjectProjection>(),
+            PendingFellowshipInvite = new PendingFellowshipInviteProjection { Text = inviteText },
+        };
+
+    [Fact]
+    public void Prompt_InviteFromConfiguredTeammate_IsDirective()
+    {
+        // Invite text is the inviter's name; when it matches a configured teammate the
+        // accept cue is a DIRECTIVE, symmetric to the leader's recruit directive.
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            ProjectionWithPendingInvite("Mbb", "Mba"), new EventStream(),
+            new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var invite = Section(prompt, "## Fellowship invite");
+        Assert.Contains("INVITED you", invite);
+        Assert.Contains("DIRECTED team coordination", invite);
+        Assert.Contains("FellowshipAccept", invite);
+        // Not the optional-branch wording (the directive may still say "before an
+        // OPTIONAL hunt/loot", so match the optional cue's signature phrase).
+        Assert.DoesNotContain("you decide whether to accept", invite);
+    }
+
+    [Fact]
+    public void Prompt_InviteFromNonTeammate_StaysOptional()
+    {
+        // An invite from a player NOT in the teammate config keeps the OPTIONAL wording.
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            ProjectionWithPendingInvite("Mbb", "RandomPlayer"), new EventStream(),
+            new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var invite = Section(prompt, "## Fellowship invite");
+        Assert.Contains("OPTIONAL", invite);
+        Assert.DoesNotContain("DIRECTED team coordination", invite);
+    }
+
+    [Fact]
+    public void Prompt_InviteFromTeammate_MixedCase_IsDirective()
+    {
+        // Prompt-level case-insensitivity: configured "Mba" + invite text "mba" (the
+        // server sends the raw inviter name; casing must not drop the directive).
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            ProjectionWithPendingInvite("Zzz", "mba"), new EventStream(),
+            new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var invite = Section(prompt, "## Fellowship invite");
+        Assert.Contains("INVITED you", invite);
+        Assert.Contains("DIRECTED team coordination", invite);
+    }
 }
