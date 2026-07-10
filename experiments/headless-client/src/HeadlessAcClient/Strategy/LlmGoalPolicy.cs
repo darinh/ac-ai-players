@@ -89,6 +89,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static readonly long MinMeaningfulUnspentXp =
         ResolveMinMeaningfulUnspentXp(Environment.GetEnvironmentVariable("AC_BOTS_MIN_RAISE_XP"));
 
+    // Operator-configured teammate character names, read once at type-load from
+    // AC_BOTS_TEAMMATE_NAMES (comma/semicolon-separated). When a configured name is
+    // visible as a player, the fellowship-guidance cue renders a DIRECTIVE (with a
+    // deterministic leader/follower role) instead of the OPTIONAL line, so a known
+    // bot team reliably groups up. Empty (the default) leaves the cue OPTIONAL.
+    // Runtime coordination config, not source knowledge; the LLM still emits the goal.
+    internal static readonly IReadOnlyCollection<string> TeammateNames =
+        TeammateCoordination.ParseNames(Environment.GetEnvironmentVariable("AC_BOTS_TEAMMATE_NAMES"));
+
+    // Per-thread override for the teammate set, used only by tests to drive the
+    // fellowship-guidance DIRECTIVE branch without mutating the process-wide
+    // TeammateNames static (a mutable static would race under xUnit's cross-class
+    // parallelism). Null in production; set/cleared by BuildUserPromptForTest below.
+    [ThreadStatic] private static IReadOnlyCollection<string>? _teammateNamesOverride;
+
+    /// <summary>The effective teammate set for this render (test override or the config static).</summary>
+    private static IReadOnlyCollection<string> EffectiveTeammateNames => _teammateNamesOverride ?? TeammateNames;
+
     // Parse AC_BOTS_MIN_RAISE_XP. A non-negative integer is used (clamped to a sane
     // ceiling); anything else (unset/blank/unparseable/negative) falls back to 0.
     internal static long ResolveMinMeaningfulUnspentXp(string? envValue)
@@ -8120,6 +8138,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
+    // Test-only: render a prompt with a specific teammate set, via a per-thread
+    // override so parallel tests never observe each other's config. Production reads
+    // the AC_BOTS_TEAMMATE_NAMES static instead.
+    internal static string BuildUserPromptForTest(
+        WorldStateProjection world, EventStream events, IReadOnlyCollection<string> teammateNames)
+    {
+        _teammateNamesOverride = teammateNames;
+        try { return BuildUserPrompt(world, events, currentGoal: null); }
+        finally { _teammateNamesOverride = null; }
+    }
+
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
         => BuildUserPrompt(world, events, currentGoal, stack, pickerActivity: null, explorationCandidates: null);
 
@@ -10547,6 +10576,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Fellowship guidance");
+
+            // Deterministic team coordination: when a configured teammate
+            // (AC_BOTS_TEAMMATE_NAMES) is a visible player, elect a single leader by a
+            // total name ordering so two symmetric bots do not both create their own
+            // one-member fellowship (which blocks mutual recruitment). The elected
+            // leader creates + recruits; the follower waits for and accepts the invite.
+            // Empty config -> Role.None -> the OPTIONAL cue renders. Operator-config
+            // orchestration only; the LLM still authors every goal.
+            var teammateRole = TeammateCoordination.Decide(
+                world.Self.Name, EffectiveTeammateNames,
+                world.Visible.Where(v => v.IsPlayer).Select(v => v.Name));
+
             if (world.Fellowship is { } fg)
             {
                 // The XP-share claim is conditional on the rendered ShareXp/EvenShare
@@ -10562,11 +10603,65 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                           "near your fellow members spreads kill XP")
                     : "your fellowship is NOT currently sharing XP (see `shares XP` above), so grouping gives " +
                       "no XP benefit right now";
+                // The FELLOWSHIP leader (AmLeader — authoritative once grouped, unlike
+                // the pre-create role election) keeps recruiting configured teammates
+                // one at a time until every co-present one has joined, so a 3+ bot team
+                // does not stall after the first recruit.
+                var unrecruited = fg.AmLeader
+                    ? TeammateCoordination.FirstUnrecruitedTeammate(
+                        EffectiveTeammateNames,
+                        world.Visible.Where(v => v.IsPlayer).Select(v => v.Name),
+                        fg.Members.Select(m => m.Name))
+                    : null;
+                if (unrecruited is { } recruitName)
+                {
+                    sb.AppendLine(
+                        $"- You are grouped and are your team's designated leader: {xpClause}. Your teammate " +
+                        $"`{recruitName}` is nearby but NOT yet in the fellowship — `FellowshipRecruit` them by " +
+                        "name now (only when exactly one visible `player` matches that name) to add them. This " +
+                        "is DIRECTED team coordination — do it before an OPTIONAL hunt/explore.");
+                }
+                else if (fg.AmLeader)
+                {
+                    // Leader with no configured teammate left to add: may still recruit
+                    // any other visible player, or leave.
+                    sb.AppendLine(
+                        $"- You are grouped and lead the fellowship: {xpClause}. You MAY `FellowshipRecruit` " +
+                        "another visible `player` by name (only when exactly one visible `player` matches that " +
+                        "name) to add them; `FellowshipQuit` only if you disband or grouping no longer helps. Do " +
+                        "this only when it does not interrupt a more important immediate objective.");
+                }
+                else
+                {
+                    // Non-leader member: leave membership management to the leader; just
+                    // hunt near the fellowship to share XP (or leave if parting ways).
+                    sb.AppendLine(
+                        $"- You are grouped (NOT the leader): {xpClause}. Hunt near your fellowship members so " +
+                        "kills are shared; leave recruiting to the leader. `FellowshipQuit` only if you part " +
+                        "ways or grouping no longer helps you.");
+                }
+            }
+            else if (teammateRole.Role == TeammateRole.Leader && teammateRole.CounterpartName is { } leadRecruit)
+            {
+                // This bot is the elected leader and is not yet in a fellowship: create
+                // it and recruit the waiting teammate.
                 sb.AppendLine(
-                    $"- You are grouped: {xpClause}. `FellowshipRecruit` another visible `player` by name " +
-                    "(only when exactly one visible `player` matches that name) to add them; `FellowshipQuit` " +
-                    "only if you part ways or grouping no longer helps you. Do this only when it does not " +
-                    "interrupt a more important immediate objective.");
+                    $"- Your teammate `{leadRecruit}` (a known `player`) is nearby and you are your team's " +
+                    "designated leader (your name sorts first). Group up NOW: `FellowshipCreate` (you become " +
+                    $"leader), then `FellowshipRecruit{{target: {{name: \"{leadRecruit}\"}}}}` to invite them " +
+                    "(only when exactly one visible `player` matches that name). Your teammate is WAITING for " +
+                    "your invite — this is DIRECTED team coordination, do it before an OPTIONAL hunt/explore.");
+            }
+            else if (teammateRole.Role == TeammateRole.Follower && teammateRole.CounterpartName is { } leaderName)
+            {
+                // This bot is the follower: it must NOT create its own group (that would
+                // block the leader's recruit); it stays near and accepts the invite.
+                sb.AppendLine(
+                    $"- Your teammate `{leaderName}` (a known `player`) is your team's designated leader (their " +
+                    "name sorts first) and will invite YOU. Do NOT `FellowshipCreate` yourself — that would block " +
+                    $"the group. Stay near `{leaderName}` and accept the pending invite when it arrives (see " +
+                    $"`## Fellowship invite`); if you have drifted away, `GoTo` `{leaderName}` to stay in invite " +
+                    "range. DIRECTED team coordination.");
             }
             else
             {
