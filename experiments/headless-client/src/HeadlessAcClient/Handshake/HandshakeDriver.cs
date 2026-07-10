@@ -53,6 +53,17 @@ internal sealed class HandshakeDriver : IDisposable
     internal static readonly int ObserveSeconds =
         ResolveObserveSeconds(Environment.GetEnvironmentVariable("AC_BOTS_OBSERVE_SECONDS"));
 
+    // clean-logoff-on-exit: when true (default), the observe loop sends a
+    // CharacterLogOff (0xF653) on a graceful window-end while still in-world, so
+    // the server frees the character immediately rather than holding it until the
+    // abrupt-disconnect session timeout (which makes a supervisor relaunch hit
+    // CharacterError "already in world"). Disable with
+    // AC_BOTS_CLEAN_LOGOFF_ON_EXIT=0/false/no/off. Read once at type-load; pure
+    // runtime config, no game knowledge.
+    internal static readonly bool CleanLogoffOnExit =
+        ((Environment.GetEnvironmentVariable("AC_BOTS_CLEAN_LOGOFF_ON_EXIT") ?? "1")
+            .Trim().ToLowerInvariant()) is not ("0" or "false" or "no" or "off");
+
     // Outer cancellation headroom (seconds) added on top of ObserveSeconds so the
     // process-level budget always exceeds the observe loop PLUS the worst-case
     // pre-observe handshake — including the login resilience loop's full backoff
@@ -317,6 +328,16 @@ internal sealed class HandshakeDriver : IDisposable
             return Math.Min(v, Max);
         return Default;
     }
+
+    // clean-logoff-on-exit decision: send a CharacterLogOff only on a TRUE
+    // final/graceful observe-loop exit while CONFIRMED in-world. Excludes: the
+    // feature being disabled; a reconnect-triggered return (which re-enters to
+    // KEEP playing the same character — a logoff there would needlessly drop the
+    // session mid-run); an exit before world entry was confirmed; and a missing
+    // socket. Pure decision; no game knowledge.
+    internal static bool ShouldSendCleanLogoff(
+        bool cleanLogoffEnabled, bool inWorldConfirmed, bool reconnectRequested, bool socketPresent)
+        => cleanLogoffEnabled && inWorldConfirmed && !reconnectRequested && socketPresent;
 
     // Resolve the per-run action budget from the env var. Falls back to the default
     // (100) for an unset/blank/invalid/below-min value; clamps to [1, 10,000,000]
@@ -11393,6 +11414,52 @@ internal sealed class HandshakeDriver : IDisposable
             Console.WriteLine("[spatial] self snapshot has no CellId — skipping spatial queries");
         }
         Console.WriteLine($"[observe] sent: {acksSent} acks, {timeSyncsSent} timesync echoes, characterCreate={characterCreateSent}, enterWorldRequest={enterWorldRequestSent}, enterWorld={enterWorldSent}, loginComplete={loginCompleteSent}, autonomousPosition={autonomousPositionSent}, moveToStateStart={moveToStateStartSent}, moveToStateStop={moveToStateStopSent}, walkTickAps={walkTickAps}, starvationPokes={starvationPokesSent}");
+        // clean-logoff-on-exit: on a graceful window-end while CONFIRMED in-world, send
+        // a CharacterLogOff (0xF653) so the server frees the character immediately
+        // (session.LogOffPlayer) instead of holding it until the abrupt-disconnect
+        // timeout — which otherwise makes the supervisor's relaunch hit CharacterError
+        // "already in world". ShouldSendCleanLogoff gates on !reconnectRequested (a
+        // reconnect re-enters to KEEP playing, so no mid-run logoff) and a confirmed
+        // in-world signal (loginCompleteFirstAtUtc, not the weaker enterWorldSent).
+        // Best-effort: any failure is logged and swallowed so it can never break the
+        // graceful shutdown. Sent with CancellationToken.None because the observe token
+        // may already be cancelled. Mechanical protocol shutdown action; no game knowledge.
+        if (ShouldSendCleanLogoff(
+                CleanLogoffOnExit,
+                inWorldConfirmed: loginCompleteFirstAtUtc is not null,
+                reconnectRequested: reconnectRequested,
+                socketPresent: _socket is not null))
+        {
+            try
+            {
+                var loPktSeq  = nextOutboundPacketSequence++;
+                var loFragSeq = nextOutboundFragmentSequence++;
+                var loBuf     = new byte[CharacterLogOffMessage.PackedSize];
+                var loLen     = CharacterLogOffMessage.Pack(loBuf);
+                var loPkt = new OutboundPacket();
+                if (lastReceivedSeq != 0)
+                    loPkt.AddAckSequence(lastReceivedSeq);
+                loPkt.AddBlobFragment(
+                    fragSequence: loFragSeq,
+                    fragId: OutboundFragmentId,
+                    queue: (ushort)GameMessageGroup.UIQueue,
+                    gameMessagePayload: loBuf.AsSpan(0, loLen));
+                var loSent = loPkt.Pack(sendBuf, myClientId,
+                                        sequence: loPktSeq, iteration: 1,
+                                        encrypt: true, cryptoSend: cryptoSend);
+                await _socket!.SendToAsync(
+                    new ArraySegment<byte>(sendBuf, 0, loSent),
+                    SocketFlags.None, _serverPort0, CancellationToken.None).ConfigureAwait(false);
+                Console.WriteLine(
+                    $"[observe] clean logoff sent (CharacterLogOff 0xF653, pktSeq={loPktSeq} " +
+                    $"fragSeq={loFragSeq} bytes={loSent}) — server should free the character now");
+            }
+            catch (Exception logoffEx)
+            {
+                Console.WriteLine(
+                    $"[observe] clean logoff send failed (non-fatal): {logoffEx.GetType().Name}: {logoffEx.Message}");
+            }
+        }
         if (createResponse is not null)
             Console.WriteLine($"[observe] CharacterCreateResponse received: {createResponse.Response} (code={(uint)createResponse.Response})");
         else if (characterCreateSent)
