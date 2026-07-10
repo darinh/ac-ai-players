@@ -1679,6 +1679,14 @@ internal sealed class HandshakeDriver : IDisposable
         // bot was in when the opcode was sent (high 16 bits of the cell id).
         DateTime?            recallInFlightUntil = null;
         ushort               recallDispatchLandblock = 0;
+        // Full cell id + world position captured at recall dispatch. Used to
+        // judge "did the teleport land?" more precisely than the high-16
+        // landblock alone: a recall to a lifestone in the SAME landblock (or
+        // same cell) is still a LANDED teleport (the position moves), so the
+        // synthetic recall-did-not-land rejection is stamped ONLY when both cell
+        // id AND position are essentially unchanged (see RecallEscape).
+        uint                 recallDispatchCellId = 0;
+        System.Numerics.Vector3? recallDispatchPos = null;
         // True for the current tick while a lifestone recall is animating (set
         // each tick from recallInFlightUntil). Declared at connection scope so
         // it is visible in BOTH the deeper goal-dispatch block (which assigns
@@ -6073,6 +6081,8 @@ internal sealed class HandshakeDriver : IDisposable
                             {
                                 recallInFlightUntil = null;
                                 recallDispatchLandblock = 0;
+                                recallDispatchCellId = 0;
+                                recallDispatchPos = null;
                                 motionDone = false;
                                 moveToStateStartSent = false;
                                 moveToStateStopSent = false;
@@ -6467,16 +6477,47 @@ internal sealed class HandshakeDriver : IDisposable
                             // teleport landed: the recall action is done.
                             // Complete the goal so the LLM re-deliberates from
                             // the new location.
-                            var landed = recallDispatchLandblock != 0 && selfLandblockNow != 0 &&
-                                selfLandblockNow != recallDispatchLandblock;
+                            // A LANDED teleport moves the bot (cell id changes, or
+                            // position moves — e.g. to a lifestone in the SAME
+                            // landblock/cell). Only stamp the synthetic
+                            // recall-did-not-land rejection when the teleport is
+                            // CONFIDENTLY observed NOT to have happened (both poses
+                            // known, same cell, no move) so a real recall is never
+                            // mis-recorded as refused (a transient null Self is
+                            // inconclusive -> no stamp).
+                            var didNotLand = RecallEscape.RecallConfidentlyDidNotLand(
+                                recallDispatchCellId, recallDispatchPos,
+                                worldState.Self?.CellId ?? 0u, worldState.Self?.Position);
                             Console.WriteLine(
                                 $"[recall] recall window closed (" +
-                                (landed
-                                    ? $"teleport landed: landblock 0x{recallDispatchLandblock:X4}->0x{selfLandblockNow:X4}"
-                                    : "timed out, no landblock change observed") +
+                                (didNotLand
+                                    ? "no teleport observed (same cell, no move) — refused/interrupted"
+                                    : $"teleport landed or inconclusive: landblock 0x{recallDispatchLandblock:X4}->0x{selfLandblockNow:X4}") +
                                 "); releasing goal.");
+                            if (didNotLand)
+                            {
+                                // The recall did NOT land — the server refused it (no
+                                // attuned lifestone / blocked in a training area / just
+                                // after PvP) or it was interrupted. Stamp a synthetic
+                                // targetless ActionRejected so the policy's
+                                // recently-rejected dedup suppresses re-emitting the same
+                                // Recall in a loop (a targetless self-action can't be
+                                // matched by the generic target/item dedup). Mirrors the
+                                // synthetic transport-failure rejections.
+                                eventStream.Append(new StreamEvent
+                                {
+                                    Sequence = 0,
+                                    Utc = DateTimeOffset.UtcNow,
+                                    Kind = EventKind.ActionRejected,
+                                    Text = "Recall did not land (no teleport observed)",
+                                    ErrorCode = RecallEscape.RecallDidNotLandRejectionCode,
+                                    ErrorLabel = "RecallDidNotLand",
+                                });
+                            }
                             recallInFlightUntil = null;
                             recallDispatchLandblock = 0;
+                            recallDispatchCellId = 0;
+                            recallDispatchPos = null;
                             // Recall quiescence forced motionDone=true (and may have
                             // sent a MoveToState STOP) to suppress every stepping AP
                             // during the in-flight window. Those latches persist across
@@ -6515,6 +6556,8 @@ internal sealed class HandshakeDriver : IDisposable
                             motionTarget = null;
                             combatTargetGuid = null;
                             recallDispatchLandblock = selfLandblockNow;
+                            recallDispatchCellId = worldState.Self?.CellId ?? 0u;
+                            recallDispatchPos = worldState.Self?.Position;
                             recallInFlightUntil = nowR + recallInFlightWindow;
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL Recall: TeleToLifestone (0x0063) sent " +
