@@ -1686,6 +1686,10 @@ internal sealed class HandshakeDriver : IDisposable
         uint?                prevSelfCellBeforeAp = null;
         float                prevExpectedStepLen = 0f;
         int                  consecutiveBlockedTicks = 0;
+        // combat-hold-in-swing-range observability: the previous tick's holdForSwingLoop
+        // value, so a swing-hold is logged ONCE per episode (on the enter/leave
+        // transition) rather than every ~250ms walk-tick. Pure diagnostic bookkeeping.
+        var                  prevHoldForSwingLoop = false;
         // immobile-stuck telemetry: aggregate count of full block-stops
         // (each = BlockedConsecutiveTicks consecutive zero-progress walk
         // ticks) that have fired WITHOUT the bot's self-position changing
@@ -10321,6 +10325,22 @@ internal sealed class HandshakeDriver : IDisposable
                     lastServerCombatActivityAt is DateTime swingAct &&
                     CombatRetry.IsSwingLoopActive(
                         (DateTime.UtcNow - swingAct).TotalSeconds, CombatActivityQuiescenceSec);
+
+                // combat-hold-in-swing-range observability: log the hold episode
+                // transitions ONCE (START when the walk advance begins being skipped,
+                // END when it resumes) so the config-gated hold is visible in the run
+                // log for validation — the skipped walk-tick is otherwise silent.
+                // Diagnostic only; no behavior change. The guid is a mechanical wire
+                // identifier, not game content.
+                if (holdForSwingLoop && !prevHoldForSwingLoop)
+                    Console.WriteLine(
+                        $"[motion] hold-in-swing-range START: swing loop alive vs target " +
+                        $"0x{(combatTargetGuid ?? 0u):X8} — skipping walk advance so our own " +
+                        $"motion does not cancel the in-progress swing");
+                else if (!holdForSwingLoop && prevHoldForSwingLoop)
+                    Console.WriteLine(
+                        "[motion] hold-in-swing-range END: swing loop no longer active — resuming walk-tick advance");
+                prevHoldForSwingLoop = holdForSwingLoop;
 
                 // While holding for the swing loop, keep the blocked-motion detector
                 // state clear so the FIRST tick after the hold releases starts a fresh
