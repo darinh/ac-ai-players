@@ -10615,11 +10615,24 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     : null;
                 if (unrecruited is { } recruitName)
                 {
+                    // Count configured teammates (AC_BOTS_TEAMMATE_NAMES) not yet in the
+                    // fellowship, so the leader knows the WHOLE roster is still forming — not
+                    // just the next name. A weak model tends to recruit one then revert to
+                    // hunting; the remaining count + "until your whole team is grouped" frames
+                    // it as an unfinished roster to complete. Mechanical: derived from operator
+                    // config + wire-decoded fellowship membership. (Self is always a member of
+                    // its own fellowship here, so it never counts toward "remaining".)
+                    var joined = new HashSet<string>(
+                        fg.Members.Select(m => m.Name).Where(n => !string.IsNullOrWhiteSpace(n)),
+                        StringComparer.OrdinalIgnoreCase);
+                    var remaining = EffectiveTeammateNames.Count(n => !joined.Contains(n));
                     sb.AppendLine(
                         $"- You are grouped and are your team's designated leader: {xpClause}. Your teammate " +
                         $"`{recruitName}` is nearby but NOT yet in the fellowship — `FellowshipRecruit` them by " +
-                        "name now (only when exactly one visible `player` matches that name) to add them. This " +
-                        "is DIRECTED team coordination — do it before an OPTIONAL hunt/explore.");
+                        "name now (only when exactly one visible `player` matches that name) to add them. " +
+                        $"{remaining} configured teammate(s) still to add — keep recruiting each teammate as it " +
+                        "becomes visible, one per turn, until your whole team is grouped. This is DIRECTED team " +
+                        "coordination — do it before an OPTIONAL hunt/explore.");
                 }
                 else if (fg.AmLeader)
                 {
