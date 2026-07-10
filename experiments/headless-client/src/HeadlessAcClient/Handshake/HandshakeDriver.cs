@@ -1731,6 +1731,10 @@ internal sealed class HandshakeDriver : IDisposable
         // value, so a swing-hold is logged ONCE per episode (on the enter/leave
         // transition) rather than every ~250ms walk-tick. Pure diagnostic bookkeeping.
         var                  prevHoldForSwingLoop = false;
+        // team-formation observability: the last-logged operator-team formation snapshot,
+        // so a change (grouped, recruited a teammate, swore allegiance) is logged ONCE
+        // rather than every tick. null until first computed. Pure diagnostic bookkeeping.
+        string?              prevTeamFormationSnapshot = null;
         // immobile-stuck telemetry: aggregate count of full block-stops
         // (each = BlockedConsecutiveTicks consecutive zero-progress walk
         // ticks) that have fired WITHOUT the bot's self-position changing
@@ -6130,6 +6134,32 @@ internal sealed class HandshakeDriver : IDisposable
                                 Rationale = "auto-approve configured-teammate swear-allegiance request",
                             },
                             eventStream);
+                    }
+
+                    // team-formation observability (diagnostic only, no behavior change):
+                    // when an operator team is configured (AC_BOTS_TEAMMATE_NAMES), log the
+                    // formation-state snapshot once per change so multi-bot fellowship /
+                    // allegiance formation progress is greppable from a single line per
+                    // transition. Pure read of wire-decoded projections + operator config;
+                    // makes no decision and selects no target.
+                    if (projection is not null)
+                    {
+                        var teamSnapshot = TeamFormation.Describe(
+                            LlmGoalPolicy.TeammateNames,
+                            projection.Self.Name,
+                            projection.Fellowship is not null,
+                            projection.Fellowship?.AmLeader ?? false,
+                            projection.Fellowship?.LeaderName,
+                            projection.Fellowship?.Members.Select(m => (string?)m.Name)
+                                ?? System.Linq.Enumerable.Empty<string?>(),
+                            projection.Visible.Where(v => v.IsPlayer).Select(v => v.Name),
+                            projection.Self.IsInAllegiance,
+                            projection.Self.IsOwnMonarch);
+                        if (teamSnapshot is not null && teamSnapshot != prevTeamFormationSnapshot)
+                        {
+                            Console.WriteLine($"[team-formation] {teamSnapshot}");
+                            prevTeamFormationSnapshot = teamSnapshot;
+                        }
                     }
 
                     // Named-target search continuity: the search telemetry
