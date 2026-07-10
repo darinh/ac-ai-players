@@ -6106,6 +6106,32 @@ internal sealed class HandshakeDriver : IDisposable
                             $"(reached distinct-silent threshold); fallback will now skip it");
                     var goal = projection is null ? null : tactics.Tick(projection, eventStream);
 
+                    // Auto-team (AC_BOTS_AUTO_TEAM): when a swear-allegiance request from
+                    // a configured teammate is pending, the Motor emits AllegianceApprove
+                    // itself so the monarch answers within the server's ~30s confirmation
+                    // window regardless of model quality. Unlike fellowship auto-join
+                    // (a native client option), allegiance has no auto-accept option, so
+                    // the approve is client-driven here. The teammate INITIATED the swear;
+                    // this only answers an already-pending request, gated on operator
+                    // config. Default off leaves the LLM-driven approve path unchanged.
+                    if (projection is not null
+                        && AutoTeamCoordinator.ShouldAutoApproveAllegiance(
+                            autoTeamEnabled, LlmGoalPolicy.TeammateNames, worldState.PendingAllegianceRequest))
+                    {
+                        // Route through tactics so CurrentGoal (read by Clear/Fail + the
+                        // search-continuity logic below) becomes the synthetic goal too —
+                        // a local-only override would desync CurrentGoal and later clear
+                        // the wrong goal.
+                        goal = tactics.OverrideCurrentGoal(
+                            new Goal
+                            {
+                                Kind = GoalKind.AllegianceApprove,
+                                Source = "auto-team",
+                                Rationale = "auto-approve configured-teammate swear-allegiance request",
+                            },
+                            eventStream);
+                    }
+
                     // Named-target search continuity: the search telemetry
                     // belongs to ONE LLM pursuit (its goal kind + target name).
                     // If the current goal is no longer that same named pursuit
