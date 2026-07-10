@@ -72,6 +72,30 @@ internal sealed class TacticsExecutor
     }
 
     /// <summary>
+    /// Replace the current goal with a Motor-fabricated one (e.g. the config-gated
+    /// auto-team approve) so <see cref="CurrentGoal"/> — which <see cref="Clear"/>,
+    /// <see cref="Fail"/>, and the driver's search-continuity logic read — stays in
+    /// sync with the goal the Motor is about to dispatch. Returns the goal. Emits the
+    /// same GoalEmitted event Tick does so telemetry is consistent.
+    /// </summary>
+    public Goal OverrideCurrentGoal(Goal goal, EventStream events)
+    {
+        if (!ReferenceEquals(goal, CurrentGoal))
+        {
+            CurrentGoal = goal;
+            events.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.GoalEmitted,
+                GoalId = goal.Id,
+                Text = $"{goal.Kind} target={goal.Target} item={goal.Item} source={goal.Source}",
+            });
+        }
+        return goal;
+    }
+
+    /// <summary>
     /// Resolve the current goal's Target Selector to a concrete
     /// nearest world object (relative to <paramref name="self"/>).
     /// Returns null if no goal or no live match.
