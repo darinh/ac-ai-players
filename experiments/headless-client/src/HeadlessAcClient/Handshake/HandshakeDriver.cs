@@ -1342,6 +1342,10 @@ internal sealed class HandshakeDriver : IDisposable
         // native continuous melee swing loop (see the SetSingleCharacterOption
         // send below and Player_Melee.cs:375).
         var autoRepeatOptionSent = false;
+        // One-shot: clear the ACE fresh-character default IgnoreFellowshipRequests at
+        // login so a fellowship recruit can reach this bot (else the server refuses it
+        // and never sends the invite). The LLM still decides whether to accept.
+        var ignoreFellowshipCleared = false;
         // Packet index at which LoginComplete was sent; we gate the
         // first AutonomousPosition probe on "saw at least this many
         // more inbound packets after LC" so the server has time to
@@ -4546,6 +4550,40 @@ internal sealed class HandshakeDriver : IDisposable
                     await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, optSent),
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     Console.WriteLine($"[observe]   -> PHASE7F.0 SEND: SetSingleCharacterOption(AutoRepeatAttacks=on) pktSeq={optPacketSeq} fragSeq={optFragSeq} totalBytes={optSent}");
+                }
+
+                // Phase 7f.0b — clear IgnoreFellowshipRequests once, right after we're
+                // in the world. New characters have this option ON by default in ACE, so
+                // the server REFUSES any fellowship recruit aimed at this bot ("X is not
+                // accepting fellowship requests.") and never sends the invite
+                // confirmation. Clearing it makes the bot recruitable so an invite can
+                // reach it; the LLM still decides whether to FellowshipAccept. Mechanical
+                // client configuration (like AutoRepeatAttacks above), not game knowledge.
+                if (loginCompleteSent && !ignoreFellowshipCleared)
+                {
+                    ignoreFellowshipCleared = true;
+                    var ifrPacketSeq = nextOutboundPacketSequence++;
+                    var ifrFragSeq   = nextOutboundFragmentSequence++;
+
+                    var ifrBuf = new byte[GameActionSetSingleCharacterOptionMessage.PackedSize];
+                    var ifrLen = GameActionSetSingleCharacterOptionMessage.Pack(
+                        ifrBuf, CharacterOption.IgnoreFellowshipRequests, value: false);
+
+                    var ifrMsg = new OutboundPacket();
+                    if (lastReceivedSeq != 0)
+                        ifrMsg.AddAckSequence(lastReceivedSeq);
+                    ifrMsg.AddBlobFragment(
+                        fragSequence: ifrFragSeq,
+                        fragId: OutboundFragmentId,
+                        queue: (ushort)GameMessageGroup.UIQueue,
+                        gameMessagePayload: ifrBuf.AsSpan(0, ifrLen));
+
+                    var ifrSent = ifrMsg.Pack(sendBuf, myClientId,
+                                              sequence: ifrPacketSeq, iteration: 1,
+                                              encrypt: true, cryptoSend: cryptoSend);
+                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ifrSent),
+                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                    Console.WriteLine($"[observe]   -> PHASE7F.0b SEND: SetSingleCharacterOption(IgnoreFellowshipRequests=off) pktSeq={ifrPacketSeq} fragSeq={ifrFragSeq} totalBytes={ifrSent}");
                 }
 
                 // Phase 7f.H — update this engagement's self-health high-water

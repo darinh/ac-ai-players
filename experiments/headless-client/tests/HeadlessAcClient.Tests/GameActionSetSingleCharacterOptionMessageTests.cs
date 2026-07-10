@@ -80,4 +80,34 @@ public class GameActionSetSingleCharacterOptionMessageTests
             GameActionSetSingleCharacterOptionMessage.Pack(
                 tooSmall, CharacterOption.AutoRepeatAttacks, true));
     }
+
+    [Fact]
+    public void IgnoreFellowshipRequests_OptionId_Is0x02()
+    {
+        // Must match ACE.Entity CharacterOption.IgnoreFellowshipRequests (0x02); if it
+        // drifts the bot would toggle the wrong option and stay un-recruitable.
+        Assert.Equal(0x02u, (uint)CharacterOption.IgnoreFellowshipRequests);
+    }
+
+    [Fact]
+    public void Pack_ClearIgnoreFellowshipRequests_WritesOption02Value0()
+    {
+        // The login-time clear that makes the bot recruitable: option 0x02, value 0.
+        var dest = new byte[GameActionSetSingleCharacterOptionMessage.PackedSize];
+
+        var written = GameActionSetSingleCharacterOptionMessage.Pack(
+            dest, CharacterOption.IgnoreFellowshipRequests, value: false, actionSequence: 2u);
+
+        Assert.Equal(GameActionSetSingleCharacterOptionMessage.PackedSize, written);
+
+        var expected = new byte[20];
+        var c = 0;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), GameActionEnvelopeOpcode); c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 2u);                        c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x0005u);                   c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0x02u /* IgnoreFellowshipRequests */); c += 4;
+        BinaryPrimitives.WriteUInt32LittleEndian(expected.AsSpan(c), 0u /* off */);              c += 4;
+
+        Assert.Equal(expected, dest);
+    }
 }
