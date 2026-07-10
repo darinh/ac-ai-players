@@ -10500,9 +10500,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "max HP (and other vitals — you come back weaker each time), and EACH new death RESETS your " +
                 "recovery progress, so the penalty burns off ONLY as you EARN XP WITHOUT dying — raising max HP " +
                 "helps less and will NOT fix it alone while the deaths keep resetting your recovery. BREAK the " +
-                "spiral: do NOT start optional fights you might lose; `Explore` AWAY from whatever keeps killing " +
-                "you toward a SAFER, weaker area (or `Recall` if you have an attuned lifestone), then earn XP " +
-                "from only SAFE, winnable kills (or other low-risk progress) until the penalty burns down. While " +
+                "spiral: do NOT start optional fights you might lose. If something is STILL pursuing or attacking " +
+                "you and you cannot shake it on foot, `Recall` (if you have an attuned lifestone) is the most " +
+                "RELIABLE escape — it teleports you away where a pursuer cannot follow, whereas walking or " +
+                "`Explore` away may not lose a faster attacker; start it EARLY (it needs a moment to take effect), " +
+                "not at your last sliver of health. If `Recall` is refused (no attuned lifestone, or the server " +
+                "blocks it — e.g. inside a training area or just after PvP), do NOT repeat it — flee toward a " +
+                "safer area on foot instead. Once nothing is pursuing you, `Explore` toward a SAFER, weaker " +
+                "area, then earn XP from only SAFE, winnable kills (or other low-risk progress) until the penalty " +
+                "burns down. While " +
                 "this caution applies it OVERRIDES the optional-combat/hunt guidance and the 'dying -> raise max " +
                 "HP' XP tiebreaker above. (A `HOSTILE` already attacking you, or an explicit server/quest " +
                 "directive, still takes priority — defend or flee as needed.)");
