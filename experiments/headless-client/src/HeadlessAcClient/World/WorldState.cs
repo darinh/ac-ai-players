@@ -237,6 +237,15 @@ internal sealed class WorldState
     public PendingFellowshipInvite? PendingFellowshipInvite { get; private set; }
 
     /// <summary>
+    /// A swear-allegiance request the server has sent the bot (as prospective patron)
+    /// and it has not yet answered, or null when none is outstanding. Set from a
+    /// CharacterConfirmationRequest (0x0274) of type SwearAllegiance; cleared on the
+    /// matching CharacterConfirmationDone (0x0276) or when a response is sent. Pure
+    /// perception; the LLM owns the approve decision.
+    /// </summary>
+    public PendingAllegianceRequest? PendingAllegianceRequest { get; private set; }
+
+    /// <summary>
     /// The bot's currently tracked contracts/objectives, set from the server's
     /// SendClientContractTrackerTable (0x0314) full snapshot and upserted/removed
     /// by SendClientContractTracker (0x0315). Empty when none are tracked. Pure
@@ -648,35 +657,51 @@ internal sealed class WorldState
     }
 
     /// <summary>
-    /// Record a fellowship-invite prompt from a CharacterConfirmationRequest
-    /// (0x0274). Only <c>ConfirmationType.Fellowship</c> prompts are tracked (the
-    /// prompt kind the Strategy layer has an accept action for); any other type is
-    /// ignored (returns false). A new fellowship prompt replaces any prior pending
-    /// one. Returns true when a fellowship invite was stored.
+    /// Record a server confirmation prompt from a CharacterConfirmationRequest
+    /// (0x0274). Fellowship prompts populate <see cref="PendingFellowshipInvite"/> and
+    /// SwearAllegiance prompts populate <see cref="PendingAllegianceRequest"/> — the
+    /// two prompt kinds the Strategy layer has an accept action for. Any other type is
+    /// ignored (returns false). A new prompt of a kind replaces any prior pending one
+    /// of that kind. Returns true when a tracked prompt was stored.
     /// </summary>
     public bool ApplyConfirmationRequest(ConfirmationRequestPayload payload)
     {
-        if (payload.ConfirmationType != (uint)ConfirmationType.Fellowship)
-            return false;
-        PendingFellowshipInvite = new PendingFellowshipInvite(payload.Context, payload.Text);
-        return true;
+        if (payload.ConfirmationType == (uint)ConfirmationType.Fellowship)
+        {
+            PendingFellowshipInvite = new PendingFellowshipInvite(payload.Context, payload.Text);
+            return true;
+        }
+        if (payload.ConfirmationType == (uint)ConfirmationType.SwearAllegiance)
+        {
+            PendingAllegianceRequest = new PendingAllegianceRequest(payload.Context, payload.Text);
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
-    /// Clear the pending fellowship invite when the server closes it with a
-    /// CharacterConfirmationDone (0x0276). Only clears when the done event's type
-    /// is Fellowship AND its context matches the tracked invite — a stale Done for
-    /// a superseded context must not drop a newer pending invite. Returns true when
-    /// a matching pending invite was cleared.
+    /// Clear a pending prompt when the server closes it with a CharacterConfirmationDone
+    /// (0x0276). Clears only when the done event's type matches a tracked prompt AND its
+    /// context matches — a stale Done for a superseded context must not drop a newer
+    /// pending prompt. Returns true when a matching pending prompt was cleared.
     /// </summary>
     public bool ApplyConfirmationDone(ConfirmationDonePayload payload)
     {
-        if (payload.ConfirmationType != (uint)ConfirmationType.Fellowship)
-            return false;
-        if (PendingFellowshipInvite is null || PendingFellowshipInvite.Context != payload.Context)
-            return false;
-        PendingFellowshipInvite = null;
-        return true;
+        if (payload.ConfirmationType == (uint)ConfirmationType.Fellowship)
+        {
+            if (PendingFellowshipInvite is null || PendingFellowshipInvite.Context != payload.Context)
+                return false;
+            PendingFellowshipInvite = null;
+            return true;
+        }
+        if (payload.ConfirmationType == (uint)ConfirmationType.SwearAllegiance)
+        {
+            if (PendingAllegianceRequest is null || PendingAllegianceRequest.Context != payload.Context)
+                return false;
+            PendingAllegianceRequest = null;
+            return true;
+        }
+        return false;
     }
 
     /// <summary>
@@ -688,6 +713,18 @@ internal sealed class WorldState
         if (PendingFellowshipInvite is null)
             return false;
         PendingFellowshipInvite = null;
+        return true;
+    }
+
+    /// <summary>
+    /// Drop any pending swear-allegiance request (e.g. optimistically after a response
+    /// is sent, before the server's Done arrives). Returns false if none was pending.
+    /// </summary>
+    public bool ClearPendingAllegianceRequest()
+    {
+        if (PendingAllegianceRequest is null)
+            return false;
+        PendingAllegianceRequest = null;
         return true;
     }
 

@@ -39,3 +39,14 @@ internal sealed record FellowshipMembership(
 /// Pure perception memory — the LLM owns whether to accept.
 /// </summary>
 internal sealed record PendingFellowshipInvite(uint Context, string Text);
+
+/// <summary>
+/// A pending swear-allegiance request the server has sent the bot (as a prospective
+/// PATRON/monarch) and that it has not yet answered. Distilled from a
+/// CharacterConfirmationRequest (0x0274) whose type is
+/// <c>ConfirmationType.SwearAllegiance</c>. <see cref="Context"/> is the server's
+/// context id a ConfirmationResponse (0x0275) must echo; <see cref="Text"/> is the
+/// server-supplied prompt line (the would-be vassal's name). Pure perception memory —
+/// the LLM owns whether to approve.
+/// </summary>
+internal sealed record PendingAllegianceRequest(uint Context, string Text);

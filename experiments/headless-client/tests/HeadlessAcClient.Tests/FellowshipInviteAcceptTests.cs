@@ -123,9 +123,9 @@ public class FellowshipInviteAcceptTests
     public void WorldState_ApplyRequest_IgnoresNonFellowshipTypes()
     {
         var ws = new WorldState();
-        // SwearAllegiance (0x01) also uses a confirmation prompt, but only fellowship
-        // invites are tracked (the only kind with an accept action).
-        var applied = ws.ApplyConfirmationRequest(new ConfirmationRequestPayload(0x01u, 7u, "swear?"));
+        // AlterAttribute (0x03) uses a confirmation prompt too, but it is not a tracked
+        // kind (the client has no accept action for it), so it populates nothing.
+        var applied = ws.ApplyConfirmationRequest(new ConfirmationRequestPayload(0x03u, 7u, "raise?"));
         Assert.False(applied);
         Assert.Null(ws.PendingFellowshipInvite);
     }

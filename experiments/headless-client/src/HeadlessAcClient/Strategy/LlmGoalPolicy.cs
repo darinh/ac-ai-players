@@ -8822,7 +8822,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -8842,7 +8842,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -10741,6 +10741,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "from a visible `player` by name (only when exactly one visible `player` matches that " +
                     "name); this severs your allegiance bond with them. OPTIONAL — you decide whether and " +
                     "with whom, or skip it.");
+        }
+
+        // ── ## Allegiance request (a prospective vassal asked to pledge to you) ──
+        // Rendered ONLY when the server has sent the bot a swear-allegiance request it
+        // has not yet answered (perceived as pending_allegiance_request). The request's
+        // server text is the would-be vassal's name; when it matches a configured
+        // teammate the cue is a DIRECTIVE (approve now — the vassal is waiting), else
+        // OPTIONAL. Either way the LLM owns the approve decision; the Motor only echoes
+        // the request's context back on AllegianceApprove.
+        if (world.PendingAllegianceRequest is { } pendingSwear)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Allegiance request");
+            if (TeammateCoordination.IsConfiguredTeammate(pendingSwear.Text, EffectiveTeammateNames))
+            {
+                sb.AppendLine(
+                    $"- Your teammate `{pendingSwear.Text}` has asked to SWEAR ALLEGIANCE to you (become " +
+                    "your vassal). Emit `AllegianceApprove` (no target needed) NOW to accept them — this is " +
+                    "DIRECTED team coordination, do it BEFORE an OPTIONAL hunt/loot/explore. Ignoring it lets " +
+                    "the request lapse and leaves your team un-allied.");
+            }
+            else
+            {
+                sb.AppendLine(
+                    $"- A `player` (`{pendingSwear.Text}`) has asked to SWEAR ALLEGIANCE to you (become your " +
+                    "vassal). To ACCEPT them as your vassal, emit `AllegianceApprove` (no target needed). To " +
+                    "decline, do nothing and it will lapse. OPTIONAL — you decide whether to accept.");
+            }
         }
 
         // ── ## Chat (optional say — local aloud and/or a group channel) ───────
@@ -15253,19 +15281,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 && parsed.Kind != GoalKind.FellowshipCreate
                 && parsed.Kind != GoalKind.FellowshipQuit
                 && parsed.Kind != GoalKind.FellowshipAccept
+                && parsed.Kind != GoalKind.AllegianceApprove
                 && parsed.Kind != GoalKind.Say
                 && parsed.Target.IsEmpty)
             {
-                // Recall and the fellowship self/social actions (FellowshipCreate /
-                // FellowshipQuit / FellowshipAccept) are SELF-actions with no world
-                // target — like Recall, they legitimately carry an empty target
-                // (FellowshipCreate's name rides in target.name when given, but an
-                // unnamed create falls back to a default; FellowshipQuit and
-                // FellowshipAccept carry nothing — Accept's context is looked up from
-                // the pending invite). Say is likewise a self-broadcast (local chat)
-                // with no world target — its payload is the `message`, validated
-                // below. Accept them rather than discarding the LLM's decision to the
-                // heuristic fallback.
+                // Recall and the fellowship/allegiance self/social actions
+                // (FellowshipCreate / FellowshipQuit / FellowshipAccept /
+                // AllegianceApprove) are SELF-actions with no world target — like Recall,
+                // they legitimately carry an empty target (FellowshipCreate's name rides
+                // in target.name when given, but an unnamed create falls back to a
+                // default; FellowshipQuit, FellowshipAccept and AllegianceApprove carry
+                // nothing — the accept/approve context is looked up from the pending
+                // request). Say is likewise a self-broadcast (local chat) with no world
+                // target — its payload is the `message`, validated below. Accept them
+                // rather than discarding the LLM's decision to the heuristic fallback.
                 //
                 // Wield's wielded object is logically the `item`, not the
                 // `target`: the Motor's Wield dispatch reads goal.Item (or an

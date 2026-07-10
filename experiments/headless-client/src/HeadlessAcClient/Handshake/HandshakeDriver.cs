@@ -2700,21 +2700,22 @@ internal sealed class HandshakeDriver : IDisposable
                                         Console.WriteLine($"[fellowship] dismissed: 0x{fellowDismiss.DismissedGuid:X8}");
                                 }
                                 // Confirmation prompt (0x0274) / done (0x0276) -> WorldState
-                                // so the LLM prompt can perceive "you have a pending fellowship
-                                // invite" and choose to emit a FellowshipAccept. Perception
-                                // only; source never decides whether to accept.
+                                // so the LLM prompt can perceive a pending fellowship invite
+                                // or swear-allegiance request and choose to answer it.
+                                // Perception only; source never decides whether to accept.
                                 else if (ge.Payload?.ConfirmationRequest is { } confirmReq)
                                 {
                                     if (worldState.ApplyConfirmationRequest(confirmReq))
                                         Console.WriteLine(
-                                            $"[fellowship] invite pending: context={confirmReq.Context} " +
-                                            $"text=\"{confirmReq.Text}\"");
+                                            $"[confirmation] pending: type={confirmReq.ConfirmationType} " +
+                                            $"context={confirmReq.Context} text=\"{confirmReq.Text}\"");
                                 }
                                 else if (ge.Payload?.ConfirmationDone is { } confirmDone)
                                 {
                                     if (worldState.ApplyConfirmationDone(confirmDone))
                                         Console.WriteLine(
-                                            $"[fellowship] invite closed: context={confirmDone.Context}");
+                                            $"[confirmation] closed: type={confirmDone.ConfirmationType} " +
+                                            $"context={confirmDone.Context}");
                                 }
                                 // Contract tracker (0x0314 full table / 0x0315 single
                                 // update) -> WorldState so the LLM prompt can perceive
@@ -7139,6 +7140,52 @@ internal sealed class HandshakeDriver : IDisposable
                                 $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
                                 $"pktSeq={faPktSeq} fragSeq={faFragSeq} bytes={faSent}");
                             tactics.Clear("fellowship-accept dispatched", eventStream);
+                        }
+                    }
+                    else if (goal is not null && goal.Kind == GoalKind.AllegianceApprove)
+                    {
+                        // Social self-action: approve a pending swear-allegiance request
+                        // from a prospective vassal. The LLM chose to approve (it sees the
+                        // pending request in the projection); the motor looks up the
+                        // outstanding request's echoed context and packs a
+                        // ConfirmationResponse (0x0275) approving it. It makes NO decision
+                        // about WHETHER to approve, and fails cleanly when none is pending.
+                        var approveDecision = AllegianceRequestResponse.Decide(worldState.PendingAllegianceRequest);
+                        if (approveDecision.Kind == AllegianceRequestResponse.ResultKind.Fail)
+                        {
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL AllegianceApprove not sent ({approveDecision.FailReason}); " +
+                                $"source={goal.Source}");
+                            tactics.Fail(approveDecision.FailReason!, eventStream);
+                        }
+                        else
+                        {
+                            var aaPktSeq  = nextOutboundPacketSequence++;
+                            var aaFragSeq = nextOutboundFragmentSequence++;
+                            var aaBuf = new byte[GameActionConfirmationResponseMessage.PackedSize];
+                            var aaLen = GameActionConfirmationResponseMessage.Pack(
+                                aaBuf, ConfirmationType.SwearAllegiance, approveDecision.Context, accept: true);
+                            var aaMsg = new OutboundPacket();
+                            if (lastReceivedSeq != 0)
+                                aaMsg.AddAckSequence(lastReceivedSeq);
+                            aaMsg.AddBlobFragment(
+                                fragSequence: aaFragSeq,
+                                fragId: OutboundFragmentId,
+                                queue: (ushort)GameMessageGroup.UIQueue,
+                                gameMessagePayload: aaBuf.AsSpan(0, aaLen));
+                            var aaSent = aaMsg.Pack(sendBuf, myClientId,
+                                                    sequence: aaPktSeq, iteration: 1,
+                                                    encrypt: true, cryptoSend: cryptoSend);
+                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, aaSent),
+                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            // Optimistically drop the pending request so a slow server Done
+                            // does not leave the cue up and re-mint another approve.
+                            worldState.ClearPendingAllegianceRequest();
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL AllegianceApprove: context={approveDecision.Context} " +
+                                $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                $"pktSeq={aaPktSeq} fragSeq={aaFragSeq} bytes={aaSent}");
+                            tactics.Clear("allegiance-approve dispatched", eventStream);
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.Explore)
