@@ -10676,19 +10676,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         // ── ## Fellowship invite (a pending invite the bot can accept) ───────
         // Rendered ONLY when the server has sent the bot a fellowship invite it has
-        // not yet answered (perceived as pending_fellowship_invite). Surfaces the
-        // FellowshipAccept affordance mechanically: the server-supplied prompt text
-        // (a runtime value, includes who invited), and that FellowshipAccept joins
-        // while ignoring it lets it lapse. OPTIONAL — the LLM owns the accept
-        // decision; the Motor only echoes the invite's context back on accept.
+        // not yet answered (perceived as pending_fellowship_invite). The invite's
+        // server text is the inviter's name; when it matches a configured teammate the
+        // cue is a DIRECTIVE (accept now — symmetric to the leader's recruit directive),
+        // else OPTIONAL. Either way the LLM owns the accept decision; the Motor only
+        // echoes the invite's context back on FellowshipAccept.
         if (world.PendingFellowshipInvite is { } pendingInvite)
         {
             sb.AppendLine();
             sb.AppendLine("## Fellowship invite");
-            sb.AppendLine(
-                $"- You have a PENDING fellowship invite: \"{pendingInvite.Text}\". To JOIN, emit " +
-                "`FellowshipAccept` (no target needed). To stay solo, do nothing and it will lapse. " +
-                "OPTIONAL — you decide whether to accept.");
+            if (TeammateCoordination.IsConfiguredTeammate(pendingInvite.Text, EffectiveTeammateNames))
+            {
+                sb.AppendLine(
+                    $"- Your teammate `{pendingInvite.Text}` has INVITED you to their fellowship. Emit " +
+                    "`FellowshipAccept` (no target needed) NOW to join them — this is DIRECTED team " +
+                    "coordination, do it BEFORE an OPTIONAL hunt/loot/explore. Ignoring it lets the invite " +
+                    "lapse and leaves your team ungrouped.");
+            }
+            else
+            {
+                sb.AppendLine(
+                    $"- You have a PENDING fellowship invite: \"{pendingInvite.Text}\". To JOIN, emit " +
+                    "`FellowshipAccept` (no target needed). To stay solo, do nothing and it will lapse. " +
+                    "OPTIONAL — you decide whether to accept.");
+            }
         }
 
         // ── ## Allegiance state (self-fact, rendered when the bot is in an allegiance) ──

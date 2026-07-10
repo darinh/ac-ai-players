@@ -105,6 +105,24 @@ internal static class TeammateCoordination
         return c != 0 ? c : string.Compare(a, b, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// True when <paramref name="name"/> is one of the configured teammate names
+    /// (case-insensitive). Used to tell whether a fellowship invite came from a
+    /// configured teammate (the invite's server text is the inviter's name), so the
+    /// invite cue can be a directive rather than optional. Blank name or empty config
+    /// → false.
+    /// </summary>
+    internal static bool IsConfiguredTeammate(string? name, IReadOnlyCollection<string> teammateNames)
+    {
+        if (string.IsNullOrWhiteSpace(name) || teammateNames.Count == 0)
+            return false;
+        var trimmed = name.Trim();
+        foreach (var t in teammateNames)
+            if (string.Equals(t, trimmed, StringComparison.OrdinalIgnoreCase))
+                return true;
+        return false;
+    }
+
     private static readonly IComparer<string> NameOrderComparer =
         Comparer<string>.Create(CompareNames);
 
