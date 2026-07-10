@@ -104,6 +104,16 @@ internal enum CharacterOption : uint
     /// to re-issue every swing.
     /// </summary>
     AutoRepeatAttacks = 0x00,
+
+    /// <summary>
+    /// When enabled (the ACE fresh-character default), the server REFUSES any
+    /// fellowship recruit aimed at this character ("X is not accepting fellowship
+    /// requests." in GameActionFellowshipRecruit) and never sends the invite
+    /// confirmation. A bot that should be recruitable clears this at login so an
+    /// invite can reach it (the LLM still decides whether to accept). Wire id from
+    /// ACE.Entity CharacterOption.IgnoreFellowshipRequests.
+    /// </summary>
+    IgnoreFellowshipRequests = 0x02,
 }
 
 /// <summary>
