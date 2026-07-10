@@ -137,10 +137,15 @@ internal static class Program
         }
         catch (Exception ex)
         {
-            // Full stack (ToString), not just the message — a run that dies here must
-            // leave a diagnosable trace (the run-end cause was previously invisible).
-            Console.Error.WriteLine($"[main] PHASE 1 FAIL: {ex.GetType().Name}: {ex.Message}");
-            Console.Error.WriteLine($"[main] PHASE 1 FAIL stack: {ex}");
+            // Phase-neutral run-end label: this catch wraps the ENTIRE run (handshake
+            // through hours in-world), so the failure is NOT necessarily a handshake
+            // "phase 1" problem — a mid-run socket drop after being in-world for hours
+            // lands here too. Label it neutrally and log the full stack (ToString), whose
+            // frames reveal the actual phase; a run that dies here must leave a
+            // diagnosable trace (the run-end cause was previously invisible, and the old
+            // "PHASE 1 FAIL" label mis-attributed in-world failures to the handshake).
+            Console.Error.WriteLine($"[main] RUN ENDED (uncaught {ex.GetType().Name}): {ex.Message}");
+            Console.Error.WriteLine($"[main] RUN ENDED — full stack (frames show the phase): {ex}");
             return 1;
         }
     }
