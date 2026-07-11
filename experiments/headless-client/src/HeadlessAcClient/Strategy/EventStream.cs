@@ -174,6 +174,19 @@ internal enum EventKind
     // on its own. Name = speaker display name, Text = the spoken line, ChatType
     // = the raw wire ChatMessageType, ItemGuid = speaker guid.
     HeardSpeech             = 22,
+    // teammate-co-location-wake: an operator-configured teammate
+    // (AC_BOTS_TEAMMATE_NAMES) just came into view. The Motor emits ONE event on the
+    // not-visible -> visible EDGE (mirrors the SelfProgressChanged /
+    // InboundDamageTaken structural wakes) so the LLM re-consults the moment a
+    // configured teammate is perceivable rather than only at the next scheduled
+    // decision. Continuous presence does not re-fire; a teammate that leaves view and
+    // returns re-fires, bounded by a per-teammate re-fire cooldown (a debounce, not a
+    // game constant). Structural salience wake ONLY: the source assigns NO urgency,
+    // selects NO target, and decides NO action — it never moves the bot or interacts
+    // with the teammate. Scoped to configured teammates, so a single bot (empty
+    // config) never triggers it. Text = the raw "teammate now in view: X" summary,
+    // Name = the (first) teammate's display name.
+    TeammateSighted         = 23,
 }
 
 /// <summary>

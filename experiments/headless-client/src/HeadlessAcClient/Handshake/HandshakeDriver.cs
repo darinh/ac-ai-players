@@ -1732,9 +1732,16 @@ internal sealed class HandshakeDriver : IDisposable
         // transition) rather than every ~250ms walk-tick. Pure diagnostic bookkeeping.
         var                  prevHoldForSwingLoop = false;
         // team-formation observability: the last-logged operator-team formation snapshot,
-        // so a change (grouped, recruited a teammate, swore allegiance) is logged ONCE
-        // rather than every tick. null until first computed. Pure diagnostic bookkeeping.
+        // so a formation-state change is logged ONCE rather than every tick. null until
+        // first computed. Pure diagnostic bookkeeping.
         string?              prevTeamFormationSnapshot = null;
+        // teammate-sighting wake bookkeeping: the configured teammates visible at the
+        // last check (the not-visible -> visible edge), plus a per-teammate re-fire
+        // cooldown so a TeammateSighted salience wake fires once per genuine edge and is
+        // debounced across rapid leave/return (see TeammateSightingWake). Empty when no
+        // operator team is configured (a single bot never populates them).
+        var                  lastVisibleTeammates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var                  teammateSightCooldownUntil = new Dictionary<string, DateTimeOffset>(StringComparer.OrdinalIgnoreCase);
         // immobile-stuck telemetry: aggregate count of full block-stops
         // (each = BlockedConsecutiveTicks consecutive zero-progress walk
         // ticks) that have fired WITHOUT the bot's self-position changing
@@ -6159,6 +6166,28 @@ internal sealed class HandshakeDriver : IDisposable
                         {
                             Console.WriteLine($"[team-formation] {teamSnapshot}");
                             prevTeamFormationSnapshot = teamSnapshot;
+                        }
+
+                        // teammate-sighting wake: the moment a configured teammate comes
+                        // into view, append a salience event so the LLM re-consults now
+                        // rather than only at the next scheduled decision. WHEN-to-consult
+                        // bookkeeping only — it appends an event and nothing else; it never
+                        // moves the bot or interacts with the teammate, so whatever the LLM
+                        // does with the sighting stays the LLM's call. Scoped to configured
+                        // teammates (a single bot never triggers), fired once per
+                        // not-visible -> visible edge and debounced per teammate.
+                        if (TeammateSightingWake.TryBuildTeammateSightingEvent(
+                                LlmGoalPolicy.TeammateNames,
+                                projection.Self.Name,
+                                projection.Visible.Where(v => v.IsPlayer).Select(v => v.Name),
+                                DateTimeOffset.UtcNow,
+                                TeammateSightingWake.DefaultReFireCooldown,
+                                teammateSightCooldownUntil,
+                                lastVisibleTeammates,
+                                out var teammateSightEv, out var teammateSightLog))
+                        {
+                            eventStream.Append(teammateSightEv);
+                            Console.WriteLine(teammateSightLog);
                         }
                     }
 

@@ -15364,7 +15364,118 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCallCount);
     }
 
-    // ---- reduce-llm-call-volume — picker-start coalesce + dedupe ----
+    // ---- teammate-sighted-wake — TeammateSighted bypasses coalesce ----
+
+    [Fact]
+    public void HasTeammateSightedSince_DetectsEvent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, Text = "some chatter",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.TeammateSighted, Name = "Mbb",
+            Text = "Configured teammate now in view: Mbb.",
+        });
+        Assert.True(LlmGoalPolicy.HasTeammateSightedSince(events, floor));
+    }
+
+    [Fact]
+    public void HasTeammateSightedSince_ReturnsFalseWhenAbsent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.TeammateSighted, Name = "Old",
+            Text = "Configured teammate now in view: Old.",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, Text = "later chatter",
+        });
+        // Floor is AFTER the sighting — nothing since.
+        Assert.False(LlmGoalPolicy.HasTeammateSightedSince(events, floor));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_TeammateSighted_BypassesCoalesce()
+    {
+        // teammate-sighted-wake: a configured teammate is only briefly perceivable, so
+        // a TeammateSighted event since the last LLM look must force a fresh call even
+        // inside the MinCallInterval coalesce window (mirrors the picker-arrival
+        // bypass). currentGoal is non-null so the coalesce gate is the one exercised,
+        // not the no-goal short-circuit. This also proves the picker-start suppression
+        // block cannot swallow the sighting (it is a NON-picker salient event).
+        var httpCallCount = 0;
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[]
+            {
+                new
+                {
+                    message = new
+                    {
+                        content = JsonSerializer.Serialize(new
+                        {
+                            goal_id = "22222222-3333-4444-5555-666666666666",
+                            kind = "Explore",
+                            target = new { name = "anywhere" },
+                            priority = 5,
+                            expires_in_seconds = 60,
+                        }),
+                    },
+                },
+            },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+        {
+            Interlocked.Increment(ref httpCallCount);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) };
+        }));
+        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
+        // MinCallInterval LARGE so the only way a second call goes out within this test
+        // is via the teammate-sighted bypass.
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+        };
+
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Equal(1, httpCallCount);
+
+        // Within coalesce window WITHOUT a teammate sighting: no new call.
+        var stayed = policy.ProposeGoal(world, events, firstGoal);
+        Assert.Equal(1, httpCallCount);
+        Assert.Equal(firstGoal, stayed);
+
+        // A TeammateSighted event since the last LLM look, still inside the coalesce
+        // window, MUST force a fresh call.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.TeammateSighted,
+            Name = "Mbb",
+            Text = "Configured teammate now in view: Mbb.",
+        });
+        var afterSighting = policy.ProposeGoal(world, events, firstGoal);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, httpCallCount);
+    }
 
     private static (LlmGoalClient llm, Func<int> count) CannedExploreLlm()
     {
