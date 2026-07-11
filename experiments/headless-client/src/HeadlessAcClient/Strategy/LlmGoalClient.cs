@@ -160,6 +160,35 @@ internal sealed class LlmGoalClient
     private DateTimeOffset _lastPrimaryReprobeAt = DateTimeOffset.MinValue;
     private static readonly TimeSpan PrimaryReprobeInterval = TimeSpan.FromSeconds(45);
 
+    // ── Persistent-failover cooldown ─────────────────────────────────────────
+    // A model that fails over (transport/5xx) is normally NOT cooled — it may be a
+    // transient blip, so it stays eligible next call. But a model that fails this
+    // way REPEATEDLY is not transient: re-probing it every PrimaryReprobeInterval
+    // re-pays its full fallback timeout as dead latency (a live run wasted a large
+    // fraction of wall time re-probing one fallback that timed out on ~every
+    // attempt). So after _failoverCooldownThreshold CONSECUTIVE failover failures a
+    // model is cooled down for FailoverCooldown (skipped in rotation, like a 429),
+    // re-probed once when it expires, and re-benched if it fails again; ANY success
+    // resets its streak. Below the threshold it stays eligible, so a one-off blip
+    // behaves exactly as before. Per-model streak keyed on model name; guarded by
+    // _gate.
+    private readonly Dictionary<string, int> _consecutiveFailovers =
+        new(StringComparer.Ordinal);
+    private readonly int _failoverCooldownThreshold;
+    // Per-model "benched until" from consecutive failover failures — SEPARATE from
+    // the 429 _cooldownUntil so the empty-roster path can tell a quota wall from a
+    // transport bench. A benched model is skipped in rotation, EXCEPT a bench is
+    // IGNORED when it would empty the WHOLE roster (no 429 in play): a bench is only
+    // worth honouring to skip a persistent failer while a healthy model remains;
+    // with none left, re-probe so the 20s infra circuit-breaker paces recovery
+    // instead of a full FailoverCooldown LLM stall on an endpoint that may recover
+    // much sooner. ANY success clears it (with the streak). Guarded by _gate.
+    private readonly Dictionary<string, DateTimeOffset> _failoverBenchedUntil =
+        new(StringComparer.Ordinal);
+    // Bench span. Must exceed PrimaryReprobeInterval so a benched model is skipped
+    // ACROSS re-probes rather than re-probed (and re-timed-out) every interval.
+    private static readonly TimeSpan FailoverCooldown = TimeSpan.FromSeconds(300);
+
     // Per-call HttpClient timeout for an LLM request. Default RAISED from a
     // hardcoded 30s after a live run showed a single 30s timeout on the capable
     // model rotate the whole session to a weaker fallback (the large ~26 KB prompt
@@ -208,14 +237,27 @@ internal sealed class LlmGoalClient
             : TimeSpan.FromSeconds(defaultSeconds);
     }
 
+    // Consecutive failover failures (transport/5xx) on ONE model before it is
+    // cooled down (benched) in rotation, so a PERSISTENTLY failing/slow fallback
+    // stops being re-probed — and re-paying its per-attempt timeout — every
+    // re-probe interval. Default 3: a one-off blip (below 3) still stays eligible,
+    // preserving prior behaviour; <=0 disables (never cool on a failover). Override
+    // with AC_BOTS_LLM_FAILOVER_COOLDOWN_THRESHOLD. Pure request-infrastructure
+    // tuning; model-agnostic, no game knowledge.
+    internal static int ResolveFailoverCooldownThreshold(string? envValue)
+        => int.TryParse(envValue, out var n) ? n : 3;
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
         string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null,
-        Action<string>? log = null)
+        Action<string>? log = null, int? failoverCooldownThreshold = null)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _log = log ?? (s => Console.WriteLine(s));
+        _failoverCooldownThreshold = failoverCooldownThreshold
+            ?? ResolveFailoverCooldownThreshold(
+                Environment.GetEnvironmentVariable("AC_BOTS_LLM_FAILOVER_COOLDOWN_THRESHOLD"));
         _httpTimeout = ResolveHttpTimeout(
             Environment.GetEnvironmentVariable("AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS"));
         _fallbackHttpTimeout = ResolveFallbackHttpTimeout(
@@ -327,15 +369,42 @@ internal sealed class LlmGoalClient
             var multi = _models.Count > 1;
             order = new List<int>(_models.Count);
             soonestCooling = null;
+            var benchedSkipped = 0;   // models skipped ONLY because of a failover bench
             for (var step = 0; step < _models.Count; step++)
             {
                 var idx = (start + step) % _models.Count;
-                if (multi && _cooldownUntil.TryGetValue(_models[idx], out var until) && now < until)
+                var m = _models[idx];
+                if (multi && _cooldownUntil.TryGetValue(m, out var until) && now < until)
                 {
+                    // 429 quota cooldown: skip, and remember the soonest reset for backoff.
                     if (soonestCooling is null || until < soonestCooling) soonestCooling = until;
                     continue;
                 }
+                if (multi && _failoverBenchedUntil.TryGetValue(m, out var bench) && now < bench)
+                {
+                    // Persistent transport/5xx failer: skip WHILE a healthy model remains.
+                    benchedSkipped++;
+                    continue;
+                }
                 order.Add(idx);
+            }
+            // A bench is only worth honouring while a viable NON-benched candidate
+            // remains. If EVERY eligible model is failover-benched — whether the rest
+            // of the roster is idle OR hard-walled by a 429 — re-probe the benched ones
+            // anyway: a 429'd model is NOT a viable recovery path, so sleeping out its
+            // (possibly hour-long) Retry-After while a benched model's endpoint may
+            // recover in ~20s is wrong. The re-probes fail and arm the 20s infra
+            // circuit-breaker, which paces recovery, instead of a full FailoverCooldown
+            // (or 429 Retry-After) LLM stall. 429-cooled models stay skipped here; a
+            // PURE-429 empty roster (no benches) still falls through to the 429 backoff.
+            if (order.Count == 0 && benchedSkipped > 0)
+            {
+                for (var step = 0; step < _models.Count; step++)
+                {
+                    var idx = (start + step) % _models.Count;
+                    if (multi && _cooldownUntil.TryGetValue(_models[idx], out var u) && now < u) continue;
+                    order.Add(idx);
+                }
             }
         }
         var multiModel = _models.Count > 1;
@@ -382,7 +451,7 @@ internal sealed class LlmGoalClient
                 // Stick to the model that just worked, clear any stale cooldown
                 // on it, and lift the infra circuit-breaker — the endpoint is
                 // reachable again.
-                lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); _infraBackoffUntil = null; }
+                lock (_gate) { _activeIndex = idx; _cooldownUntil.Remove(model); _consecutiveFailovers.Remove(model); _failoverBenchedUntil.Remove(model); _infraBackoffUntil = null; }
                 if (multiModel && idx != start)
                     SafeLog($"[llm-fallback] rotated to {model} (now the active model)");
                 return result;
@@ -420,7 +489,28 @@ internal sealed class LlmGoalClient
             // adaptive prompt-ceiling and misconfiguration handling.
             if (multiModel && IsFailoverCandidate(result))
             {
-                SafeLog($"[llm-fallback] {model} failed ({result.Error}); rotating to next candidate");
+                // Track consecutive failovers for this model; a PERSISTENT failer
+                // (>= threshold in a row without a success) is benched like a 429 so
+                // the periodic primary-re-probe stops re-paying its timeout every
+                // interval. A one-off blip (below the threshold, or threshold <=0)
+                // stays eligible next call exactly as before.
+                int streak;
+                lock (_gate)
+                {
+                    _consecutiveFailovers.TryGetValue(model, out var prev);
+                    streak = prev + 1;
+                    _consecutiveFailovers[model] = streak;
+                }
+                if (_failoverCooldownThreshold > 0 && streak >= _failoverCooldownThreshold)
+                {
+                    lock (_gate) _failoverBenchedUntil[model] = _now() + FailoverCooldown;
+                    SafeLog($"[llm-fallback] {model} failed ({result.Error}); {streak} consecutive " +
+                            $"failovers -> benched {FailoverCooldown.TotalSeconds:F0}s (skipped while a healthy model remains)");
+                }
+                else
+                {
+                    SafeLog($"[llm-fallback] {model} failed ({result.Error}); rotating to next candidate");
+                }
                 lastFailover = result;
                 continue;
             }

@@ -837,6 +837,139 @@ public class LlmGoalClientTests
         Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
     }
 
+    // ---- persistent-failover cooldown: a repeatedly-failing model is benched ----
+
+    [Fact]
+    public async Task FailoverCooldown_PersistentFailer_BenchedAfterThreshold_ThenSkipped()
+    {
+        // A (primary) fails over on EVERY attempt (503); B answers. With threshold 2,
+        // the first failover leaves A eligible (transient tolerance), but the second
+        // consecutive failover benches A for the cooldown window, so the next
+        // primary-re-probe SKIPS A instead of re-paying its timeout.
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(m => m == "A" ? ServiceUnavailable() : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, failoverCooldownThreshold: 2);
+
+        await llm.CompleteAsync("s", "u");                 // A 503 (streak 1) -> B ok
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(46);                     // past the 45s re-probe interval
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");                 // re-probe A: 503 (streak 2) -> benched; B ok
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        clock.Now = T0.AddSeconds(92);                     // past re-probe interval, WITHIN A's 300s bench
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");                 // A benched -> skipped; only B probed
+        Assert.Equal(new[] { "B" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task FailoverCooldown_ThresholdZero_Disabled_AlwaysReprobes()
+    {
+        // threshold <= 0 disables benching: a persistent failover-failer stays
+        // eligible and is re-probed every interval — byte-identical to prior
+        // behaviour (no per-model cooldown on a transport/5xx failure).
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(m => m == "A" ? ServiceUnavailable() : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, failoverCooldownThreshold: 0);
+
+        await llm.CompleteAsync("s", "u");
+        clock.Now = T0.AddSeconds(46);
+        await llm.CompleteAsync("s", "u");
+        clock.Now = T0.AddSeconds(92);
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");                 // A still re-probed (never benched)
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task FailoverCooldown_SuccessResetsStreak_NoPrematureBench()
+    {
+        // A success clears the streak: a fail -> success -> fail sequence must NOT
+        // bench A (the post-success fail is only streak 1, below the threshold of 2).
+        var clock = new FakeClock(T0);
+        var aProbe = 0;
+        var handler = new ModelRoutingHandler(m =>
+        {
+            if (m != "A") return Ok("ok-B");
+            aProbe++;
+            return aProbe == 2 ? Ok("ok-A") : ServiceUnavailable(); // 2nd A-probe succeeds
+        });
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, failoverCooldownThreshold: 2);
+
+        await llm.CompleteAsync("s", "u");                 // A #1 503 (streak 1) -> B ok
+        clock.Now = T0.AddSeconds(46);
+        await llm.CompleteAsync("s", "u");                 // re-probe A #2 OK (streak reset, active A)
+        clock.Now = T0.AddSeconds(92);
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");                 // A #3 503 (streak 1, NOT benched) -> B ok
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels); // A still eligible, re-probed
+
+        clock.Now = T0.AddSeconds(138);
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u");                 // A #4 503 (streak 2 -> benched now) -> B ok
+        Assert.Contains("A", handler.RequestedModels);     // benched only AFTER 2 post-reset fails
+    }
+
+    [Fact]
+    public async Task FailoverCooldown_WholeRosterBenched_RecoversViaInfraCadence_NotStalledForFullBench()
+    {
+        // Regression: if EVERY model gets failover-benched (a shared transport outage),
+        // the client must NOT stall for the full 300s bench. A bench is only honoured
+        // while a NON-benched candidate remains; with none left it re-probes, paced by
+        // the 20s infra circuit-breaker, so a recovered endpoint is picked up in ~20s.
+        var clock = new FakeClock(T0);
+        var down = true;
+        var handler = new ModelRoutingHandler(m => down ? ServiceUnavailable() : Ok($"ok-{m}"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, failoverCooldownThreshold: 1);
+
+        var first = await llm.CompleteAsync("s", "u"); // A,B both 503 -> both benched + infra-breaker armed
+        Assert.False(first.Ok);
+        Assert.Equal(new[] { "A", "B" }, handler.RequestedModels);
+
+        down = false;                         // endpoint recovers well before the 300s bench
+        clock.Now = T0.AddSeconds(21);        // past the 20s infra backoff, deep inside the 300s bench
+        handler.RequestedModels.Clear();
+        var second = await llm.CompleteAsync("s", "u");
+
+        // Re-probed despite the benches (not stalled a full 300s): recovers immediately.
+        Assert.True(second.Ok);
+        Assert.Contains("A", handler.RequestedModels);
+    }
+
+    [Fact]
+    public async Task FailoverCooldown_MixedQuotaAndBench_ReprobesBenched_NotStalledForQuota()
+    {
+        // A hits a LONG 429 (1h Retry-After); B fails over and is benched. The client
+        // must NOT sleep out A's 1h quota wall — a 429'd model is not a viable recovery
+        // path — so the benched B is re-probed (paced by the infra-breaker) and recovers
+        // as soon as its endpoint comes back, while A rides out its 429.
+        var clock = new FakeClock(T0);
+        var bDown = true;
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? TooMany(TimeSpan.FromHours(1))            // hard 1h quota wall
+                     : (bDown ? ServiceUnavailable() : Ok("ok-B"))); // B transport-fails, then recovers
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, failoverCooldownThreshold: 1);
+
+        await llm.CompleteAsync("s", "u"); // A 429 (cooled 1h); B 503 (benched, threshold 1)
+
+        bDown = false;                      // B's endpoint recovers quickly
+        clock.Now = T0.AddSeconds(21);      // A still 429-walled (1h), B still benched (300s)
+        handler.RequestedModels.Clear();
+        var second = await llm.CompleteAsync("s", "u");
+
+        // B re-probed (bench ignored: A's 429 is not a viable candidate) -> recovers;
+        // NOT stalled for A's 1h Retry-After.
+        Assert.True(second.Ok);
+        Assert.Equal(new[] { "B" }, handler.RequestedModels); // A skipped (429), only B re-probed
+    }
+
     // ---- global infra circuit-breaker (whole roster down) ----
 
     [Fact]
