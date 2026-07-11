@@ -2724,6 +2724,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var pickerArrived = HasPickerArrivedSince(events, _lastEventConsideredSequence);
         var pickerStartKey = NewestPickerStartTargetKeySince(events, _lastEventConsideredSequence);
         var pickerStartWake = pickerStartKey is not null && ShouldWakeForPickerStart(pickerStartKey, nowUtc);
+        // Time-sensitive: a configured teammate is only briefly perceivable, so a
+        // TeammateSighted event bypasses the coalesce window like picker arrival (it is
+        // already a non-picker salient event, so it also satisfies hasNonPickerSalient).
+        var teammateSighted = HasTeammateSightedSince(events, _lastEventConsideredSequence);
 
         // SOURCE RE-DRIVE of an LLM-authored exploration commitment.
         // While the EXACT intent the LLM pushed alongside an Explore goal
@@ -2852,12 +2856,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // wake path are unchanged.
         if (!anyWake && stuck && ShouldContinueActiveMeleeOnStuck(currentGoal, world.CurrentFight))
             return currentGoal;
-        // Non-picker salient events still respect the coalesce window; the
-        // picker arrival + new-target picker-start paths bypass it. The `&& !stuck`
-        // guard ensures the stuck-timer re-deliberation backstop always punches
-        // through, so a (capped, but defensively also a hypothetical caller-set)
-        // MinCallInterval can never suppress re-deliberation past StuckTimeout.
-        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake && !stuck) return currentGoal;
+        // Non-picker salient events still respect the coalesce window; the picker
+        // arrival + new-target picker-start paths bypass it, and so does a
+        // TeammateSighted event (time-sensitive, already debounced at the Motor). The
+        // `&& !stuck` guard ensures the stuck-timer re-deliberation backstop always
+        // punches through, so a (capped, but defensively also a hypothetical
+        // caller-set) MinCallInterval can never suppress re-deliberation past StuckTimeout.
+        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake && !teammateSighted && !stuck) return currentGoal;
 
         // STICKY LLM-OBJECTIVE (call-volume reduction). The tactical
         // goal has cleared (currentGoal == null), so without this gate
@@ -6583,7 +6588,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.PickerArrivedNoAction
              or EventKind.CombatFeedback
              or EventKind.SelfProgressChanged
-             or EventKind.InboundDamageTaken;
+             or EventKind.InboundDamageTaken
+             or EventKind.TeammateSighted;
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
     {
@@ -6652,6 +6658,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
             .Any(e => e.Kind == EventKind.PickerArrivedNoAction);
+    }
+
+    // Call-timing: a TeammateSighted salience event since the floor. Like the
+    // picker-arrival valve, this is time-sensitive — a configured teammate is only
+    // briefly perceivable — so it must punch through the short MinCallInterval
+    // coalesce (it is already deduped/debounced at the Motor, at most once per
+    // teammate per re-fire cooldown, so bypassing coalesce cannot storm calls). It
+    // is still a plain non-picker salient event for every other purpose.
+    internal static bool HasTeammateSightedSince(EventStream events, long sequenceFloor)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.TeammateSighted);
     }
 
     // Call-volume reduction: target key of the NEWEST PickerActivityStarted
