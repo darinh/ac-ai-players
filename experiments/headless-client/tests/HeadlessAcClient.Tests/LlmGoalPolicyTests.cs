@@ -15477,6 +15477,94 @@ public class LlmGoalPolicyTests
         Assert.Equal(2, httpCallCount);
     }
 
+    // ---- confirmation-request-wake — ConfirmationRequested bypasses coalesce ----
+
+    [Fact]
+    public void IsSalientKind_ConfirmationRequested_WakesLlm()
+    {
+        Assert.True(LlmGoalPolicy.IsSalientKind(EventKind.ConfirmationRequested));
+        Assert.False(LlmGoalPolicy.IsPickerKind(EventKind.ConfirmationRequested));
+    }
+
+    [Fact]
+    public void HasConfirmationRequestedSince_DetectsEvent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, Text = "some chatter",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ConfirmationRequested, Text = "a pending prompt",
+        });
+        Assert.True(LlmGoalPolicy.HasConfirmationRequestedSince(events, floor));
+    }
+
+    [Fact]
+    public void HasConfirmationRequestedSince_ReturnsFalseWhenAbsent()
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ConfirmationRequested, Text = "old prompt",
+        });
+        var floor = events.NextSequence;
+        events.Append(new StreamEvent
+        {
+            Sequence = 0, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ServerMessage, Text = "later chatter",
+        });
+        // Floor is AFTER the prompt — nothing since.
+        Assert.False(LlmGoalPolicy.HasConfirmationRequestedSince(events, floor));
+    }
+
+    [Fact]
+    public async Task LlmGoalPolicy_ConfirmationRequested_BypassesCoalesce()
+    {
+        // confirmation-request-wake: a server confirmation prompt has a short timeout,
+        // so a ConfirmationRequested event since the last LLM look must force a fresh
+        // call even inside the MinCallInterval coalesce window (mirrors the
+        // picker-arrival / teammate-sighted bypass). currentGoal is non-null so the
+        // coalesce gate is the one exercised. This also proves the picker-start
+        // suppression block cannot swallow it (it is a NON-picker salient event).
+        var (llm, count) = CannedExploreLlm();
+        var policy = new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.FromHours(1),
+        };
+        var world = BuildHostileWorld();
+        var events = new EventStream();
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var firstGoal = policy.ProposeGoal(world, events, null);
+        Assert.NotNull(firstGoal);
+        Assert.Equal(1, count());
+
+        // Within coalesce window WITHOUT a confirmation prompt: no new call.
+        var stayed = policy.ProposeGoal(world, events, firstGoal);
+        Assert.Equal(1, count());
+        Assert.Equal(firstGoal, stayed);
+
+        // A ConfirmationRequested event since the last LLM look, still inside the
+        // coalesce window, MUST force a fresh call.
+        events.Append(new StreamEvent
+        {
+            Sequence = 0,
+            Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ConfirmationRequested,
+            Text = "you have a pending request",
+        });
+        var afterPrompt = policy.ProposeGoal(world, events, firstGoal);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, count());
+    }
+
     private static (LlmGoalClient llm, Func<int> count) CannedExploreLlm()
     {
         var httpCallCount = 0;
@@ -26043,6 +26131,52 @@ public class LlmGoalPolicyTests
         await policy.WaitForInFlightAsync();
         Assert.Single(reqs);            // NO new call — re-drive suppressed it
         Assert.Equal(GoalKind.Explore, g2!.Kind);
+    }
+
+    [Fact]
+    public async Task Redrive_ConfirmationRequested_EndsRedrive_WakesLlm()
+    {
+        // Unlike ambient NpcDialog, a ConfirmationRequested has a short server timeout,
+        // so it must END the re-drive and force a fresh LLM decision — otherwise the
+        // re-drive suppress path advances the event floor, consumes the wake, and the
+        // prompt lapses (the exact failure confirmation-request-wake fixes).
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+
+        var g = await ConsumeFirstAsync(policy, world, events);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+        Assert.Single(reqs);            // only the kickoff call
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.ConfirmationRequested, Text = "a pending prompt",
+        });
+        var g2 = policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // re-drive ENDED by the confirmation → fresh call
+    }
+
+    [Fact]
+    public async Task Redrive_TeammateSighted_EndsRedrive_WakesLlm()
+    {
+        // The sibling time-critical social wake: a configured teammate coming into
+        // view must likewise END the re-drive (a co-location window is brief), not be
+        // consumed by the re-drive floor-advance.
+        var (policy, world, events, reqs, stack) = SetupRedrive(RedrivePushExploreDeadlineJson);
+
+        var g = await ConsumeFirstAsync(policy, world, events);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+        Assert.Single(reqs);
+
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = DateTimeOffset.UtcNow,
+            Kind = EventKind.TeammateSighted, Name = "Mbb",
+            Text = "Configured teammate now in view: Mbb.",
+        });
+        var g2 = policy.ProposeGoal(world, events, null);
+        await policy.WaitForInFlightAsync();
+        Assert.Equal(2, reqs.Count);    // re-drive ENDED by the teammate sighting → fresh call
     }
 
     [Fact]

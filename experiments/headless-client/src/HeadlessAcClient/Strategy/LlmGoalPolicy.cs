@@ -2728,6 +2728,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // TeammateSighted event bypasses the coalesce window like picker arrival (it is
         // already a non-picker salient event, so it also satisfies hasNonPickerSalient).
         var teammateSighted = HasTeammateSightedSince(events, _lastEventConsideredSequence);
+        // Time-sensitive: a server confirmation prompt has a short timeout, so a
+        // ConfirmationRequested event bypasses the coalesce window like picker arrival
+        // (it is already a non-picker salient event, so it also satisfies
+        // hasNonPickerSalient).
+        var confirmationRequested = HasConfirmationRequestedSince(events, _lastEventConsideredSequence);
 
         // SOURCE RE-DRIVE of an LLM-authored exploration commitment.
         // While the EXACT intent the LLM pushed alongside an Explore goal
@@ -2747,6 +2752,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // timeout, or the liveness reinstall budget. Ambient salient events
         // (town NPC dialog, server chatter, picker churn) deliberately do NOT
         // end it — ignoring those re-deliberation triggers is the entire point.
+        // The exception is a TIME-CRITICAL social wake — a TeammateSighted (a
+        // configured teammate is only briefly perceivable) or a ConfirmationRequested
+        // (a server prompt with a short timeout) — which DOES end the re-drive so the
+        // LLM gets a decision inside the window; otherwise the suppress path below
+        // consumes the wake event and the opportunity lapses. These are edge-driven and
+        // rare, so they do not reintroduce per-tick re-deliberation churn.
         // Source never inspects the intent kind or any object/quest knowledge.
         //
         // Whenever a commitment ends, redriveEndedMustCallLlm forces a fresh
@@ -2774,7 +2785,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var redriveExploreReached = IsExploreToReachedTarget(_redriveGoal, world);
             if (stuck || landblockChangedSinceLook || semanticRejectSinceLook
                 || inventoryChangedSinceLook || leftTop || topInactive || topDeadlinePassed
-                || budgetExhausted || redriveExploreReached)
+                || budgetExhausted || redriveExploreReached
+                || confirmationRequested || teammateSighted)
             {
                 Console.WriteLine(
                     $"[strategy] re-drive ended: intent={_redriveIntentId} reason=" +
@@ -2786,6 +2798,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                      : topInactive ? $"top-{redriveTop!.Status}"
                      : topDeadlinePassed ? "top-deadline"
                      : redriveExploreReached ? "explore-target-reached"
+                     : confirmationRequested ? "confirmation-request"
+                     : teammateSighted ? "teammate-sighted"
                      : $"budget({_redriveReinstalls}/{MaxRedriveReinstalls})"));
                 _redriveIntentId = null;
                 _redriveGoal = null;
@@ -2857,12 +2871,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (!anyWake && stuck && ShouldContinueActiveMeleeOnStuck(currentGoal, world.CurrentFight))
             return currentGoal;
         // Non-picker salient events still respect the coalesce window; the picker
-        // arrival + new-target picker-start paths bypass it, and so does a
-        // TeammateSighted event (time-sensitive, already debounced at the Motor). The
-        // `&& !stuck` guard ensures the stuck-timer re-deliberation backstop always
-        // punches through, so a (capped, but defensively also a hypothetical
-        // caller-set) MinCallInterval can never suppress re-deliberation past StuckTimeout.
-        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake && !teammateSighted && !stuck) return currentGoal;
+        // arrival + new-target picker-start paths bypass it, and so do a TeammateSighted
+        // and a ConfirmationRequested event (both time-sensitive, and each debounced /
+        // emitted-once at the Motor). The `&& !stuck` guard ensures the stuck-timer
+        // re-deliberation backstop always punches through, so a (capped, but defensively
+        // also a hypothetical caller-set) MinCallInterval can never suppress
+        // re-deliberation past StuckTimeout.
+        if (coalesce && currentGoal is not null && !pickerArrived && !pickerStartWake && !teammateSighted && !confirmationRequested && !stuck) return currentGoal;
 
         // STICKY LLM-OBJECTIVE (call-volume reduction). The tactical
         // goal has cleared (currentGoal == null), so without this gate
@@ -6589,7 +6604,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
              or EventKind.CombatFeedback
              or EventKind.SelfProgressChanged
              or EventKind.InboundDamageTaken
-             or EventKind.TeammateSighted;
+             or EventKind.TeammateSighted
+             or EventKind.ConfirmationRequested;
 
     internal static bool HasLandblockChangeSince(EventStream events, long sequenceFloor)
     {
@@ -6671,6 +6687,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return events.Recent()
             .TakeWhile(e => e.Sequence >= sequenceFloor)
             .Any(e => e.Kind == EventKind.TeammateSighted);
+    }
+
+    // Call-timing: a ConfirmationRequested salience event since the floor. Like the
+    // picker-arrival valve, this is time-sensitive — a server confirmation prompt has a
+    // short timeout and lapses unanswered if the LLM does not get a decision in time —
+    // so it must punch through the short MinCallInterval coalesce. It is emitted once
+    // per stored prompt at the Motor, so bypassing coalesce cannot storm calls. It is
+    // still a plain non-picker salient event for every other purpose.
+    internal static bool HasConfirmationRequestedSince(EventStream events, long sequenceFloor)
+    {
+        return events.Recent()
+            .TakeWhile(e => e.Sequence >= sequenceFloor)
+            .Any(e => e.Kind == EventKind.ConfirmationRequested);
     }
 
     // Call-volume reduction: target key of the NEWEST PickerActivityStarted

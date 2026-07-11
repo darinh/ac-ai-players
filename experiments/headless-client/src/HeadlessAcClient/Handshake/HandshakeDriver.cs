@@ -2725,9 +2725,22 @@ internal sealed class HandshakeDriver : IDisposable
                                 else if (ge.Payload?.ConfirmationRequest is { } confirmReq)
                                 {
                                     if (worldState.ApplyConfirmationRequest(confirmReq))
+                                    {
                                         Console.WriteLine(
                                             $"[confirmation] pending: type={confirmReq.ConfirmationType} " +
                                             $"context={confirmReq.Context} text=\"{confirmReq.Text}\"");
+                                        // Structural salience wake: a confirmation prompt has a short
+                                        // server timeout, so wake the LLM now to re-decide rather than
+                                        // letting the prompt lapse before the next scheduled decision.
+                                        // Perception only — whether/how to answer stays the LLM's call.
+                                        eventStream.Append(new StreamEvent
+                                        {
+                                            Sequence = 0,
+                                            Utc = DateTimeOffset.UtcNow,
+                                            Kind = EventKind.ConfirmationRequested,
+                                            Text = confirmReq.Text,
+                                        });
+                                    }
                                 }
                                 else if (ge.Payload?.ConfirmationDone is { } confirmDone)
                                 {

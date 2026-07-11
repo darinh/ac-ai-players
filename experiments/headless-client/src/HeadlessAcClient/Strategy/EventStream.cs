@@ -187,6 +187,15 @@ internal enum EventKind
     // config) never triggers it. Text = the raw "teammate now in view: X" summary,
     // Name = the (first) teammate's display name.
     TeammateSighted         = 23,
+    // server-confirmation-wake: the server asked the character to confirm a pending
+    // action (a CharacterConfirmationRequest 0x0274 the Strategy layer tracks and can
+    // answer). The Motor emits ONE event when a tracked prompt is stored (mirrors the
+    // SelfProgressChanged / InboundDamageTaken / TeammateSighted structural wakes) so
+    // the LLM re-consults immediately — a confirmation has a short server timeout, so
+    // waiting for the next scheduled decision can let it lapse unanswered. Structural
+    // salience wake ONLY: the source assigns NO urgency and decides NO answer — whether
+    // and how to answer stays the LLM's call. Text = the raw server prompt text.
+    ConfirmationRequested   = 24,
 }
 
 /// <summary>
