@@ -407,6 +407,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private Goal? _lastLlmGoal;
     private int _stickyReEmitCount;
 
+    // Diagnostic-only (reduce-llm-call-volume): the last-logged reason the
+    // budget-exempt untargeted-Explore sticky re-drive did NOT fire, so a live
+    // run pins WHICH gate condition is forcing a per-cell LLM re-consult during
+    // aimless frontier exploration (change-throttled to avoid log spam). Carries
+    // no decision weight — pure telemetry.
+    private string? _lastExploreRedriveBlockReason;
+
     // Diagnostic-only tempo meter (reduce-llm-call-volume). Counts the LLM
     // round-trips spent per kill so the per-monster call cost is measurable.
     // Pure observability — never consulted by any decision. See LlmTempoMeter.
@@ -3132,7 +3139,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $" kind={sticky.Kind} target={sticky.Target}" +
                 (sticky.Item is null ? "" : $" item={sticky.Item}") +
                 " (no external salient event since last LLM look; skipping LLM call)");
+            _lastExploreRedriveBlockReason = null;
             return sticky;
+        }
+
+        // Diagnostic (behavior-neutral, reduce-llm-call-volume): the untargeted
+        // "anywhere" Explore re-drive above is budget-exempt, so when the goal has
+        // cleared and the last objective is a bare Explore yet the gate did NOT
+        // fire (we are about to burn a per-cell LLM re-consult), pin WHICH single
+        // condition blocked the free re-drive. Live evidence: 424 no-current-goal
+        // Explore calls vs only 48 free re-drives in one landblock — this localizes
+        // the silent break so the fix is precise. Change-throttled; no behavior.
+        if (currentGoal is null && stickyUntargetedExplore && _lastLlmGoal is not null)
+        {
+            var blockReason =
+                stuck ? "stuck"
+                : redriveEndedMustCallLlm ? "redrive-ended"
+                : hasNonPickerExternal ? "non-picker-external"
+                : pickerArrived ? "picker-arrived"
+                : pickerStartWake ? "picker-start-wake"
+                : stickyAlreadyAttempted ? "self-already-interacted"
+                : stickyExploreReached ? "explore-reached"
+                : "other";
+            if (!string.Equals(blockReason, _lastExploreRedriveBlockReason, StringComparison.Ordinal))
+            {
+                _lastExploreRedriveBlockReason = blockReason;
+                Console.WriteLine(
+                    $"[explore-redrive] untargeted-Explore free re-drive first-blocked by: {blockReason} " +
+                    "(falling through past the sticky re-drive)");
+            }
         }
 
         // Autonomous kill-intent decomposition (reduce-llm-call-volume).
@@ -4880,6 +4915,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // re-emit budget.
         _lastLlmGoal = goal;
         _stickyReEmitCount = 0;
+        // Reset the explore-redrive diagnostic throttle so a fresh objective's
+        // first blocked re-drive re-logs (behavior-neutral telemetry only).
+        _lastExploreRedriveBlockReason = null;
         // Reset the autonomous combat-chain budget ONLY here — when a USABLE LLM
         // decision has actually been consumed. Doing it at call kickoff would
         // refresh the cap even when the call later FAILS (429/timeout) or is
