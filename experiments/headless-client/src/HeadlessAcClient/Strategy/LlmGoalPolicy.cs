@@ -15654,12 +15654,38 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return inner.Trim();
     }
 
+    /// <summary>
+    /// Strip a leading chain-of-thought preamble that some reasoning models emit
+    /// before their JSON answer — a <c>&lt;think&gt;…&lt;/think&gt;</c> block (e.g.
+    /// DeepSeek-R1, Phi-4-reasoning) — which they emit even under
+    /// <c>response_format=json_object</c>. Only fires when the (trimmed) content
+    /// STARTS with <c>&lt;think&gt;</c> AND a closing <c>&lt;/think&gt;</c> is present:
+    /// everything up to and including the LAST closing tag is dropped, leaving the
+    /// JSON answer for the fence-strip + deserialize below. The reasoning text often
+    /// quotes the example JSON (so it contains braces); dropping the WHOLE block
+    /// avoids a brace-hunting heuristic mis-parsing that, and taking the LAST close
+    /// tolerates reasoning that mentions the tag itself. A truncated, unclosed
+    /// <c>&lt;think&gt;</c> (the model spent its budget reasoning and emitted no answer)
+    /// is returned unchanged so it fails as a normal parse error and the caller
+    /// re-consults. Content that does not start with the tag is returned unchanged
+    /// (zero behaviour change off the reasoning path). Idempotent.
+    /// </summary>
+    internal static string StripReasoningPreamble(string? content)
+    {
+        if (string.IsNullOrEmpty(content)) return content ?? string.Empty;
+        if (!content.TrimStart().StartsWith("<think>", StringComparison.OrdinalIgnoreCase))
+            return content; // not a reasoning preamble — return the ORIGINAL unchanged
+        const string close = "</think>";
+        var idx = content.LastIndexOf(close, StringComparison.OrdinalIgnoreCase);
+        return idx < 0 ? content : content.Substring(idx + close.Length);
+    }
+
     internal static bool TryParseGoal(string json, out Goal? goal, out string? error)
     {
         goal = null; error = null;
         try
         {
-            json = StripJsonCodeFence(json);
+            json = StripJsonCodeFence(StripReasoningPreamble(json));
             var opts = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
             opts.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
             var parsed = JsonSerializer.Deserialize<Goal>(json, opts);
