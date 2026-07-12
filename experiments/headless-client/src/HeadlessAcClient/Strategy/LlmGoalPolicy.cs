@@ -347,6 +347,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private readonly System.Collections.Generic.List<(DateTimeOffset Utc, float Distance)> _goalProgressSamples = new();
     private static readonly TimeSpan GoalProgressMinSampleInterval = TimeSpan.FromSeconds(1.5);
     private const int GoalProgressMaxSamples = 8;
+    // reduce-llm-call: max age of the newest goal-progress sample for the approach-on-stuck
+    // suppression to trust the trend. Samples are taken >= GoalProgressMinSampleInterval
+    // apart while the tracked target is visible, so a fresh trend means the bot is actively
+    // sampling (target in view + being approached). A trend older than this window means the
+    // target has left view, so the stuck-timer must re-deliberate rather than ride a stale
+    // inbound trend. Bookkeeping window, not a game constant.
+    private static readonly TimeSpan GoalProgressFreshnessWindow = TimeSpan.FromSeconds(4);
 
     // Fresh-directive tracking (paired with FreshDirectiveGrace above).
     // _egressLastDirectiveSeqSeen is the high-water event sequence already
@@ -2575,6 +2582,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && string.Equals(currentGoal.Target.Name, fightName, StringComparison.OrdinalIgnoreCase);
     }
 
+    // Pure predicate for the stuck-timer suppression below (reduce-llm-call-volume).
+    // Returns true only when the current goal is an object-pursuit walk AND the recent
+    // bot-to-target distance trend is strictly INBOUND — the latest sample is the closest
+    // one observed AND strictly closer than the first sample (net approach). A stalled
+    // (flat) or drifting (increasing) trend does NOT qualify, so a goal that is no longer
+    // making progress still re-deliberates on the stuck-timer. Requires >= 3 samples for a
+    // real trend. Reads only the goal kind + the distance trend; selects no target and
+    // decides no action. Mirrors ShouldContinueActiveMeleeOnStuck: both cut a wasteful
+    // re-deliberation of a goal that is demonstrably making progress. The CALLER is
+    // responsible for the freshness gate (only pass a snapshot whose samples are being
+    // actively updated) so a stale trend for a target that left view cannot suppress.
+    internal static bool ShouldContinueApproachOnStuck(Goal? currentGoal, GoalProgressSnapshot? progress)
+    {
+        if (currentGoal is null || !IsObjectPursuitKind(currentGoal.Kind)) return false;
+        if (progress is not { Distances: { Count: >= 3 } d }) return false;
+        var latest = d[^1];
+        var first = d[0];
+        var prev = d[^2];
+        var min = latest;
+        foreach (var x in d) if (x < min) min = x;
+        // latest is the closest observed (not bounced back), still DECLINING in the most
+        // recent step (not plateaued at the best distance), AND net inbound vs the first
+        // sample. A plateau (e.g. 10,4,4) or a stall means progress has stopped, so the
+        // stuck-timer must re-deliberate.
+        return latest <= min && latest < prev && latest < first;
+    }
+
     private Goal? ProposeGoalCore(WorldStateProjection world, EventStream events, Goal? currentGoal)
     {
         var nowUtc = DateTimeOffset.UtcNow;
@@ -2869,6 +2903,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // re-invocation; the per-tick Motor handling and the salient-event (anyWake)
         // wake path are unchanged.
         if (!anyWake && stuck && ShouldContinueActiveMeleeOnStuck(currentGoal, world.CurrentFight))
+            return currentGoal;
+        // reduce-llm-call: likewise continue a PROGRESSING approach walk on the stuck-timer
+        // instead of re-deliberating — when the bot-to-target distance trend is strictly
+        // inbound. Freshness-gated on the newest goal-progress sample so a stale trend (the
+        // target left view) cannot suppress; salient/picker wakes still punch through (the
+        // `!anyWake` guard). Only the stuck-timer re-invocation is affected.
+        if (!anyWake && stuck
+            && nowUtc - _goalProgressLastSampleUtc < GoalProgressFreshnessWindow
+            && ShouldContinueApproachOnStuck(currentGoal, BuildGoalProgressSnapshot()))
             return currentGoal;
         // Non-picker salient events still respect the coalesce window; the picker
         // arrival + new-target picker-start paths bypass it, and so do a TeammateSighted
