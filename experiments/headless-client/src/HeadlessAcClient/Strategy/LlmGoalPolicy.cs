@@ -1981,6 +1981,77 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
+    // Selector match for a remembered out-of-view sighting given a PRE-STRIPPED
+    // bare name (the trailing-quoted-role strip is computed once by the caller,
+    // not re-allocated per remembered row). Mirrors VisibleMatchesSelector's
+    // name / name_contains / wcid comparison. Pure wire-value comparison; no
+    // names/wcids in source.
+    private static bool SightingMatchesSelector(Selector sel, string? bareName, SightedRecallProjection s)
+    {
+        if (!string.IsNullOrEmpty(sel.Name)
+            && !string.Equals(s.Name, sel.Name, StringComparison.OrdinalIgnoreCase)
+            // Mirror VisibleMatchesSelector: tolerate a trailing quoted-role suffix
+            // the model often copies from the prompt label and re-test the bare name.
+            && !(bareName is not null && string.Equals(s.Name, bareName, StringComparison.OrdinalIgnoreCase)))
+            return false;
+        if (!string.IsNullOrEmpty(sel.NameContains)
+            && !s.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (sel.Wcid is uint w && !(s.Wcid is uint sw && sw == w)) return false;
+        return true;
+    }
+
+    // reduce-llm-call-volume: the straight-line distance (world units) from the
+    // bot to the UNAMBIGUOUS remembered location of an object-pursuit target that
+    // is not currently in view, plus that sighting's label — or null when memory
+    // holds no single such location. Lets UpdateGoalProgressTracking keep a
+    // progress trend during a walk toward a remembered/out-of-view target: the
+    // stuck-timeout driver the visible-only sampler misses.
+    //
+    // Only rows within the recall TTL are considered, so suppression reads the
+    // SAME remembered set the prompt shows the LLM (a row aged past the TTL is not
+    // trustworthy enough to suppress on). Requires EXACTLY ONE fresh matching row:
+    // if the selector resolves to more than one remembered entity, the bot can
+    // walk to only one and a distance that hops between them is not a real approach
+    // trend, so it declines and the caller re-deliberates (the safe default).
+    //
+    // A recall row carries no guid, so a guid-qualified selector is declined here
+    // (the visible path owns guids). PERCEPTION only: reads the bot's own
+    // already-surfaced sighting memory + self position; selects no target and
+    // decides no action — the LLM chose the target.
+    internal static (float DistanceUnits, string Label)? TryRememberedTargetDistanceUnits(
+        Selector target,
+        IReadOnlyList<SightedRecallProjection>? sightings,
+        float selfGlobalX,
+        float selfGlobalY)
+    {
+        if (sightings is null || sightings.Count == 0) return null;
+        var hasIdentity = !string.IsNullOrEmpty(target.Name)
+            || !string.IsNullOrEmpty(target.NameContains)
+            || target.Wcid is not null;
+        if (!hasIdentity || target.Guid is not null) return null;
+        // Compute the bare (role-suffix-stripped) name ONCE — the selector name is
+        // loop-invariant, so the per-row match must not re-allocate it per sighting.
+        var bareName = string.IsNullOrEmpty(target.Name)
+            ? null
+            : HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(target.Name);
+
+        SightedRecallProjection? match = null;
+        foreach (var s in sightings)
+        {
+            // Ignore rows the prompt would have dropped as stale, so suppression
+            // and the LLM read the same remembered set.
+            if (s.AgeSeconds > RecentSightingTtlSeconds) continue;
+            if (!SightingMatchesSelector(target, bareName, s)) continue;
+            if (match is not null) return null; // >1 fresh match -> ambiguous, decline
+            match = s;
+        }
+        if (match is null) return null;
+        var dx = match.WorldX - selfGlobalX;
+        var dy = match.WorldY - selfGlobalY;
+        return (MathF.Sqrt(dx * dx + dy * dy), match.Name);
+    }
+
     // Selector match for inventory items — mirrors VisibleMatchesSelector above
     // but operates on an InventoryItemProjection. Used by the useless-launcher
     // Wield drop guard to confirm a Wield selector resolves to a specific bag
@@ -2619,7 +2690,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (in-flight poll, backoff, coalesce, fallback). See field docs.
         UpdateDwellTracking(world.Self.Landblock, world.Self.Level, events, nowUtc);
         UpdateDeathRecencyTracking(world.Self.NumDeaths, nowUtc);
-        UpdateGoalProgressTracking(world, currentGoal, nowUtc);
+        UpdateGoalProgressTracking(world, currentGoal, nowUtc, _currentRecentSightings);
 
         // Behavior-preserving diagnostic (cp024 pattern): surface why the stage-3
         // contract "DONE" note does or does not fire, so the roving-Explore
@@ -8131,7 +8202,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Tracks ONE locked guid for the current goal-target selector so a chase
     // produces a coherent distance trend; resets when the LLM switches target.
     // Own-geometry bookkeeping only — no game knowledge, no behavior change.
-    private void UpdateGoalProgressTracking(WorldStateProjection world, Goal? currentGoal, DateTimeOffset nowUtc)
+    private void UpdateGoalProgressTracking(
+        WorldStateProjection world, Goal? currentGoal, DateTimeOffset nowUtc,
+        IReadOnlyList<SightedRecallProjection>? recentSightings)
     {
         // Only goals that pursue a concrete world object have a meaningful
         // distance trend. Wait/Explore/Raise* carry a NON-empty target selector
@@ -8169,6 +8242,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 .FirstOrDefault();
             if (tracked is not null)
             {
+                // Switching the trend's distance SOURCE (remembered 2D distance ->
+                // the engine's visible distance): drop any remembered samples so the
+                // buffer never mixes two metrics in one trend. Before the first
+                // visible lock the buffer holds only remembered samples (or none),
+                // so this only clears remembered data, never live visible samples.
+                if (_goalProgressSamples.Count > 0) _goalProgressSamples.Clear();
                 _goalProgressGuid = tracked.Guid;
                 _goalProgressLabel = FormatGoalProgressLabel(tracked);
             }
@@ -8176,7 +8255,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         // Target not in view this tick: keep any prior samples (a chase that
         // just lost line-of-sight still shows its last trend) but add nothing.
-        if (tracked?.Distance is not float dist) return;
+        float? sampleDist = tracked?.Distance;
+
+        // Out-of-view fallback (reduce-llm-call): the object-pursuit target is not
+        // in the visible set this tick. When the trend was NEVER locked to a
+        // visible guid this goal (_goalProgressGuid is null, so the trend keeps a
+        // single consistent source) and the bot's own sighting memory holds an
+        // UNAMBIGUOUS last-known location for the selector, sample the
+        // bot-to-remembered-location distance so a walk toward a remembered target
+        // keeps a progress trend. Pure perception; the LLM chose the target.
+        if (sampleDist is null && _goalProgressGuid is null && recentSightings is not null
+            && world.Self.CellId is uint selfCell)
+        {
+            var (sgx, sgy) = AcCoords.ToGlobalXY(selfCell, world.Self.PositionX, world.Self.PositionY);
+            if (TryRememberedTargetDistanceUnits(currentGoal.Target, recentSightings, sgx, sgy)
+                is (float rdist, string rlabel))
+            {
+                sampleDist = rdist;
+                _goalProgressLabel ??= $"{rlabel} (remembered)";
+            }
+        }
+
+        // Target neither in view nor in an unambiguous remembered location: keep
+        // any prior samples but add nothing.
+        if (sampleDist is not float dist) return;
 
         // Throttle so a high tick rate doesn't fill the buffer with near-
         // duplicate samples spanning a fraction of a second.
