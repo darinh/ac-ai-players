@@ -20,6 +20,17 @@ namespace HeadlessAcClient.Tests;
 
 public class LlmGoalPolicyTests
 {
+    [Fact]
+    public void IsDirectedDecisionPrompt_TrueOnVassalSwearMarker_FalseOtherwise()
+    {
+        Assert.True(LlmGoalPolicy.IsDirectedDecisionPrompt(
+            "## Allegiance guidance\n- Your monarch is `X`... This is DIRECTED team coordination — do it before an OPTIONAL hunt."));
+        Assert.False(LlmGoalPolicy.IsDirectedDecisionPrompt(
+            "## Monsters in view\n- attack the monster for XP; routine combat prompt."));
+        Assert.False(LlmGoalPolicy.IsDirectedDecisionPrompt(null));
+        Assert.False(LlmGoalPolicy.IsDirectedDecisionPrompt(""));
+    }
+
     // ---- TryParseGoal ----
 
     [Fact]

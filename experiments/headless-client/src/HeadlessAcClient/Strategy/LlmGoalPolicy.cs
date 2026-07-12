@@ -3923,13 +3923,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return topCount >= 2 && topKey is not null ? $"[{topKey}]x{topCount}" : null;
     }
 
+    // True when the just-built prompt carries a DIRECTED coordination objective: a rare,
+    // operator-team decision that warrants spending the scarce reserved top-tier model on
+    // this call rather than a routine mid-tier call. Keyed on a stable marker string the
+    // prompt renderer itself emits for every such directed-coordination cue (so this covers
+    // all of them, not one specific verb). Pure string check over the bot's OWN rendered
+    // prompt: no world-state read, no target choice, no game knowledge (the marker is our
+    // own cue text). Only meaningful when the client has a reserved top-tier
+    // (AC_BOTS_TOP_TIER_RESERVE); otherwise the client ignores the directed flag and the
+    // check is a cheap no-op.
+    internal static bool IsDirectedDecisionPrompt(string? userPrompt)
+        => userPrompt is not null && userPrompt.Contains("DIRECTED team coordination", StringComparison.Ordinal);
+
     private async Task<(LlmResult, Guid, string, string, long, bool)> RunAsync(string userPrompt, Guid decisionId, string projJson, long eventSeqAtCallStart, bool hadCurrentGoalAtCallStart)
     {
         LlmResult result;
         using var cts = new CancellationTokenSource(LlmCallTimeout);
         try
         {
-            result = await _client.CompleteAsync(SystemPrompt, userPrompt, cts.Token).ConfigureAwait(false);
+            result = await _client.CompleteAsync(SystemPrompt, userPrompt, cts.Token, directed: IsDirectedDecisionPrompt(userPrompt)).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cts.IsCancellationRequested)
         {

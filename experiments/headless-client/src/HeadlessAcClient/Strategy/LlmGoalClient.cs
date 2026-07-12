@@ -98,6 +98,14 @@ internal sealed class LlmGoalClient
     // candidate within a single CompleteAsync call (see CompleteAsync).
     private readonly IReadOnlyList<string> _models;
 
+    // Indices into _models of "reserved top-tier" models (parsed from the ctor arg or
+    // AC_BOTS_TOP_TIER_RESERVE). When NON-empty, a ROUTINE CompleteAsync call (directed:
+    // false, the default) SKIPS these so their scarce per-day quota is preserved for the
+    // rare DIRECTED decision (directed:true), which tries them FIRST. Empty (unset — the
+    // default) = reservation OFF and CompleteAsync behaves exactly as before. Pure
+    // config-driven index bookkeeping; no game knowledge, no priority over game objects.
+    private readonly IReadOnlyList<int> _reservedIndices;
+
     private readonly object _gate = new();
     // Index into _models of the currently-preferred model. Advances (sticks)
     // to whichever model last answered successfully, so once rotation lands on
@@ -251,7 +259,7 @@ internal sealed class LlmGoalClient
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
         string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null,
-        Action<string>? log = null, int? failoverCooldownThreshold = null)
+        Action<string>? log = null, int? failoverCooldownThreshold = null, string? reservedModels = null)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _log = log ?? (s => Console.WriteLine(s));
@@ -287,6 +295,9 @@ internal sealed class LlmGoalClient
             ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_FALLBACK_MODELS")
             ?? (primaryFromConfig is null ? DefaultFallbackModels : null);
         _models = BuildModelList(primary, fallbacks);
+        _reservedIndices = ParseReservedIndices(
+            _models,
+            reservedModels ?? Environment.GetEnvironmentVariable("AC_BOTS_TOP_TIER_RESERVE"));
         _explicitApiKey = apiKey
             ?? Environment.GetEnvironmentVariable("AC_BOTS_LLM_API_KEY")
             ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
@@ -330,7 +341,60 @@ internal sealed class LlmGoalClient
         return ordered.AsReadOnly();
     }
 
-    public async Task<LlmResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default)
+    // Parse the reserved "top-tier" model list (comma/semicolon-separated names) into
+    // the indices of `models` that match, preserving model order. Blank/unset yields an
+    // EMPTY list (reservation OFF). A named model not present in the chain is ignored.
+    // Never reserves the ENTIRE roster: if every model would be reserved, returns empty
+    // (a reservation that leaves no routine model would starve routine calls — treat that
+    // misconfiguration as OFF). Pure; no side effects.
+    internal static IReadOnlyList<int> ParseReservedIndices(IReadOnlyList<string> models, string? reserveCsv)
+    {
+        if (string.IsNullOrWhiteSpace(reserveCsv) || models.Count == 0)
+            return System.Array.Empty<int>();
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var part in reserveCsv.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var t = part.Trim();
+            if (t.Length > 0) names.Add(t);
+        }
+        var idx = new List<int>();
+        for (var i = 0; i < models.Count; i++)
+            if (names.Contains(models[i])) idx.Add(i);
+        // Reserving the whole roster would leave routine calls with no model — treat as OFF.
+        if (idx.Count >= models.Count) return System.Array.Empty<int>();
+        return idx.AsReadOnly();
+    }
+
+    // Apply the top-tier reservation to this call's already-built try-order (indices into
+    // _models, cooldown/bench filtering already applied). `reserved` is the reserved-model
+    // index set. When `reserved` is empty the order is returned UNCHANGED (reservation OFF
+    // — byte-identical to the pre-reservation behavior). Otherwise:
+    //   - directed==true  : reserved indices that survived to `order` are tried FIRST (to
+    //                        prefer the scarce top-tier for the important decision), then
+    //                        the routine ones — no candidate is dropped, so a fully-walled
+    //                        top-tier still falls through to routine models.
+    //   - directed==false : the reserved indices are REMOVED (routine calls never spend
+    //                        top-tier quota); if that empties the order the caller's
+    //                        existing all-cooling backoff handles it.
+    // Order among same-tier entries is preserved. Pure; returns a new list.
+    internal static List<int> PartitionOrderForReservation(
+        IReadOnlyList<int> order, IReadOnlyList<int> reserved, bool directed)
+    {
+        if (reserved is null || reserved.Count == 0) return new List<int>(order);
+        var reservedSet = new HashSet<int>(reserved);
+        if (directed)
+        {
+            var result = new List<int>(order.Count);
+            foreach (var i in order) if (reservedSet.Contains(i)) result.Add(i);
+            foreach (var i in order) if (!reservedSet.Contains(i)) result.Add(i);
+            return result;
+        }
+        var routine = new List<int>(order.Count);
+        foreach (var i in order) if (!reservedSet.Contains(i)) routine.Add(i);
+        return routine;
+    }
+
+    public async Task<LlmResult> CompleteAsync(string systemPrompt, string userPrompt, CancellationToken ct = default, bool directed = false)
     {
         var token = _explicitApiKey ?? await ResolveGhAuthTokenAsync(ct).ConfigureAwait(false);
         if (string.IsNullOrEmpty(token))
@@ -388,6 +452,17 @@ internal sealed class LlmGoalClient
                 }
                 order.Add(idx);
             }
+            // Top-tier reservation (config-gated; no-op when _reservedIndices is empty).
+            // Applied to the freshly-built order BEFORE the emergency bench-reprobe below, so
+            // the reprobe (which fires only when the order is empty) stays the final word and
+            // a degraded roster is never left un-probed by reservation. A ROUTINE call
+            // (directed:false) drops the reserved models (preserving their scarce per-day
+            // quota); a DIRECTED call tries them FIRST. If reservation empties a routine order
+            // it either falls through to the reprobe (a benched model may recover) or the
+            // 429 backoff below (soonestCooling is set by the cooldown skips, so a
+            // reservation-emptied order can never hit the 1s MinModelCooldown spin).
+            if (_reservedIndices.Count > 0)
+                order = PartitionOrderForReservation(order, _reservedIndices, directed);
             // A bench is only worth honouring while a viable NON-benched candidate
             // remains. If EVERY eligible model is failover-benched — whether the rest
             // of the roster is idle OR hard-walled by a 429 — re-probe the benched ones
@@ -405,6 +480,15 @@ internal sealed class LlmGoalClient
                     if (multi && _cooldownUntil.TryGetValue(_models[idx], out var u) && now < u) continue;
                     order.Add(idx);
                 }
+                // The reprobe rescanned the whole roster, re-adding reserved models too;
+                // re-apply reservation so a ROUTINE call still prefers a non-reserved recovery
+                // candidate over spending reserved quota (and a DIRECTED call still tries
+                // reserved first). If every recovered candidate is reserved, a routine call
+                // re-empties and takes the bounded 429 backoff rather than dipping into
+                // reserved quota; the reserved model's bench clears via its TTL or a directed
+                // call.
+                if (_reservedIndices.Count > 0)
+                    order = PartitionOrderForReservation(order, _reservedIndices, directed);
             }
         }
         var multiModel = _models.Count > 1;
