@@ -3087,9 +3087,29 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (named/guid/wcid/...) keeps the cap. Pure goal-shape bookkeeping;
         // the schema sentinel is not game knowledge.
         var stickyUntargetedExplore = IsUntargetedExploreGoal(_lastLlmGoal);
+        // reduce-llm-call: allow the budget-exempt untargeted-Explore re-drive to
+        // SURVIVE the 30s stuck-timer while the bot is DEMONSTRABLY covering ground
+        // (self global position advanced >= ExploreProgressMinAdvanceUnits since the
+        // last re-drive), bounded by MaxExploreStuckContinue consecutive overrides.
+        // Root cause (diag 38b7315): autonomous frontier exploration makes no LLM
+        // calls, so `stuck` fires every 30s and breaks this free re-drive (~89% of
+        // calls in a stuck landblock). Wall-stuck => position frozen => no override
+        // => the stuck-timeout still forces a re-consult, and the cap forces one
+        // periodically regardless. DEFAULT OFF (cap 0). Pure self-geometry + budget
+        // bookkeeping; no target/priority/interaction decision, no game knowledge.
+        var exploreSelfGlobal = world.Self.CellId is uint exCell
+            ? AcCoords.ToGlobalXY(exCell, world.Self.PositionX, world.Self.PositionY)
+            : ((float X, float Y)?)null;
+        var exploreStuckOverride =
+            stuck
+            && stickyUntargetedExplore
+            && exploreSelfGlobal is (float exGX, float exGY)
+            && CanContinueExploreThroughStuck(
+                   _lastExploreProgressPos, exGX, exGY,
+                   _exploreStuckContinueCount, MaxExploreStuckContinue, ExploreProgressMinAdvanceUnits);
         if (currentGoal is null
             && _lastLlmGoal is not null
-            && !stuck
+            && (!stuck || exploreStuckOverride)
             && !redriveEndedMustCallLlm
             && (_stickyReEmitCount < MaxStickyReEmits || stickyUntargetedExplore)
             && !hasNonPickerExternal
@@ -3132,6 +3152,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // advancing the floor does not disturb it.
             _lastEventConsideredSequence = events.NextSequence;
             _stickyReEmitCount++;
+            // reduce-llm-call: maintain the untargeted-Explore stuck-override budget +
+            // last-re-drive position. A stuck-override re-drive spends one budget unit;
+            // a normal (recent-call) re-drive resets it. The position feeds the next
+            // advance check so a wall-stuck Explore stops qualifying.
+            if (stickyUntargetedExplore)
+            {
+                _exploreStuckContinueCount = exploreStuckOverride ? _exploreStuckContinueCount + 1 : 0;
+                if (exploreSelfGlobal is (float pgx, float pgy)) _lastExploreProgressPos = (pgx, pgy);
+            }
             var sticky = _lastLlmGoal with { Id = Guid.NewGuid(), CreatedAtUtc = nowUtc };
             Console.WriteLine(
                 $"[strategy] sticky-objective re-emit #{_stickyReEmitCount}" +
@@ -3139,6 +3168,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $" kind={sticky.Kind} target={sticky.Target}" +
                 (sticky.Item is null ? "" : $" item={sticky.Item}") +
                 " (no external salient event since last LLM look; skipping LLM call)");
+            if (exploreStuckOverride)
+                Console.WriteLine(
+                    "[explore-redrive] stuck-timer overridden — progressing untargeted Explore " +
+                    $"(continue #{_exploreStuckContinueCount}/{MaxExploreStuckContinue}; no LLM call)");
             _lastExploreRedriveBlockReason = null;
             return sticky;
         }
@@ -4918,6 +4951,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Reset the explore-redrive diagnostic throttle so a fresh objective's
         // first blocked re-drive re-logs (behavior-neutral telemetry only).
         _lastExploreRedriveBlockReason = null;
+        // reduce-llm-call: a genuine LLM decision was consumed, so the untargeted-
+        // Explore stuck-override budget starts fresh for the next aimless stretch.
+        // Clear the progress baseline too, so the FIRST stuck-override of the next
+        // stretch requires movement measured WITHIN that stretch (a null prior never
+        // qualifies) — a wall-stuck bot after a fresh Explore cannot inherit an old
+        // stretch's position and win one undue override.
+        _exploreStuckContinueCount = 0;
+        _lastExploreProgressPos = null;
         // Reset the autonomous combat-chain budget ONLY here — when a USABLE LLM
         // decision has actually been consumed. Doing it at call kickoff would
         // refresh the cap even when the call later FAILS (429/timeout) or is
@@ -13799,7 +13840,58 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return Math.Min(v, Max);
         return Default;
     }
+
+    // reduce-llm-call: max CONSECUTIVE times the untargeted-Explore free re-drive may
+    // override the 30s stuck-timer while the bot is still covering ground, before a
+    // forced LLM re-check (liveness + periodic oversight). DEFAULT 0 = OFF (legacy:
+    // the stuck-timer always breaks the re-drive). Tunable via
+    // AC_BOTS_MAX_EXPLORE_STUCK_CONTINUE (0 disables; else clamp [1, 30]); read once.
+    internal static readonly int MaxExploreStuckContinue =
+        ResolveMaxExploreStuckContinue(Environment.GetEnvironmentVariable("AC_BOTS_MAX_EXPLORE_STUCK_CONTINUE"));
+
+    // Minimum self global-XY advance (world units) between two consecutive untargeted-
+    // Explore re-drives to count as "still covering ground" (not wall-stuck). Below this
+    // the stuck-timer is NOT overridden. Motor-geometry bookkeeping; no game knowledge.
+    internal const float ExploreProgressMinAdvanceUnits = 3.0f;
+
+    // Parse AC_BOTS_MAX_EXPLORE_STUCK_CONTINUE. 0 (or unset/blank/unparseable) = OFF;
+    // a positive integer enables the override, clamped to [1, 30].
+    internal static int ResolveMaxExploreStuckContinue(string? envValue)
+    {
+        const int Off = 0;
+        const int Max = 30;
+        if (int.TryParse(envValue, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out var v) && v >= 1)
+            return Math.Min(v, Max);
+        return Off;
+    }
+
+    // reduce-llm-call PURE predicate: may a stuck-timer-blocked untargeted-Explore free
+    // re-drive CONTINUE without a forced LLM call? True iff the feature is enabled
+    // (maxContinue > 0), the consecutive-override budget is not spent, AND the bot has
+    // advanced at least minAdvanceUnits (world XY) since the last re-drive (covering
+    // ground, not wall-stuck). A null prior position does NOT qualify (require a
+    // measured advance). Pure self-geometry + budget; selects no target, decides no
+    // action, encodes no game knowledge — it only defers a re-consult while exploring.
+    internal static bool CanContinueExploreThroughStuck(
+        (float X, float Y)? lastPos, float curX, float curY,
+        int continueCount, int maxContinue, float minAdvanceUnits)
+    {
+        if (maxContinue <= 0) return false;
+        if (continueCount >= maxContinue) return false;
+        if (lastPos is not (float lx, float ly)) return false;
+        var dx = curX - lx;
+        var dy = curY - ly;
+        return (dx * dx + dy * dy) >= (minAdvanceUnits * minAdvanceUnits);
+    }
+
     private int _combatChainCount;
+    // reduce-llm-call: consecutive stuck-timer overrides spent by the untargeted-Explore
+    // free re-drive (see CanContinueExploreThroughStuck); reset on a normal re-drive and
+    // on a consumed LLM goal. Paired with _lastExploreProgressPos (self global XY at the
+    // last Explore re-drive) for the per-step advance check.
+    private int _exploreStuckContinueCount;
+    private (float X, float Y)? _lastExploreProgressPos;
     // Throttle for the [combat-chain] no-mint diagnostic: only log when the
     // reason CHANGES (the chain gate is evaluated ~4x/sec, so logging every tick
     // would spam). Diagnostic-only state; no behavior.
