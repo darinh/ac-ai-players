@@ -7691,7 +7691,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (failedNames.Count == 0) return 0;
         var selfName = world.Self?.Name;
         var distinct = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (verb, itemFieldMode) in new[] { ("Talk", false), ("Use", true) })
+        // Give is a social interaction whose TARGET is a world NPC (same class as Talk —
+        // see IsEgressOverridableVerb), so a Give whose target NAME binds no visible object
+        // is the same "not in view" miss a Talk/Use is. Give always carries a populated item
+        // field, but itemFieldMode:false reads the NAME from the target= segment (the NPC),
+        // not the item — a Give to an unresolvable target counts like a Talk. Own emission
+        // history + perception only; no game knowledge, no priority, no source-side target choice.
+        foreach (var (verb, itemFieldMode) in new[] { ("Talk", false), ("Use", true), ("Give", false) })
             foreach (var kv in CountRecentEmittedTargetNames(
                          events, since, verb, excludeItemGoals: false, itemNameWhenTargetEmpty: itemFieldMode))
             {
@@ -13190,7 +13196,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         // ── ## Engagement churn — multi-target unresolved-interaction loop-break ──
         // Each single-target loop cue above fires on ONE repeated name; a model that cycles
-        // through SEVERAL different nearby targets (Talk/Use), each going out of view/range
+        // through SEVERAL different nearby targets (Talk/Use/Give), each going out of view/range
         // so each emission fails to resolve, trips NONE of them (each stays below its own
         // repeat threshold). Surface that multi-target canvass as an informational CUE keyed
         // on the bot's OWN recent emissions + perception — NOT a hard drop, so a legitimate
@@ -13203,12 +13209,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Engagement churn (several targets not in view)");
             sb.AppendLine(
-                "- you have recently tried to `Talk`/`Use` SEVERAL different targets that are NOT visible " +
+                "- you have recently tried to `Talk`/`Use`/`Give` SEVERAL different targets that are NOT visible " +
                 "here — each interaction is failing to resolve. If you are CANVASSING nearby NPCs hoping one " +
                 "helps, that is not progress: pick ONE target, walk right up to it (it must be visible + close " +
-                "in `## Nearest objects` to `Talk`/`Use`), or stop interacting and pursue DIFFERENT progress " +
+                "in `## Nearest objects` to interact), or stop interacting and pursue DIFFERENT progress " +
                 "(hunt a monster, `Explore` to a new area, or act on a held objective). Do NOT keep cycling " +
-                "`Talk`/`Use` across targets that never resolve.");
+                "`Talk`/`Use`/`Give` across targets that never resolve.");
         }
 
         // ── ## Wield loop (you do not own that weapon) — sibling of the other loop cues ──

@@ -5395,6 +5395,112 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(NamedVisible("Grocer", 5f)), es, null);
         Assert.DoesNotContain("## Engagement churn", prompt);
     }
+
+    // Appends a Give GoalEmitted (canonical shape: populated target NAME + populated item NAME)
+    // plus a matching GoalFailed for each target. Give ALWAYS carries an item, so this proves the
+    // churn detector reads the NPC name from the target= segment (not the item) with the item present.
+    private static EventStream GiveEmissions((string npc, string item)[] gives, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        foreach (var (npc, item) in gives)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Give target=name=\"{npc}\" item=name=\"{item}\" source=llm:test",
+            });
+            es.Append(new StreamEvent
+            { Sequence = -1, Utc = utc, Kind = EventKind.GoalFailed, Name = npc });
+        }
+        return es;
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_CountsDistinctUnresolvableGive()
+    {
+        // Three distinct NPCs the bot tried to Give a (populated) item to, each FAILED, NONE
+        // visible -> 3 distinct. Give's populated item field must NOT suppress the target-name
+        // count (the target= segment carries the NPC), so the multi-target Give canvass is caught.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions(new[]
+        {
+            ("Nerissa", "Sealed Letter"), ("Rathgar", "Sealed Letter"), ("Talia", "Sealed Letter"),
+        }, now);
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // none of the 3 NPCs are visible
+        Assert.Equal(3, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_MixedTalkUseGive_CountsAllDistinct()
+    {
+        // A canvass mixing Talk/Use/Give across distinct not-visible names counts every kind.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        void Emit(string verb, string npc, string item)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = $"{verb} target=name=\"{npc}\" item={item} source=llm:test",
+            });
+            es.Append(new StreamEvent { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = npc });
+        }
+        Emit("Talk", "Apprentice Scrivener", "<empty>");
+        Emit("Use", "Pawn Shopkeep", "<empty>");
+        Emit("Give", "Librarian", "name=\"Sealed Letter\"");
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f));
+        Assert.Equal(3, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_GiveTargetVisible_NotCounted()
+    {
+        // A Give whose target NPC IS visible resolves (the bot can walk up + give) -> not out-of-view
+        // churn, even if the item is bogus (an item-miss is a different failure, not a canvass).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions(new[] { ("Woodsman", "Sealed Letter"), ("Grocer", "Sealed Letter") }, now);
+        var world = BuildVisibleWorld(NamedVisible("Woodsman", 5f), NamedVisible("Grocer", 6f));
+        Assert.Equal(0, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_EngagementChurn_RendersForGiveCanvass()
+    {
+        // Integration: a Give-only canvass across 3 distinct not-visible NPCs renders the churn cue,
+        // and the cue text names Give so the LLM learns Give is one of the churning verbs.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions(new[]
+        {
+            ("Nerissa", "Sealed Letter"), ("Rathgar", "Sealed Letter"), ("Talia", "Sealed Letter"),
+        }, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(NamedVisible("Grocer", 5f)), es, null);
+        Assert.Contains("## Engagement churn", prompt);
+        Assert.Contains("`Give`", prompt);
+    }
+
+    [Fact]
+    public void CountDistinctUnresolvedInteractionTargets_GiveGuidTarget_DoesNotTrip()
+    {
+        // Robustness: a guid-target Give (target=guid + a named item) has no target NAME, so the
+        // Motor's GoalFailed carries Name=null (see TacticsExecutor.Fail: Name = Target?.Name). The
+        // name parser scans past the guid and reads the ITEM name, but since that item name is not in
+        // failedNames it is never counted -> the guid-target Give shape cannot artificially trip churn.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+        {
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = $"Give target=guid=0x5000010{i} item=name=\"Sealed Letter\" source=llm:test",
+            });
+            // Motor records the target selector name; a guid target has no name -> null.
+            es.Append(new StreamEvent { Sequence = -1, Utc = now, Kind = EventKind.GoalFailed, Name = null });
+        }
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f));
+        Assert.Equal(0, LlmGoalPolicy.CountDistinctUnresolvedInteractionTargets(world, es, now.AddMinutes(-3)));
+    }
+
     [Theory]
     [InlineData("Corpse of Headless", "Headless", true)]
     [InlineData("corpse of headless", "Headless", true)]
