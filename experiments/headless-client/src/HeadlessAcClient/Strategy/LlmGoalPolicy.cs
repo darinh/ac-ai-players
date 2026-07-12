@@ -8328,6 +8328,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return new GoalProgressSnapshot(_goalProgressLabel, dists, span);
     }
 
+    // Test-only: drive ONE goal-progress tracking tick with a controlled clock,
+    // then return the resulting trend snapshot. Lets a unit test exercise the
+    // stateful sampler — including the remembered->visible source switch and its
+    // single-source buffer-clear — without the async/throttle/network machinery
+    // of ProposeGoal. Mirrors the BuildUserPromptForTest convention; production
+    // never calls this (the tracker runs inside ProposeGoalCore).
+    internal GoalProgressSnapshot? TrackGoalProgressForTest(
+        WorldStateProjection world, Goal? currentGoal, DateTimeOffset nowUtc,
+        IReadOnlyList<SightedRecallProjection>? recentSightings)
+    {
+        UpdateGoalProgressTracking(world, currentGoal, nowUtc, recentSightings);
+        return BuildGoalProgressSnapshot();
+    }
+
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal)
         => BuildUserPrompt(world, events, currentGoal, stack: null, pickerActivity: null, explorationCandidates: null);
 
