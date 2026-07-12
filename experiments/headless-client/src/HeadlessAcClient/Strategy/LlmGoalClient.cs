@@ -197,6 +197,19 @@ internal sealed class LlmGoalClient
     // ACROSS re-probes rather than re-probed (and re-timed-out) every interval.
     private static readonly TimeSpan FailoverCooldown = TimeSpan.FromSeconds(300);
 
+    // Models that rejected our non-default `temperature` with a 400
+    // (invalid_request_error / param="temperature" — some provider families only
+    // accept the default). We send our preferred temperature by default and, on
+    // that specific 400, record the model here and retry the SAME call once WITHOUT
+    // temperature. Sticky for the process so later calls skip temperature up front.
+    // Self-healing: no hardcoded model list, so a future temperature-strict model is
+    // handled automatically. Guarded by _gate. The preferred temperature is below.
+    private readonly HashSet<string> _temperatureUnsupported =
+        new(StringComparer.Ordinal);
+    // The temperature we prefer for goal generation (low = more deterministic). Sent
+    // to every model that accepts it; omitted for models in _temperatureUnsupported.
+    private const double PreferredTemperature = 0.2;
+
     // Per-call HttpClient timeout for an LLM request. Default RAISED from a
     // hardcoded 30s after a live run showed a single 30s timeout on the capable
     // model rotate the whole session to a weaker fallback (the large ~26 KB prompt
@@ -654,6 +667,18 @@ internal sealed class LlmGoalClient
         r.FailureKind == LlmFailureKind.Transport ||
         (r.FailureKind == LlmFailureKind.Http && r.StatusCode is { } sc && (int)sc >= 500);
 
+    // A 400 body that specifically rejects the `temperature` parameter (an
+    // invalid_request_error / unsupported_value for param "temperature"), vs any
+    // OTHER 400 (e.g. a 413 oversize, a content-policy block, or a malformed
+    // request). Matched loosely on the provider's error shape so a minor wording
+    // change still triggers the retry-without-temperature path. Pure; no state.
+    internal static bool IsTemperatureRejection(string? body) =>
+        body is not null
+        && body.Contains("temperature", StringComparison.OrdinalIgnoreCase)
+        && (body.Contains("unsupported_value", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("does not support", StringComparison.OrdinalIgnoreCase)
+            || body.Contains("Only the default", StringComparison.OrdinalIgnoreCase));
+
     // Diagnostics must never alter the LLM call path: a throwing log sink is
     // swallowed so a bad logger can't turn a returned LlmResult into a thrown
     // exception.
@@ -670,6 +695,11 @@ internal sealed class LlmGoalClient
         string model, string token, string systemPrompt, string userPrompt,
         TimeSpan? attemptTimeout, CancellationToken ct)
     {
+        // Send our preferred temperature unless this model previously rejected it
+        // (then omit it, so the JSON drops the field via WhenWritingNull). Read once
+        // here and reused by the 400 retry branch below.
+        bool includeTemperature;
+        lock (_gate) includeTemperature = !_temperatureUnsupported.Contains(model);
         var payload = new ChatRequest
         {
             Model = model,
@@ -679,7 +709,7 @@ internal sealed class LlmGoalClient
                 new ChatMessage { Role = "system", Content = systemPrompt },
                 new ChatMessage { Role = "user",   Content = userPrompt   },
             },
-            Temperature = 0.2,
+            Temperature = includeTemperature ? PreferredTemperature : (double?)null,
         };
 
         using var req = new HttpRequestMessage(HttpMethod.Post, _endpoint)
@@ -728,6 +758,28 @@ internal sealed class LlmGoalClient
                 FailureKind: callerCancelled ? LlmFailureKind.None : LlmFailureKind.Transport);
         }
         sw.Stop();
+
+        // A model that rejects our non-default temperature (400 with an
+        // invalid_request_error for param "temperature") is retried ONCE without it:
+        // mark it sticky, dispose this response, and re-issue the SAME call. The retry
+        // reads the mark (includeTemperature == false) so it omits temperature and
+        // cannot loop. This lets the roster include capable models that only accept the
+        // default temperature, with no hardcoded model list. Only the FIRST such 400
+        // per model logs. When temperature was already omitted (includeTemperature ==
+        // false), a 400 is NOT a temperature issue and falls through to normal handling.
+        if (includeTemperature
+            && resp.StatusCode == HttpStatusCode.BadRequest
+            && IsTemperatureRejection(raw))
+        {
+            resp.Dispose();
+            bool firstMark;
+            lock (_gate) firstMark = _temperatureUnsupported.Add(model);
+            if (firstMark)
+                SafeLog($"[llm] model '{model}' rejects a non-default temperature; " +
+                        "retrying without it (sticky for this run)");
+            return await SendOnceAsync(model, token, systemPrompt, userPrompt, attemptTimeout, ct)
+                .ConfigureAwait(false);
+        }
 
         // Dispose the response on every path below — rotation can issue several
         // requests per CompleteAsync call, so leaking them adds up.

@@ -1186,6 +1186,74 @@ public class LlmGoalClientTests
         Assert.Equal("B", handler.RequestedModels[0]);
     }
 
+    // ---- temperature-strict models (self-healing retry-without-temperature) ----
+
+    [Fact]
+    public void IsTemperatureRejection_MatchesTemperature400_NotOtherErrors()
+    {
+        Assert.True(LlmGoalClient.IsTemperatureRejection(
+            "{\"error\":{\"message\":\"Unsupported value: 'temperature' does not support 0.2 with this model. " +
+            "Only the default (1) value is supported.\",\"param\":\"temperature\",\"code\":\"unsupported_value\"}}"));
+        Assert.False(LlmGoalClient.IsTemperatureRejection("{\"error\":\"rate limited\"}"));
+        Assert.False(LlmGoalClient.IsTemperatureRejection(
+            "{\"error\":{\"message\":\"context length exceeded\",\"code\":\"context_length_exceeded\"}}"));
+        Assert.False(LlmGoalClient.IsTemperatureRejection(null));
+        Assert.False(LlmGoalClient.IsTemperatureRejection(""));
+    }
+
+    [Fact]
+    public async Task TemperatureRejected_RetriesWithoutTemperature_Succeeds_ThenStaysSticky()
+    {
+        // A model that 400-rejects a non-default temperature is retried ONCE without it
+        // and succeeds; the omission is sticky so a later call skips temperature up front.
+        var handler = new TemperatureAwareHandler((_, hasTemp) => hasTemp ? TemperatureRejected() : Ok("ok"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "strict-model", "key");
+
+        var first = await llm.CompleteAsync("s", "u");
+        Assert.True(first.Ok);
+        Assert.Equal(2, handler.Requests.Count);          // WITH temp (400) -> retry WITHOUT (200)
+        Assert.True(handler.Requests[0].HadTemperature);
+        Assert.False(handler.Requests[1].HadTemperature);
+
+        handler.Requests.Clear();
+        var second = await llm.CompleteAsync("s", "u");    // sticky: omits temperature up front
+        Assert.True(second.Ok);
+        Assert.Single(handler.Requests);
+        Assert.False(handler.Requests[0].HadTemperature);
+    }
+
+    [Fact]
+    public async Task TemperatureAccepted_SendsPreferredTemperature_NoRetry()
+    {
+        // No regression: a model that accepts temperature still receives it (single call).
+        var handler = new TemperatureAwareHandler((_, _) => Ok("ok"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "normal-model", "key");
+
+        var r = await llm.CompleteAsync("s", "u");
+        Assert.True(r.Ok);
+        Assert.Single(handler.Requests);
+        Assert.True(handler.Requests[0].HadTemperature);
+    }
+
+    [Fact]
+    public async Task NonTemperature400_DoesNotRetry_ReturnedAsIs()
+    {
+        // A 400 that is NOT about temperature (e.g. an oversize/context error) must NOT be
+        // masked by a retry — it returns as-is so the policy's request-specific handling applies.
+        var handler = new TemperatureAwareHandler((_, _) => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(
+                "{\"error\":{\"message\":\"context length exceeded\",\"code\":\"context_length_exceeded\"}}",
+                Encoding.UTF8, "application/json"),
+        });
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "m", "key");
+
+        var r = await llm.CompleteAsync("s", "u");
+        Assert.False(r.Ok);
+        Assert.Single(handler.Requests);                  // no retry
+        Assert.True(handler.Requests[0].HadTemperature);
+    }
+
     // ---- test doubles ----
 
     private sealed class FakeClock
@@ -1224,6 +1292,18 @@ public class LlmGoalClientTests
         new((HttpStatusCode)503)
         {
             Content = new StringContent("{\"error\":\"unavailable\"}", Encoding.UTF8, "application/json"),
+        };
+
+    // A 400 that rejects a non-default temperature (the provider's invalid_request_error
+    // shape for param "temperature"), used to exercise the retry-without-temperature path.
+    private static HttpResponseMessage TemperatureRejected() =>
+        new(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent(
+                "{\"error\":{\"message\":\"Unsupported value: 'temperature' does not support 0.2 with this " +
+                "model. Only the default (1) value is supported.\",\"type\":\"invalid_request_error\"," +
+                "\"param\":\"temperature\",\"code\":\"unsupported_value\"}}",
+                Encoding.UTF8, "application/json"),
         };
 
     /// <summary>
@@ -1289,6 +1369,32 @@ public class LlmGoalClientTests
             if (string.IsNullOrEmpty(body)) return "";
             using var doc = JsonDocument.Parse(body);
             return doc.RootElement.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "";
+        }
+    }
+
+    /// <summary>
+    /// Fake transport that records, per request, the model name and whether the body
+    /// carried a <c>temperature</c> field, and routes to a response by (model,
+    /// hasTemperature). Used to exercise the retry-without-temperature self-heal.
+    /// </summary>
+    private sealed class TemperatureAwareHandler : HttpMessageHandler
+    {
+        private readonly Func<string, bool, HttpResponseMessage> _route;
+        public List<(string Model, bool HadTemperature)> Requests { get; } = new();
+
+        public TemperatureAwareHandler(Func<string, bool, HttpResponseMessage> route) => _route = route;
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = request.Content is null
+                ? ""
+                : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            using var doc = JsonDocument.Parse(string.IsNullOrEmpty(body) ? "{}" : body);
+            var model = doc.RootElement.TryGetProperty("model", out var m) ? m.GetString() ?? "" : "";
+            var hasTemp = doc.RootElement.TryGetProperty("temperature", out _);
+            Requests.Add((model, hasTemp));
+            return _route(model, hasTemp);
         }
     }
 }
