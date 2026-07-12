@@ -148,11 +148,39 @@ internal sealed class HandshakeDriver : IDisposable
     // Pure own-state read; no game knowledge.
     internal static bool IsPendingRaiseConfirmed(
         string kind, uint id, long? preAvailableXp, uint? preExpSpent,
-        long? availXpNow, IReadOnlyList<PdAttribute>? selfAttributes)
+        long? availXpNow, IReadOnlyList<PdAttribute>? selfAttributes,
+        long? preTotalXp = null, long? totalXpNow = null, uint amount = 0)
     {
         if (kind == "Attribute" && preExpSpent is uint pes)
             return TryGetSelfAttributeExperienceSpentById(selfAttributes, id, out var nowExpSpent)
                 && nowExpSpent > pes;
+        // Income-immune available-XP confirm for a Vital/Skill raise (and an attribute's
+        // first-ever raise, before it appears in SelfAttributes with an ExperienceSpent
+        // to key on). A raise SPENDS XP — lowering AvailableExperience — but concurrent
+        // kill-XP income RAISES both TotalExperience and AvailableExperience by the same
+        // amount, so an available-XP drop ALONE false-times-out a landed raise whenever a
+        // kill lands inside the confirm window (the common case: the confirm interval is
+        // longer than the raise-confirm timeout, so income almost always arrives first).
+        // The net spend is income-immune: spent = deltaTotal - deltaAvailable
+        // = (totalNow - totalPre) - (availNow - availPre), because a kill moves both
+        // counters equally and cancels. Only ONE raise is pending at a time (the dispatch
+        // serializes on the single pending slot) and the server deducts EXACTLY the clamped
+        // `amount`, so a coherent post-spend read nets EXACTLY `amount` regardless of how
+        // much kill income arrived. We therefore require net == amount, not net >= amount:
+        // a TORN read — one counter (Total) already carrying kill income while the paired
+        // AvailableExperience update has not yet been applied — nets the un-cancelled income,
+        // an arbitrary value that (barring exact coincidence) does not equal `amount`, so it
+        // cannot false-confirm even for a small/clamped amount. (The two counters are
+        // co-packeted in one BlobFragments packet applied before this reconcile runs, so a
+        // torn read is not expected in practice; the exact match makes the confirm robust
+        // without depending on that.) Requires a known positive amount; otherwise (and when
+        // TotalExperience is unobserved) falls back to the raw available-XP drop. A coherent
+        // partial/capped spend that deducts less than requested nets < amount and simply
+        // times out to re-deliberate. Own-state read only; no game knowledge.
+        if (amount > 0
+            && preTotalXp is long ptx && totalXpNow is long ntx
+            && preAvailableXp is long pax && availXpNow is long nax)
+            return (ntx - ptx) - (nax - pax) == amount;
         return preAvailableXp is long pxp && availXpNow is long nxp && nxp < pxp;
     }
 
@@ -1653,7 +1681,7 @@ internal sealed class HandshakeDriver : IDisposable
         // pre-dispatch. Reconciled at the next raise attempt (of either kind):
         // cleared on a confirmed AvailableExperience decrease (success) or
         // after the timeout (no confirmation seen).
-        (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp, uint? PreExpSpent)? pendingRaise = null;
+        (string Kind, uint Id, uint Amount, DateTime At, long? PreAvailableXp, uint? PreExpSpent, long? PreTotalXp)? pendingRaise = null;
         // Vendor-buy in-flight bookkeeping. Buy (0x005F) spends currency
         // irreversibly, so — exactly like the Raise* self-actions — only ONE
         // buy is allowed in flight: it is reconciled by a currency-AGNOSTIC
@@ -6368,6 +6396,10 @@ internal sealed class HandshakeDriver : IDisposable
                             worldState.Self?.PropertyInt64s is { } selfP64 &&
                             selfP64.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNow)
                                 ? axNow : (long?)null;
+                        long? totalXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64t &&
+                            selfP64t.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var txNow)
+                                ? txNow : (long?)null;
 
                         // Reconcile any prior pending raise: it landed when the confirm
                         // predicate holds (for an attribute raise, the target attribute's
@@ -6376,12 +6408,12 @@ internal sealed class HandshakeDriver : IDisposable
                         // the dedup window.
                         if (pendingRaise is { } pr0 &&
                             (IsPendingRaiseConfirmed(pr0.Kind, pr0.Id, pr0.PreAvailableXp, pr0.PreExpSpent,
-                                 availXpNow, worldState.Self?.SelfAttributes) ||
+                                 availXpNow, worldState.Self?.SelfAttributes, pr0.PreTotalXp, totalXpNow, pr0.Amount) ||
                              (DateTime.UtcNow - pr0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmed = IsPendingRaiseConfirmed(
                                 pr0.Kind, pr0.Id, pr0.PreAvailableXp, pr0.PreExpSpent,
-                                availXpNow, worldState.Self?.SelfAttributes);
+                                availXpNow, worldState.Self?.SelfAttributes, pr0.PreTotalXp, totalXpNow, pr0.Amount);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{pr0.Kind} id={pr0.Id} amount={pr0.Amount} " +
                                 (confirmed
@@ -6446,7 +6478,8 @@ internal sealed class HandshakeDriver : IDisposable
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                             pendingRaise = ("Attribute", attrId, spendAmount, DateTime.UtcNow, availXpNow,
                                 TryGetSelfAttributeExperienceSpentById(worldState.Self?.SelfAttributes, attrId, out var preAttrExpSpent)
-                                    ? preAttrExpSpent : (uint?)null);
+                                    ? preAttrExpSpent : (uint?)null,
+                                totalXpNow);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseAttribute: id={attrId} amount={spendAmount} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
@@ -6474,15 +6507,19 @@ internal sealed class HandshakeDriver : IDisposable
                             worldState.Self?.PropertyInt64s is { } selfP64v &&
                             selfP64v.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNowV)
                                 ? axNowV : (long?)null;
+                        long? totalXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64vt &&
+                            selfP64vt.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var txNowV)
+                                ? txNowV : (long?)null;
 
                         if (pendingRaise is { } pv0 &&
                             (IsPendingRaiseConfirmed(pv0.Kind, pv0.Id, pv0.PreAvailableXp, pv0.PreExpSpent,
-                                 availXpNow, worldState.Self?.SelfAttributes) ||
+                                 availXpNow, worldState.Self?.SelfAttributes, pv0.PreTotalXp, totalXpNow, pv0.Amount) ||
                              (DateTime.UtcNow - pv0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmedV = IsPendingRaiseConfirmed(
                                 pv0.Kind, pv0.Id, pv0.PreAvailableXp, pv0.PreExpSpent,
-                                availXpNow, worldState.Self?.SelfAttributes);
+                                availXpNow, worldState.Self?.SelfAttributes, pv0.PreTotalXp, totalXpNow, pv0.Amount);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{pv0.Kind} id={pv0.Id} amount={pv0.Amount} " +
                                 (confirmedV
@@ -6536,7 +6573,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                             encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentV),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaise = ("Vital", vitalId, spendAmountV, DateTime.UtcNow, availXpNow, null);
+                            pendingRaise = ("Vital", vitalId, spendAmountV, DateTime.UtcNow, availXpNow, null, totalXpNow);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseVital: id={vitalId} amount={spendAmountV} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
@@ -6567,15 +6604,19 @@ internal sealed class HandshakeDriver : IDisposable
                             worldState.Self?.PropertyInt64s is { } selfP64s &&
                             selfP64s.TryGetValue(PrivateUpdatePropertyInt64Message.AvailableExperienceId, out var axNowS)
                                 ? axNowS : (long?)null;
+                        long? totalXpNow =
+                            worldState.Self?.PropertyInt64s is { } selfP64st &&
+                            selfP64st.TryGetValue(PrivateUpdatePropertyInt64Message.TotalExperienceId, out var txNowS)
+                                ? txNowS : (long?)null;
 
                         if (pendingRaise is { } ps0 &&
                             (IsPendingRaiseConfirmed(ps0.Kind, ps0.Id, ps0.PreAvailableXp, ps0.PreExpSpent,
-                                 availXpNow, worldState.Self?.SelfAttributes) ||
+                                 availXpNow, worldState.Self?.SelfAttributes, ps0.PreTotalXp, totalXpNow, ps0.Amount) ||
                              (DateTime.UtcNow - ps0.At) > TimeSpan.FromSeconds(RaiseConfirmTimeoutSeconds)))
                         {
                             var confirmedS = IsPendingRaiseConfirmed(
                                 ps0.Kind, ps0.Id, ps0.PreAvailableXp, ps0.PreExpSpent,
-                                availXpNow, worldState.Self?.SelfAttributes);
+                                availXpNow, worldState.Self?.SelfAttributes, ps0.PreTotalXp, totalXpNow, ps0.Amount);
                             Console.WriteLine(
                                 $"[xp-spend] pending Raise{ps0.Kind} id={ps0.Id} amount={ps0.Amount} " +
                                 (confirmedS
@@ -6629,7 +6670,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                             encrypt: true, cryptoSend: cryptoSend);
                             await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, raiseSentS),
                                                        SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            pendingRaise = ("Skill", skillId, spendAmountS, DateTime.UtcNow, availXpNow, null);
+                            pendingRaise = ("Skill", skillId, spendAmountS, DateTime.UtcNow, availXpNow, null, totalXpNow);
                             Console.WriteLine(
                                 $"[strategy] LLM-GOAL RaiseSkill: id={skillId} amount={spendAmountS} " +
                                 $"(unspent={(availXpNow?.ToString() ?? "null")}) " +
