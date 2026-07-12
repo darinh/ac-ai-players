@@ -1061,6 +1061,131 @@ public class LlmGoalClientTests
         Assert.Contains(logs, l => l.Contains("[llm-fallback]") && l.Contains("rotated to B"));
     }
 
+    // ---- top-tier reservation (AC_BOTS_TOP_TIER_RESERVE) ----
+
+    [Fact]
+    public void ParseReservedIndices_UnsetOrBlank_Empty()
+    {
+        var models = new[] { "a", "b", "c" };
+        Assert.Empty(LlmGoalClient.ParseReservedIndices(models, null));
+        Assert.Empty(LlmGoalClient.ParseReservedIndices(models, ""));
+        Assert.Empty(LlmGoalClient.ParseReservedIndices(models, "   "));
+    }
+
+    [Fact]
+    public void ParseReservedIndices_MatchesNamesToIndices_PreservesModelOrder_IgnoresUnknown()
+    {
+        var models = new[] { "gpt-4o", "gpt-4.1", "gpt-4.1-mini", "deepseek" };
+        // Reserve gpt-4o + gpt-4.1 (names given out of order + an unknown one ignored).
+        var idx = LlmGoalClient.ParseReservedIndices(models, "gpt-4.1 ; unknown-model , gpt-4o");
+        Assert.Equal(new[] { 0, 1 }, idx); // model order (0=gpt-4o, 1=gpt-4.1), not arg order
+    }
+
+    [Fact]
+    public void ParseReservedIndices_ReservingWholeRoster_TreatedAsOff()
+    {
+        var models = new[] { "a", "b" };
+        Assert.Empty(LlmGoalClient.ParseReservedIndices(models, "a,b")); // would starve routine -> OFF
+    }
+
+    [Fact]
+    public void PartitionOrderForReservation_NoReserved_Unchanged()
+    {
+        var order = new List<int> { 2, 0, 1 };
+        var result = LlmGoalClient.PartitionOrderForReservation(order, System.Array.Empty<int>(), directed: false);
+        Assert.Equal(new[] { 2, 0, 1 }, result);
+        var result2 = LlmGoalClient.PartitionOrderForReservation(order, System.Array.Empty<int>(), directed: true);
+        Assert.Equal(new[] { 2, 0, 1 }, result2);
+    }
+
+    [Fact]
+    public void PartitionOrderForReservation_Routine_RemovesReserved()
+    {
+        // order = [0,1,2,3]; reserved = {0,1} (top-tier). Routine call -> only [2,3].
+        var result = LlmGoalClient.PartitionOrderForReservation(
+            new List<int> { 0, 1, 2, 3 }, new[] { 0, 1 }, directed: false);
+        Assert.Equal(new[] { 2, 3 }, result);
+    }
+
+    [Fact]
+    public void PartitionOrderForReservation_Directed_ReservedFirst_ThenRoutine_OrderPreserved()
+    {
+        // order = [2,3,0,1] (sticky landed mid-tier); reserved = {0,1}. Directed call ->
+        // reserved (in their order-of-appearance) first, then routine: [0,1,2,3].
+        var result = LlmGoalClient.PartitionOrderForReservation(
+            new List<int> { 2, 3, 0, 1 }, new[] { 0, 1 }, directed: true);
+        Assert.Equal(new[] { 0, 1, 2, 3 }, result);
+    }
+
+    [Fact]
+    public void PartitionOrderForReservation_Directed_DropsNoCandidate_FallsThroughToRoutine()
+    {
+        // A directed call must still reach routine models if the reserved ones are walled
+        // (excluded from `order` upstream). Here order already lacks the reserved indices
+        // (all cooling) -> directed returns just the routine ones (no candidate invented).
+        var result = LlmGoalClient.PartitionOrderForReservation(
+            new List<int> { 2, 3 }, new[] { 0, 1 }, directed: true);
+        Assert.Equal(new[] { 2, 3 }, result);
+    }
+
+    [Fact]
+    public void PartitionOrderForReservation_Routine_AllReservedInOrder_EmptiesOrder()
+    {
+        // If every surviving candidate is reserved, a routine call yields an EMPTY order
+        // (caller's all-cooling backoff then applies; routine never spends top-tier quota).
+        var result = LlmGoalClient.PartitionOrderForReservation(
+            new List<int> { 0, 1 }, new[] { 0, 1 }, directed: false);
+        Assert.Empty(result);
+    }
+
+    [Fact]
+    public async Task Reserve_Routine_ReservedHealthy_FallbacksBenched_ReprobesFallback_NoSpin()
+    {
+        // Regression (both reviewers, BLOCKING): with A reserved (top-tier) and the routine
+        // fallbacks B/C failover-benched, a ROUTINE call must re-probe a benched fallback (the
+        // emergency reprobe recovery) rather than letting the reservation empty the order into
+        // the 1s-MinModelCooldown spin (soonestCooling is null after a pure-bench skip). A stays
+        // reserved (never probed on a routine call).
+        var clock = new FakeClock(T0);
+        var down = true;
+        var handler = new ModelRoutingHandler(m => down ? ServiceUnavailable() : Ok($"ok-{m}"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B;C", now: clock.Get, failoverCooldownThreshold: 1, reservedModels: "A");
+
+        // Routine call: A is reserved-excluded, so only B and C are tried; both 503 -> benched;
+        // infra breaker armed. A is never probed (reserved) and so is never benched.
+        var first = await llm.CompleteAsync("s", "u"); // directed defaults false
+        Assert.False(first.Ok);
+        Assert.Equal(new[] { "B", "C" }, handler.RequestedModels);
+
+        down = false;                          // fallbacks recover
+        clock.Now = T0.AddSeconds(21);         // past the 20s infra backoff, within the 300s bench
+        handler.RequestedModels.Clear();
+
+        var second = await llm.CompleteAsync("s", "u"); // routine
+        Assert.True(second.Ok);                          // recovered via the benched-fallback reprobe, no spin
+        Assert.DoesNotContain("A", handler.RequestedModels); // A still reserved: not spent on a routine call
+        Assert.Contains("B", handler.RequestedModels);       // a benched fallback re-probed instead
+    }
+
+    [Fact]
+    public async Task Reserve_Directed_TriesReservedModelFirst_RoutineSkipsIt()
+    {
+        // A DIRECTED decision prefers the reserved model (tried FIRST); a ROUTINE call skips it.
+        var clock = new FakeClock(T0);
+        var handler = new ModelRoutingHandler(_ => Ok("ok"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B;C", now: clock.Get, reservedModels: "B");
+
+        await llm.CompleteAsync("s", "u");                 // routine: B (reserved) dropped -> A first
+        Assert.Equal("A", handler.RequestedModels[0]);
+        Assert.DoesNotContain("B", handler.RequestedModels);
+
+        handler.RequestedModels.Clear();
+        await llm.CompleteAsync("s", "u", directed: true); // directed: B (reserved) tried FIRST
+        Assert.Equal("B", handler.RequestedModels[0]);
+    }
+
     // ---- test doubles ----
 
     private sealed class FakeClock
