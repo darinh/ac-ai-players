@@ -12312,6 +12312,10 @@ public class LlmGoalPolicyTests
 
         // Slice H RULES line is present (so the LLM knows what `monster` means).
         Assert.Contains("`monster`-tagged creatures", prompt);
+        // The combat-target rule clarifies that the `monster` TAG is a classification, not a
+        // target name, so the model must Attack by the exact creature name (fixes the observed
+        // `Attack{name_contains:"monster"}` confabulation).
+        Assert.Contains("NOT by the word `monster`", prompt);
     }
 
     [Fact]
