@@ -91,6 +91,33 @@ internal static class WeaponSwap
     public static bool IsWieldedWeapon(ItemFacts item) =>
         item.WieldedAt is uint w && (w & MainWeaponSlotMask) != 0 && IsWeapon(item);
 
+    /// <summary>
+    /// True iff the item is a missile LAUNCHER that cannot currently fire: a
+    /// MAIN-WEAPON-slot item whose ItemType has the MissileWeapon bit and which
+    /// carries an <paramref name="ammoType"/> (a launcher — a self-firing THROWN
+    /// weapon has no AmmoType), while NO ammo is loaded
+    /// (<paramref name="hasLoadedAmmo"/> false). Such a launcher is not
+    /// combat-capable (the server cancels a shot with no ammo) and, once wielded,
+    /// forces Missile combat mode and blocks an unarmed-melee strike (a
+    /// LauncherNeedsDequip trap). The MAIN-WEAPON-slot requirement is essential:
+    /// bag AMMO also carries the MissileWeapon ItemType bit AND a non-null
+    /// AmmoType, differing only by valid slot (ammo → MissileAmmoSlot, launcher →
+    /// a <see cref="MainWeaponSlotMask"/> slot), so keying on ItemType+AmmoType
+    /// alone would misclassify loadable ammo as a launcher. Mirrors the
+    /// launcher+ammo leg of <c>LlmGoalPolicy.IsCombatCapable</c> /
+    /// <c>CombatWeaponSelection.ClassifyWeaponState</c> so the auto-wield
+    /// candidates never diverge from the combat-capability test. Pure wire-state
+    /// precondition (ItemType/AmmoType/valid-slot + ammo-slot occupancy); no game
+    /// knowledge. <paramref name="validLocations"/> is the item's ValidLocations
+    /// equip-slot mask.
+    /// </summary>
+    public static bool IsAmmolessLauncher(
+        uint? itemType, ushort? ammoType, uint? validLocations, bool hasLoadedAmmo)
+        => validLocations is uint vl && (vl & MainWeaponSlotMask) != 0
+           && itemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0
+           && ammoType is not null
+           && !hasLoadedAmmo;
+
     /// <summary>True if the item is currently wielded in the off-hand
     /// SHIELD slot (EquipMask.Shield). A wielded shield blocks a
     /// two-handed weapon wield but not a one-handed weapon.</summary>

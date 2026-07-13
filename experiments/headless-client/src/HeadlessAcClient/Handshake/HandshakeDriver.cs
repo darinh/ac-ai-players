@@ -5384,6 +5384,11 @@ internal sealed class HandshakeDriver : IDisposable
                         ieInventory.Add(new WeaponSwap.ItemFacts(
                             io.Guid, io.ItemType, io.ValidLocations, io.CurrentWieldedLocation));
                     }
+                    // Loaded ammo occupies the missile-ammo slot; used below to
+                    // let the ammoless-launcher guard tell a fire-ready launcher
+                    // from one that cannot attack.
+                    var ieHasLoadedAmmo = ieInventory.Any(
+                        f => f.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
 
                     WorldObjectSnapshot? ieCandidate = null;
                     uint                 ieEquipSlot = 0;
@@ -5416,6 +5421,20 @@ internal sealed class HandshakeDriver : IDisposable
                                     snap.Guid, snap.ItemType,
                                     snap.ValidLocations, snap.CurrentWieldedLocation),
                                 ieInventory) is not null)
+                            continue;
+
+                        // Do not auto-wield an ammoless missile LAUNCHER: it can
+                        // never fire yet, once wielded, forces Missile mode and
+                        // blocks unarmed melee (a LauncherNeedsDequip trap that
+                        // leaves the bot not combat-capable). Mirrors the
+                        // NoQuestKnowledgePolicy fallback guard via the shared
+                        // WeaponSwap.IsAmmolessLauncher so the login auto-equip
+                        // never enters the trap the fallback would then unwind (and
+                        // so bag ammo — same MissileWeapon bit + AmmoType, but the
+                        // ammo slot — stays loadable). The LLM may still explicitly
+                        // wield a launcher.
+                        if (WeaponSwap.IsAmmolessLauncher(
+                                snap.ItemType, snap.AmmoType, snap.ValidLocations, ieHasLoadedAmmo))
                             continue;
 
                         ieCandidate = snap;
