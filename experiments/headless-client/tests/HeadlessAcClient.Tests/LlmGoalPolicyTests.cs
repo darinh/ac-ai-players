@@ -318,6 +318,79 @@ public class LlmGoalPolicyTests
         Assert.Equal("{\"kind\":\"Recall\"}", LlmGoalPolicy.StripJsonCodeFence(fenced));
     }
 
+    // ---- reasoning-model chain-of-thought preamble (<think>...</think>) ----
+
+    [Fact]
+    public void TryParseGoal_ParsesJsonAfterThinkPreamble()
+    {
+        // Real DeepSeek-R1 shape (observed live): a <think>…</think> block — whose
+        // reasoning QUOTES the example JSON, so it contains braces — then the answer.
+        var content =
+            "<think> Okay, a Drudge is visible and I am unarmed. The example was " +
+            "{\"kind\":\"Explore\"} but I should attack. Final: {\"kind\":\"Attack\"}. </think>  " +
+            "{\"kind\":\"Attack\",\"target\":{\"name\":\"Drudge\"},\"rationale\":\"engage\",\"priority\":7}";
+        Assert.True(LlmGoalPolicy.TryParseGoal(content, out var g, out var err), err);
+        Assert.Equal(GoalKind.Attack, g!.Kind);
+        Assert.Equal("Drudge", g.Target.Name);
+    }
+
+    [Fact]
+    public void TryParseGoal_ParsesThinkPreambleThenFencedJson()
+    {
+        // Reasoning preamble AND a markdown fence around the answer: strip the think
+        // block first, then the fence.
+        var content = "<think> reasoning </think>\n```json\n{\"kind\":\"Explore\",\"target\":{\"name\":\"anywhere\"}}\n```";
+        Assert.True(LlmGoalPolicy.TryParseGoal(content, out var g, out var err), err);
+        Assert.Equal(GoalKind.Explore, g!.Kind);
+    }
+
+    [Fact]
+    public void StripReasoningPreamble_StripsThinkBlock()
+    {
+        var content = "<think> some reasoning </think> {\"kind\":\"Recall\"}";
+        Assert.Equal("{\"kind\":\"Recall\"}", LlmGoalPolicy.StripReasoningPreamble(content).Trim());
+    }
+
+    [Fact]
+    public void StripReasoningPreamble_ReasoningMentionsCloseTag_TakesLastClose()
+    {
+        // If the reasoning text itself mentions "</think>", the LAST close tag is the
+        // real end of the block, so the JSON answer is preserved intact.
+        var content = "<think> the closing tag is </think> and I am done </think> {\"kind\":\"Recall\"}";
+        Assert.Equal("{\"kind\":\"Recall\"}", LlmGoalPolicy.StripReasoningPreamble(content).Trim());
+    }
+
+    [Fact]
+    public void StripReasoningPreamble_LeavesNonThinkUnchanged()
+    {
+        var raw = "{\"kind\":\"Recall\"}";
+        Assert.Equal(raw, LlmGoalPolicy.StripReasoningPreamble(raw));
+        var fenced = "```json\n{\"kind\":\"Recall\"}\n```";
+        Assert.Equal(fenced, LlmGoalPolicy.StripReasoningPreamble(fenced)); // fence handled downstream, untouched here
+    }
+
+    [Fact]
+    public void StripReasoningPreamble_UnclosedThink_LeftUnchanged()
+    {
+        // A truncated, unclosed <think> (the model spent its budget reasoning and
+        // emitted no answer) is returned unchanged so it fails as a normal parse
+        // error and the caller re-consults.
+        var content = "<think> reasoning that never closed and has no json";
+        Assert.Equal(content, LlmGoalPolicy.StripReasoningPreamble(content));
+        Assert.False(LlmGoalPolicy.TryParseGoal(content, out _, out _));
+    }
+
+    [Fact]
+    public void StripReasoningPreamble_IsIdempotentAndHandlesNullEmpty()
+    {
+        Assert.Equal(string.Empty, LlmGoalPolicy.StripReasoningPreamble(null));
+        Assert.Equal(string.Empty, LlmGoalPolicy.StripReasoningPreamble(""));
+        var content = "<think> r </think> {\"kind\":\"Recall\"}";
+        var once = LlmGoalPolicy.StripReasoningPreamble(content);
+        var twice = LlmGoalPolicy.StripReasoningPreamble(once);
+        Assert.Equal(once, twice); // stripped content no longer starts with <think>
+    }
+
     [Fact]
     public void TryParseGoal_RecallParsesWithoutTarget()
     {
