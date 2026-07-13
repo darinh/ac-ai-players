@@ -35,4 +35,26 @@ public class FellowshipGoalGuardTests
     public void NonFellowshipGoal_WhileInFellowship_IsNotAffected()
         => Assert.False(FellowshipGoalGuard.IsRedundantFellowshipCreate(
             GoalKind.Attack, inFellowship: true));
+
+    // ---- ShouldCreateBeforeRecruit (recruit precondition: create the fellowship first) ----
+
+    [Fact]
+    public void Recruit_AutoTeam_NotInFellowship_CreatesFirst()
+        => Assert.True(FellowshipGoalGuard.ShouldCreateBeforeRecruit(
+            autoTeamEnabled: true, inFellowship: false));
+
+    [Fact]
+    public void Recruit_AutoTeam_AlreadyInFellowship_RecruitsAlone()
+        => Assert.False(FellowshipGoalGuard.ShouldCreateBeforeRecruit(
+            autoTeamEnabled: true, inFellowship: true));
+
+    [Fact]
+    public void Recruit_AutoTeamOff_NotInFellowship_Unchanged()
+        => Assert.False(FellowshipGoalGuard.ShouldCreateBeforeRecruit(
+            autoTeamEnabled: false, inFellowship: false));
+
+    [Fact]
+    public void Recruit_AutoTeamOff_InFellowship_Unchanged()
+        => Assert.False(FellowshipGoalGuard.ShouldCreateBeforeRecruit(
+            autoTeamEnabled: false, inFellowship: true));
 }
