@@ -9407,7 +9407,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // exploration toward monsters when none are in view. Gate it on
         // monsterInView to free prompt budget in the common no-monster scene.
         if (monsterInView)
-        sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot); `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
+        sb.AppendLine("- Combat targets: `monster`-tagged creatures are valid combat targets (grant XP + loot) — `Attack` one by the exact `name` shown for it in `## Nearest objects`, NOT by the word `monster` (that is a classification tag; a `name`/`name_contains` selector matches a creature's actual NAME, which is almost never the tag word `monster`). `npc`-tagged are civilians — talk/trade, do NOT attack. Combat is the primary XP source outside NPC quests.");
         // SELF-ARM is entirely about getting armed: it applies ONLY when the bot
         // is NOT yet combat-effective (no melee weapon wielded, and no wielded
         // missile weapon with ammo loaded). Once combat-effective the rule is
