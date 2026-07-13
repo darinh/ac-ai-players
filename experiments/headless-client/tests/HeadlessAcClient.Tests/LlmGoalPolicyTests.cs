@@ -5221,6 +5221,111 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("## Use loop (target not in view)", prompt);
     }
 
+    private static EventStream GiveEmissions(string npc, string item, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                // Canonical Give shape: an NPC target + a populated item field.
+                Text = $"Give target=name=\"{npc}\" item=name=\"{item}\" source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_ReturnsNpcNameForRepeatedNoVisibleMatch()
+    {
+        // 3 recent Give emissions to an NPC name (with a populated item) that binds NO visible
+        // object (the live confabulated-quest-NPC case) -> the looped NPC name (NOT the item).
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Grocer", 5f)); // some other object, not the NPC
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 3, now);
+        Assert.Equal("Gorath", LlmGoalPolicy.RepeatedUnresolvedGiveTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_NullWhenNpcNameMatchesVisibleObject()
+    {
+        // A VISIBLE NPC whose name matches the Give target -> the Give could still resolve to it,
+        // so the no-match cue is suppressed.
+        var now = System.DateTimeOffset.UtcNow;
+        var world = BuildVisibleWorld(NamedVisible("Gorath", 5f));
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedGiveTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_FiresWhenOnlyVisibleMatchIsCorpse()
+    {
+        // Give EXCLUDES corpses (you Give to a living NPC, not a corpse), so a visible corpse whose
+        // name matches does NOT suppress the cue -- differs from the Use loop, which keeps corpses.
+        var now = System.DateTimeOffset.UtcNow;
+        var corpse = new VisibleObjectProjection { Guid = 0x80009010u, Name = "Gorath", Distance = 4f, IsCorpse = true };
+        var world = BuildVisibleWorld(corpse);
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 3, now);
+        Assert.Equal("Gorath", LlmGoalPolicy.RepeatedUnresolvedGiveTarget(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedGiveTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_IgnoresUseEmissionsOfSameName()
+    {
+        // The detector keys on the GIVE verb only: repeated Use emissions of the same name must
+        // not trigger the Give-loop cue.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = UseEmissions("Gorath", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedGiveTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_GiveLoopCapsule_RendersForRepeatedUnresolvedGive()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 3, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.Contains("## Give loop (target not in view)", prompt);
+        Assert.Contains("Gorath", prompt);
+        Assert.Contains("Give` to a DIFFERENT", prompt);
+        Assert.Contains("keep going", prompt); // travel-aware wording (allows still-approaching)
+        // Keys on the NPC target, not the item field.
+        Assert.DoesNotContain("Give` to `Ancient Amulet`", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_GiveLoopCapsule_OmittedWhenNoLoop()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = GiveEmissions("Gorath", "Ancient Amulet", 1, now);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildVisibleWorld(), es, null);
+        Assert.DoesNotContain("## Give loop (target not in view)", prompt);
+    }
+
+    [Fact]
+    public void RepeatedUnresolvedGiveTarget_NullForGuidTargetWithNamedItem()
+    {
+        // A guid/id-targeted Give (target has NO name=, but item does) must NOT count the
+        // ITEM name as the NPC target -> no false loop cue about an NPC named after the item.
+        // The target and item segments are parsed SEPARATELY, so the item name never leaks in.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = new EventStream();
+        for (int i = 0; i < 3; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = now, Kind = EventKind.GoalEmitted,
+                Text = "Give target=guid=0x50000101 item=name=\"Ancient Amulet\" source=llm:test",
+            });
+        Assert.Null(LlmGoalPolicy.RepeatedUnresolvedGiveTarget(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
     [Fact]
     public void RepeatedUnresolvedUseTarget_IgnoresTwoObjectItemUse()
     {
