@@ -11314,7 +11314,7 @@ public class LlmGoalPolicyTests
         Assert.True(capsule > 0);
         var capsuleText = p.Substring(capsule);
         Assert.Contains("NONE wielded - UNARMED", capsuleText);
-        Assert.Contains("Wield it to arm): Spadone", capsuleText);
+        Assert.Contains("`Wield` `Spadone` to arm", capsuleText);
     }
 
     [Fact]
@@ -11337,7 +11337,7 @@ public class LlmGoalPolicyTests
         Assert.True(capsule > 0);
         var capsuleText = p.Substring(capsule);
         Assert.Contains("missile ammo: EMPTY", capsuleText);
-        Assert.Contains("Wield it to load): Arrows", capsuleText);
+        Assert.Contains("`Wield` `Arrows` to load", capsuleText);
     }
 
     [Fact]
@@ -13541,7 +13541,10 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
-        Assert.Contains("melee weapon in your inventory (Wield it to arm): Training Spadone", prompt);
+        Assert.Contains("melee weapon in your inventory — `Wield` `Training Spadone` to arm", prompt);
+        // Pins the fix: the arm line tells the LLM to Wield by the exact name, NOT by the
+        // type-label "melee weapon" (which it was confabulating as a selector).
+        Assert.Contains("NOT the words \"melee weapon\"", prompt);
     }
 
     [Fact]
@@ -13579,8 +13582,8 @@ public class LlmGoalPolicyTests
         });
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
         Assert.Contains("weapon: NONE wielded - UNARMED", prompt);
-        Assert.Contains("melee weapon in your inventory (Wield it to arm): Lugian Hammer", prompt);
-        Assert.DoesNotContain("Wield it to arm): Training Spadone", prompt);
+        Assert.Contains("melee weapon in your inventory — `Wield` `Lugian Hammer` to arm", prompt);
+        Assert.DoesNotContain("`Wield` `Training Spadone` to arm", prompt);
     }
 
     [Fact]
@@ -13648,7 +13651,7 @@ public class LlmGoalPolicyTests
             ErrorCode = 0xFFFEu, ErrorLabel = "Unreachable",
         });
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null);
-        Assert.Contains("melee weapon in your inventory (Wield it to arm): Training Spadone", prompt);
+        Assert.Contains("melee weapon in your inventory — `Wield` `Training Spadone` to arm", prompt);
     }
 
     [Fact]
@@ -13710,7 +13713,7 @@ public class LlmGoalPolicyTests
             },
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("melee weapon nearby (Pickup it to arm): Hand Axe", prompt);
+        Assert.Contains("melee weapon nearby — `Pickup` `Hand Axe` to arm", prompt);
     }
 
     [Fact]
@@ -14279,7 +14282,7 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: missile weapon wielded; missile ammo: EMPTY", prompt);
-        Assert.Contains("missile ammo in your inventory (Wield it to load): Royal Dart", prompt);
+        Assert.Contains("missile ammo in your inventory — `Wield` `Royal Dart` to load", prompt);
     }
 
     [Fact]
@@ -14307,7 +14310,7 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: missile weapon wielded; missile ammo: EMPTY", prompt);
-        Assert.Contains("melee weapon in your inventory (Wield it to arm): Practice Blade", prompt);
+        Assert.Contains("melee weapon in your inventory — `Wield` `Practice Blade` to arm", prompt);
     }
 
     [Fact]
@@ -14336,7 +14339,7 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("weapon: missile weapon wielded; missile ammo: loaded", prompt);
-        Assert.DoesNotContain("melee weapon in your inventory (Wield it to arm)", prompt);
+        Assert.DoesNotContain("melee weapon in your inventory — `Wield`", prompt);
         // A combat-capable (ammo-loaded) missile weapon must NOT carry the
         // empty-missile UNARMED marker — check the weapon line itself (the rule
         // text on other lines legitimately mentions UNARMED).
@@ -14465,7 +14468,7 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("missile ammo: EMPTY, no loadable ammo", prompt);
         Assert.DoesNotContain("wield ammo to fire", prompt);
-        Assert.DoesNotContain("missile ammo in your inventory (Wield it to load)", prompt);
+        Assert.DoesNotContain("missile ammo in your inventory — `Wield`", prompt);
     }
 
     [Fact]
@@ -14491,7 +14494,7 @@ public class LlmGoalPolicyTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.Contains("missile ammo: EMPTY (wield ammo to fire)", prompt);
-        Assert.Contains("missile ammo in your inventory (Wield it to load): Royal Dart", prompt);
+        Assert.Contains("missile ammo in your inventory — `Wield` `Royal Dart` to load", prompt);
     }
 
     [Fact]
@@ -14556,7 +14559,7 @@ public class LlmGoalPolicyTests
             Visible = System.Array.Empty<VisibleObjectProjection>(),
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("missile ammo in your inventory (Wield it to load): Lead Pea", prompt);
+        Assert.Contains("missile ammo in your inventory — `Wield` `Lead Pea` to load", prompt);
         Assert.DoesNotContain("missile launcher + compatible ammo in your inventory", prompt);
     }
 
@@ -14672,7 +14675,7 @@ public class LlmGoalPolicyTests
             { Guid = 0x111u, Name = "Throwing Dagger", Wcid = 999u, ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null, AmmoType = null },
         });
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): Throwing Dagger", prompt);
+        Assert.Contains("throwable weapon in your inventory — `Wield` `Throwing Dagger` to arm", prompt);
     }
 
     [Fact]
@@ -14688,7 +14691,7 @@ public class LlmGoalPolicyTests
             { Guid = 0x111u, Name = "Loose Pebble", Wcid = 998u, ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null, AmmoType = null },
         });
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("throwable weapon in your inventory (Wield it to arm —", prompt);
+        Assert.DoesNotContain("throwable weapon in your inventory — `Wield`", prompt);
     }
 
     [Fact]

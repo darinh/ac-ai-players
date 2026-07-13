@@ -10444,16 +10444,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 dwellMinForHunt, EgressDwellMinutes) is string tappedOutFact)
             sb.AppendLine($"- {tappedOutFact}");
         if (bagWeapon is not null)
-            sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
+            sb.AppendLine($"- melee weapon in your inventory — `Wield` `{bagWeapon.Name}` to arm (use that exact `name`, NOT the words \"melee weapon\").");
         if (bagThrownWeapon is not null)
-            sb.AppendLine($"- throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): {bagThrownWeapon.Name}");
+            sb.AppendLine($"- throwable weapon in your inventory — `Wield` `{bagThrownWeapon.Name}` to arm (use that exact `name`; a thrown weapon is its own projectile, NO ammo needed).");
         if (groundWeapon is not null)
         {
             var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
-            sb.AppendLine($"- melee weapon nearby (Pickup it to arm): {groundWeapon.Name}{gwd}");
+            sb.AppendLine($"- melee weapon nearby — `Pickup` `{groundWeapon.Name}` to arm (use that exact `name`){gwd}.");
         }
         if (bagAmmo is not null)
-            sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
+            sb.AppendLine($"- missile ammo in your inventory — `Wield` `{bagAmmo.Name}` to load (use that exact `name`).");
         if (bagLauncherAmmo is { } bla1)
             sb.AppendLine(
                 "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
@@ -13738,16 +13738,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // requires a wielded missile weapon, which the gate excluded), so a
             // missile-empty bot was told ammo is EMPTY but never which to wield.
             if (bagWeapon is not null)
-                sb.AppendLine($"- melee weapon in your inventory (Wield it to arm): {bagWeapon.Name}");
+                sb.AppendLine($"- melee weapon in your inventory — `Wield` `{bagWeapon.Name}` to arm (use that exact `name`, NOT the words \"melee weapon\").");
             if (bagThrownWeapon is not null)
-                sb.AppendLine($"- throwable weapon in your inventory (Wield it to arm — a thrown weapon is its own projectile, NO ammo needed): {bagThrownWeapon.Name}");
+                sb.AppendLine($"- throwable weapon in your inventory — `Wield` `{bagThrownWeapon.Name}` to arm (use that exact `name`; a thrown weapon is its own projectile, NO ammo needed).");
             if (groundWeapon is not null)
             {
                 var gwd = groundWeapon.Distance is float gd ? $" d={gd:F1}" : "";
-                sb.AppendLine($"- melee weapon nearby (Pickup it to arm): {groundWeapon.Name}{gwd}");
+                sb.AppendLine($"- melee weapon nearby — `Pickup` `{groundWeapon.Name}` to arm (use that exact `name`){gwd}.");
             }
             if (bagAmmo is not null)
-                sb.AppendLine($"- missile ammo in your inventory (Wield it to load): {bagAmmo.Name}");
+                sb.AppendLine($"- missile ammo in your inventory — `Wield` `{bagAmmo.Name}` to load (use that exact `name`).");
             if (bagLauncherAmmo is { } bla2)
                 sb.AppendLine(
                     "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
