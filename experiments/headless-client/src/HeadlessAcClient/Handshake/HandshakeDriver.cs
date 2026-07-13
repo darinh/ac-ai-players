@@ -7606,7 +7606,7 @@ internal sealed class HandshakeDriver : IDisposable
                             tactics.Clear("allegiance-approve dispatched", eventStream);
                         }
                     }
-                    else if (goal is not null && goal.Kind == GoalKind.Explore)
+                    else if (goal is not null && (goal.Kind == GoalKind.Explore || goal.Kind == GoalKind.GoTo))
                     {
                         // `Explore{target}`, honor it: walk to that
                         // specific candidate (typically chosen from
@@ -7614,8 +7614,26 @@ internal sealed class HandshakeDriver : IDisposable
                         // block). Fall back to "farthest unvisited
                         // in 200u" only when the goal has no target
                         // or the target can't be resolved.
+                        //
+                        // `GoTo{target}` shares this branch: it is a DIRECTED
+                        // approach — resolve the named/guid target (live view,
+                        // remembered sighting, or the bot's own cross-landblock
+                        // route) and walk to it, stopping at the arrival radius
+                        // WITHOUT interacting (identical arrival semantics to a
+                        // targeted Explore: lockedGoalKind stays Explore so the
+                        // arrival is a no-op park). The ONLY difference from
+                        // Explore is that GoTo does NOT fall back to undirected
+                        // frontier/farthest-unvisited WANDER when its target does
+                        // not resolve — an unmet approach clears and re-deliberates
+                        // instead of drifting away from the intended target (the
+                        // `directedApproach` gate below). This gives the schema
+                        // `GoTo` verb a real executor; previously it was a dead
+                        // verb (no dispatch), so any policy cue that emitted `GoTo`
+                        // to approach a named target was silently dropped. Mechanical
+                        // execution of an LLM-chosen approach goal; no target choice here.
                         WorldObjectSnapshot? exploreTarget = null;
                         float bestDist = 0f;
+                        var directedApproach = goal.Kind == GoalKind.GoTo;
 
                         if (goal.Target is not null)
                         {
@@ -7895,7 +7913,7 @@ internal sealed class HandshakeDriver : IDisposable
                         // tick. Domain-general spatial search: reads only
                         // navmesh geometry + the bot's own visited-cell set,
                         // never object names/wcids/types/quest state.
-                        if (exploreTarget is null)
+                        if (exploreTarget is null && !directedApproach)
                         {
                             var frontier = TryChooseFrontierDest(
                                 tacticsSelfCell, frontierCellCooldownUntil);
@@ -7935,7 +7953,7 @@ internal sealed class HandshakeDriver : IDisposable
                         // door-USE pre-emptor, terminal cell-claim, AP
                         // cell-advance) is all inert; only the outdoor
                         // cell-slide consumes motionIndoorPathCells.
-                        if (exploreTarget is null)
+                        if (exploreTarget is null && !directedApproach)
                         {
                             // Hunt authorization for the optional frontier
                             // Mob-bias: the bot only steers toward remembered
@@ -7987,7 +8005,7 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
-                        if (exploreTarget is null)
+                        if (exploreTarget is null && !directedApproach)
                         {
                             // Original Explore{anywhere} behaviour:
                             // farthest unvisited within 200u. The
@@ -8033,10 +8051,25 @@ internal sealed class HandshakeDriver : IDisposable
 
                         if (exploreTarget is null)
                         {
-                            Console.WriteLine(
-                                $"[strategy] LLM-GOAL Explore: no fresh target in 200u; " +
-                                $"clearing so picker can deliberate again");
-                            tactics.Fail("explore: no fresh target", eventStream);
+                            if (directedApproach)
+                            {
+                                // A directed `GoTo` whose target did not resolve
+                                // (not in view, not remembered, no explored route):
+                                // clear and re-deliberate rather than drift off on
+                                // the undirected wander above (which is gated to
+                                // Explore). The LLM re-decides on its own cadence.
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL GoTo{{target}} unresolved (selector {goal.Target}); " +
+                                    $"clearing so the picker can deliberate again (a directed approach does not wander)");
+                                tactics.Fail("goto: target unresolved", eventStream);
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Explore: no fresh target in 200u; " +
+                                    $"clearing so picker can deliberate again");
+                                tactics.Fail("explore: no fresh target", eventStream);
+                            }
                         }
                         else
                         {
