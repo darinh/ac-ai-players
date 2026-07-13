@@ -563,7 +563,9 @@ public class WorldStateTests
         ushort seqPosition = 0,
         ObjectPosition? position = null,
         ObjectDescriptionFlag descriptionFlags = 0,
-        uint? monarchGuid = null)
+        uint? monarchGuid = null,
+        uint? containerGuid = null,
+        uint? wielderGuid = null)
     {
         var model = new ObjectModelData(
             PaletteId: null,
@@ -591,7 +593,7 @@ public class WorldStateTests
             PluralName: null, ItemsCapacity: null, ContainersCapacity: null, AmmoType: null,
             Value: null, Usable: null, UseRadius: null, TargetType: null, UiEffects: null,
             CombatUse: null, Structure: null, MaxStructure: null, StackSize: null, MaxStackSize: null,
-            ContainerGuid: null, WielderGuid: null, ValidLocations: null, CurrentlyWieldedLocation: null,
+            ContainerGuid: containerGuid, WielderGuid: wielderGuid, ValidLocations: null, CurrentlyWieldedLocation: null,
             Priority: null, RadarBlipColor: null, RadarBehavior: null, PScript: null, Workmanship: null,
             Burden: null, Spell: null, HouseOwner: null, HookItemTypes: null, MonarchGuid: monarchGuid,
             HookType: null, IconOverlay: null, IconUnderlay: null, MaterialType: null,
@@ -942,5 +944,104 @@ public class WorldStateTests
         ws.ApplySelfVitae(1.5f);                      // out of (0,1] -> ignored
         ws.ApplySelfVitae(-0.5f);                     // out of (0,1] -> ignored
         Assert.Equal(1.0, ws.SelfVitaeMultiplier!.Value); // unchanged by the noise
+    }
+
+    // ---- EvictDistantObjects (distant-object snapshot sweep) ----
+
+    [Fact]
+    public void EvictDistantObjects_DropsFarKeepsSelfNearAndOwned()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        // self at landblock 0xA8B5
+        ws.Apply(BuildObjectCreate(TestGuid, name: "self",
+            position: new ObjectPosition(0xA8B50024, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        // a NEAR object (landblock 0xA9B5, 1 block away) -> kept
+        const uint nearGuid = 0x80000001;
+        ws.Apply(BuildObjectCreate(nearGuid, name: "near",
+            position: new ObjectPosition(0xA9B50010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        // a FAR object (landblock 0xC0C0, well beyond radius) -> evicted
+        const uint farGuid = 0x80000002;
+        ws.Apply(BuildObjectCreate(farGuid, name: "far",
+            position: new ObjectPosition(0xC0C00010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        // an OWNED item (ContainerGuid == self, cell-less pack item) -> kept
+        const uint ownedGuid = 0x80000003;
+        ws.Apply(BuildObjectCreate(ownedGuid, name: "owned", containerGuid: TestGuid));
+
+        var evicted = ws.EvictDistantObjects(3);
+
+        Assert.Equal(1, evicted);              // only the far object
+        Assert.NotNull(ws.TryGet(TestGuid));   // self kept
+        Assert.NotNull(ws.TryGet(nearGuid));   // near kept
+        Assert.Null(ws.TryGet(farGuid));       // far evicted
+        Assert.NotNull(ws.TryGet(ownedGuid));  // owned kept
+    }
+
+    [Fact]
+    public void EvictDistantObjects_CellLessChild_InheritsParentDistance()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(TestGuid, name: "self",
+            position: new ObjectPosition(0xA8B50024, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        // NEAR parent (a nearby creature/vendor) + its cell-less children (equipped
+        // weapon via WielderGuid, stock item via ContainerGuid) -> all kept.
+        const uint nearParent = 0x80000010;
+        ws.Apply(BuildObjectCreate(nearParent, name: "nearVendor",
+            position: new ObjectPosition(0xA9B50010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        const uint nearWorn = 0x80000011, nearStock = 0x80000012;
+        ws.Apply(BuildObjectCreate(nearWorn, name: "nearWeapon", wielderGuid: nearParent));
+        ws.Apply(BuildObjectCreate(nearStock, name: "nearApple", containerGuid: nearParent));
+        // FAR parent + its cell-less children -> parent AND children evicted (the
+        // orphan-child leak gemini caught: children are cell-less so only the chain
+        // reaches the far cell).
+        const uint farParent = 0x80000020;
+        ws.Apply(BuildObjectCreate(farParent, name: "farVendor",
+            position: new ObjectPosition(0xC0C00010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        const uint farWorn = 0x80000021, farStock = 0x80000022;
+        ws.Apply(BuildObjectCreate(farWorn, name: "farWeapon", wielderGuid: farParent));
+        ws.Apply(BuildObjectCreate(farStock, name: "farApple", containerGuid: farParent));
+        // a cell-less ORPHAN (no parent at all) -> evicted.
+        const uint orphan = 0x80000030;
+        ws.Apply(BuildObjectCreate(orphan, name: "orphan"));
+
+        var evicted = ws.EvictDistantObjects(3);
+
+        Assert.Equal(4, evicted);                 // farParent + farWorn + farStock + orphan
+        Assert.NotNull(ws.TryGet(nearParent));    // near parent kept
+        Assert.NotNull(ws.TryGet(nearWorn));      // near child (wielded) kept
+        Assert.NotNull(ws.TryGet(nearStock));     // near child (contained) kept
+        Assert.Null(ws.TryGet(farParent));        // far parent evicted
+        Assert.Null(ws.TryGet(farWorn));          // far child evicted (no leak)
+        Assert.Null(ws.TryGet(farStock));         // far child evicted (no leak)
+        Assert.Null(ws.TryGet(orphan));           // parentless cell-less orphan evicted
+    }
+
+    [Fact]
+    public void EvictDistantObjects_RadiusZero_IsNoOp()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        ws.Apply(BuildObjectCreate(TestGuid,
+            position: new ObjectPosition(0xA8B50024, 1f, 2f, 3f, 1f, 0, 0, 0)));
+        const uint farGuid = 0x80000002;
+        ws.Apply(BuildObjectCreate(farGuid,
+            position: new ObjectPosition(0xC0C00010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+
+        Assert.Equal(0, ws.EvictDistantObjects(0)); // disabled
+        Assert.NotNull(ws.TryGet(farGuid));         // far kept
+    }
+
+    [Fact]
+    public void EvictDistantObjects_NoSelfCell_IsNoOp()
+    {
+        var ws = new WorldState();
+        // no SetSelf / no self position -> no self cell to measure from
+        const uint farGuid = 0x80000002;
+        ws.Apply(BuildObjectCreate(farGuid,
+            position: new ObjectPosition(0xC0C00010, 1f, 2f, 3f, 1f, 0, 0, 0)));
+
+        Assert.Equal(0, ws.EvictDistantObjects(3)); // cannot judge distance
+        Assert.NotNull(ws.TryGet(farGuid));
     }
 }

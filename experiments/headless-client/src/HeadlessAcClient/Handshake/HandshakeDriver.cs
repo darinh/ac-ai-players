@@ -765,6 +765,12 @@ internal sealed class HandshakeDriver : IDisposable
     {
         var deadline = DateTime.UtcNow.AddSeconds(seconds);
         var count = 0;
+        // world-snapshot distant-object eviction radius (landblocks). Resolved once;
+        // the periodic heartbeat below calls WorldState.EvictDistantObjects with it
+        // to bound the snapshot for a long exploration run (the server does not send
+        // an ObjectDelete for every object a fast-moving bot leaves behind).
+        var worldStateEvictBlockRadius = WorldObjectEviction.ResolveBlockRadius(
+            Environment.GetEnvironmentVariable("AC_BOTS_WORLDSTATE_EVICT_BLOCK_RADIUS"));
         var crcPass = 0;
         var crcFail = 0;
         uint lastReceivedSeq = 0;
@@ -10728,7 +10734,17 @@ internal sealed class HandshakeDriver : IDisposable
                 // actually accumulating (vs. silently dropping
                 // everything due to a sequence-gating bug).
                 if (count % 100 == 0)
+                {
+                    // Bound the snapshot: drop stale far objects the server never
+                    // sent an ObjectDelete for (a fast-exploring bot outruns the
+                    // delete broadcasts, so the snapshot otherwise grows unbounded).
+                    // Owned/nearby objects are preserved; see EvictDistantObjects.
+                    var evicted = worldState.EvictDistantObjects(worldStateEvictBlockRadius);
+                    if (evicted > 0)
+                        Console.WriteLine(
+                            $"[worldstate] evicted {evicted} distant objects (> {worldStateEvictBlockRadius} landblocks); now {worldState.ObjectCount}");
                     Console.WriteLine($"[world] {worldState.FormatSummary()}");
+                }
             }
             catch (OperationCanceledException)
             {

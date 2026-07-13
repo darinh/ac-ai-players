@@ -1780,6 +1780,69 @@ internal sealed class WorldState
     }
 
     /// <summary>
+    /// Drop world objects whose landblock is more than <paramref name="blockRadius"/>
+    /// blocks (Chebyshev) from the bot's own landblock — stale far objects the
+    /// server never sent an ObjectDelete for. A fast-exploring bot outruns the
+    /// server's delete broadcasts, so the snapshot otherwise grows without bound
+    /// (observed 127 -> 2513 over one run), bloating memory and the per-tick
+    /// nearest-N scan. PRESERVES: the self snapshot and anything owned by self (a
+    /// pack/worn item, or an item nested in a container the chain reaches self
+    /// through). Nearby objects (the current target, corpses being looted, visible
+    /// creatures/NPCs) are within the bot's own landblock group and always kept.
+    ///
+    /// A CELL-LESS child (an equipped monster weapon, a vendor's stock, an opened
+    /// corpse's contents — these arrive without a Position, so CellId is null) is
+    /// located via its parent up the ContainerGuid/WielderGuid chain: it inherits
+    /// the parent's distance, so it is evicted exactly when its parent is (fixing an
+    /// orphan leak — the server sends no ObjectDelete for a distant parent's
+    /// children). A cell-less object whose parent is missing or unresolvable (an
+    /// already-evicted parent, or none) is an orphan and is evicted too. A
+    /// non-positive <paramref name="blockRadius"/> is a no-op (returns 0). Pure
+    /// bookkeeping — no game knowledge, no decision-making, no target selection.
+    /// </summary>
+    internal int EvictDistantObjects(int blockRadius)
+    {
+        if (blockRadius <= 0) return 0;
+        if (Self is not WorldObjectSnapshot self || self.CellId is not uint selfCell) return 0;
+        if (SelfGuid is not uint selfGuid) return 0;
+
+        List<uint>? toEvict = null;
+        foreach (var kv in _objects)
+        {
+            if (ShouldEvictSnapshot(kv.Value, selfGuid, selfCell, blockRadius))
+                (toEvict ??= new List<uint>()).Add(kv.Key);
+        }
+        if (toEvict is null) return 0;
+        foreach (var g in toEvict) _objects.Remove(g);
+        return toEvict.Count;
+    }
+
+    /// <summary>
+    /// Eviction decision for one snapshot (see <see cref="EvictDistantObjects"/>).
+    /// Walks the container/wielder chain (bounded depth) to locate a cell-less
+    /// child: keep if the chain reaches self (owned) or a near-enough cell; evict if
+    /// it reaches a far cell or dead-ends (orphan). Reads only the snapshot map.
+    /// </summary>
+    private bool ShouldEvictSnapshot(WorldObjectSnapshot snap, uint selfGuid, uint selfCell, int blockRadius)
+    {
+        var cur = snap;
+        for (var depth = 0; depth < 8; depth++)
+        {
+            if (cur.Guid == selfGuid) return false;                               // self -> keep
+            if ((cur.ContainerGuid is uint cg && cg == selfGuid) ||
+                (cur.WielderGuid is uint wg && wg == selfGuid)) return false;     // owned by self -> keep
+            if (cur.CellId is uint cell)
+                return WorldObjectEviction.ShouldEvictByBlockDistance(selfCell, cell, blockRadius);
+            // Cell-less: locate via the parent (container first, else wielder).
+            var parentGuid = cur.ContainerGuid ?? cur.WielderGuid;
+            if (parentGuid is not uint pg || pg == cur.Guid) return true;         // no/self parent -> orphan
+            if (!_objects.TryGetValue(pg, out var parent)) return true;           // parent gone -> orphan
+            cur = parent;
+        }
+        return true; // pathologically deep chain -> evict
+    }
+
+    /// <summary>
     /// The <paramref name="count"/> objects closest to
     /// <paramref name="origin"/>, sorted ascending by distance.
     /// Tie-break: guid ascending (deterministic).
