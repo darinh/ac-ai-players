@@ -7573,6 +7573,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // descriptor sibling.
     private static readonly TimeSpan RepeatedDescriptorWieldWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedDescriptorWieldThreshold = 3;
+    // Sibling: repeated-Attack-of-a-fuzzy-DESCRIPTOR window + threshold. Like the Pickup/Wield
+    // descriptor siblings above but for Attack, whose monster selector rides the target field: an
+    // Attack carrying a type-descriptor (short_desc~= / name_contains, e.g. a category word like
+    // "monster") rather than a concrete monster name expresses "attack any monster matching this
+    // description"; the resolver binds only a SPECIFIC attackable target whose name matches, so
+    // when no visible attackable target's name/short-desc matches the descriptor it resolves to
+    // MISS every time and a fresh no-current-goal call re-emits the SAME descriptor Attack — a call
+    // storm in place (live: 105 `Attack name_contains="monster"` in one run, all MISS). The
+    // name-keyed Attack-loop detector parses only name="...", so it cannot see a descriptor
+    // selector — this is its descriptor sibling.
+    private static readonly TimeSpan RepeatedDescriptorAttackWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedDescriptorAttackThreshold = 3;
     // Sibling: repeated-Pickup-of-a-departed-NAME window + threshold. A name-keyed `Pickup`
     // (a concrete ground item or a monster corpse) whose named object has left the distance-
     // bounded `## Visible` (the item/corpse decayed, was taken, or the bot travelled past it)
@@ -7941,6 +7953,61 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return null;
     }
 
+    // Sibling for Attack: the fuzzy type-DESCRIPTOR (short_desc~= / name_contains) the bot has
+    // tried to `Attack` >= threshold times within the window that NO visible ATTACKABLE target's
+    // Name/ShortDesc matches. A descriptor Attack says "attack any monster matching this
+    // description" (e.g. the category word "monster") instead of naming a concrete monster; the
+    // Attack resolver binds only a SPECIFIC attackable target (a monster / hostile creature) whose
+    // name matches, so when nothing attackable in view matches the descriptor the goal resolves to
+    // MISS, clears, and a fresh no-current-goal call re-emits the SAME descriptor Attack — a call
+    // storm in place (live: an unarmed bot re-emitting target=name_contains="monster" many times,
+    // no monster's NAME literally containing "monster"). The name-keyed Attack-loop detector
+    // (RepeatedUnresolvedAttackTarget via CountRecentEmittedTargetNames) parses only name="...", so
+    // a descriptor selector is invisible to it; this is the descriptor sibling, mirroring
+    // RepeatedDescriptorPickup/Wield. Attack carries its monster selector in the TARGET field, so
+    // the descriptor is read from the target segment. Like the name-keyed siblings (which skip a
+    // name a VISIBLE object binds), this skips a descriptor a visible ATTACKABLE target matches
+    // (scoped to what an Attack could actually bind — see VisibleAttackableMatchesDescriptor,
+    // mirroring SelectorResolver.MatchesAttackable), so the cue fires only on a genuine no-attackable
+    // -match loop, never while a monster the bot could attack matches. Returns the descriptor VALUE
+    // (the bot's own emitted selector text) or null. A concrete name=/guid=/wcid Attack is handled
+    // by the name-keyed detector, not here. Pure: own emission history + perception; no game
+    // knowledge, no priority, no target choice.
+    internal static string? RepeatedDescriptorAttack(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+    {
+        if (events is null) return null;
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var ge in events.RecentGoalEmissions().Where(e => !string.IsNullOrEmpty(e.Text)))
+        {
+            if (ge.Utc < since) continue;
+            var txt = ge.Text!;
+            if (!txt.StartsWith("Attack", StringComparison.Ordinal)) continue;
+            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
+            if (ti < 0) continue;
+            // Isolate the target segment (up to the ` item=`/` source=` boundary) so a descriptor
+            // in another field is never read as the Attack target.
+            var ii = txt.IndexOf(" item=", ti, StringComparison.Ordinal);
+            var srcIdx = txt.IndexOf(" source=", ti, StringComparison.Ordinal);
+            int tEnd = ii >= 0 ? ii : (srcIdx >= 0 ? srcIdx : txt.Length);
+            // Count by the descriptor VALUE regardless of whether it was emitted as short_desc~= or
+            // name_contains, so the same intent under either kind accumulates as one loop.
+            if (DescriptorValueInSegment(txt.Substring(ti, tEnd - ti)) is not string value) continue;
+            counts[value] = counts.TryGetValue(value, out var c) ? c + 1 : 1;
+        }
+        foreach (var kv in counts.OrderByDescending(k => k.Value))
+        {
+            if (kv.Value < RepeatedDescriptorAttackThreshold) break;
+            // A visible ATTACKABLE target whose Name OR ShortDesc contains the value — the Attack
+            // could still resolve to it, so do not surface the no-match cue (mirrors the name-keyed
+            // siblings skipping a name a visible object binds).
+            if (world?.Visible is not null && VisibleAttackableMatchesDescriptor(world.Visible, kv.Key))
+                continue;
+            return kv.Key;
+        }
+        return null;
+    }
+
     // The fuzzy type-DESCRIPTOR value of a target segment — the quoted value of short_desc~="..."
     // or name_contains="..." (the selector forms that match an item by DESCRIPTION rather than by
     // exact name), or null if the segment carries neither (a concrete name=/guid=/wcid target).
@@ -7967,6 +8034,27 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         foreach (var v in visible)
         {
+            if ((!string.IsNullOrEmpty(v.ShortDesc)
+                    && v.ShortDesc.Contains(value, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrEmpty(v.Name)
+                    && v.Name.Contains(value, StringComparison.OrdinalIgnoreCase)))
+                return true;
+        }
+        return false;
+    }
+
+    // Attack-scoped variant of VisibleMatchesDescriptor: true when a visible object the Attack
+    // resolver could actually BIND — a server-Attackable, non-player target (mirrors
+    // SelectorResolver.MatchesAttackable) — has a Name/ShortDesc containing the descriptor value.
+    // The Attack descriptor loop-break uses this rather than the all-objects VisibleMatchesDescriptor
+    // so a descriptor matching only a NON-attackable object (an item / place the Attack cannot bind)
+    // does not wrongly suppress the no-match cue. Pure wire flags + string comparison.
+    private static bool VisibleAttackableMatchesDescriptor(
+        IReadOnlyList<VisibleObjectProjection> visible, string value)
+    {
+        foreach (var v in visible)
+        {
+            if (!v.IsAttackable || v.IsPlayer) continue;
             if ((!string.IsNullOrEmpty(v.ShortDesc)
                     && v.ShortDesc.Contains(value, StringComparison.OrdinalIgnoreCase))
                 || (!string.IsNullOrEmpty(v.Name)
@@ -13291,6 +13379,44 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"`{loopedWieldDisplay}` is for sale at a vendor, `Buy` it FIRST; if it is on the ground, " +
                 "`Pickup` it FIRST. Otherwise `Wield` a weapon that IS listed in your `## Inventory`, or acquire " +
                 $"one, instead of re-`Wield`-ing `{loopedWieldDisplay}`.");
+        }
+
+        // ── ## Attack loop (repeated monster-description Attack) — descriptor sibling of the Attack cue ──
+        // The bot re-emits `Attack` carrying a fuzzy type-DESCRIPTOR (short_desc~= / name_contains,
+        // e.g. the category word "monster") in the target field instead of a concrete monster name; the
+        // Attack resolver binds only a SPECIFIC attackable target named by its exact name, so when no
+        // visible attackable target's name/short-desc matches the goal resolves to MISS, clears, and a
+        // fresh no-current-goal call re-emits the SAME descriptor Attack (live: many
+        // target=name_contains="monster", no monster's NAME literally containing the descriptor word).
+        // The name-keyed Attack cue above parses only name="...", so a descriptor selector trips none of
+        // it; this is the descriptor sibling of that cue, mirroring the Wield/Pickup descriptor siblings.
+        // RepeatedDescriptorAttack returns a looped descriptor ONLY when NO visible ATTACKABLE target's
+        // Name/ShortDesc matches it, so the cue fires on a genuine no-match loop, never while a monster
+        // the bot could attack matches. UNLIKE Wield/Pickup, an Attack can also STEER toward a monster
+        // matching the descriptor that was seen earlier but is now out of view (SightedTargetResolver
+        // with attackableOnly), and a salient wake (e.g. LandblockChanged as the bot crosses toward it)
+        // can re-emit the descriptor >= threshold times WHILE that steer is productively advancing. The
+        // detector only sees Visible (not the remembered-sighting / route state), so the cue WORDING is
+        // travel-aware (mirroring the name-keyed `## Attack loop` cue): it tells the LLM to keep going if
+        // its position is changing toward a remembered match, and only redirect if position is NOT
+        // changing — so a productive out-of-view chase is never told "no progress". Informational, NOT a
+        // hard drop. No game knowledge (the descriptor is the bot's own emitted goal text echoed back),
+        // no priority, no target choice.
+        if (RepeatedDescriptorAttack(
+                world, events, DateTimeOffset.UtcNow - RepeatedDescriptorAttackWindow) is string loopedAttackDesc
+            && OneLine(loopedAttackDesc) is string loopedAttackDescDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Attack loop (repeated monster-description Attack)");
+            sb.AppendLine(
+                $"- you have tried several times to `Attack` a monster matching the description `{loopedAttackDescDisplay}`, " +
+                "but NO attackable target matching it is in view in `## Nearest objects` — `Attack` targets a SPECIFIC " +
+                "monster named by its exact `name`, not a category word. If you are TRAVELLING toward a monster matching " +
+                $"`{loopedAttackDescDisplay}` that you saw earlier and closing in (your `landblock`/position is changing as " +
+                "you go), keep going — it will come into view. But if your position is NOT changing, re-emitting the same " +
+                "description makes no progress: `Attack` a monster that IS listed in `## Nearest objects` by its exact " +
+                "`name`, or emit `Explore{target: {name: \"anywhere\"}}` to travel toward new ground and find one, instead " +
+                "of re-`Attack`-ing a description nothing attackable in view matches.");
         }
 
         // ── ## Wield loop (repeated weapon-description Wield) — descriptor sibling of the Wield cue ──
