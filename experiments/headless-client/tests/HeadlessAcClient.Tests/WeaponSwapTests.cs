@@ -381,4 +381,32 @@ public class WeaponSwapTests
         Assert.Equal(new[] { 0x999u }, WeaponSwap.FindBlockingWieldedItems(target, inv));
         Assert.Equal(0x999u, WeaponSwap.FindBlockingWieldedWeapon(target, inv));
     }
+
+    // ---- IsAmmolessLauncher ----------------------------------------------
+
+    [Theory]
+    // itemType, ammoType (0 => null), validLoc, hasLoadedAmmo, expected
+    [InlineData(Missile, 1, MissileSlot, false, true)]   // ammoless launcher -> excluded
+    [InlineData(Missile, 1, MissileSlot, true,  false)]  // launcher WITH loaded ammo
+    [InlineData(Missile, 0, MissileSlot, false, false)]  // THROWN weapon (no AmmoType)
+    [InlineData(Missile, 1, AmmoSlot,    false, false)]  // bag AMMO (ammo slot, not main-weapon)
+    [InlineData(Melee,   0, MeleeSlot,   false, false)]  // melee weapon
+    [InlineData(Armor,   0, BodyArmor,   false, false)]  // armor
+    [InlineData(Caster,  0, HeldSlot,    false, false)]  // caster (no missile bit)
+    public void IsAmmolessLauncher_TruthTable(
+        uint itemType, int ammoType, uint validLoc, bool hasLoadedAmmo, bool expected)
+    {
+        ushort? ammo = ammoType == 0 ? (ushort?)null : (ushort)ammoType;
+        Assert.Equal(expected,
+            WeaponSwap.IsAmmolessLauncher(itemType, ammo, validLoc, hasLoadedAmmo));
+    }
+
+    [Fact]
+    public void IsAmmolessLauncher_NullFields_NotLauncher()
+    {
+        // Defensive: missing wire fields never classify as an ammoless launcher.
+        Assert.False(WeaponSwap.IsAmmolessLauncher(null, 1, MissileSlot, false));
+        Assert.False(WeaponSwap.IsAmmolessLauncher(Missile, 1, null, false));
+        Assert.False(WeaponSwap.IsAmmolessLauncher(Missile, null, MissileSlot, false));
+    }
 }

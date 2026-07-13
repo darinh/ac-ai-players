@@ -263,24 +263,14 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .Where(i => !_recentProposedGuids.Contains(i.Guid))
-            // Do NOT auto-wield a missile LAUNCHER with no loaded ammo. It cannot
-            // attack (the server cancels a launcher shot with no ammo) yet wielding
-            // it forces Missile combat mode and displaces a usable weapon, leaving
-            // the bot NOT combat-capable (the observed armed=False regression: the
-            // fallback swapped a wielded melee weapon for an ammoless launcher). A
-            // thrown missile weapon (AmmoType null — it is its own projectile) and
-            // a launcher WITH loaded ammo are unaffected. The MAIN-WEAPON valid-slot
-            // requirement is essential: bag AMMO also carries the MissileWeapon
-            // ItemType bit AND a non-null AmmoType, and differs only by valid slot
-            // (ammo → MissileAmmoSlot, launcher → a main-weapon slot); without this
-            // the guard would wrongly skip loadable ammo. Mirrors the launcher+ammo
-            // leg of IsCombatCapable; the LLM may still explicitly wield a launcher
-            // (e.g. when it plans to load ammo). Pure wire-state precondition
-            // (ItemType/AmmoType/valid-slot + ammo-slot occupancy); no game knowledge.
-            .Where(i => !(i.ValidLocations is uint vloc && (vloc & WeaponSwap.MainWeaponSlotMask) != 0
-                          && i.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0
-                          && i.AmmoType is not null
-                          && !nqpHasLoadedAmmo))
+            // Do NOT auto-wield a missile LAUNCHER with no loaded ammo — it can
+            // never attack yet displaces a usable weapon and blocks unarmed melee
+            // (the observed armed=False regression). See WeaponSwap.IsAmmolessLauncher
+            // for the full rationale (incl. why the main-weapon-slot check is needed
+            // to avoid mis-skipping loadable bag ammo). The LLM may still explicitly
+            // wield a launcher (e.g. when it plans to load ammo).
+            .Where(i => !WeaponSwap.IsAmmolessLauncher(
+                i.ItemType, i.AmmoType, i.ValidLocations, nqpHasLoadedAmmo))
             // Do NOT auto-wield gear whose wield would dequip a currently-
             // wielded WEAPON — a loadout DOWNGRADE the LLM owns, not the
             // mechanical fallback. The earlier guard only caught a redundant
