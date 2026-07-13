@@ -3297,7 +3297,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // env-resolved re-engage fraction the Motor uses, so a configured
                 // (lower) gate takes effect here too — not the fixed default.
                 selfHealthSuppressed: ChainCombatSelfHealthSuppressed(
-                    world.Self.HealthCurrent, world.Self.HealthObservedPeak));
+                    world.Self.HealthCurrent, world.Self.HealthObservedPeak),
+                // Yield the autonomous chain while the bot is in an active
+                // death-spiral so the LLM (with the survival-caution capsule) owns
+                // the retreat/relocate decision, instead of the chain re-minting
+                // Attacks into the kind that is winning the exchange between the
+                // bot's health regens. Same death-rate signal the survival cues use
+                // (RecentOwnDeathCount within DeathSpiralWindow >= DeathSpiralMinDeaths);
+                // config-flagged so it is a byte-identical revert when disabled.
+                deathSpiralActive: ChainSuppressInDeathSpiral
+                    && RecentOwnDeathCount(nowUtc) >= DeathSpiralMinDeaths);
             if (chainTarget is not null)
             {
                 _combatChainCount++;
@@ -7311,6 +7320,39 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Environment.GetEnvironmentVariable("AC_BOTS_CHAIN_INTERRUPT_MULTI_ATTACKER"));
 
     internal static bool ResolveChainInterruptOnMultiAttacker(string? envValue)
+    {
+        if (string.IsNullOrWhiteSpace(envValue)) return true; // default ON
+        var v = envValue.Trim();
+        return !(string.Equals(v, "0", StringComparison.Ordinal)
+              || string.Equals(v, "false", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "off", StringComparison.OrdinalIgnoreCase)
+              || string.Equals(v, "no", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Suppress the autonomous combat chain while the bot is in an active
+    // death-spiral (RecentOwnDeathCount >= DeathSpiralMinDeaths within
+    // DeathSpiralWindow). The chain decomposes an LLM-authored kill-count
+    // commitment into autonomous Attacks WITHOUT a per-swing LLM call; its only
+    // self-preservation gate is the per-tick self-health suppression, which stops
+    // a mint while the bot is already hurt but re-mints the moment health regens
+    // between fights. When the bot is repeatedly DYING, that re-mint feeds the
+    // spiral: the committed kind may have a MIXED record (a kill or two, so
+    // IsBeatenKind — which only excludes ZERO-kill kinds — does not skip it) yet
+    // still be killing the bot faster than it kills, and each death stacks a
+    // penalty that lowers effective max HP, so blind continuation digs the hole
+    // deeper. Yielding routes control to the LLM, which owns the retreat decision
+    // (the survival-caution capsule + the spend-XP death-spiral exception already
+    // tell it to withdraw to safer content until the penalty fades). This NEVER
+    // originates combat and assigns no target urgency; it only DECLINES to
+    // autonomously CONTINUE combat while a mechanical death-rate signal is tripped
+    // — the same category as the self-health gate. Own death-outcome counts + a
+    // timer window; no game knowledge. Env AC_BOTS_CHAIN_DEATH_SPIRAL_SUPPRESS =
+    // 0/false/off/no disables (byte-identical revert).
+    internal static readonly bool ChainSuppressInDeathSpiral =
+        ResolveChainSuppressInDeathSpiral(
+            Environment.GetEnvironmentVariable("AC_BOTS_CHAIN_DEATH_SPIRAL_SUPPRESS"));
+
+    internal static bool ResolveChainSuppressInDeathSpiral(string? envValue)
     {
         if (string.IsNullOrWhiteSpace(envValue)) return true; // default ON
         var v = envValue.Trim();
@@ -14746,7 +14788,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// returned target is identical). <paramref name="skipReason"/> is null when a
     /// target is returned, else a stable tag (chain-disabled / budget-exhausted /
     /// no-visible / no-active-commitment / not-combat-capable / self-health-below-reengage /
-    /// no-matching-monster)
+    /// death-spiral-retreat / no-matching-monster)
     /// so the chain-never-fires tempo gap is observable in the log. Pure
     /// classification; no behavior change, no game knowledge.
     /// </summary>
@@ -14762,7 +14804,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         float perceptionRadius = WorldStateProjection.DefaultVisibleRadiusUnits,
         bool combatCapable = true,
         bool canUnarmedMelee = false,
-        bool selfHealthSuppressed = false)
+        bool selfHealthSuppressed = false,
+        bool deathSpiralActive = false)
     {
         skipReason = null;
         if (!enabled) { skipReason = "chain-disabled"; return null; }
@@ -14786,6 +14829,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the suppressed flag from self-health, mirroring CombatDisengage
         // .IsCombatSuppressed. Pure self-state gate; the LLM still chose WHAT to do.
         if (selfHealthSuppressed) { skipReason = "self-health-below-reengage"; return null; }
+        // Do not mint an autonomous Attack while the bot is in an active death-spiral
+        // (caller passes deathSpiralActive = RecentOwnDeathCount >= DeathSpiralMinDeaths).
+        // The self-health gate above only stops a mint while the bot is CURRENTLY hurt;
+        // it re-mints as soon as health regens between fights, so a bot that keeps
+        // DYING would otherwise chain right back into the same losing exchange. A kind
+        // with a MIXED record (a kill or two, so IsBeatenKind — which only excludes
+        // ZERO-kill kinds — does not skip it) can still be winning that exchange, and
+        // each death stacks a penalty that lowers effective max HP. Yield so the
+        // LLM — which sees the survival-caution capsule — owns the retreat/relocate
+        // decision instead of the Motor blindly continuing the commitment. Pure
+        // self-outcome + timer gate; the LLM still chose WHAT to do.
+        if (deathSpiralActive) { skipReason = "death-spiral-retreat"; return null; }
         if (visible is null || visible.Count == 0) { skipReason = "no-visible"; return null; }
         if (!CombatCommitment.IsActiveKillCommitment(top, out var nameFilter)) { skipReason = "no-active-commitment"; return null; }
 
