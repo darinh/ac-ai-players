@@ -6169,6 +6169,128 @@ public class LlmGoalPolicyTests
         Assert.Contains("NO item matching it is in view", prompt);
     }
 
+    private static EventStream AttackDescriptorEmissions(string targetSeg, int count, System.DateTimeOffset utc)
+    {
+        var es = new EventStream();
+        for (int i = 0; i < count; i++)
+            es.Append(new StreamEvent
+            {
+                Sequence = -1, Utc = utc, Kind = EventKind.GoalEmitted,
+                Text = $"Attack target={targetSeg} item= source=llm:test",
+            });
+        return es;
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_ReturnsValueForRepeatedNameContainsAttack()
+    {
+        // The live shape: 3 Attack emissions carrying target=name_contains="monster" (a category
+        // word) with NO visible attackable target matching -> the looped descriptor value.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 3, now);
+        Assert.Equal("monster",
+            LlmGoalPolicy.RepeatedDescriptorAttack(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_ReturnsValueForRepeatedShortDescAttack()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("short_desc~=\"undead thing\"", 3, now);
+        Assert.Equal("undead thing",
+            LlmGoalPolicy.RepeatedDescriptorAttack(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_NullWhenVisibleAttackableNameMatches()
+    {
+        // A VISIBLE attackable monster whose NAME contains the descriptor value -> the Attack could
+        // still resolve to it, so the no-match cue is suppressed.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x80009001u, Name = "Monster Beast", Distance = 4f,
+            IsCreature = true, IsMonster = true, IsAttackable = true,
+        });
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorAttack(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_FiresWhenOnlyNonAttackableMatches()
+    {
+        // A visible NON-attackable object (an item whose name contains the descriptor word) does NOT
+        // suppress the cue: the Attack cannot bind it (attackable-scoped), so the loop still surfaces.
+        // KEY difference from the all-objects VisibleMatchesDescriptor the Pickup/Wield siblings use.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x80009002u, Name = "Yellow Monster Seed", Distance = 4f,
+            IsAttackable = false,
+        });
+        Assert.Equal("monster",
+            LlmGoalPolicy.RepeatedDescriptorAttack(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_FiresWhenVisibleAttackableIsPlayer()
+    {
+        // A visible player carrying the Attackable bit + a matching name must NOT suppress the cue
+        // (an Attack never binds a fellow player -> the descriptor still resolves to nothing).
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 3, now);
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x50000099u, Name = "Monster Hunter", Distance = 4f,
+            IsCreature = true, IsAttackable = true, IsPlayer = true,
+        });
+        Assert.Equal("monster",
+            LlmGoalPolicy.RepeatedDescriptorAttack(world, es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_NullForConcreteNameAttack()
+    {
+        // A concrete name= Attack is handled by the name-keyed detector, not here.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name=\"Drudge\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorAttack(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_NullBelowThreshold()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 2, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorAttack(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void RepeatedDescriptorAttack_IgnoresNonAttackVerbWithSameDescriptor()
+    {
+        // A Pickup carrying the same descriptor must not count toward an Attack loop.
+        var now = System.DateTimeOffset.UtcNow;
+        var es = PickupEmissions("name_contains=\"monster\"", 3, now);
+        Assert.Null(LlmGoalPolicy.RepeatedDescriptorAttack(BuildVisibleWorld(), es, now.AddMinutes(-3)));
+    }
+
+    [Fact]
+    public void BuildUserPrompt_AttackLoopCapsule_RendersForRepeatedDescriptorAttack()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var es = AttackDescriptorEmissions("name_contains=\"monster\"", 3, now);
+        // BuildInventoryWorld has an empty Visible list -> no attackable object matches.
+        var prompt = LlmGoalPolicy.BuildUserPrompt(BuildInventoryWorld(), es, null);
+        Assert.Contains("## Attack loop (repeated monster-description Attack)", prompt);
+        Assert.Contains("description `monster`", prompt);
+        Assert.Contains("NO attackable target matching it is in view", prompt);
+        // Travel-aware wording (mirrors the name-keyed ## Attack loop cue): does NOT claim absolute
+        // "no progress" when the bot may be steering toward a remembered out-of-view match.
+        Assert.Contains("If you are TRAVELLING toward", prompt);
+        Assert.Contains("if your position is NOT changing", prompt);
+    }
+
     [Fact]
     public void BuildUserPrompt_PickupLoopCapsule_OmittedForConcreteNamePickup()
     {
