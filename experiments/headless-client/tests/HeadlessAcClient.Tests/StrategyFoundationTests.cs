@@ -682,6 +682,101 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void SelectorResolver_AttackableOnly_SkipsNonCreatureItemPicksMonster()
+    {
+        // Live bug: an Attack `name_contains="monster"` bound a NON-creature
+        // "Yellow Monster Seed" (its name contains "monster") because the live
+        // resolver only excluded corpses/dead guids. attackableOnly must skip
+        // the item and pick the attackable monster even when the item is NEARER.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(5f, 96f, 0f));
+        // Non-creature item (no Creature bit) NEAR the bot.
+        SeedSnapshot(ws, ItemGuid, "Yellow Monster Seed", wcid: 9001u, itemType: 0u, cellId: 0x86020001u,
+            position: new Vector3(10f, 96f, 0f));
+        // Attackable monster (Creature + Attackable) FAR from the bot.
+        SeedSnapshot(ws, MobGuid, "Monster Beast", wcid: 9002u, itemType: 0x10u, cellId: 0x86020001u,
+            position: new Vector3(50f, 96f, 0f),
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var self = ws.TryGet(SelfGuid);
+        var sel = new Selector { NameContains = "monster" };
+        // Default (no attackableOnly) picks the NEAR non-creature item.
+        Assert.Equal(ItemGuid, SelectorResolver.ResolveSingleNearest(sel, ws, self)!.Guid);
+        // attackableOnly skips the item and returns the attackable (far) monster.
+        Assert.Equal(MobGuid,
+            SelectorResolver.ResolveSingleNearest(sel, ws, self, attackableOnly: true)!.Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_Resolve_AttackableOnly_KeepsOnlyMonster()
+    {
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, ItemGuid, "Yellow Monster Seed", wcid: 9001u, itemType: 0u, cellId: 0x86020001u);
+        SeedSnapshot(ws, MobGuid, "Monster Beast", wcid: 9002u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var sel = new Selector { NameContains = "monster" };
+        // Default: both the item and the monster match by name.
+        Assert.Equal(2, SelectorResolver.Resolve(sel, ws).Count);
+        // attackableOnly: only the attackable monster remains.
+        var attackOnly = SelectorResolver.Resolve(sel, ws, attackableOnly: true);
+        Assert.Single(attackOnly);
+        Assert.Equal(MobGuid, attackOnly[0].Guid);
+    }
+
+    [Fact]
+    public void SelectorResolver_AttackableOnly_ExcludesPlayer()
+    {
+        // A player carries the Creature+Attackable wire profile a monster has
+        // but is guid-band excluded from IsMonster; attackableOnly must not let
+        // an Attack bind a fellow player (players-are-not-monsters invariant).
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        const uint OtherPlayerGuid = 0x50000099u; // player guid band
+        SeedSnapshot(ws, OtherPlayerGuid, "Monster Hunter", wcid: 1u, itemType: 0x10u, cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable);
+
+        var sel = new Selector { NameContains = "monster" };
+        // Default matches the player by name.
+        Assert.Single(SelectorResolver.Resolve(sel, ws));
+        // attackableOnly excludes the player.
+        Assert.Empty(SelectorResolver.Resolve(sel, ws, attackableOnly: true));
+    }
+
+    [Fact]
+    public void SelectorResolver_AttackableOnly_KeepsAttackableNonMonsterCreature()
+    {
+        // Self-defense: the autonomous combat fallback emits Attack for ANY
+        // observed-hostile non-player creature. A hostile creature carrying a
+        // radar-blip color is Attackable but IsMonster=false (the composite
+        // excludes radar-blip creatures), so the filter must use the RAW
+        // Attackable bit and KEEP it — gating on IsMonster would drop this valid
+        // self-defense attack.
+        var ws = new WorldState();
+        ws.SetSelf(SelfGuid);
+        SeedSnapshot(ws, SelfGuid, "Headless", wcid: 1u, itemType: 0u, cellId: 0x86020001u);
+        // Creature + Attackable + RadarBlipColor (weenieFlags 0x100000).
+        const uint HostileNpcGuid = 0x90000055u;
+        SeedSnapshot(ws, HostileNpcGuid, "Enraged Townsperson", wcid: 5u, itemType: 0x10u,
+            cellId: 0x86020001u,
+            objectDescriptionFlags: (uint)ObjectDescriptionFlag.Attackable,
+            weenieFlags: 0x100000u);
+        // Precondition: this target is NOT IsMonster (radar-blip) but IS Attackable.
+        Assert.False(EntityClassifier.IsMonster(HostileNpcGuid, 0x10u,
+            (uint)ObjectDescriptionFlag.Attackable, 0x100000u));
+
+        var kept = SelectorResolver.Resolve(
+            new Selector { Name = "Enraged Townsperson" }, ws, attackableOnly: true);
+        Assert.Single(kept);
+        Assert.Equal(HostileNpcGuid, kept[0].Guid);
+    }
+
+    [Fact]
     public void SelectorResolver_ExcludeGuids_SkipsKilledGuid_PicksNextNearest()
     {
         // Attack resolution passes the recently-killed guid set. The NEAR golem

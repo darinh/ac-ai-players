@@ -42,12 +42,19 @@ internal static class SightedTargetResolver
     /// sightings in the same landblock (upper 16 bits) are considered.</param>
     /// <param name="excluded">SightedLocation ids to skip (e.g. on
     /// revisit cooldown). May be null.</param>
+    /// <param name="attackableOnly">When true, only a sighting whose wire
+    /// classification is an attackable creature (<see cref="EntityKind.Mob"/>)
+    /// may match — used by the Attack path so a combat verb never binds a
+    /// non-creature (an item whose name merely contains a selector word) or a
+    /// non-attackable creature. The Explore path leaves this false (any
+    /// remembered location is a valid walk destination).</param>
     public static SightedLocation? Resolve(
         IReadOnlyList<SightedLocation> sighted,
         Selector selector,
         uint currentCellId,
-        IReadOnlySet<Guid>? excluded = null)
-        => ResolveCore(sighted, selector, currentCellId, sameLandblock: true, excluded);
+        IReadOnlySet<Guid>? excluded = null,
+        bool attackableOnly = false)
+        => ResolveCore(sighted, selector, currentCellId, sameLandblock: true, excluded, attackableOnly);
 
     /// <summary>
     /// Returns the best remembered match for <paramref name="selector"/>
@@ -61,8 +68,28 @@ internal static class SightedTargetResolver
         IReadOnlyList<SightedLocation> sighted,
         Selector selector,
         uint currentCellId,
-        IReadOnlySet<Guid>? excluded = null)
-        => ResolveCore(sighted, selector, currentCellId, sameLandblock: false, excluded);
+        IReadOnlySet<Guid>? excluded = null,
+        bool attackableOnly = false)
+        => ResolveCore(sighted, selector, currentCellId, sameLandblock: false, excluded, attackableOnly);
+
+    /// <summary>
+    /// True when a sighting of <paramref name="kind"/> is a valid out-of-view
+    /// ATTACK-steer destination — a wire-classified attackable monster
+    /// (<see cref="EntityKind.Mob"/>). A sighting carries only the coarse
+    /// EntityKind (no raw Attackable bit), and this path STEERS the bot toward
+    /// a remembered target to HUNT it; a non-creature sighting (an item / place
+    /// → <see cref="EntityKind.Unknown"/>) or a non-monster creature (NPC /
+    /// vendor / healer → <see cref="EntityKind.NPC"/>) is not a hunt
+    /// destination, so routing an out-of-view Attack toward it only walks the
+    /// bot to coordinates where no attack can land. (Self-defense against a
+    /// hostile creature is an IN-VIEW event resolved by the live
+    /// SelectorResolver, which uses the finer raw Attackable bit and so is
+    /// unaffected by this out-of-view hunt-steer.) A player sighting is
+    /// <see cref="EntityKind.Unknown"/> (guid-aware) and thus excluded too.
+    /// Pure wire classification; assigns no priority and hardcodes no names.
+    /// </summary>
+    internal static bool IsAttackableSightingKind(EntityKind kind)
+        => kind == EntityKind.Mob;
 
     /// <summary>
     /// Shared matcher. <paramref name="sameLandblock"/> selects whether a
@@ -74,7 +101,8 @@ internal static class SightedTargetResolver
         Selector selector,
         uint currentCellId,
         bool sameLandblock,
-        IReadOnlySet<Guid>? excluded)
+        IReadOnlySet<Guid>? excluded,
+        bool attackableOnly = false)
     {
         if (sighted is null || sighted.Count == 0 || selector is null)
             return null;
@@ -101,6 +129,13 @@ internal static class SightedTargetResolver
                  !s.Name.Contains(selector.NameContains!, StringComparison.OrdinalIgnoreCase)))
                 continue;
             if (hasWcid && s.Wcid != selector.Wcid) continue;
+            // An Attack destination must be an attackable creature. A sighting
+            // can match the selector by NAME yet be a non-creature (an item
+            // whose name merely contains a selector word) or a non-attackable
+            // creature; routing an Attack toward it only walks the bot to
+            // coordinates where nothing can be attacked. Pure wire
+            // classification; the LLM still chose the selector.
+            if (attackableOnly && !IsAttackableSightingKind(s.Kind)) continue;
 
             if (best is null || s.LastSeenUtc > best.LastSeenUtc)
                 best = s;

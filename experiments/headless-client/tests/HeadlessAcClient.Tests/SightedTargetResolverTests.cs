@@ -264,4 +264,95 @@ public sealed class SightedTargetResolverTests : IDisposable
 
         Assert.Null(hit);
     }
+
+    // ─── attackableOnly (an Attack must bind an attackable creature) ──────
+    // The Attack path passes attackableOnly:true so a combat verb never
+    // routes the bot to a sighting that merely matches the selector by NAME
+    // but is a non-creature (an item) or a non-attackable creature. Live bug:
+    // an Attack `name_contains="monster"` bound a non-creature "Yellow Monster
+    // Seed" in another landblock and walked a 28-hop route to attack nothing.
+
+    [Fact]
+    public void IsAttackableSightingKind_only_true_for_mob()
+    {
+        Assert.True(SightedTargetResolver.IsAttackableSightingKind(EntityKind.Mob));
+        foreach (var kind in new[]
+        {
+            EntityKind.Unknown, EntityKind.NPC, EntityKind.Player, EntityKind.Item,
+            EntityKind.Portal, EntityKind.Door, EntityKind.Vendor, EntityKind.Healer,
+            EntityKind.Lifestone, EntityKind.Corpse,
+        })
+            Assert.False(SightedTargetResolver.IsAttackableSightingKind(kind), $"kind={kind}");
+    }
+
+    [Fact]
+    public void Resolve_attackableOnly_skips_non_creature_but_default_binds_it()
+    {
+        var g = NewGraph();
+        // A non-creature item whose NAME contains the selector word "monster"
+        // (ClassifySighting labels a non-creature EntityKind.Unknown).
+        g.RecordSightedLocation(CellA, new Vector3(5, 0, 5), 100u, "Yellow Monster Seed",
+            EntityKind.Unknown, null, _t0);
+
+        // Attack path: declines the item — you cannot attack it.
+        Assert.Null(SightedTargetResolver.Resolve(
+            g.SnapshotSighted(), new Selector { NameContains = "monster" }, CellB,
+            attackableOnly: true));
+
+        // Explore path (default false): still binds it — byte-identical prior
+        // behaviour (any remembered location is a valid walk destination).
+        var explore = SightedTargetResolver.Resolve(
+            g.SnapshotSighted(), new Selector { NameContains = "monster" }, CellB);
+        Assert.NotNull(explore);
+        Assert.Equal("Yellow Monster Seed", explore!.Name);
+    }
+
+    [Fact]
+    public void Resolve_attackableOnly_returns_mob()
+    {
+        var g = NewGraph();
+        g.RecordSightedLocation(CellA, new Vector3(5, 0, 5), 100u, "Monster Beast",
+            EntityKind.Mob, null, _t0);
+
+        var hit = SightedTargetResolver.Resolve(
+            g.SnapshotSighted(), new Selector { NameContains = "monster" }, CellB,
+            attackableOnly: true);
+
+        Assert.NotNull(hit);
+        Assert.Equal("Monster Beast", hit!.Name);
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_attackableOnly_skips_non_creature()
+    {
+        var g = NewGraph();
+        g.RecordSightedLocation(OtherLandblockCell, new Vector3(5, 0, 5), 100u, "Yellow Monster Seed",
+            EntityKind.Unknown, null, _t0);
+
+        Assert.Null(SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { NameContains = "monster" }, CellA,
+            attackableOnly: true));
+    }
+
+    [Fact]
+    public void ResolveCrossLandblock_attackableOnly_picks_mob_over_more_recent_non_creature()
+    {
+        var g = NewGraph();
+        // Both match NameContains="monster"; the non-creature was seen MORE
+        // recently (would win the plain tie-break), but attackableOnly must
+        // still return the attackable Mob and never the item.
+        const uint mobCell  = 0x8603001Au; // lb 0x8603
+        const uint itemCell = 0x8604002Bu; // lb 0x8604
+        g.RecordSightedLocation(mobCell, new Vector3(5, 0, 5), 100u, "Monster Beast",
+            EntityKind.Mob, null, _t0);
+        g.RecordSightedLocation(itemCell, new Vector3(9, 0, 9), 101u, "Yellow Monster Seed",
+            EntityKind.Unknown, null, _t0.AddSeconds(60));
+
+        var hit = SightedTargetResolver.ResolveCrossLandblock(
+            g.SnapshotSighted(), new Selector { NameContains = "monster" }, CellA,
+            attackableOnly: true);
+
+        Assert.NotNull(hit);
+        Assert.Equal("Monster Beast", hit!.Name);
+    }
 }
