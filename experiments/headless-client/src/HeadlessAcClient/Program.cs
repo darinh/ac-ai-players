@@ -14,6 +14,7 @@
 // of the spike doesn't *need* the API yet.
 
 using System;
+using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading;
@@ -38,6 +39,11 @@ internal static class Program
         // background thread or an unobserved Task that bypasses the try/catch below)
         // logs its full stack instead of ending the run silently. See CrashDiagnostics.
         CrashDiagnostics.Install();
+
+        // Capture the process start as early as possible: the graceful-shutdown
+        // watch (below) honours ONLY a request file written at/after this instant,
+        // so a leftover file from a prior run is ignored rather than acted on.
+        var processStartUtc = DateTime.UtcNow;
 
         if (args.Length < 4)
         {
@@ -82,6 +88,55 @@ internal static class Program
         // regardless of ObserveSeconds. See spec/12 future ops notes.
         var outerBudgetSeconds = HandshakeDriver.ObserveSeconds + HandshakeDriver.OuterBudgetHeadroomSeconds;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(outerBudgetSeconds));
+
+        // graceful-shutdown-on-file: a deploy stops the bot with a hard process
+        // kill, which can strand the character's server-side inventory so the
+        // server rejects every wield on the next login (armed=False, zero
+        // WieldObject acks). A hard kill can't be intercepted, so a deploy instead
+        // creates the AC_BOTS_SHUTDOWN_FILE; we poll for it and, on seeing a request
+        // written after this run started, cancel the observe token — the SAME
+        // cancellation the 24h budget uses, which the observe loop turns into a
+        // clean break that reaches the CharacterLogOff (0xF653) send — so the
+        // character is freed before the process exits. The write-after-launch guard
+        // (IsShutdownRequested) means a leftover/undeletable file from a prior run
+        // is ignored, never acted on, so there is no stale-file crash-loop and no
+        // startup delete race. Env unset/blank == watch disabled (default).
+        var shutdownFilePath = GracefulShutdown.ResolveShutdownFilePath(
+            Environment.GetEnvironmentVariable(GracefulShutdown.ShutdownFileEnvVar));
+        if (shutdownFilePath is not null)
+        {
+            Console.WriteLine($"[main] graceful-shutdown watch armed: create {shutdownFilePath} to request a clean logoff (only a file written after now is honoured)");
+        }
+        var shutdownWatch = shutdownFilePath is null
+            ? Task.CompletedTask
+            : Task.Run(async () =>
+            {
+                try
+                {
+                    while (!cts.IsCancellationRequested)
+                    {
+                        if (GracefulShutdown.IsShutdownRequested(shutdownFilePath, processStartUtc))
+                        {
+                            Console.WriteLine($"[main] shutdown-request file seen ({shutdownFilePath}) — cancelling observe window for a clean logoff");
+                            // Best-effort cleanup; not required for correctness — the
+                            // write-time guard already ignores this file on the next
+                            // launch (its write time predates the new process start),
+                            // so a failed delete cannot crash-loop a relaunch.
+                            try { File.Delete(shutdownFilePath); } catch { /* best-effort */ }
+                            cts.Cancel();
+                            return;
+                        }
+                        // Poll cadence: 1s is well under any deploy's wait-for-exit
+                        // budget while adding negligible idle cost.
+                        await Task.Delay(TimeSpan.FromSeconds(1), cts.Token).ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException) { /* cts cancelled elsewhere (e.g. 24h budget) — normal */ }
+                catch (Exception watchEx)
+                {
+                    Console.Error.WriteLine($"[main] shutdown watcher error (non-fatal): {watchEx.GetType().Name}: {watchEx.Message}");
+                }
+            });
         using var driver = new HandshakeDriver(host, port, account, password, characterName, indoorNav, contractCatalog);
         try
         {
@@ -147,6 +202,19 @@ internal static class Program
             Console.Error.WriteLine($"[main] RUN ENDED (uncaught {ex.GetType().Name}): {ex.Message}");
             Console.Error.WriteLine($"[main] RUN ENDED — full stack (frames show the phase): {ex}");
             return 1;
+        }
+        finally
+        {
+            // Stop the shutdown-file watcher and await it so the background poll
+            // never outlives the CancellationTokenSource it captures. If the run
+            // ended for a reason OTHER than a cancel (e.g. an early PHASE return or
+            // an error), cancelling here is harmless — the run is already over — and
+            // it lets the watcher exit its Task.Delay promptly. The watcher swallows
+            // its own exceptions, so this await is guarded only for defence.
+            if (!cts.IsCancellationRequested)
+                cts.Cancel();
+            try { await shutdownWatch.ConfigureAwait(false); }
+            catch (Exception) { /* watcher is best-effort; never let its teardown fail the run */ }
         }
     }
 
