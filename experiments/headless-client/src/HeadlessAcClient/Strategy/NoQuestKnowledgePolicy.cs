@@ -252,10 +252,35 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
         var nqpInventoryFacts = world.Inventory
             .Select(i => new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt))
             .ToList();
+        // Does the bot have loaded ammo (an item wielded in the missile-ammo
+        // slot)? A missile LAUNCHER (a MissileWeapon carrying an AmmoType — vs a
+        // self-firing THROWN weapon, whose AmmoType is null) cannot fire without
+        // loaded ammo (the server cancels the attack) and, once wielded, forces
+        // Missile combat mode + blocks an unarmed-melee strike.
+        var nqpHasLoadedAmmo = world.Inventory.Any(
+            i => i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
         var unwielded = world.Inventory
             .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
             .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
             .Where(i => !_recentProposedGuids.Contains(i.Guid))
+            // Do NOT auto-wield a missile LAUNCHER with no loaded ammo. It cannot
+            // attack (the server cancels a launcher shot with no ammo) yet wielding
+            // it forces Missile combat mode and displaces a usable weapon, leaving
+            // the bot NOT combat-capable (the observed armed=False regression: the
+            // fallback swapped a wielded melee weapon for an ammoless launcher). A
+            // thrown missile weapon (AmmoType null — it is its own projectile) and
+            // a launcher WITH loaded ammo are unaffected. The MAIN-WEAPON valid-slot
+            // requirement is essential: bag AMMO also carries the MissileWeapon
+            // ItemType bit AND a non-null AmmoType, and differs only by valid slot
+            // (ammo → MissileAmmoSlot, launcher → a main-weapon slot); without this
+            // the guard would wrongly skip loadable ammo. Mirrors the launcher+ammo
+            // leg of IsCombatCapable; the LLM may still explicitly wield a launcher
+            // (e.g. when it plans to load ammo). Pure wire-state precondition
+            // (ItemType/AmmoType/valid-slot + ammo-slot occupancy); no game knowledge.
+            .Where(i => !(i.ValidLocations is uint vloc && (vloc & WeaponSwap.MainWeaponSlotMask) != 0
+                          && i.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0
+                          && i.AmmoType is not null
+                          && !nqpHasLoadedAmmo))
             // Do NOT auto-wield gear whose wield would dequip a currently-
             // wielded WEAPON — a loadout DOWNGRADE the LLM owns, not the
             // mechanical fallback. The earlier guard only caught a redundant

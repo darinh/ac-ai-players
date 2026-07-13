@@ -2321,6 +2321,167 @@ public class StrategyFoundationTests
     }
 
     [Fact]
+    public void NoQuestKnowledgePolicy_SkipsWield_AmmolessLauncher()
+    {
+        // Regression (armed=False): the fallback must NOT auto-wield a missile
+        // LAUNCHER (MissileWeapon ItemType + non-null AmmoType) with no loaded
+        // ammo. It cannot fire (the server cancels) and wielding it forces
+        // Missile mode + blocks a melee strike, leaving the bot not combat-
+        // capable. With only the ammoless launcher unwielded, the fallback
+        // skips it (falls through to a non-Wield step).
+        const uint AmmolessLauncherGuid = 0x80000C92;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    // Launcher (AmmoType != null) with NO loaded ammo.
+                    Guid = AmmolessLauncherGuid, Name = "Longbow", Wcid = 307u,
+                    ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null,
+                    AmmoType = (ushort)307,
+                },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.False(goal!.Kind == GoalKind.Wield && goal.Item?.Guid == AmmolessLauncherGuid,
+            "fallback must not auto-wield an ammoless launcher");
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_ProposesWield_Launcher_WhenAmmoLoaded()
+    {
+        // Positive control: the SAME launcher IS wieldable when ammo is loaded
+        // (an item occupying the missile-ammo slot 0x800000) — it can fire, so
+        // the ammoless-launcher guard does not apply.
+        const uint LauncherGuid = 0x80000C92;
+        const uint LoadedAmmoGuid = 0x80000C93;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = LauncherGuid, Name = "Longbow", Wcid = 307u,
+                    ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null,
+                    AmmoType = (ushort)307,
+                },
+                new InventoryItemProjection
+                {
+                    // Loaded ammo in the missile-ammo slot.
+                    Guid = LoadedAmmoGuid, Name = "Arrow", Wcid = 300u,
+                    ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = 0x800000u,
+                    AmmoType = null,
+                },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Wield, goal!.Kind);
+        Assert.Equal(LauncherGuid, goal.Item!.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_PrefersMelee_OverAmmolessLauncher()
+    {
+        // The real regression scenario: the bag holds an ammoless launcher AND
+        // a usable melee weapon, nothing wielded. Even with the launcher FIRST
+        // in iteration order, the fallback skips it and wields the melee weapon
+        // (so the bot ends combat-capable, not holding a useless launcher).
+        const uint AmmolessLauncherGuid = 0x80000C92;
+        const uint MeleeGuid = 0x800070DA;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    Guid = AmmolessLauncherGuid, Name = "Longbow", Wcid = 307u,
+                    ItemType = 0x100u, ValidLocations = 0x400000u, WieldedAt = null,
+                    AmmoType = (ushort)307,
+                },
+                new InventoryItemProjection
+                {
+                    Guid = MeleeGuid, Name = "Dagger", Wcid = 30598u,
+                    ItemType = 0x1u, ValidLocations = 0x100000u, WieldedAt = null,
+                    AmmoType = null,
+                },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Wield, goal!.Kind);
+        Assert.Equal(MeleeGuid, goal.Item!.Guid);
+    }
+
+    [Fact]
+    public void NoQuestKnowledgePolicy_ProposesWield_BagAmmo_NotTreatedAsAmmolessLauncher()
+    {
+        // Regression guard for the launcher filter: bag AMMO also carries the
+        // MissileWeapon ItemType bit AND a non-null AmmoType, differing from a
+        // launcher only by its valid slot (MissileAmmoSlot 0x800000, NOT a main-
+        // weapon slot). The ammoless-launcher guard must NOT exclude it, so the
+        // fallback can still auto-load ammo (e.g. into an already-wielded empty
+        // launcher).
+        const uint BagAmmoGuid = 0x80000C93;
+        var policy = new NoQuestKnowledgePolicy();
+        var proj = new WorldStateProjection
+        {
+            Self = new SelfProjection
+            {
+                Guid = SelfGuid, Name = "Headless", Landblock = 0xA9B4u,
+                CellId = 0xA9B40001u, PositionX = 0, PositionY = 0, PositionZ = 0,
+                HealthFraction = 1.0f,
+            },
+            Inventory = new[]
+            {
+                new InventoryItemProjection
+                {
+                    // Unwielded bag ammo: MissileWeapon bit + AmmoType, but the
+                    // ammo SLOT (not a main-weapon slot) — must stay wieldable.
+                    Guid = BagAmmoGuid, Name = "Arrow", Wcid = 300u,
+                    ItemType = 0x100u, ValidLocations = 0x800000u, WieldedAt = null,
+                    AmmoType = (ushort)300,
+                },
+            },
+            Visible = System.Array.Empty<VisibleObjectProjection>(),
+        };
+
+        var goal = policy.ProposeGoal(proj, new EventStream(), null);
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Wield, goal!.Kind);
+        Assert.Equal(BagAmmoGuid, goal.Item!.Guid);
+    }
+
+    [Fact]
     public void NoQuestKnowledgePolicy_PrefersPickup_OverOpenable_BothVisible()
     {
         // Step 4 (Pickup) runs BEFORE Step 5b (Openable). A pickup-mask
