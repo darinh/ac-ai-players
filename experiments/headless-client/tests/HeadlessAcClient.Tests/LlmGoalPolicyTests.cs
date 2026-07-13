@@ -1238,6 +1238,23 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildRunSummaryLine_ChainMints_ShownOnlyWhenPositive()
+    {
+        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
+        var with = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 10, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 12, totalXp: 90000L, model: "m",
+            chainMints: 18);
+        Assert.Contains("chain-mints=18", with);
+
+        var without = LlmGoalPolicy.BuildRunSummaryLine(
+            decisions: 10, triggerCounts: triggers, distinctLandblocks: 1,
+            lastLandblock: 0xA9B4u, level: 12, totalXp: 90000L, model: "m",
+            chainMints: 0);
+        Assert.DoesNotContain("chain-mints", without);
+    }
+
+    [Fact]
     public void CountUntargetedExploreEmits_CountsOnlyUntargetedExplore()
     {
         var es = new EventStream();

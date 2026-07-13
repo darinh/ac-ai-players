@@ -3310,6 +3310,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (chainTarget is not null)
             {
                 _combatChainCount++;
+                _summaryChainMints++;
                 _lastChainNoMintReason = null;
                 // Consume the events pending at this mint so a deliberately
                 // ignored picker arrival/start (and own-loot / combat-progress)
@@ -3555,6 +3556,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-reports how many redundant calls the tempo gates saved (the standing
     // reduce-llm-call-volume goal's per-run effect). Pure observability.
     private int _summarySkips;
+    // Count of Attacks the autonomous combat-chain MINTED this run WITHOUT an LLM
+    // call (each mint decomposes an LLM-authored kill-count commitment into the next
+    // Attack directly in the Motor). This is the PRIMARY reduce-llm-call-volume
+    // mechanism — distinct from _summarySkips (the fixated-talk + empty-explore
+    // deliberation-skip gates) — so surfacing it as chain-mints=N in [run-summary]
+    // completes the per-run call-reduction picture skips= alone understates. Pure
+    // observability; incremented at the chain mint site, never reset (cumulative like
+    // the other run aggregates).
+    private int _summaryChainMints;
     // Count of LLM-emitted Attacks the beaten-kind veto DROPPED this run (the bot
     // ordered combat on a KIND its own ledger marks beaten/un-out-leveled). The
     // dominant open-world override when the bot is in territory too tough for it;
@@ -3607,7 +3617,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack),
             world.Self.StaminaCurrent, world.Self.StaminaObservedPeak,
             world.CumulativeZeroDamageAbandons,
-            CountUntargetedExploreEmits(events, SummaryIntervalDecisions)));
+            CountUntargetedExploreEmits(events, SummaryIntervalDecisions), _summaryChainMints));
         _lastSummaryEmitAtUtc = DateTimeOffset.UtcNow;
         _summaryEmittedThisTick = true;
     }
@@ -3711,7 +3721,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
         int raises = 0, int attackEgresses = 0, string? topIntent = null,
         int? staminaCurrent = null, int? staminaPeak = null, int zeroDamageAbandons = 0,
-        int untargetedExplores = 0)
+        int untargetedExplores = 0, int chainMints = 0)
     {
         var triggers = triggerCounts.Count == 0
             ? "-"
@@ -3726,6 +3736,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // gates have saved this run (shown only when >0). Pure observability.
         if (skips > 0)
             line += $" skips={skips}";
+        // Reduce-llm-call-volume effect (PRIMARY): how many Attacks the autonomous
+        // combat-chain minted this run WITHOUT an LLM call by decomposing an
+        // LLM-authored kill-count commitment. Each is one LLM call the Motor served
+        // itself. Read with skips= (the deliberation-skip gates) for the full per-run
+        // call-reduction picture; a high chain-mints= is the standing tempo goal
+        // working. Shown only when >0. Pure observability; no behavior change.
+        if (chainMints > 0)
+            line += $" chain-mints={chainMints}";
         // Loop-detector field: the single most-repeated recent goal emission, shown
         // only when it recurs (>=2). A goal the bot re-emits many times is the
         // signature of a fixation OR an unresolved-target (target=MISS) loop — the
