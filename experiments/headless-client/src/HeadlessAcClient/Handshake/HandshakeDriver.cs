@@ -5414,8 +5414,18 @@ internal sealed class HandshakeDriver : IDisposable
                 {
                     // Snapshot the bot's own inventory (pack + worn) once so
                     // the per-candidate weapon-collision check below mirrors
-                    // the server's CheckWeaponCollision precondition.
+                    // the server's CheckWeaponCollision precondition. Also OR the
+                    // slots occupied by currently-WORN gear (WielderGuid == self) into
+                    // ieWornSlots: a fresh character logs in with starter clothing
+                    // already worn (its chest/legs/etc. slots filled), so auto-wielding
+                    // a bag item into one of those slots is rejected
+                    // InventoryServerSaveFailed(None). The ack-based satisfiedEquipSlots
+                    // only knows about THIS-session wields, not gear worn before login,
+                    // so those doomed wields slip through; the single-slot skip below
+                    // uses this mask to drop them. Taken only from actually-worn items
+                    // (not a bag item's possibly-stale CurrentWieldedLocation).
                     var ieInventory = new List<WeaponSwap.ItemFacts>();
+                    uint ieWornSlots = 0;
                     foreach (var io in worldState.Objects.Values)
                     {
                         var ieOwnedBag  = io.ContainerGuid is uint icg && icg == ieSelfGuid;
@@ -5423,6 +5433,8 @@ internal sealed class HandshakeDriver : IDisposable
                         if (!ieOwnedBag && !ieOwnedWorn) continue;
                         ieInventory.Add(new WeaponSwap.ItemFacts(
                             io.Guid, io.ItemType, io.ValidLocations, io.CurrentWieldedLocation));
+                        if (ieOwnedWorn && io.CurrentWieldedLocation is uint cwl)
+                            ieWornSlots |= cwl;
                     }
                     // Loaded ammo occupies the missile-ammo slot; used below to
                     // let the ammoless-launcher guard tell a fire-ready launcher
@@ -5508,17 +5520,19 @@ internal sealed class HandshakeDriver : IDisposable
                         var slot = ivl & (~ivl + 1);
                         // Skip a slot already SATISFIED (an item was wielded there)
                         // OR, for a SINGLE-slot item with serialization on, one whose
-                        // wield is already IN FLIGHT — so the pre-ack login burst does
+                        // wield is already IN FLIGHT, OR the single slot is already
+                        // occupied by WORN gear — so the pre-ack login burst does
                         // not fire a wield for every owned item competing for the same
                         // one slot (a whole weapon collection -> the single main-hand
-                        // slot), each rejected InventoryServerSaveFailed. A multi-slot
-                        // item (ring/bracelet) keeps its prior behaviour (it might
-                        // equip in another of its slots). The worn outcome is unchanged;
-                        // the in-flight mark is released on the item's ack (worn), its
-                        // rejection (slot still free), or the retry re-eligibility.
+                        // slot), nor a bag item into a slot filled by starter gear
+                        // worn before login, each rejected InventoryServerSaveFailed. A
+                        // multi-slot item (ring/bracelet) keeps its prior behaviour (it
+                        // might equip in another of its slots). The worn outcome is
+                        // unchanged; the in-flight mark is released on the item's ack
+                        // (worn), its rejection (slot still free), or retry re-eligibility.
                         var ivlSingleSlot = Phase7f4EquipDedup.IsSingleSlot(ivl);
                         if (Phase7f4EquipDedup.SlotOccupied(
-                                slot, ivlSingleSlot, satisfiedEquipSlots,
+                                slot, ivlSingleSlot, satisfiedEquipSlots, ieWornSlots,
                                 pendingEquipItemSlots.Values, phase7f4SlotSerialize))
                             continue;
                         if (snap.WeenieClassId is uint wcSat2 &&

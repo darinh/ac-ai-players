@@ -49,29 +49,38 @@ internal static class Phase7f4EquipDedup
     /// <summary>
     /// True iff a candidate targeting <paramref name="chosenSlot"/> should be
     /// SKIPPED this tick because the slot is already spoken for:
-    ///   - it is SATISFIED (an item was successfully wielded there — ack-based), or
-    ///   - (when <paramref name="serializeEnabled"/> AND the item is single-slot) a
-    ///     wield for that slot is already IN FLIGHT (sent, not yet acked/rejected).
+    ///   - it is SATISFIED (an item was successfully wielded there — ack-based); or
+    ///   - (when <paramref name="serializeEnabled"/> AND the item is single-slot)
+    ///     the slot is already occupied by currently-WORN gear
+    ///     (<paramref name="wornSlotsMask"/>); or
+    ///   - (same gate) a wield for that slot is already IN FLIGHT (sent, not yet
+    ///     acked/rejected).
     ///
-    /// The in-flight skip is gated on <paramref name="isSingleSlot"/> — an item
-    /// whose ValidLocations has exactly one bit can ONLY go in <paramref name="chosenSlot"/>,
-    /// so a duplicate while that slot is in flight is definitively doomed. A
-    /// MULTI-slot item (a ring/bracelet with two finger/wrist bits) might still
-    /// equip in another of its slots, so its lowest-bit being in flight does not
-    /// make it redundant; its behaviour is left unchanged (only the pre-existing
-    /// ack-based satisfied check applies). A zero slot is never blocked. Pure set
-    /// membership; no side effects. The worn outcome is unchanged.
+    /// The worn-gear and in-flight skips are gated on <paramref name="isSingleSlot"/>:
+    /// an item whose ValidLocations has exactly one bit can ONLY go in
+    /// <paramref name="chosenSlot"/>, so if that slot is worn or a duplicate is
+    /// already in flight the wield is definitively doomed. A MULTI-slot item (a
+    /// ring/bracelet with two finger/wrist bits) might still equip in another of its
+    /// slots, so it is left unchanged (only the pre-existing ack-based satisfied
+    /// check applies). A zero slot is never blocked. Pure membership/mask test; no
+    /// side effects. The worn outcome is unchanged — this only avoids firing a wield
+    /// the server would reject because the one slot is taken.
     /// </summary>
     internal static bool SlotOccupied(
         uint chosenSlot,
         bool isSingleSlot,
         ISet<uint> satisfiedSlots,
+        uint wornSlotsMask,
         ICollection<uint> inFlightSlots,
         bool serializeEnabled)
     {
         if (chosenSlot == 0) return false;
         if (satisfiedSlots.Contains(chosenSlot)) return true;
-        if (serializeEnabled && isSingleSlot && inFlightSlots.Contains(chosenSlot)) return true;
+        if (serializeEnabled && isSingleSlot)
+        {
+            if ((chosenSlot & wornSlotsMask) != 0) return true;
+            if (inFlightSlots.Contains(chosenSlot)) return true;
+        }
         return false;
     }
 

@@ -50,77 +50,101 @@ public class Phase7f4EquipDedupTests
     public void SlotOccupied_ZeroSlot_NeverBlocked()
     {
         Assert.False(Phase7f4EquipDedup.SlotOccupied(
-            0, isSingleSlot: true, Slots(0), InFlight(0), serializeEnabled: true));
+            0, isSingleSlot: true, Slots(0), wornSlotsMask: 0x2, InFlight(0), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_SatisfiedSlot_Blocked()
     {
         Assert.True(Phase7f4EquipDedup.SlotOccupied(
-            0x100000, isSingleSlot: true, Slots(0x100000), InFlight(), serializeEnabled: true));
+            0x100000, isSingleSlot: true, Slots(0x100000), wornSlotsMask: 0, InFlight(), serializeEnabled: true));
+    }
+
+    [Fact]
+    public void SlotOccupied_SingleSlot_WornSlot_Blocked()
+    {
+        // The new win: a single-slot bag item (chest 0x2) is skipped when the chest
+        // slot is already occupied by worn starter gear (wornSlotsMask has 0x2).
+        Assert.True(Phase7f4EquipDedup.SlotOccupied(
+            0x2, isSingleSlot: true, Slots(), wornSlotsMask: 0x2, InFlight(), serializeEnabled: true));
+    }
+
+    [Fact]
+    public void SlotOccupied_SingleSlot_WornSlot_SerializeOff_NotBlocked()
+    {
+        // Serialization disabled -> the worn-slot skip is off too (byte-identical to
+        // the prior ack-only dedup).
+        Assert.False(Phase7f4EquipDedup.SlotOccupied(
+            0x2, isSingleSlot: true, Slots(), wornSlotsMask: 0x2, InFlight(), serializeEnabled: false));
+    }
+
+    [Fact]
+    public void SlotOccupied_MultiSlot_WornSlot_NotBlocked()
+    {
+        // Regression guard: a MULTI-slot item whose lowest bit is worn is NOT blocked
+        // (it might equip in another of its slots) — the worn-slot skip is single-slot only.
+        Assert.False(Phase7f4EquipDedup.SlotOccupied(
+            0x40000, isSingleSlot: false, Slots(), wornSlotsMask: 0x40000, InFlight(), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_SingleSlot_InFlight_SerializeOn_Blocked()
     {
-        // The main win: a second single-slot item is skipped while the first is
-        // still in flight (before any ack), serializing the login burst.
+        // A second single-slot item is skipped while the first is still in flight.
         Assert.True(Phase7f4EquipDedup.SlotOccupied(
-            0x100000, isSingleSlot: true, Slots(), InFlight(0x100000), serializeEnabled: true));
+            0x100000, isSingleSlot: true, Slots(), wornSlotsMask: 0, InFlight(0x100000), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_SingleSlot_InFlight_SerializeOff_NotBlocked()
     {
-        // Serialization disabled -> in-flight mark ignored (byte-identical to the
-        // prior ack-only dedup).
         Assert.False(Phase7f4EquipDedup.SlotOccupied(
-            0x100000, isSingleSlot: true, Slots(), InFlight(0x100000), serializeEnabled: false));
+            0x100000, isSingleSlot: true, Slots(), wornSlotsMask: 0, InFlight(0x100000), serializeEnabled: false));
     }
 
     [Fact]
     public void SlotOccupied_MultiSlot_InFlight_NotBlocked()
     {
-        // Regression guard: a MULTI-slot item (e.g. a ring, whose lowest bit is in
-        // flight) is NOT blocked by the in-flight serialization — it could still
-        // equip in another of its slots, so its behaviour is unchanged.
+        // A MULTI-slot item (ring, lowest bit in flight) is NOT blocked by the
+        // in-flight serialization — could equip in another slot.
         Assert.False(Phase7f4EquipDedup.SlotOccupied(
-            0x40000, isSingleSlot: false, Slots(), InFlight(0x40000), serializeEnabled: true));
+            0x40000, isSingleSlot: false, Slots(), wornSlotsMask: 0, InFlight(0x40000), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_MultiSlot_Satisfied_StillBlocked()
     {
-        // The pre-existing ack-based satisfied check applies to ALL items (single
-        // and multi-slot) — unchanged by this slice.
+        // The pre-existing ack-based satisfied check applies to ALL items.
         Assert.True(Phase7f4EquipDedup.SlotOccupied(
-            0x40000, isSingleSlot: false, Slots(0x40000), InFlight(), serializeEnabled: true));
+            0x40000, isSingleSlot: false, Slots(0x40000), wornSlotsMask: 0, InFlight(), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_SatisfiedStillBlocks_WhenSerializeOff()
     {
         Assert.True(Phase7f4EquipDedup.SlotOccupied(
-            0x2, isSingleSlot: true, Slots(0x2), InFlight(), serializeEnabled: false));
+            0x2, isSingleSlot: true, Slots(0x2), wornSlotsMask: 0, InFlight(), serializeEnabled: false));
     }
 
     [Fact]
     public void SlotOccupied_FreeSlot_NotBlocked()
     {
-        // A different slot than the occupied/in-flight ones is allowed (e.g. a
-        // shield 0x400000 is not blocked by a wielded weapon 0x100000).
+        // A slot not satisfied/worn/in-flight is allowed (a shield 0x400000 is not
+        // blocked by a worn shirt 0x2, a wielded weapon 0x100000, or a neck in flight).
         Assert.False(Phase7f4EquipDedup.SlotOccupied(
-            0x400000, isSingleSlot: true, Slots(0x100000), InFlight(0x8000), serializeEnabled: true));
+            0x400000, isSingleSlot: true, Slots(0x100000), wornSlotsMask: 0x2, InFlight(0x8000), serializeEnabled: true));
     }
 
     [Fact]
     public void SlotOccupied_DistinctSlots_EachIndependent()
     {
-        var satisfied = Slots(0x100000); // weapon worn
-        var inflight = InFlight(0x2);    // chest wield sent
-        Assert.True(Phase7f4EquipDedup.SlotOccupied(0x100000, true, satisfied, inflight, true));  // weapon blocked (worn)
-        Assert.True(Phase7f4EquipDedup.SlotOccupied(0x2, true, satisfied, inflight, true));       // chest blocked (in flight)
-        Assert.False(Phase7f4EquipDedup.SlotOccupied(0x8000, true, satisfied, inflight, true));   // neck free
+        var satisfied = Slots(0x100000); // weapon worn (this session)
+        uint worn = 0x2;                 // chest worn (starter gear)
+        var inflight = InFlight(0x8000); // neck wield sent
+        Assert.True(Phase7f4EquipDedup.SlotOccupied(0x100000, true, satisfied, worn, inflight, true)); // weapon blocked (satisfied)
+        Assert.True(Phase7f4EquipDedup.SlotOccupied(0x2, true, satisfied, worn, inflight, true));       // chest blocked (worn)
+        Assert.True(Phase7f4EquipDedup.SlotOccupied(0x8000, true, satisfied, worn, inflight, true));    // neck blocked (in flight)
+        Assert.False(Phase7f4EquipDedup.SlotOccupied(0x4, true, satisfied, worn, inflight, true));      // legs free
     }
 
     // ---- IsSingleSlot ------------------------------------------------------
