@@ -50,7 +50,8 @@ internal static class SelectorResolver
         IWeenieRepository? weenies = null,
         WorldObjectSnapshot? actor = null,
         bool excludeCorpses = false,
-        IReadOnlySet<uint>? excludeGuids = null)
+        IReadOnlySet<uint>? excludeGuids = null,
+        bool attackableOnly = false)
     {
         if (sel is null) throw new ArgumentNullException(nameof(sel));
         if (sel.IsEmpty) return Array.Empty<WorldObjectSnapshot>();
@@ -62,6 +63,7 @@ internal static class SelectorResolver
         var candidates = world.Objects.Values
             .Where(o => !excludeCorpses || !IsCorpse(o))
             .Where(o => excludeGuids is null || !excludeGuids.Contains(o.Guid))
+            .Where(o => !attackableOnly || MatchesAttackable(o))
             .Where(o => MatchesGuid(o, sel))
             .Where(o => MatchesNameContains(o, sel))
             .Where(o => MatchesWcid(o, sel))
@@ -96,14 +98,16 @@ internal static class SelectorResolver
         WorldObjectSnapshot? referencePoint = null,
         IWeenieRepository? weenies = null,
         bool excludeCorpses = false,
-        IReadOnlySet<uint>? excludeGuids = null)
+        IReadOnlySet<uint>? excludeGuids = null,
+        bool attackableOnly = false)
     {
         // Use referencePoint as the actor for the locality filter:
         // a single-nearest resolution is asking "what should this
         // actor act on?", so confining to the actor's landblock is
         // the right default.
         var all = Resolve(sel, world, weenies, actor: referencePoint,
-            excludeCorpses: excludeCorpses, excludeGuids: excludeGuids);
+            excludeCorpses: excludeCorpses, excludeGuids: excludeGuids,
+            attackableOnly: attackableOnly);
         if (all.Count == 0) return null;
         if (referencePoint is null) return all[0];
 
@@ -112,6 +116,23 @@ internal static class SelectorResolver
             .OrderBy(t => t.ok ? t.d2 : double.MaxValue)
             .First().o;
     }
+
+    // An Attack goal must bind a target the server flags Attackable that is
+    // NOT a fellow player. A selector can match a world object by NAME yet be a
+    // non-attackable non-creature (an item whose name merely contains a
+    // selector word) or a non-attackable NPC (vendor / healer); dispatching a
+    // melee/missile attack at it lands nothing and strands the bot in the
+    // no-damage abandon watchdog. Uses the RAW server Attackable bit, NOT the
+    // IsMonster composite, on purpose: the autonomous combat fallback emits
+    // Attack for ANY observed-hostile non-player creature — including radar-blip
+    // creatures that IsMonster excludes — so gating on IsMonster here would drop
+    // a valid self-defense attack (producer/consumer mismatch). Players carry
+    // the Attackable bit too, so they are excluded by guid band (the
+    // players-are-not-monsters invariant; the bot does not attack a fellow
+    // player). Pure wire classification; the LLM still chose the selector.
+    private static bool MatchesAttackable(WorldObjectSnapshot o)
+        => ((o.ObjectDescriptionFlags ?? 0u) & (uint)ObjectDescriptionFlag.Attackable) != 0
+           && !WorldStateProjection.IsPlayerGuid(o.Guid);
 
     /// <summary>
     /// Resolve a player-directed selector (e.g. a FellowshipRecruit target) to the

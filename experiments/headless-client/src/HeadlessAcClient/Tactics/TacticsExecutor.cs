@@ -132,11 +132,19 @@ internal sealed class TacticsExecutor
         // Use/Talk/Give deliberately keep corpses (open/loot the body). Pickup
         // EXCLUDES the corpse OBJECT (it is a container, not a pickable item —
         // see the Pickup branch below); its CONTENTS are separate guids.
+        // attackableOnly: an Attack must also bind a server-Attackable,
+        // non-player target — a selector can match a NON-attackable object by
+        // name (an item whose name merely contains a selector word) or a
+        // non-attackable NPC; dispatching a melee/missile attack at it lands
+        // nothing and strands the bot in the no-damage abandon watchdog, so the
+        // resolver drops it (see SelectorResolver.MatchesAttackable; mirrors the
+        // out-of-view sighted-memory Attack filter).
         if (CurrentGoal.Kind == GoalKind.Attack)
         {
             var resolved = SelectorResolver.ResolveSingleNearest(
                 CurrentGoal.Target, world, self, _weenies,
-                excludeCorpses: true, excludeGuids: killedAttackGuids);
+                excludeCorpses: true, excludeGuids: killedAttackGuids,
+                attackableOnly: true);
             // Perception-bounded Attack resolution. The Strategy chose WHAT to
             // attack from the projection's visible set, which is capped at
             // WorldStateProjection.DefaultVisibleRadiusUnits. Once the nearby

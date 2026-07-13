@@ -8606,7 +8606,8 @@ internal sealed class HandshakeDriver : IDisposable
                                     // Same-landblock: steer straight to the
                                     // remembered coords.
                                     var rememberedA = SightedTargetResolver.Resolve(
-                                        navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA);
+                                        navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA,
+                                        attackableOnly: true);
                                     if (rememberedA is not null)
                                     {
                                         var destA = new WorldObjectSnapshot(0u)
@@ -8668,7 +8669,8 @@ internal sealed class HandshakeDriver : IDisposable
                                                 crossLbAdvanceCooldownUntil.Remove(k);
                                         }
                                         var farA = SightedTargetResolver.ResolveCrossLandblock(
-                                            navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA);
+                                            navGraph.SnapshotSighted(), goal.Target, tacticsSelfCell, onCooldownA,
+                                            attackableOnly: true);
                                         if (farA is not null)
                                         {
                                             var planA = navGraph.PlanWaypointToward(
