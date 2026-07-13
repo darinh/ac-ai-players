@@ -7118,6 +7118,46 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                         else
                         {
+                            // Precondition: FellowshipRecruit (0x00A5) only works once the bot
+                            // already LEADS a fellowship. A capable model was observed emitting
+                            // FellowshipRecruit directly, skipping the FellowshipCreate the prompt
+                            // names first, so the recruit hit a non-existent fellowship and the
+                            // group never formed. When the LLM's explicit recruit lands with no
+                            // fellowship, mechanically send the FellowshipCreate the recruit
+                            // presupposes FIRST (same tick, processed before the recruit), then the
+                            // recruit — decomposing the LLM's "recruit <player>" intent into the two
+                            // wire steps it requires. The bot picks no target of its own (the LLM
+                            // named the player) and forms no group unprompted: this only fulfils an
+                            // already-issued recruit. Gated on the operator's auto-team opt-in, like
+                            // the allegiance auto-approve. The server replies with a
+                            // FellowshipFullUpdate the client already decodes.
+                            if (FellowshipGoalGuard.ShouldCreateBeforeRecruit(
+                                    autoTeamEnabled, inFellowship: projection?.Fellowship is not null))
+                            {
+                                var acName = GameActionFellowshipCreateMessage.SanitizeName(null);
+                                const bool acShareXp = true;
+                                var acPktSeq  = nextOutboundPacketSequence++;
+                                var acFragSeq = nextOutboundFragmentSequence++;
+                                var acBuf = new byte[GameActionFellowshipCreateMessage.MeasureSize(acName)];
+                                var acLen = GameActionFellowshipCreateMessage.Pack(acBuf, acName, acShareXp);
+                                var acMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    acMsg.AddAckSequence(lastReceivedSeq);
+                                acMsg.AddBlobFragment(
+                                    fragSequence: acFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: acBuf.AsSpan(0, acLen));
+                                var acSent = acMsg.Pack(sendBuf, myClientId,
+                                                        sequence: acPktSeq, iteration: 1,
+                                                        encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, acSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                Console.WriteLine(
+                                    "[strategy] FellowshipRecruit precondition: not in a fellowship -> " +
+                                    $"sent FellowshipCreate first (name='{acName}' shareXp={acShareXp}); " +
+                                    $"pktSeq={acPktSeq} fragSeq={acFragSeq} bytes={acSent}");
+                            }
                             var frPktSeq  = nextOutboundPacketSequence++;
                             var frFragSeq = nextOutboundFragmentSequence++;
                             var frBuf = new byte[GameActionFellowshipRecruitMessage.PackedSize];

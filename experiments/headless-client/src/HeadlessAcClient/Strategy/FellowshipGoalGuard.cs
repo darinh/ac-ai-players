@@ -21,4 +21,19 @@ internal static class FellowshipGoalGuard
     /// </summary>
     internal static bool IsRedundantFellowshipCreate(GoalKind kind, bool inFellowship)
         => kind == GoalKind.FellowshipCreate && inFellowship;
+
+    /// <summary>
+    /// True when a <see cref="GoalKind.FellowshipRecruit"/> must be preceded by a
+    /// FellowshipCreate: the recruit wire action (0x00A5) only works once the bot already
+    /// LEADS a fellowship, but a model may emit Recruit directly (skipping the Create the
+    /// prompt names), which would hit a non-existent fellowship and never form the group.
+    /// So when auto-team is enabled AND the bot is NOT yet in a fellowship, the Motor sends
+    /// the FellowshipCreate the recruit presupposes first — decomposing the LLM's explicit
+    /// "recruit &lt;player&gt;" intent into its two required wire steps. Gated on the
+    /// operator's auto-team opt-in (like the allegiance auto-approve): the bot forms no
+    /// group unprompted, it only fulfils an already-issued recruit. False when already in a
+    /// fellowship (recruit sends alone) or auto-team is off (unchanged behavior).
+    /// </summary>
+    internal static bool ShouldCreateBeforeRecruit(bool autoTeamEnabled, bool inFellowship)
+        => autoTeamEnabled && !inFellowship;
 }
