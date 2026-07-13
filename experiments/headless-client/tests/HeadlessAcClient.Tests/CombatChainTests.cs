@@ -400,6 +400,102 @@ public class CombatChainTests
     }
 
     [Fact]
+    public void ChooseChainTarget_DeathSpiralActive_SkipsEvenWithMatchingTarget()
+    {
+        // The chain must NOT mint an Attack while the bot is in an active death-spiral
+        // (repeated recent deaths). The self-health gate only stops a mint while the
+        // bot is CURRENTLY hurt; it re-mints as health regens between fights, so a
+        // dying bot would chain right back into the losing exchange and deepen the
+        // vitae penalty. Yields to the LLM (survival-caution retreat) even with an
+        // active commitment + a matching target in view.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: true);
+        Assert.Null(chosen);
+        Assert.Equal("death-spiral-retreat", reason);
+    }
+
+    [Fact]
+    public void ChooseChainTarget_DeathSpiralInactive_MintsMatchingTarget()
+    {
+        // Default (deathSpiralActive:false) is unchanged — a healthy armed bot not in
+        // a spiral still mints the matching committed target.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: false);
+        Assert.NotNull(chosen);
+        Assert.Null(reason);
+    }
+
+    [Fact]
+    public void ChooseChainTarget_SelfHealthTakesPrecedenceOverDeathSpiral()
+    {
+        // When BOTH gates trip, the more immediate self-health danger is reported
+        // first (locks the gate ordering); both yield, so behavior is identical.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
+
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            combatCapable: true, selfHealthSuppressed: true, deathSpiralActive: true);
+        Assert.Null(chosen);
+        Assert.Equal("self-health-below-reengage", reason);
+    }
+
+    [Fact]
+    public void ChooseChainTarget_DeathSpiral_SuppressesMixedRecordKindThatIsBeatenKindAllows()
+    {
+        // The wedge this gate closes: IsBeatenKind excludes only ZERO-kill kinds, so
+        // a MIXED record (some kills AND recent deaths) slips past its filter and the
+        // chain would keep feeding attacks into a kind that is winning the exchange.
+        // First prove the mixed-record kind is NOT beaten (chain mints it when not
+        // spiraling), then prove the death-spiral gate still suppresses it.
+        var commit = NewIntent(new KillCountSincePushAtLeastPredicate(5, "Quarry"));
+        var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f, wcid: 0x4242) };
+        var mixedRecord = new List<CombatHistoryEntry>
+        {
+            new CombatHistoryEntry(
+                Name: "Quarry Alpha", Wcid: 0x4242, Kills: 2, Deaths: 3,
+                NearDeaths: 0, Fights: 5, LastOutcome: "death", Ineffective: 0),
+        };
+
+        // Not spiraling: the mixed-record kind is not an IsBeatenKind, so it mints.
+        var mint = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, mixedRecord, 5, true, 0, 6, out var mintReason,
+            combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: false);
+        Assert.NotNull(mint);
+        Assert.Null(mintReason);
+
+        // Spiraling: the same mixed-record kind is now suppressed.
+        var suppressed = LlmGoalPolicy.ChooseCombatChainTarget(
+            commit, oneQuarry, mixedRecord, 5, true, 0, 6, out var suppressedReason,
+            combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: true);
+        Assert.Null(suppressed);
+        Assert.Equal("death-spiral-retreat", suppressedReason);
+    }
+
+    [Theory]
+    [InlineData(null, true)]     // unset  -> default ON
+    [InlineData("", true)]       // blank  -> default ON
+    [InlineData("   ", true)]    // ws     -> default ON
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("False", false)]
+    [InlineData("off", false)]
+    [InlineData("no", false)]
+    [InlineData("1", true)]
+    [InlineData("true", true)]
+    [InlineData("yes", true)]
+    public void ResolveChainSuppressInDeathSpiral_TruthTable(string? env, bool expected)
+        => Assert.Equal(expected, LlmGoalPolicy.ResolveChainSuppressInDeathSpiral(env));
+
+    [Fact]
     public void IsCombatCapable_TruthTable()
     {
         const uint meleeType = 0x1u, missileType = 0x100u;
