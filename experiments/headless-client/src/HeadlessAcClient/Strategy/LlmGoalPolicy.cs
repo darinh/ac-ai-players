@@ -3491,6 +3491,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // resets when the finished-batch state is absent.
         EmitContractBatchSourceDiagnostic(world);
         var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling, recentOwnDeathCount: RecentOwnDeathCount(nowUtc), routeBlockedTarget: FreshRouteBlockedTarget(_currentRouteBlockedTarget, _routeBlockedAtUtc, nowUtc));
+        EmitLoopCueDiagnostic(userPrompt);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -9125,6 +9126,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     private string? _lastContractBatchSourceDiag;
+    // On-change throttle for the loop-cue render diagnostic (EmitLoopCueDiagnostic).
+    private string _lastLoopCueSignature = "";
 
     // Diagnostic (cp030 pattern, behavior-preserving): when the bot holds a
     // FINISHED contract batch (every tracked contract stage-3), the FIND-A-
@@ -9177,6 +9180,41 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (key == _lastContractBatchSourceDiag) return;
         _lastContractBatchSourceDiag = key;
         Console.WriteLine("[contract-source] " + key);
+    }
+
+    // Diagnostic: the ## ...loop / ## Engagement churn loop-break cues render into the
+    // PROMPT (which is not otherwise logged — only prompt-bytes is), so an operator cannot
+    // tell whether a loop-break cue actually FIRED for a repeated goal (a mechanical gap)
+    // or fired-and-the-model-ignored-it (model quality). Scan the prompt this class just
+    // built for those headers and log the set ON CHANGE (console-only; pure observation of
+    // the already-built prompt; no behavior change, no game knowledge).
+    private void EmitLoopCueDiagnostic(string userPrompt)
+    {
+        var fired = ExtractRenderedLoopCueHeaders(userPrompt);
+        var sig = fired.Count == 0 ? "" : string.Join(" | ", fired);
+        if (sig == _lastLoopCueSignature) return; // no change (incl. staying empty)
+        _lastLoopCueSignature = sig;
+        Console.WriteLine(fired.Count == 0
+            ? "[loop-cue] cleared — no loop-break cues in this prompt"
+            : $"[loop-cue] rendered {fired.Count} loop-break cue(s): {sig}");
+    }
+
+    // The ## section headers of any loop-break / churn cue present in a rendered prompt, in
+    // order. A loop cue's header line starts with "## " and contains "loop" or the
+    // "Engagement churn" phrase (see the cue renderers). Pure string scan; no game knowledge.
+    internal static IReadOnlyList<string> ExtractRenderedLoopCueHeaders(string prompt)
+    {
+        var headers = new List<string>();
+        if (string.IsNullOrEmpty(prompt)) return headers;
+        foreach (var raw in prompt.Split('\n'))
+        {
+            var t = raw.TrimEnd('\r');
+            if (t.StartsWith("## ", StringComparison.Ordinal)
+                && (t.Contains("loop", StringComparison.OrdinalIgnoreCase)
+                    || t.Contains("Engagement churn", StringComparison.OrdinalIgnoreCase)))
+                headers.Add(t.Substring(3).Trim());
+        }
+        return headers;
     }
 
     // Accumulate the guids of vendors in view WHILE the bot holds a finished

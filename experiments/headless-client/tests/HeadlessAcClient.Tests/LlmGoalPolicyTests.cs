@@ -6397,6 +6397,40 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void ExtractRenderedLoopCueHeaders_ReturnsOnlyLoopAndChurnHeaders()
+    {
+        var prompt = string.Join("\n", new[]
+        {
+            "## Nearest objects",
+            "- some object",
+            "## Attack loop (target not in view)",
+            "- you have tried to Attack ...",
+            "## Combat readiness",
+            "- weapon: NONE",
+            "## Give loop (target not in view)",
+            "## Engagement churn (several targets not in view)",
+            "## Wield loop (repeated weapon-description Wield)",
+        });
+        var headers = LlmGoalPolicy.ExtractRenderedLoopCueHeaders(prompt);
+        Assert.Equal(new[]
+        {
+            "Attack loop (target not in view)",
+            "Give loop (target not in view)",
+            "Engagement churn (several targets not in view)",
+            "Wield loop (repeated weapon-description Wield)",
+        }, headers);
+        Assert.DoesNotContain(headers, h => h.Contains("Nearest") || h.Contains("Combat readiness"));
+    }
+
+    [Fact]
+    public void ExtractRenderedLoopCueHeaders_EmptyWhenNoLoopCues()
+    {
+        var prompt = "## Nearest objects\n- x\n## Combat readiness\n- y";
+        Assert.Empty(LlmGoalPolicy.ExtractRenderedLoopCueHeaders(prompt));
+        Assert.Empty(LlmGoalPolicy.ExtractRenderedLoopCueHeaders(""));
+    }
+
+    [Fact]
     public void BuildUserPrompt_PickupLoopCapsule_OmittedForConcreteNamePickup()
     {
         var now = System.DateTimeOffset.UtcNow;
