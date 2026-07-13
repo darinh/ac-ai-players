@@ -949,8 +949,8 @@ internal sealed class HandshakeDriver : IDisposable
         // wield ack arrives.
         var                  pendingEquipWcid = new Dictionary<uint, uint>();
         // Phase 7f.4 — startup equip-from-inventory pass. Items the
-        // server grants at character creation (Training Spadone via
-        // Two-Handed-Combat skill, Handy Healing Kit via Healing, etc.)
+        // server grants at character creation (a starter weapon tied to
+        // the character's trained skill, a starter consumable, etc.)
         // arrive as ObjectCreate with ContainerGuid=self and
         // WielderGuid=null. The pickup-equip path (Phase 6m) doesn't
         // fire for these because there's no pickup - they're already
@@ -961,6 +961,18 @@ internal sealed class HandshakeDriver : IDisposable
         // the item from the inventory-equip candidate set on the
         // next tick.
         var                  inventoryEquipSent = new HashSet<uint>();
+        // Optimistic per-slot serialization for the login auto-equip burst (see
+        // Phase7f4EquipDedup): guid -> the equip slot we SENT a wield for but have
+        // not yet seen resolve. The ack-based satisfiedEquipSlots cannot stop the
+        // pre-ack burst from firing a wield for every owned item that shares a slot
+        // (a whole weapon collection -> the one main-hand slot), each rejected
+        // InventoryServerSaveFailed(None). Marking the slot in-flight on send +
+        // releasing it on the item's ack (worn) or rejection (slot still free ->
+        // the next same-slot candidate may try) serializes each slot to one wield.
+        // The worn outcome is unchanged; only the doomed duplicate sends are removed.
+        var                  pendingEquipItemSlots = new Dictionary<uint, uint>();
+        var                  phase7f4SlotSerialize = Phase7f4EquipDedup.ResolveSerializeEnabled(
+            Environment.GetEnvironmentVariable("AC_BOTS_PHASE7F4_SLOT_SERIALIZE"));
         // Per-guid send timestamp + attempt count for the login auto-equip RETRY.
         // A wield can race the item-creation ack (silent InventoryServerSaveFailed
         // err=None, no WieldObject ack) leaving the item unwielded; inventoryEquipSent
@@ -3188,6 +3200,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 equipRetry.Remove(wieldAck.ItemGuid);
                                 if (wieldAck.NewLocation != 0)
                                     satisfiedEquipSlots.Add(wieldAck.NewLocation);
+                                // In-flight login-equip wield resolved (worn): release
+                                // its pending-slot mark. The slot is now satisfied
+                                // (above), so same-slot candidates stay skipped.
+                                pendingEquipItemSlots.Remove(wieldAck.ItemGuid);
                                 if (pendingEquipWcid.TryGetValue(wieldAck.ItemGuid, out var wcEq))
                                 {
                                     satisfiedWeenieClasses.Add(wcEq);
@@ -3837,6 +3853,13 @@ internal sealed class HandshakeDriver : IDisposable
                             // source-autonomous auto-equip handled below — are
                             // unaffected because they do not match the in-flight
                             // give guid.)
+                            // Release an IN-FLIGHT login-equip slot the moment its
+                            // wield is rejected: the slot is still free, so the next
+                            // same-slot candidate may try it. Fires independently of
+                            // whether the failure is surfaced to the LLM below (a
+                            // Remove for a non-pending guid is a harmless no-op).
+                            if (ge.Payload?.InventoryServerSaveFailed is { } isfRelease)
+                                pendingEquipItemSlots.Remove(isfRelease.ItemGuid);
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
                                 AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(
                                     isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryEquipSent,
@@ -5407,6 +5430,33 @@ internal sealed class HandshakeDriver : IDisposable
                     var ieHasLoadedAmmo = ieInventory.Any(
                         f => f.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
 
+                    // Liveness sweep (decoupled from candidate selection): drop any
+                    // in-flight slot mark whose item is no longer owned AND awaiting a
+                    // wield. The candidate-loop releases below only run for items still
+                    // in our inventory, so an item that was dropped/given/deleted (or
+                    // silently wielded without our ack) while its wield was in flight
+                    // would otherwise strand its slot permanently. Re-checking against
+                    // current world state each tick makes that impossible: a mark whose
+                    // item vanished or is now wielded is released here. (An item still
+                    // owned + unwielded — legitimately in flight, retrying, or given up
+                    // via the retry cap — is kept; the cap-exhaustion release below
+                    // frees that case.)
+                    if (phase7f4SlotSerialize && pendingEquipItemSlots.Count > 0)
+                    {
+                        List<uint>? ieStalePending = null;
+                        foreach (var pg in pendingEquipItemSlots.Keys)
+                        {
+                            var psnap = worldState.TryGet(pg);
+                            var ownedAwaiting = psnap is not null
+                                && psnap.ContainerGuid is uint pcg && pcg == ieSelfGuid
+                                && psnap.WielderGuid is null;
+                            if (!ownedAwaiting)
+                                (ieStalePending ??= new List<uint>()).Add(pg);
+                        }
+                        if (ieStalePending is not null)
+                            foreach (var pg in ieStalePending) pendingEquipItemSlots.Remove(pg);
+                    }
+
                     WorldObjectSnapshot? ieCandidate = null;
                     uint                 ieEquipSlot = 0;
                     foreach (var snap in worldState.Objects.Values)
@@ -5428,12 +5478,49 @@ internal sealed class HandshakeDriver : IDisposable
                                     er.SentAt, er.Attempts, DateTime.UtcNow,
                                     AutoEquipRetryPolicy.RetryCooldown,
                                     AutoEquipRetryPolicy.MaxAttempts))
+                            {
                                 inventoryEquipSent.Remove(snap.Guid);
+                                // Liveness backstop: also release this guid's in-flight
+                                // slot mark. Normally the mark is cleared on the ack
+                                // (worn) or the InventoryServerSaveFailed (rejected),
+                                // but a TRULY silent wield (no response of either kind)
+                                // would otherwise strand the slot pending forever and
+                                // block this retry AND every same-slot item. Clearing
+                                // it on the retry-cooldown re-release guarantees the
+                                // slot is freed so the re-send below can proceed.
+                                pendingEquipItemSlots.Remove(snap.Guid);
+                            }
                             else
+                            {
+                                // Not retrying now: either still within the retry
+                                // cooldown (awaiting the ack/ISF — keep the slot marked
+                                // in flight) OR the attempt cap is reached. On cap
+                                // exhaustion, release the slot so a DIFFERENT same-slot
+                                // item can be tried instead of leaving the slot
+                                // permanently empty (armed=False) behind a silently-lost
+                                // wield that will never get an ack or a rejection.
+                                if (equipRetry.TryGetValue(snap.Guid, out var erDone)
+                                    && erDone.Attempts >= AutoEquipRetryPolicy.MaxAttempts)
+                                    pendingEquipItemSlots.Remove(snap.Guid);
                                 continue;
+                            }
                         }
                         var slot = ivl & (~ivl + 1);
-                        if (satisfiedEquipSlots.Contains(slot)) continue;
+                        // Skip a slot already SATISFIED (an item was wielded there)
+                        // OR, for a SINGLE-slot item with serialization on, one whose
+                        // wield is already IN FLIGHT — so the pre-ack login burst does
+                        // not fire a wield for every owned item competing for the same
+                        // one slot (a whole weapon collection -> the single main-hand
+                        // slot), each rejected InventoryServerSaveFailed. A multi-slot
+                        // item (ring/bracelet) keeps its prior behaviour (it might
+                        // equip in another of its slots). The worn outcome is unchanged;
+                        // the in-flight mark is released on the item's ack (worn), its
+                        // rejection (slot still free), or the retry re-eligibility.
+                        var ivlSingleSlot = Phase7f4EquipDedup.IsSingleSlot(ivl);
+                        if (Phase7f4EquipDedup.SlotOccupied(
+                                slot, ivlSingleSlot, satisfiedEquipSlots,
+                                pendingEquipItemSlots.Values, phase7f4SlotSerialize))
+                            continue;
                         if (snap.WeenieClassId is uint wcSat2 &&
                             satisfiedWeenieClasses.Contains(wcSat2)) continue;
 
@@ -5441,8 +5528,8 @@ internal sealed class HandshakeDriver : IDisposable
                         // caster) the server would reject because another
                         // primary weapon is already wielded — that wield
                         // silently no-ops as InventoryServerSaveFailed
-                        // (err=None) and wastes a round-trip (the Royal Atlatl
-                        // vs an already-wielded Training Spadone case). Skip
+                        // (err=None) and wastes a round-trip (a second primary
+                        // weapon vs an already-wielded one). Skip
                         // it here; it stays a candidate for a later tick if the
                         // blocker is dequipped. An intentional weapon SWAP is
                         // the LLM Wield dispatch's job (it dequips the blocker
@@ -5479,6 +5566,15 @@ internal sealed class HandshakeDriver : IDisposable
                     if (ieCandidate is not null)
                     {
                         inventoryEquipSent.Add(ieCandidate.Guid);
+                        // Mark the chosen slot IN FLIGHT so same-slot candidates are
+                        // skipped until this wield resolves (WieldObject ack ->
+                        // satisfied/worn; InventoryServerSaveFailed -> released; retry
+                        // re-eligibility -> released). Only for a SINGLE-slot item —
+                        // a multi-slot item (ring/bracelet) is never serialized, so it
+                        // must not pollute the pending set either.
+                        if (phase7f4SlotSerialize && ieEquipSlot != 0 &&
+                            ieCandidate.ValidLocations is uint ieVl && Phase7f4EquipDedup.IsSingleSlot(ieVl))
+                            pendingEquipItemSlots[ieCandidate.Guid] = ieEquipSlot;
                         // Stamp the send time + bump the attempt count so a raced
                         // equip can be re-sent after the cooldown (see the candidate
                         // skip above). Only the PHASE7F.4 login pass records this, so
