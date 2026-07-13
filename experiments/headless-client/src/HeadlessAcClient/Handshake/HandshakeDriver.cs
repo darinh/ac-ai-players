@@ -961,6 +961,13 @@ internal sealed class HandshakeDriver : IDisposable
         // the item from the inventory-equip candidate set on the
         // next tick.
         var                  inventoryEquipSent = new HashSet<uint>();
+        // Per-guid send timestamp + attempt count for the login auto-equip RETRY.
+        // A wield can race the item-creation ack (silent InventoryServerSaveFailed
+        // err=None, no WieldObject ack) leaving the item unwielded; inventoryEquipSent
+        // alone would then never re-send it. AutoEquipRetryPolicy re-eligibles a
+        // still-unwielded guid after a cooldown (capped by MaxAttempts) so the retry
+        // lands once the creation ack settles. Keyed only by guid; no game knowledge.
+        var                  equipRetry = new Dictionary<uint, (DateTime SentAt, int Attempts)>();
         // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
         // server refuses (a non-takeable fixed object) returns a silent
         // InventoryServerSaveFailed err=None whose queued auto-equip never fires
@@ -3169,6 +3176,16 @@ internal sealed class HandshakeDriver : IDisposable
                                 // guid, e.g. dequipping this weapon as a swap
                                 // blocker).
                                 autoEquipFailureFilter.ClearAutonomous(wieldAck.ItemGuid);
+                                // A successful wield also ends this guid's
+                                // login-equip RETRY eligibility: the retry only
+                                // exists for an equip whose ack was LOST to the
+                                // item-creation race. Once the ack arrives the item
+                                // is wielded, so drop the retry marker — otherwise a
+                                // LATER intentional dequip (WielderGuid -> null) would
+                                // let the login pass re-wield it (fighting the swap/
+                                // dequip). inventoryEquipSent stays, preserving the
+                                // prior one-shot suppression for that dequip case.
+                                equipRetry.Remove(wieldAck.ItemGuid);
                                 if (wieldAck.NewLocation != 0)
                                     satisfiedEquipSlots.Add(wieldAck.NewLocation);
                                 if (pendingEquipWcid.TryGetValue(wieldAck.ItemGuid, out var wcEq))
@@ -5397,7 +5414,24 @@ internal sealed class HandshakeDriver : IDisposable
                         if (snap.ContainerGuid is not uint cg || cg != ieSelfGuid) continue;
                         if (snap.WielderGuid is not null) continue;
                         if (snap.ValidLocations is not uint ivl || ivl == 0) continue;
-                        if (inventoryEquipSent.Contains(snap.Guid)) continue;
+                        if (inventoryEquipSent.Contains(snap.Guid))
+                        {
+                            // Retry a still-unwielded raced equip after a cooldown: its
+                            // wield likely raced the item-creation ack (silent
+                            // InventoryServerSaveFailed, no WieldObject ack), so the
+                            // one-shot dedup would otherwise strand it unwielded for the
+                            // session. Release it (fall through -> re-picked + re-sent
+                            // below), capped by MaxAttempts. WielderGuid != null is
+                            // already excluded above, so this only fires while unwielded.
+                            if (equipRetry.TryGetValue(snap.Guid, out var er)
+                                && AutoEquipRetryPolicy.ShouldRetry(
+                                    er.SentAt, er.Attempts, DateTime.UtcNow,
+                                    AutoEquipRetryPolicy.RetryCooldown,
+                                    AutoEquipRetryPolicy.MaxAttempts))
+                                inventoryEquipSent.Remove(snap.Guid);
+                            else
+                                continue;
+                        }
                         var slot = ivl & (~ivl + 1);
                         if (satisfiedEquipSlots.Contains(slot)) continue;
                         if (snap.WeenieClassId is uint wcSat2 &&
@@ -5445,6 +5479,14 @@ internal sealed class HandshakeDriver : IDisposable
                     if (ieCandidate is not null)
                     {
                         inventoryEquipSent.Add(ieCandidate.Guid);
+                        // Stamp the send time + bump the attempt count so a raced
+                        // equip can be re-sent after the cooldown (see the candidate
+                        // skip above). Only the PHASE7F.4 login pass records this, so
+                        // other equip paths keep their one-shot behavior.
+                        equipRetry[ieCandidate.Guid] = (
+                            DateTime.UtcNow,
+                            (equipRetry.TryGetValue(ieCandidate.Guid, out var prevRetry)
+                                ? prevRetry.Attempts : 0) + 1);
                         // cp-2273 — this wield is source-autonomous (the motor
                         // chose it, the LLM never asked). If the server rejects
                         // it, suppress the rejection rather than letting it
