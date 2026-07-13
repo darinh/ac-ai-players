@@ -4317,28 +4317,28 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_TrueForReachedNamedExplore()
+    public void IsApproachToReachedTarget_TrueForReachedNamedExplore()
     {
         // The bot is re-driving an Explore toward a named target it has reached;
         // the Motor must recognise the no-op so it can yield to a fresh decision.
         var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
         var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Wayfarer" } };
 
-        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_TrueForReachedNameContainsExplore()
+    public void IsApproachToReachedTarget_TrueForReachedNameContainsExplore()
     {
         // A name_contains Explore that has reached a matching object also counts.
         var world = BuildVisibleWorld(NamedVisible("Wayfarer the Bold", 2f));
         var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { NameContains = "Way" } };
 
-        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_FalseForUntargetedExplore()
+    public void IsApproachToReachedTarget_FalseForUntargetedExplore()
     {
         // An "anywhere" Explore is a Motor-owned traversal with nothing to
         // interact with — it must keep free-re-driving (budget-exempt), not break
@@ -4346,33 +4346,33 @@ public class LlmGoalPolicyTests
         var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
         var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
 
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_FalseWhenGoalNotExplore()
+    public void IsApproachToReachedTarget_FalseWhenGoalNotExplore()
     {
         // Only a navigate-only Explore can strand the bot beside a reached target;
         // a Talk/Attack goal is handled by other gates, so this must not fire.
         var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
         var goal = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Wayfarer" } };
 
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_FalseWhenTargetNotYetReached()
+    public void IsApproachToReachedTarget_FalseWhenTargetNotYetReached()
     {
         // The named Explore target is still far (not arrived) — keep re-driving
         // the Explore; do not break mid-travel.
         var world = BuildVisibleWorld(NamedVisible("Wayfarer", 40f));
         var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Wayfarer" } };
 
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_FalseForDifferentTargetThanReachedObject()
+    public void IsApproachToReachedTarget_FalseForDifferentTargetThanReachedObject()
     {
         // Keys on the GOAL's OWN target, not on which objects happen to be near:
         // an Explore toward a NOT-yet-visible target must NOT be flagged just
@@ -4381,7 +4381,72 @@ public class LlmGoalPolicyTests
         var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
         var goal = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Stonekeeper" } };
 
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(goal, world));
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsApproachToReachedTarget_TrueForReachedGoTo()
+    {
+        // A GoTo is a navigate-only DIRECTED approach: once its named target is
+        // visible within reach, the bot has arrived, so the reached check must
+        // fire (so the Motor yields a fresh LLM decision — e.g. the follow-up
+        // interaction verb — instead of sticky-re-driving the completed GoTo).
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.GoTo, Target = new Selector { Name = "Wayfarer" } };
+
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsApproachToReachedTarget_FalseWhenGoToTargetNotYetReached()
+    {
+        // The GoTo target is still far (not arrived) — keep driving the approach;
+        // do not break the walk mid-travel.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 40f));
+        var goal = new Goal { Kind = GoalKind.GoTo, Target = new Selector { Name = "Wayfarer" } };
+
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsApproachToReachedTarget_TrueForReachedGuidGoTo()
+    {
+        // The approach executor resolves a GUID-addressed target first, so a
+        // reached guid GoTo must also trip the no-op break (else it keeps
+        // sticky-re-emitting after arrival). NamedVisible carries guid 0x800000A1.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal { Kind = GoalKind.GoTo, Target = new Selector { Guid = 0x800000A1u } };
+
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsApproachToReachedTarget_FalseWhenGuidGoToTargetNotYetReached()
+    {
+        // A guid GoTo whose target is still far must NOT break mid-travel.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 40f));
+        var goal = new Goal { Kind = GoalKind.GoTo, Target = new Selector { Guid = 0x800000A1u } };
+
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
+    }
+
+    [Fact]
+    public void IsApproachToReachedTarget_GuidIsAuthoritative_NoNameFallthrough()
+    {
+        // Mixed selector: guid (points at an object that is NOT visible) + a name
+        // that DOES match a different nearby object. guid is authoritative (the
+        // executor resolves it first), so a guid MISS must NOT be rescued by the
+        // name match — otherwise a still-active directed approach would be wrongly
+        // broken. The visible "Wayfarer" has guid 0x800000A1; the goal names a
+        // different guid.
+        var world = BuildVisibleWorld(NamedVisible("Wayfarer", 2f));
+        var goal = new Goal
+        {
+            Kind = GoalKind.GoTo,
+            Target = new Selector { Guid = 0x800000FFu, Name = "Wayfarer" },
+        };
+
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(goal, world));
     }
 
     private static EventStream ExploreEmissions(string name, int count, System.DateTimeOffset utc)
@@ -4761,30 +4826,30 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_FuzzyAndRoleBindsWithinReach()
+    public void IsApproachToReachedTarget_FuzzyAndRoleBindsWithinReach()
     {
         // The hard-drop reached check shares the resolver too: a subsequence bind and a
         // quoted-role bind within reach are both recognised as reached (no-op Explore).
         var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 2f));
-        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world));
         var world2 = BuildVisibleWorld(NamedVisible("Ianto", 2f));
-        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Ianto \"Town Crier\"" } }, world2));
         // Beyond reach -> NOT reached (so the far-visible cue owns it).
         var world3 = BuildVisibleWorld(NamedVisible("Central Courtyard", 30f));
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world3));
     }
 
     [Fact]
-    public void IsExploreToReachedTarget_DuplicateExactNames_NearestWithinReachStillReached()
+    public void IsApproachToReachedTarget_DuplicateExactNames_NearestWithinReachStillReached()
     {
         // Regression lock (gpt-5.4 nit): two objects with the SAME exact name, one at 2u
         // one at 30u. The old "any exact within reach" and the new "nearest exact within
         // reach" agree -> reached (the bot is at the near one).
         var world = BuildVisibleWorld(NamedVisible("Ianto", 2f), NamedVisible("Ianto", 30f));
-        Assert.True(LlmGoalPolicy.IsExploreToReachedTarget(
+        Assert.True(LlmGoalPolicy.IsApproachToReachedTarget(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Ianto" } }, world));
     }
 
@@ -4795,7 +4860,7 @@ public class LlmGoalPolicyTests
         // courtyards) does NOT uniquely resolve -> the reached hard-drop is false, the
         // far-visible cue does not fire, and the unresolved `## Explore loop` owns it.
         var world = BuildVisibleWorld(NamedVisible("Central Courtyard", 2f), NamedVisible("East Courtyard", 8f));
-        Assert.False(LlmGoalPolicy.IsExploreToReachedTarget(
+        Assert.False(LlmGoalPolicy.IsApproachToReachedTarget(
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Courtyard" } }, world));
         var es = ExploreEmissions("Courtyard", 3, System.DateTimeOffset.UtcNow);
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);

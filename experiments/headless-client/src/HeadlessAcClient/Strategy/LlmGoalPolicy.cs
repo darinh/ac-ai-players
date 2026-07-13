@@ -2894,10 +2894,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // place. Without this the higher-priority re-drive path re-installs a
             // reached Explore for free, never showing the `## Reached Explore
             // target` capsule. Keys on the re-driven goal's OWN target.
-            var redriveExploreReached = IsExploreToReachedTarget(_redriveGoal, world);
+            var redriveApproachReached = IsApproachToReachedTarget(_redriveGoal, world);
             if (stuck || landblockChangedSinceLook || semanticRejectSinceLook
                 || inventoryChangedSinceLook || leftTop || topInactive || topDeadlinePassed
-                || budgetExhausted || redriveExploreReached
+                || budgetExhausted || redriveApproachReached
                 || confirmationRequested || teammateSighted)
             {
                 Console.WriteLine(
@@ -2909,7 +2909,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                      : leftTop ? "intent-left-top"
                      : topInactive ? $"top-{redriveTop!.Status}"
                      : topDeadlinePassed ? "top-deadline"
-                     : redriveExploreReached ? "explore-target-reached"
+                     : redriveApproachReached ? "approach-target-reached"
                      : confirmationRequested ? "confirmation-request"
                      : teammateSighted ? "teammate-sighted"
                      : $"budget({_redriveReinstalls}/{MaxRedriveReinstalls})"));
@@ -3066,14 +3066,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // bookkeeping (the bot's OWN Explore goal + a name-matched visible object
         // within reach); no game knowledge, no source-side interaction decision —
         // the LLM still chooses whether/how to interact or to move on.
-        var stickyExploreReached =
-            IsExploreToReachedTarget(_lastLlmGoal, world);
-        if (currentGoal is null && stickyExploreReached
+        var stickyApproachReached =
+            IsApproachToReachedTarget(_lastLlmGoal, world);
+        if (currentGoal is null && stickyApproachReached
             && !hasNonPickerExternal && !pickerArrived && !pickerStartWake)
         {
             Console.WriteLine(
-                "[strategy] sticky re-emit broken: reached named Explore target " +
-                $"{_lastLlmGoal!.Target} — forcing fresh LLM decision (switch to interaction)");
+                $"[strategy] sticky re-emit broken: reached named {_lastLlmGoal!.Kind} target " +
+                $"{_lastLlmGoal.Target} — forcing fresh LLM decision (switch to interaction)");
         }
         // Budget exemption for a NON-TARGETED Explore (schema "anywhere"
         // sentinel). The MaxStickyReEmits cap exists to stop spin on an
@@ -3116,7 +3116,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && !pickerArrived
             && !pickerStartWake
             && !stickyAlreadyAttempted
-            && !stickyExploreReached)
+            && !stickyApproachReached)
         {
             // Call-volume reduction (aimless path). Live evidence: a fresh
             // L1 bot is dominantly aimless (currentGoal == null) in an
@@ -3192,7 +3192,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 : pickerArrived ? "picker-arrived"
                 : pickerStartWake ? "picker-start-wake"
                 : stickyAlreadyAttempted ? "self-already-interacted"
-                : stickyExploreReached ? "explore-reached"
+                : stickyApproachReached ? "approach-reached"
                 : "other";
             if (!string.Equals(blockReason, _lastExploreRedriveBlockReason, StringComparison.Ordinal))
             {
@@ -4245,13 +4245,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // instead, drop it and defer to the fallback so the bot moves on rather
         // than burning an LLM round-trip per cycle in place. Keys on the goal's
         // OWN target, so a NEW Explore toward a not-yet-reached target is kept.
-        if (IsExploreToReachedTarget(goal, world))
+        if (IsApproachToReachedTarget(goal, world))
         {
             Console.WriteLine(
-                $"[llm-dedup] dropping LLM Explore target={goal.Target}" +
-                " — target already reached; Explore cannot interact; deferring to fallback.");
+                $"[llm-dedup] dropping LLM {goal!.Kind} target={goal.Target}" +
+                " — target already reached; a navigate-only approach cannot interact; deferring to fallback.");
             _training?.RecordParseError(decisionId,
-                "dropped-by-dedup: Explore toward an already-reached target (no-op)");
+                "dropped-by-dedup: approach (Explore/GoTo) toward an already-reached target (no-op)");
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
@@ -7522,23 +7522,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
-    // Goal-based reached check: true iff `goal` is a TARGETED Explore whose OWN
-    // target (name= exact / name_contains= substring; not the untargeted
-    // "anywhere" sentinel) matches a `Visible nearby` object within reach.
-    // Unlike TryDetectReachedExploreTarget (which keys on the bot's recent
-    // emission history to render the prompt capsule), this keys on the SPECIFIC
-    // goal being evaluated — the Motor uses it to recognise that walking this
-    // Explore makes no progress because the bot is already at its target, so a
-    // NEW Explore toward a DIFFERENT (not-yet-reached) target is NOT matched.
-    // Pure motor-geometry over the bot's own goal + visible objects; no game
-    // knowledge, no source-side interaction decision.
-    internal static bool IsExploreToReachedTarget(Goal? goal, WorldStateProjection world)
+    // Goal-based reached check: true iff `goal` is a DIRECTED approach — a
+    // TARGETED Explore (name= exact / name_contains= substring; not the
+    // untargeted "anywhere" sentinel) OR a GoTo (always targeted) — whose OWN
+    // target matches a `Visible nearby` object within reach. Both verbs are
+    // navigate-only (arrival sends no opcode), so once the bot is already at the
+    // target, re-driving the same approach makes no progress; the Motor uses this
+    // to force a fresh LLM decision AT arrival (so the LLM can pick the follow-up
+    // interaction verb) instead of re-driving in place. Keys on the SPECIFIC goal
+    // being evaluated, so a NEW approach toward a DIFFERENT (not-yet-reached)
+    // target is NOT matched. Pure motor-geometry over the bot's own goal + visible
+    // objects; no game knowledge, no source-side interaction decision.
+    internal static bool IsApproachToReachedTarget(Goal? goal, WorldStateProjection world)
     {
-        if (goal is not { Kind: GoalKind.Explore } || IsUntargetedExploreGoal(goal)) return false;
+        if (goal is null) return false;
+        var isApproach = (goal.Kind == GoalKind.Explore && !IsUntargetedExploreGoal(goal))
+                         || goal.Kind == GoalKind.GoTo;
+        if (!isApproach) return false;
         if (world?.Visible is null) return false;
         var name = goal.Target?.Name;
         var nameContains = goal.Target?.NameContains;
-        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(nameContains)) return false;
+        var guid = goal.Target?.Guid;
+        if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(nameContains) && guid is null)
+            return false;
+        // guid= is AUTHORITATIVE when present: the approach executor resolves a
+        // GUID-addressed target FIRST (HandshakeDriver prefers goal.Target.Guid) and
+        // a guid uniquely identifies ONE object, so "reached" means THAT exact object
+        // is visible within reach — and NOT that some DIFFERENT nearby object happens
+        // to match a name also on the selector. Mirror the executor's guid-first
+        // semantics: when a guid is given, decide solely on it and do not fall through
+        // to the name paths (avoids wrongly breaking a still-active directed approach).
+        if (guid is uint tg)
+        {
+            foreach (var v in world.Visible)
+                if (v.Guid == tg)
+                    return v.Distance is float gd && gd <= ReachedExploreTargetDistanceUnits;
+            return false;
+        }
         // name= resolves under the SHARED selector semantics (exact / quoted-role-strip
         // / unique subsequence) so a fuzzy/role bind that is already within reach is
         // recognised as a no-op Explore (consistent with the reached cue + the
@@ -7628,7 +7648,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // no-current-goal LLM call that re-emits the SAME Explore — a call storm in place
     // (live: an area/location name re-Explored many times back-to-back, the Motor
     // reporting arrival although the name is not a visible object). cp022
-    // IsExploreToReachedTarget only covers a target that IS a visible reached object;
+    // IsApproachToReachedTarget only covers a target that IS a visible reached object;
     // this surfaces the no-visible-match (area/location-name) case to the LLM as an
     // informational CUE (the `## Explore loop` capsule) — NOT a hard drop, so a
     // legitimate TRAVEL-BACK toward a not-yet-visible distant target (the cp035/cp037/
