@@ -7551,6 +7551,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // is one the Use goal would resolve to MISS (the bot walked out of range of it).
     private static readonly TimeSpan RepeatedUnresolvedUseWindow = TimeSpan.FromMinutes(3);
     private const int RepeatedUnresolvedUseThreshold = 3;
+    // Sibling: repeated-Give-toward-a-departed/absent-NPC window + threshold. A `Give` target is
+    // an NPC (the item rides the separate item field); an NPC name absent from the distance-bounded
+    // `## Visible` is one the Give goal would resolve to MISS (the bot walked out of range, or -- the
+    // live case -- the model confabulated a quest NPC that does not exist). Give is the last
+    // interaction verb without a name-keyed loop cue (Attack/Use/Pickup have one).
+    private static readonly TimeSpan RepeatedUnresolvedGiveWindow = TimeSpan.FromMinutes(3);
+    private const int RepeatedUnresolvedGiveThreshold = 3;
     // Sibling: repeated-Wield-of-an-UNOWNED-item window + threshold. A Wield only equips an
     // item in the bot's OWN inventory; re-Wielding a weapon it does not own (e.g. a vendor's
     // or a ground item) fails every time, leaving the bot unarmed.
@@ -7713,6 +7720,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static string? RepeatedUnresolvedUseTarget(
         WorldStateProjection world, EventStream events, DateTimeOffset since)
         => MostRepeatedUnresolvedTargetName(world, events, since, "Use", RepeatedUnresolvedUseThreshold, excludeCorpses: false, itemNameWhenTargetEmpty: true);
+
+    // Sibling for Give: the NPC NAME the bot has tried to `Give` to >= threshold times within the
+    // window that NO currently-visible object would bind — the NPC left view/range, or (the live
+    // case) the model confabulated a quest NPC that does not exist, so the Give resolves to MISS and
+    // a fresh no-current-goal call re-emits the SAME Give. Surfaced as the `## Give loop`
+    // informational cue — NOT a hard drop, so a legitimate close-in toward an NPC just out of the
+    // visible radius is never overridden. Give's TARGET is the NPC and its item rides the SEPARATE
+    // item field, so the target name is read from the target segment (itemNameWhenTargetEmpty:false —
+    // NOT the item field: a Give always carries a populated item, and reading the item name as the
+    // target would count the wrong string); a Give is never a two-object item-Use, so it is not
+    // excluded. Corpses ARE excluded (you Give to a living NPC, not a corpse), mirroring Attack.
+    // Same audit posture as the Attack/Use/Pickup loop cues: own emission history + perception; no
+    // game knowledge, no priority, no source-side target choice.
+    internal static string? RepeatedUnresolvedGiveTarget(
+        WorldStateProjection world, EventStream events, DateTimeOffset since)
+        => MostRepeatedUnresolvedTargetName(world, events, since, "Give", RepeatedUnresolvedGiveThreshold, excludeCorpses: true);
 
     // Sibling for Pickup: the concrete NAME the bot has tried to `Pickup` >= threshold times
     // within the window that NO currently-visible object would bind — the ground item or corpse
@@ -8107,12 +8130,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             else if (!preferItemName)
             {
-                // Single-target verbs: the first name= from `target=` onward is the target's
-                // (item is empty), the original behavior.
-                var nm = System.Text.RegularExpressions.Regex.Match(
-                    txt.Substring(ti), "name=\"([^\"]+)\"");
-                if (!nm.Success) continue;
-                name = nm.Groups[1].Value;
+                // Parse the target and item segments SEPARATELY and count only the TARGET
+                // segment's name. Single-target verbs (Attack/Pickup) carry an EMPTY item
+                // segment, so this is equivalent to the prior "first name= from `target=`"
+                // regex for them; but a verb that DOES carry an item (Give: target=NPC,
+                // item=object) must NOT let the item name leak in as the target when the
+                // target is a guid/id with no name= (else a Give to guid + item="X" would
+                // wrongly count "X" as the NPC and fire a false loop cue).
+                var (tName, _) = ParseTargetAndItemNames(txt, ti);
+                if (tName is null) continue;
+                name = tName;
             }
             else
             {
@@ -13272,6 +13299,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 $"you have travelled PAST `{loopedUseDisplay}`, re-`Use`-ing makes no progress: `Use` a DIFFERENT " +
                 "object that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
                 $"re-`Use`-ing `{loopedUseDisplay}`.");
+        }
+
+        // ── ## Give loop (target not in view) — social-interaction sibling of the Attack/Use loops ──
+        // The bot re-emits `Give` toward a named NPC no longer within the visible radius (the NPC
+        // walked out of range) OR — the live case — toward a quest NPC the model CONFABULATED that
+        // binds no object at all; either way the Give resolves to MISS, clears, and a fresh
+        // no-current-goal call re-emits the SAME Give (live: a canvass of Give goals to distinct
+        // invented NPCs). Give was the last interaction verb without a name-keyed loop cue. The
+        // multi-target `## Engagement churn` cue catches a TIGHT canvass across several NPCs within one
+        // window; this concrete-name sibling catches a SINGLE repeated NPC name. Informational CUE
+        // keyed on the bot's OWN repeated emissions + perception — NOT a hard drop, so a close-in
+        // toward an NPC just out of view is never overridden; the LLM still decides. No game knowledge
+        // (the looped name is the bot's own emitted goal text echoed back), no priority, no
+        // source-side target choice.
+        if (RepeatedUnresolvedGiveTarget(
+                world, events, DateTimeOffset.UtcNow - RepeatedUnresolvedGiveWindow) is string loopedGiveName
+            && OneLine(loopedGiveName) is string loopedGiveDisplay)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Give loop (target not in view)");
+            sb.AppendLine(
+                $"- you have tried to `Give` to `{loopedGiveDisplay}` several times recently but NO NPC named " +
+                $"`{loopedGiveDisplay}` is in view in `## Nearest objects`. If you are still TRAVELLING toward " +
+                $"`{loopedGiveDisplay}` and closing in (your `landblock`/position is changing as you go), keep going " +
+                "— `Give` walks you to a target, and it will come into view. But if your position is NOT changing, or " +
+                $"you have travelled PAST `{loopedGiveDisplay}`, re-`Give`-ing makes no progress: `Give` to a DIFFERENT " +
+                "NPC that IS visible in `## Nearest objects`, or pursue a DIFFERENT objective, instead of " +
+                $"re-`Give`-ing to `{loopedGiveDisplay}`.");
         }
 
         // ── ## Pickup loop (target not in view) — concrete-name sibling of the Attack/Use loops ──
