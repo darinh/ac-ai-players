@@ -477,11 +477,15 @@ public class TeammateCoordinationTests
 
     private static WorldStateProjection AllegianceProjection(
         string ownName, uint? monarchGuid, params string[] visiblePlayerNames)
+        => AllegianceProjection(ownName, monarchGuid, 6f, visiblePlayerNames);
+
+    private static WorldStateProjection AllegianceProjection(
+        string ownName, uint? monarchGuid, float visibleDistance, params string[] visiblePlayerNames)
     {
         var visible = visiblePlayerNames
             .Select((n, i) => new VisibleObjectProjection
             {
-                Guid = 0x50000180u + (uint)i, Name = n, IsPlayer = true, Distance = 6f,
+                Guid = 0x50000180u + (uint)i, Name = n, IsPlayer = true, Distance = visibleDistance,
             })
             .ToArray();
         return new WorldStateProjection
@@ -507,6 +511,41 @@ public class TeammateCoordinationTests
         Assert.Contains("your team's leader", sec);
         Assert.Contains("Mba", sec);
         Assert.Contains("DIRECTED team coordination", sec);
+    }
+
+    [Fact]
+    public void Prompt_Follower_MonarchInSwearRange_SwearsInOneStep()
+    {
+        // Monarch is a visible player WITHIN swear range (<= 2u) among other players: the
+        // proximity + name-keyed check resolves it -> ONE-step swear (no redundant GoTo;
+        // the server completes the pledge in place without commanding a client move).
+        var world = AllegianceProjection("Mbb", monarchGuid: 0x5000000Bu, 1.0f, "Zzz", "Mba", "Qqq");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("Your monarch is", sec);
+        Assert.Contains("Mba", sec);
+        Assert.Contains("ONE step", sec);
+        Assert.DoesNotContain("GoTo", sec);
+        Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));
+    }
+
+    [Fact]
+    public void Prompt_Follower_MonarchVisibleButFar_KeepsGoToFirst()
+    {
+        // Monarch is VISIBLE but outside swear range (~6u): the client cannot rely on the
+        // server to walk it there (this headless client ignores a server move-to-object),
+        // so the cue MUST keep the two-step GoTo-first path. Regression guard — a
+        // visibility-only gate would emit a one-step swear the server could never complete
+        // (the bot would stand still, out of range, while the server waits).
+        var world = AllegianceProjection("Mbb", monarchGuid: 0x5000000Bu, 6f, "Mba");
+        var prompt = LlmGoalPolicy.BuildUserPromptForTest(
+            world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
+        var sec = Section(prompt, "## Allegiance guidance");
+        Assert.Contains("Your monarch is", sec);
+        Assert.Contains("GoTo", sec);
+        Assert.DoesNotContain("ONE step", sec);
+        Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));
     }
 
     [Fact]
@@ -561,6 +600,7 @@ public class TeammateCoordinationTests
         Assert.Contains("Mba", sec);
         Assert.Contains("SwearAllegiance", sec);
         Assert.Contains("GoTo", sec);   // directed to approach the out-of-view monarch
+        Assert.DoesNotContain("ONE step", sec);   // out-of-view monarch keeps the two-step GoTo-first path
         // Integration: the render diagnostic's detector recognizes the REAL built prompt's
         // vassal-swear directive (ties BuildUserPrompt output to PromptHasVassalSwearDirective).
         Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));

@@ -523,6 +523,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const float StationaryUseEpsilonSq = StationaryUseEpsilon * StationaryUseEpsilon;
     private const int StationaryUseRepeatThreshold = 3;
 
+    // Distance (world units) within which the one-step vassal-swear cue is offered. The
+    // server completes a swear only when the vassal is within Allegiance_MaxSwearDistance
+    // (2.0u) of the patron, measured by its cylinder reach test; this bot's perceived
+    // distance (WorldStateProjection.Distance) is a 2D horizontal distance outdoors, so a
+    // value held DELIBERATELY BELOW the server's 2.0u absorbs that metric difference plus
+    // client/server position slop. A conservative margin matters because this headless
+    // client does not act on a server-issued move-to-object (it walks only under its own
+    // GoTo/Explore/Use/Attack goals): if a one-step swear were offered while the server
+    // still saw the bot out of range, the swear would not complete and the bot would not
+    // move. Below this the one-step cue is offered; otherwise the cue keeps GoTo-first.
+    private const float SwearOneStepRangeUnits = 1.5f;
+
     // ── Landblock-scoped world-object USE churn loop-break (cp-2354) ──────
     // The stationary guard above resets on ANY movement, so it MISSES a TOUR
     // of several doors/openables within ONE landblock: the bot walks between
@@ -11354,6 +11366,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             monarchName = fleaderName;   // drifted-apart-after-grouping: monarch = fellowship leader
         }
+        // The swear is a ONE-step action ONLY when the monarch is already within the
+        // server's swear-completion distance. The server completes a swear by first moving
+        // the vassal up to that distance of the patron, but this headless client does not
+        // act on a server-issued move-to-object (it walks only under its own GoTo/Explore/
+        // Use/Attack motion goals), so a swear dispatched from beyond that distance would
+        // not complete — the client would not close the gap the server expects it to. When
+        // already in range no move is commanded and the pledge completes on dispatch, so a
+        // preceding client `GoTo` is redundant. Otherwise — monarch beyond range, or not
+        // currently visible (resolved from fellowship membership) — the cue keeps `GoTo`
+        // first so the client closes the distance itself and brings the monarch into
+        // perception for the Motor to resolve the name.
+        var monarchInSwearRange = monarchName is not null
+            && world.Visible.Any(v => v.IsPlayer
+                && v.Distance is { } d && d <= SwearOneStepRangeUnits
+                && string.Equals(v.Name, monarchName, StringComparison.OrdinalIgnoreCase));
         var renderVassalSwear = monarchName is not null && !alreadyVassal;
         if (aPlayerIsInView || renderVassalSwear)
         {
@@ -11362,11 +11389,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
             if (renderVassalSwear)
             {
+                var swearStep = monarchInSwearRange
+                    ? $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge NOW in ONE step " +
+                      "(they are right next to you — no need to travel to them first)"
+                    : $"`GoTo` `{monarchName}` to reach them (a swear needs you near them), then " +
+                      $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge";
                 sb.AppendLine(
                     $"- Your monarch is `{monarchName}` (your team's leader). You are NOT yet their vassal. " +
-                    $"`GoTo` `{monarchName}` to reach them (a swear needs you near them), then " +
-                    $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge. This is DIRECTED team " +
-                    "coordination — do it before an OPTIONAL hunt/explore.");
+                    swearStep + ". This is DIRECTED team coordination — do it before an OPTIONAL hunt/explore.");
             }
 
             // The generic "swear to anyone" affordance is for a bot that is not already
