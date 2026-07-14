@@ -561,6 +561,9 @@ public class TeammateCoordinationTests
         Assert.Contains("Mba", sec);
         Assert.Contains("SwearAllegiance", sec);
         Assert.Contains("GoTo", sec);   // directed to approach the out-of-view monarch
+        // Integration: the render diagnostic's detector recognizes the REAL built prompt's
+        // vassal-swear directive (ties BuildUserPrompt output to PromptHasVassalSwearDirective).
+        Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));
         // With no visible player the generic visible-target affordances must stay closed
         // even though the fellowship-leader path forces the section open.
         Assert.DoesNotContain("A `player` is in view", sec);

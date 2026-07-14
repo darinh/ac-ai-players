@@ -3507,6 +3507,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         EmitContractBatchSourceDiagnostic(world);
         var userPrompt = BuildUserPrompt(world, events, currentGoal, _stack, _currentPickerActivity, _currentExplorationCandidates, dwellEntry, _currentRecentSightings, _levelAtCurrentLandblockEntry, SecondsSinceLastOwnDeath(nowUtc), BuildGoalProgressSnapshot(), _currentUnreachableTargets, _currentApproachDistance, _currentExcursionCoverage, _currentFreshKillCorpses, _currentLootedEmptyCorpses, localUseChurn, _talkedNpcGuids, _talkedNpcNames, promptCeiling: _adaptivePromptCeiling, recentOwnDeathCount: RecentOwnDeathCount(nowUtc), routeBlockedTarget: FreshRouteBlockedTarget(_currentRouteBlockedTarget, _routeBlockedAtUtc, nowUtc));
         EmitLoopCueDiagnostic(userPrompt);
+        EmitSwearCueDiagnostic(userPrompt);
         var projJson = JsonSerializer.Serialize(world);
         var decisionId = Guid.NewGuid();
 
@@ -9182,6 +9183,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private string? _lastContractBatchSourceDiag;
     // On-change throttle for the loop-cue render diagnostic (EmitLoopCueDiagnostic).
     private string _lastLoopCueSignature = "";
+    private string _lastSwearCueSignature = "";
 
     // Diagnostic (cp030 pattern, behavior-preserving): when the bot holds a
     // FINISHED contract batch (every tracked contract stage-3), the FIND-A-
@@ -9270,6 +9272,35 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         return headers;
     }
+
+    // Diagnostic: the vassal-swear DIRECTIVE ("## Allegiance guidance" -> "Your monarch is
+    // ... You are NOT yet their vassal ... SwearAllegiance") renders into the PROMPT (not
+    // otherwise logged — only prompt-bytes is), so an operator cannot tell whether a grouped
+    // follower is actually being TOLD to swear (the cue fired, so any non-swear is model
+    // quality) or the cue is GATED OFF (a mechanical gap in the monarch resolution). Correlate
+    // this with the [team-formation] role=follower marker: follower + directive RENDERED =>
+    // the model ignored it; follower + directive ABSENT => a rendering gap. Scan the prompt
+    // this class just built + log presence ON CHANGE (console-only; pure observation of the
+    // already-built prompt; no behavior change, no game knowledge).
+    private void EmitSwearCueDiagnostic(string userPrompt)
+    {
+        var sig = PromptHasVassalSwearDirective(userPrompt) ? "rendered" : "absent";
+        if (sig == _lastSwearCueSignature) return; // no change (incl. staying absent)
+        _lastSwearCueSignature = sig;
+        Console.WriteLine(sig == "rendered"
+            ? "[swear-cue] vassal-swear directive RENDERED (follower told to SwearAllegiance to its monarch)"
+            : "[swear-cue] vassal-swear directive absent");
+    }
+
+    // True when the rendered prompt contains the vassal-swear DIRECTIVE (as opposed to the
+    // generic "swear to a visible player" affordance). Requires BOTH of the directive's
+    // distinctive phrases — "Your monarch is" AND "NOT yet their vassal" — so injected
+    // in-game chat/NPC text that merely quotes one phrase cannot spoof a RENDERED reading
+    // (organic text would need both). Pure string scan; no game knowledge.
+    internal static bool PromptHasVassalSwearDirective(string prompt)
+        => !string.IsNullOrEmpty(prompt)
+            && prompt.Contains("Your monarch is", StringComparison.Ordinal)
+            && prompt.Contains("NOT yet their vassal", StringComparison.Ordinal);
 
     // Accumulate the guids of vendors in view WHILE the bot holds a finished
     // contract batch (a contract-refresh BUY opportunity) into <paramref

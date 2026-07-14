@@ -6513,6 +6513,32 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void PromptHasVassalSwearDirective_TrueOnlyForTheVassalDirective()
+    {
+        // The vassal-swear DIRECTIVE ("Your monarch is ...") -> true.
+        var directive =
+            "## Allegiance guidance\n- Your monarch is `Mba` (your team's leader). You are NOT yet " +
+            "their vassal. `GoTo` `Mba` ... then `SwearAllegiance{target: {name: \"Mba\"}}` to pledge.";
+        Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(directive));
+    }
+
+    [Fact]
+    public void PromptHasVassalSwearDirective_FalseForGenericAffordanceOrEmpty()
+    {
+        // The GENERIC "swear to a visible player" affordance is NOT the directive.
+        var generic =
+            "## Allegiance guidance\n- A `player` is in view. You MAY `SwearAllegiance` to a visible " +
+            "`player` by name ... OPTIONAL — you decide whether and to whom, or skip it.";
+        Assert.False(LlmGoalPolicy.PromptHasVassalSwearDirective(generic));
+        Assert.False(LlmGoalPolicy.PromptHasVassalSwearDirective(""));
+        Assert.False(LlmGoalPolicy.PromptHasVassalSwearDirective(null!));
+        // Injected in-game text quoting ONE phrase must not spoof a RENDERED reading:
+        // the detector requires BOTH directive phrases.
+        Assert.False(LlmGoalPolicy.PromptHasVassalSwearDirective(
+            "## System messages\n- Someone says, \"Your monarch is a fool!\""));
+    }
+
+    [Fact]
     public void BuildUserPrompt_PickupLoopCapsule_OmittedForConcreteNamePickup()
     {
         var now = System.DateTimeOffset.UtcNow;
