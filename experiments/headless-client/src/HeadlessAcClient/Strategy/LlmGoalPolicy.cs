@@ -535,6 +535,14 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // move. Below this the one-step cue is offered; otherwise the cue keeps GoTo-first.
     private const float SwearOneStepRangeUnits = 1.5f;
 
+    // Distance (world units) beyond which a dispatched SwearAllegiance cannot complete: it
+    // is the server's Allegiance_MaxSwearDistance (2.0u). Beyond it the server would command
+    // the vassal to move, which this headless client does not act on, so a swear sent from
+    // farther is dropped. Used to decide when to rewrite an out-of-range SwearAllegiance goal
+    // into an approach (GoTo) first. Held AT the server distance (not the conservative
+    // one-step cue value) so only a swear that genuinely could not land is diverted.
+    private const float SwearServerRangeUnits = 2.0f;
+
     // ── Landblock-scoped world-object USE churn loop-break (cp-2354) ──────
     // The stationary guard above resets on ANY movement, so it MISSES a TOUR
     // of several doors/openables within ONE landblock: the bot walks between
@@ -2578,6 +2586,65 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (world.Inventory is null) return null;
         if (TryResolveWieldWearableInTargetField(goal, world) is not null) return null;
         return ResolveNonEquippableOwnedByName(world.Inventory, targetName);
+    }
+
+    // SwearAllegiance{target=<player beyond swear range>} -> the visible player projection to
+    // GoTo, or null. A swear completes only when the vassal is within the server's swear
+    // distance of the patron; the server closes any remaining gap by commanding the vassal to
+    // move, but this headless client does not act on a server-issued move-to-object (it walks
+    // only under its own motion goals), so a swear dispatched from beyond that distance is sent
+    // yet never lands and the bot does not approach. The prerequisite the pledge requires is to
+    // reach the patron first, which the client performs with a GoTo. Fire ONLY when the target
+    // uniquely binds a visible player (other than self) whose wire distance is beyond
+    // SwearServerRangeUnits: the goal is then rewritten to a GoTo of that SAME player (pinned by
+    // guid so a same-named non-player object cannot divert the approach). The LLM chose WHOM to
+    // pledge to; the Motor only inserts the approach that choice presupposes (like the
+    // Wield->Pickup / Pickup->Use prerequisite rewrites). No autonomous target pick, no game
+    // knowledge — keyed on the named player's wire distance.
+    //
+    // Target binding is a deliberately CONSERVATIVE subset of the Motor's swear resolver
+    // (ResolveUniquePlayerOtherThanActor): a guid filter (if the selector carries a guid), then
+    // exact name (incl. a trailing quoted ` "<role>"` strip via the same StripTrailingQuotedRoleTitle
+    // the Motor uses); an empty selector name (guid-only) matches any guid-filtered player. It does
+    // NOT attempt the Motor's whole-word-subsequence fuzzy fallback: this helper only sees the
+    // clipped world.Visible projection while the Motor resolves over the full world.Objects, so a
+    // fuzzy match unique WITHIN Visible could be ambiguous over the full set — which would make the
+    // rewrite fire where the swear would Fail. Exact names and guids are globally unique, so an
+    // exact/guid match over Visible can never diverge from the full-population result; restricting
+    // to those keeps the rewrite provably NEVER looser than the Motor (it never approaches a player
+    // the swear would not have targeted). The swear cue emits the monarch's exact name, so a fuzzy
+    // far-swear is a rare model abbreviation that simply stalls and self-corrects on the next
+    // decision (unchanged from before this rewrite). 0 or ambiguous matches, or an already-in-range
+    // patron, return null so the normal dispatch resolves/sends/Fails it.
+    internal static VisibleObjectProjection? TryResolveOutOfRangeSwearAsGoTo(
+        Goal goal, WorldStateProjection world)
+    {
+        if (goal.Kind != GoalKind.SwearAllegiance) return null;
+        var sel = goal.Target;
+        if (sel is null || sel.IsEmpty) return null;
+        if (world.Visible is null) return null;
+        var selfName = world.Self?.Name;
+        var players = world.Visible.Where(v => v.IsPlayer
+            && v.Name is not null
+            && (selfName is null || !string.Equals(v.Name, selfName, StringComparison.OrdinalIgnoreCase))
+            && (sel.Guid is null || v.Guid == sel.Guid))
+            .ToList();
+        List<VisibleObjectProjection> chosen;
+        if (string.IsNullOrEmpty(sel.Name))
+        {
+            chosen = players;   // guid-only selector: the guid filter above already bound it
+        }
+        else
+        {
+            var bare = HeadlessAcClient.Tactics.SelectorResolver.StripTrailingQuotedRoleTitle(sel.Name);
+            bool ExactName(string n) => string.Equals(n, sel.Name, StringComparison.OrdinalIgnoreCase)
+                || (bare is not null && string.Equals(n, bare, StringComparison.OrdinalIgnoreCase));
+            chosen = players.Where(v => ExactName(v.Name!)).ToList();
+        }
+        if (chosen.Count != 1) return null;
+        var patron = chosen[0];
+        if (patron.Distance is not { } d || d <= SwearServerRangeUnits) return null;
+        return patron;
     }
 
     // Returns the EXACT open-vendor offering name to Buy when a Pickup goal names a
@@ -4743,6 +4810,30 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 Kind = GoalKind.Use,
                 Target = new Selector { Guid = wieldUseGuid },
+                Item = null,
+            };
+        }
+
+        // SwearAllegiance{target=<player beyond swear range>} -> GoTo{target=that player}
+        // (mechanical prerequisite, criterion-6 robustness). See TryResolveOutOfRangeSwearAsGoTo:
+        // a swear only lands within the server's swear distance, and this headless client does
+        // not act on the server's move-to-object, so a pledge dispatched to a far player is sent
+        // yet never completes and the bot does not approach. Insert the approach the pledge
+        // presupposes: rewrite to a GoTo of that SAME named player so the bot walks into range;
+        // on arrival the in-range one-step swear cue prompts the pledge. The LLM chose WHOM to
+        // pledge to; the Motor only supplies the approach (like the Wield->Pickup / Pickup->Use
+        // prerequisite rewrites above; no autonomous target pick, no game knowledge).
+        if (TryResolveOutOfRangeSwearAsGoTo(goal, world) is { } swearPatron)
+        {
+            Console.WriteLine(
+                $"[llm-override] swear-approach -> goto: target={goal.Target}" +
+                $" name='{swearPatron.Name}' guid=0x{swearPatron.Guid:X8} — a pledge only lands" +
+                " within swear range; approaching the named player first (GoTo), then the swear" +
+                " is sent in range.");
+            return goal with
+            {
+                Kind = GoalKind.GoTo,
+                Target = new Selector { Name = swearPatron.Name, Guid = swearPatron.Guid },
                 Item = null,
             };
         }

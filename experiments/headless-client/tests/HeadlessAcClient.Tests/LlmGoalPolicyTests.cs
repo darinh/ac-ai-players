@@ -2321,6 +2321,140 @@ public class LlmGoalPolicyTests
         Assert.Null(LlmGoalPolicy.TryResolveWieldNonEquippableUse(use, world));
     }
 
+    // ---- TryResolveOutOfRangeSwearAsGoTo (out-of-range swear -> GoTo approach) ----
+
+    private static VisibleObjectProjection PlayerObj(uint guid, string name, float distance)
+        => new() { Guid = guid, Name = name, IsPlayer = true, Distance = distance };
+
+    private static Goal SwearGoalTo(string name)
+        => new() { Kind = GoalKind.SwearAllegiance, Target = new Selector { Name = name } };
+
+    [Fact]
+    public void SwearApproach_FarPlayer_ReturnsPatronWithGuid()
+    {
+        // A swear dispatched to a player beyond swear range never lands (the client does not
+        // act on the server's move-to-object), so it is rewritten to an approach first. The
+        // returned patron carries its GUID so the GoTo locks the exact player (a same-named
+        // non-player object cannot divert the approach).
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Monarch", 10f));
+        var patron = LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world);
+        Assert.NotNull(patron);
+        Assert.Equal(0x50000201u, patron!.Guid);
+        Assert.Equal("Monarch", patron.Name);
+    }
+
+    [Fact]
+    public void SwearApproach_RoleTitleSuffix_MatchesBareName()
+    {
+        // Models copy the prompt's `<Name> "<role>"` label into the target; the rewrite mirrors
+        // the Motor's swear resolver (strip the trailing quoted role) so it fires for the same
+        // spellings the swear would otherwise send-and-drop out of range.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Monarch", 10f));
+        var patron = LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(
+            SwearGoalTo("Monarch \"your team's leader\""), world);
+        Assert.NotNull(patron);
+        Assert.Equal(0x50000201u, patron!.Guid);
+    }
+
+    [Fact]
+    public void SwearApproach_InRangePlayer_ReturnsNull()
+    {
+        // Within the server's swear range the pledge completes in place -> do not divert.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Monarch", 1.5f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_NoMatchingPlayer_ReturnsNull()
+    {
+        // No visible player matches the named patron -> let the Motor's resolver Fail it.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Someone Else", 10f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_AmbiguousTwoPlayers_ReturnsNull()
+    {
+        // Two visible players share the name -> ambiguous; leave it to the Motor (0/>1 Fail),
+        // do not pick one to approach.
+        var world = WorldWithVisible(
+            PlayerObj(0x50000201u, "Monarch", 10f),
+            PlayerObj(0x50000202u, "Monarch", 12f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_SelfNameExcluded_ReturnsNull()
+    {
+        // A visible player with the bot's OWN name (self appearing in the visible list) is
+        // never treated as the patron.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Headless", 10f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Headless"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_NonPlayerSameName_ReturnsNull()
+    {
+        // Only a PLAYER can be a patron; a same-named non-player object does not qualify.
+        var npc = new VisibleObjectProjection { Guid = 0x80000201u, Name = "Monarch", IsPlayer = false, Distance = 10f };
+        var world = WorldWithVisible(npc);
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_NullDistancePlayer_ReturnsNull()
+    {
+        // No distance -> cannot confirm the patron is out of range; do not divert (the normal
+        // dispatch handles it).
+        var world = WorldWithVisible(new VisibleObjectProjection
+        { Guid = 0x50000201u, Name = "Monarch", IsPlayer = true, Distance = null });
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_NonSwearGoal_ReturnsNull()
+    {
+        // Only SwearAllegiance is diverted; a plain GoTo to a far player is untouched.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Monarch", 10f));
+        var goto_ = new Goal { Kind = GoalKind.GoTo, Target = new Selector { Name = "Monarch" } };
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(goto_, world));
+    }
+
+    [Fact]
+    public void SwearApproach_WordSubsequenceUnique_NotRewritten()
+    {
+        // Deliberately conservative: a fuzzy whole-word-subsequence match ("Galad" in "Galad
+        // Stormrider") is NOT rewritten. The helper sees only the clipped Visible projection,
+        // so a fuzzy match unique here could be ambiguous over the Motor's full object set;
+        // restricting to exact/guid (globally unique) keeps the rewrite provably never looser
+        // than the swear resolver. A fuzzy far-swear simply stalls and self-corrects (unchanged).
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Galad Stormrider", 10f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Galad"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_ExactNameAmbiguous_ReturnsNull()
+    {
+        // Two visible players share the exact name -> ambiguous; the rewrite must not pick one
+        // (mirrors the Motor's exactly-one requirement).
+        var world = WorldWithVisible(
+            PlayerObj(0x50000201u, "Monarch", 10f),
+            PlayerObj(0x50000202u, "Monarch", 12f));
+        Assert.Null(LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(SwearGoalTo("Monarch"), world));
+    }
+
+    [Fact]
+    public void SwearApproach_GuidOnlySelector_ReturnsPatron()
+    {
+        // The Motor honors guid selectors; a far swear addressed by guid (no name) must also be
+        // rewritten to an approach, pinned to that exact guid.
+        var world = WorldWithVisible(PlayerObj(0x50000201u, "Monarch", 10f));
+        var byGuid = new Goal { Kind = GoalKind.SwearAllegiance, Target = new Selector { Guid = 0x50000201u } };
+        var patron = LlmGoalPolicy.TryResolveOutOfRangeSwearAsGoTo(byGuid, world);
+        Assert.NotNull(patron);
+        Assert.Equal(0x50000201u, patron!.Guid);
+    }
+
     // ---- TryResolvePickupUseContainer (pickup-of-corpse-or-chest -> Use) ----
 
     private static VisibleObjectProjection CorpseObj(uint guid, string name)
