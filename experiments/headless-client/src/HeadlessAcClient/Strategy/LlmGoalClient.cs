@@ -144,19 +144,20 @@ internal sealed class LlmGoalClient
     // pure rate-limit bookkeeping.
     private static readonly TimeSpan DefaultModelCooldown = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan MinModelCooldown = TimeSpan.FromSeconds(1);
-    // Cap on a 429 cooldown. GitHub Models' per-day quota wall returns a
-    // Retry-After that can be many hours (up to the daily reset). Honouring it
-    // verbatim strands the bot on a weaker fallback for that whole window even when
-    // the quota RECOVERS EARLIER than the stated reset (observed live: gpt-4o /
-    // gpt-4.1 / gpt-4.1-mini answered a direct probe ~6h after their 429 wall, yet
+    // Cap on a 429 cooldown (resolved per-client; see ResolveMaxModelCooldown +
+    // AC_BOTS_LLM_MAX_MODEL_COOLDOWN_MINUTES). GitHub Models' per-day quota wall
+    // returns a Retry-After that can be many hours (up to the daily reset).
+    // Honouring it verbatim strands the bot on a weaker fallback for that whole
+    // window even when the quota RECOVERS EARLIER than the stated reset (observed
+    // live: capable models answered a direct probe ~6h after their 429 wall, yet
     // the bot stayed on a weak fallback because their recorded cooldown had not
-    // expired). Capping the cooldown at 1h lets the existing PrimaryReprobeInterval
-    // re-probe (which is skipped while a model is cooling) re-try a walled model
-    // within an hour of any early recovery and pick the preferred model back up.
-    // A model that is genuinely walled longer simply 429s again on the re-probe and
-    // re-cools — at most one extra probe per hour per model. Transient 429s with a
-    // short Retry-After (< 1h) are unaffected. Pure rate-limit bookkeeping.
-    private static readonly TimeSpan MaxModelCooldown = TimeSpan.FromHours(1);
+    // expired). Capping the cooldown (default 1h) lets the existing
+    // PrimaryReprobeInterval re-probe (which is skipped while a model is cooling)
+    // re-try a walled model within the cap of any early recovery and pick the
+    // preferred model back up. A model that is genuinely walled longer simply 429s
+    // again on the re-probe and re-cools — at most one extra probe per cap-window
+    // per model. Transient 429s with a Retry-After under the cap are unaffected.
+    private readonly TimeSpan _maxModelCooldown;
 
     // How long to skip LLM probing after the whole roster fails one call with an
     // infrastructure error (see _infraBackoffUntil). Short, so a recovered
@@ -280,17 +281,37 @@ internal sealed class LlmGoalClient
     internal static int ResolveFailoverCooldownThreshold(string? envValue)
         => int.TryParse(envValue, out var n) ? n : 3;
 
+    // Ceiling on a per-model 429 cooldown, in minutes, from
+    // AC_BOTS_LLM_MAX_MODEL_COOLDOWN_MINUTES (default 60). Accept only
+    // [1min, 24h]: below 1min a tiny cap would re-probe a walled model almost
+    // every call; above 24h exceeds a full daily wall. An out-of-range or
+    // unparseable value falls back to the default (it is NOT clamped to the
+    // nearest bound). Pure rate-limit tuning; model-agnostic, no game knowledge.
+    internal const int DefaultMaxModelCooldownMinutes = 60;
+    internal static TimeSpan ResolveMaxModelCooldown(string? envValue)
+    {
+        const int minMinutes = 1;
+        const int maxMinutes = 24 * 60;
+        return int.TryParse(envValue, out var m) && m >= minMinutes && m <= maxMinutes
+            ? TimeSpan.FromMinutes(m)
+            : TimeSpan.FromMinutes(DefaultMaxModelCooldownMinutes);
+    }
+
     /// <summary>Public for tests: lets a fake bearer token bypass `gh auth token`.</summary>
     public LlmGoalClient(
         HttpClient? http = null, string? endpoint = null, string? model = null,
         string? apiKey = null, string? fallbackModels = null, Func<DateTimeOffset>? now = null,
-        Action<string>? log = null, int? failoverCooldownThreshold = null, string? reservedModels = null)
+        Action<string>? log = null, int? failoverCooldownThreshold = null, string? reservedModels = null,
+        TimeSpan? maxModelCooldown = null)
     {
         _now = now ?? (() => DateTimeOffset.UtcNow);
         _log = log ?? (s => Console.WriteLine(s));
         _failoverCooldownThreshold = failoverCooldownThreshold
             ?? ResolveFailoverCooldownThreshold(
                 Environment.GetEnvironmentVariable("AC_BOTS_LLM_FAILOVER_COOLDOWN_THRESHOLD"));
+        _maxModelCooldown = maxModelCooldown
+            ?? ResolveMaxModelCooldown(
+                Environment.GetEnvironmentVariable("AC_BOTS_LLM_MAX_MODEL_COOLDOWN_MINUTES"));
         _httpTimeout = ResolveHttpTimeout(
             Environment.GetEnvironmentVariable("AC_BOTS_LLM_HTTP_TIMEOUT_SECONDS"));
         _fallbackHttpTimeout = ResolveFallbackHttpTimeout(
@@ -653,9 +674,25 @@ internal sealed class LlmGoalClient
     private void RecordCooldown(string model, TimeSpan? retryAfter)
     {
         if (_models.Count <= 1) return;
-        var span = retryAfter is { } ra
-            ? (ra < MinModelCooldown ? MinModelCooldown : (ra > MaxModelCooldown ? MaxModelCooldown : ra))
-            : DefaultModelCooldown;
+        TimeSpan span;
+        if (retryAfter is { } ra)
+        {
+            if (ra < MinModelCooldown)
+                span = MinModelCooldown;
+            else if (ra > _maxModelCooldown)
+            {
+                // A daily-quota 429's Retry-After can far exceed the cap; capping it
+                // lets the periodic primary re-probe re-try this model within the cap
+                // of any early recovery instead of honouring the full (up-to-daily)
+                // window. Log when the cap engages so the fix is observable.
+                SafeLog($"[llm-cooldown] {model} 429 Retry-After {ra.TotalHours:F1}h exceeds cap; cooling {_maxModelCooldown.TotalHours:F1}h for early re-probe");
+                span = _maxModelCooldown;
+            }
+            else
+                span = ra;
+        }
+        else
+            span = DefaultModelCooldown;
         // Anchor at the moment the 429 was OBSERVED, not the CompleteAsync-start
         // snapshot: the awaited HTTP round-trip can take seconds, and the
         // server's Retry-After is relative to when it answered — anchoring at

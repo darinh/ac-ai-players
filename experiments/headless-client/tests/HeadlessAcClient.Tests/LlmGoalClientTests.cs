@@ -513,6 +513,97 @@ public class LlmGoalClientTests
             LlmGoalClient.ResolveFallbackHttpTimeout(env, TimeSpan.FromSeconds(primarySeconds)));
     }
 
+    // ---- configurable 429 cooldown cap (early quota recovery) ----
+
+    [Theory]
+    [InlineData(null, 60)]     // unset -> default 60min (1h)
+    [InlineData("", 60)]       // blank -> default
+    [InlineData("abc", 60)]    // unparseable -> default
+    [InlineData("60", 60)]     // valid == default
+    [InlineData("30", 30)]     // valid shorter override (faster recovery)
+    [InlineData("120", 120)]   // valid longer override
+    [InlineData("1", 1)]       // min bound
+    [InlineData("1440", 1440)] // max bound (24h)
+    [InlineData("0", 60)]      // below min -> default
+    [InlineData("1441", 60)]   // above 24h -> rejected -> default
+    public void ResolveMaxModelCooldown_DefaultsTo60Minutes_ClampedTo1MinTo24h(
+        string? env, int expectedMinutes)
+    {
+        Assert.Equal(TimeSpan.FromMinutes(expectedMinutes),
+            LlmGoalClient.ResolveMaxModelCooldown(env));
+    }
+
+    [Fact]
+    public async Task Cooldown_ConfiguredCap_HonoredOverDefault()
+    {
+        // The cap is operator-configurable (AC_BOTS_LLM_MAX_MODEL_COOLDOWN_MINUTES
+        // or the ctor arg). A 30-minute cap recovers the primary at T0+30m, proving
+        // the configured value (not the 60m default) governs early re-probe.
+        var clock = new FakeClock(T0);
+        var primaryWalled = true;
+        var handler = new ModelRoutingHandler(m =>
+            m == "A"
+                ? (primaryWalled ? TooMany(TimeSpan.FromHours(24)) : Ok("ok-A"))
+                : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, maxModelCooldown: TimeSpan.FromMinutes(30));
+
+        var first = await llm.CompleteAsync("s", "u");   // A 429 (24h hint, capped 30m) -> B
+        Assert.True(first.Ok);
+        Assert.Equal("B", llm.Model);
+
+        primaryWalled = false;                           // quota recovered early
+
+        clock.Now = T0.AddMinutes(29);                   // still cooling (< 30m cap)
+        var second = await llm.CompleteAsync("s", "u");
+        Assert.True(second.Ok);
+        Assert.Equal("B", llm.Model);
+
+        clock.Now = T0.AddMinutes(30);                   // cap elapsed -> recovered A
+        var third = await llm.CompleteAsync("s", "u");
+        Assert.True(third.Ok);
+        Assert.Equal("ok-A", third.Content);
+        Assert.Equal("A", llm.Model);
+    }
+
+    [Fact]
+    public async Task Cooldown_LongRetryAfter_LogsCapEngaged()
+    {
+        // A 429 whose Retry-After exceeds the cap logs the clamp so the
+        // early-recovery cap is observable in production.
+        var clock = new FakeClock(T0);
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? TooMany(TimeSpan.FromHours(24)) : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, log: s => { lock (logs) logs.Add(s); },
+            maxModelCooldown: TimeSpan.FromHours(1));
+
+        await llm.CompleteAsync("s", "u");   // A 429 24h -> capped 1h -> logs once -> B
+
+        Assert.Contains(logs, s => s.StartsWith("[llm-cooldown]") && s.Contains("exceeds cap"));
+        // Exactly one cap log per 429 cycle: the cooled model is skipped until
+        // expiry, so RecordCooldown (and its log) is not re-invoked between probes.
+        Assert.Equal(1, logs.Count(s => s.StartsWith("[llm-cooldown]")));
+    }
+
+    [Fact]
+    public async Task Cooldown_ShortRetryAfter_DoesNotLogCapEngaged()
+    {
+        // A Retry-After UNDER the cap is honoured verbatim: no clamp, no cap log.
+        var clock = new FakeClock(T0);
+        var logs = new List<string>();
+        var handler = new ModelRoutingHandler(m =>
+            m == "A" ? TooMany(TimeSpan.FromSeconds(30)) : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get, log: s => { lock (logs) logs.Add(s); },
+            maxModelCooldown: TimeSpan.FromHours(1));
+
+        await llm.CompleteAsync("s", "u");   // A 429 30s (< 1h cap) -> no cap log
+
+        Assert.DoesNotContain(logs, s => s.StartsWith("[llm-cooldown]"));
+    }
+
     // ---- per-attempt fallback timeout: a stalled fallback rotates fast ----
 
     [Fact]
