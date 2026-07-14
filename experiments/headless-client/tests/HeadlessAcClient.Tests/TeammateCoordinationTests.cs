@@ -150,9 +150,12 @@ public class TeammateCoordinationTests
     }
 
     private static string RenderWithTeammates(WorldStateProjection world, params string[] teammateNames)
+        => RenderWithTeammates(world, autoTeam: true, teammateNames);
+
+    private static string RenderWithTeammates(WorldStateProjection world, bool autoTeam, params string[] teammateNames)
     {
         var set = new HashSet<string>(teammateNames, StringComparer.OrdinalIgnoreCase);
-        return LlmGoalPolicy.BuildUserPromptForTest(world, new EventStream(), set);
+        return LlmGoalPolicy.BuildUserPromptForTest(world, new EventStream(), set, autoTeam);
     }
 
     // Extract a single "## Header" section from the rendered prompt (up to the next
@@ -174,6 +177,23 @@ public class TeammateCoordinationTests
         Assert.Contains("FellowshipCreate", prompt);
         Assert.Contains("FellowshipRecruit", prompt);
         Assert.Contains("Mbb", prompt);
+        // The cue directs a ONE-step recruit (the Motor auto-creates the fellowship
+        // as a precondition), so the teammate can't disperse in a second LLM turn
+        // between a separate FellowshipCreate and the recruit.
+        Assert.Contains("ONE step", prompt);
+        Assert.Contains("do NOT need a separate `FellowshipCreate`", prompt);
+    }
+
+    [Fact]
+    public void Prompt_LeaderDirective_AutoTeamOff_KeepsTwoStepCreateThenRecruit()
+    {
+        // Without auto-team the Motor won't auto-create on recruit, so a one-step
+        // recruit would hit a non-existent fellowship and fail. The leader cue must
+        // keep the explicit two-step FellowshipCreate-then-recruit wording.
+        var prompt = RenderWithTeammates(ProjectionWith("Mba", "Mbb"), autoTeam: false, "Mbb");
+        Assert.Contains("designated leader", prompt);
+        Assert.Contains("Group up NOW: `FellowshipCreate`", prompt);
+        Assert.DoesNotContain("ONE step", prompt);
     }
 
     [Fact]

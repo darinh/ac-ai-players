@@ -107,6 +107,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// <summary>The effective teammate set for this render (test override or the config static).</summary>
     private static IReadOnlyCollection<string> EffectiveTeammateNames => _teammateNamesOverride ?? TeammateNames;
 
+    // Operator auto-team opt-in (AC_BOTS_AUTO_TEAM), read once at type-load, mirroring
+    // HandshakeDriver's parse. When on, the Motor auto-creates a fellowship as a
+    // precondition of an LLM-issued FellowshipRecruit (FellowshipGoalGuard
+    // .ShouldCreateBeforeRecruit), so the leader cue can direct a ONE-step recruit;
+    // when off, the leader must FellowshipCreate first (a recruit alone would hit a
+    // non-existent fellowship). Runtime coordination config, not source knowledge.
+    internal static readonly bool AutoTeamEnabled =
+        (Environment.GetEnvironmentVariable("AC_BOTS_AUTO_TEAM") ?? string.Empty)
+            .Trim().ToLowerInvariant() is "1" or "true" or "yes" or "on";
+
+    // Per-thread override for the auto-team flag (tests only; see _teammateNamesOverride).
+    [ThreadStatic] private static bool? _autoTeamOverride;
+    private static bool EffectiveAutoTeam => _autoTeamOverride ?? AutoTeamEnabled;
+
     // Parse AC_BOTS_MIN_RAISE_XP. A non-negative integer is used (clamped to a sane
     // ceiling); anything else (unset/blank/unparseable/negative) falls back to 0.
     internal static long ResolveMinMeaningfulUnspentXp(string? envValue)
@@ -8642,11 +8656,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // override so parallel tests never observe each other's config. Production reads
     // the AC_BOTS_TEAMMATE_NAMES static instead.
     internal static string BuildUserPromptForTest(
-        WorldStateProjection world, EventStream events, IReadOnlyCollection<string> teammateNames)
+        WorldStateProjection world, EventStream events, IReadOnlyCollection<string> teammateNames,
+        bool autoTeam = true)
     {
         _teammateNamesOverride = teammateNames;
+        _autoTeamOverride = autoTeam;
         try { return BuildUserPrompt(world, events, currentGoal: null); }
-        finally { _teammateNamesOverride = null; }
+        finally { _teammateNamesOverride = null; _autoTeamOverride = null; }
     }
 
     internal static string BuildUserPrompt(WorldStateProjection world, EventStream events, Goal? currentGoal, IntentStack? stack)
@@ -11193,14 +11209,33 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             else if (teammateRole.Role == TeammateRole.Leader && teammateRole.CounterpartName is { } leadRecruit)
             {
-                // This bot is the elected leader and is not yet in a fellowship: create
-                // it and recruit the waiting teammate.
-                sb.AppendLine(
-                    $"- Your teammate `{leadRecruit}` (a known `player`) is nearby and you are your team's " +
-                    "designated leader (your name sorts first). Group up NOW: `FellowshipCreate` (you become " +
-                    $"leader), then `FellowshipRecruit{{target: {{name: \"{leadRecruit}\"}}}}` to invite them " +
-                    "(only when exactly one visible `player` matches that name). Your teammate is WAITING for " +
-                    "your invite — this is DIRECTED team coordination, do it before an OPTIONAL hunt/explore.");
+                // This bot is the elected leader and is not yet in a fellowship: recruit
+                // the waiting teammate. Under auto-team the Motor auto-creates the
+                // fellowship as a recruit precondition, so a ONE-step recruit forms the
+                // group in a single LLM turn (no teammate dispersal between a separate
+                // FellowshipCreate and the recruit). Without auto-team the Motor won't
+                // auto-create, so the leader must FellowshipCreate first, then recruit.
+                if (EffectiveAutoTeam)
+                {
+                    sb.AppendLine(
+                        $"- Your teammate `{leadRecruit}` (a known `player`) is nearby and you are your team's " +
+                        "designated leader (your name sorts first). Recruit them NOW in ONE step: " +
+                        $"`FellowshipRecruit{{target: {{name: \"{leadRecruit}\"}}}}` (only when exactly one visible " +
+                        "`player` matches that name). You do NOT need a separate `FellowshipCreate` first — if you " +
+                        "are not yet in a fellowship the recruit creates one automatically; spending a separate turn " +
+                        "on `FellowshipCreate` risks your teammate moving out of invite range before you recruit. " +
+                        "Your teammate is WAITING for your invite — this is DIRECTED team coordination, do it before " +
+                        "an OPTIONAL hunt/explore.");
+                }
+                else
+                {
+                    sb.AppendLine(
+                        $"- Your teammate `{leadRecruit}` (a known `player`) is nearby and you are your team's " +
+                        "designated leader (your name sorts first). Group up NOW: `FellowshipCreate` (you become " +
+                        $"leader), then `FellowshipRecruit{{target: {{name: \"{leadRecruit}\"}}}}` to invite them " +
+                        "(only when exactly one visible `player` matches that name). Your teammate is WAITING for " +
+                        "your invite — this is DIRECTED team coordination, do it before an OPTIONAL hunt/explore.");
+                }
             }
             else if (teammateRole.Role == TeammateRole.Follower && teammateRole.CounterpartName is { } leaderName)
             {
