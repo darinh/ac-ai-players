@@ -487,6 +487,10 @@ internal sealed class HandshakeDriver : IDisposable
     // melee send site; centralized here as one constant.
     private const float MeleeAttackPowerLevel = 0.5f;
 
+    // Wire-action range used to execute an LLM-selected SwearAllegiance goal
+    // as an atomic walk-then-send operation.
+    private const float SwearServerRangeUnits = 2.0f;
+
     private readonly IPEndPoint _serverPort0;
     private readonly IPEndPoint _serverPort1;
     private readonly string _account;
@@ -7385,28 +7389,97 @@ internal sealed class HandshakeDriver : IDisposable
                         }
                         else
                         {
-                            var saPktSeq  = nextOutboundPacketSequence++;
-                            var saFragSeq = nextOutboundFragmentSequence++;
-                            var saBuf = new byte[GameActionSwearAllegianceMessage.PackedSize];
-                            var saLen = GameActionSwearAllegianceMessage.Pack(saBuf, patronPlayer.Guid);
-                            var saMsg = new OutboundPacket();
-                            if (lastReceivedSeq != 0)
-                                saMsg.AddAckSequence(lastReceivedSeq);
-                            saMsg.AddBlobFragment(
-                                fragSequence: saFragSeq,
-                                fragId: OutboundFragmentId,
-                                queue: (ushort)GameMessageGroup.UIQueue,
-                                gameMessagePayload: saBuf.AsSpan(0, saLen));
-                            var saSent = saMsg.Pack(sendBuf, myClientId,
-                                                    sequence: saPktSeq, iteration: 1,
-                                                    encrypt: true, cryptoSend: cryptoSend);
-                            await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, saSent),
-                                                       SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            Console.WriteLine(
-                                $"[strategy] LLM-GOAL SwearAllegiance: patron '{patronPlayer.Name}' " +
-                                $"guid=0x{patronPlayer.Guid:X8} source={goal.Source} rationale=\"{goal.Rationale}\"; " +
-                                $"pktSeq={saPktSeq} fragSeq={saFragSeq} bytes={saSent}");
-                            tactics.Clear("swear-allegiance dispatched", eventStream);
+                            var swearDistanceKnown =
+                                WorldDistance.TrySquaredDistance(tacticsSelf, patronPlayer, out var swearD2);
+                            var swearOutOfRange = SwearApproach.RequiresWalk(
+                                swearDistanceKnown ? swearD2 : null,
+                                SwearServerRangeUnits);
+                            if (swearOutOfRange)
+                            {
+                                // Keep the selected goal active and lock motion to the
+                                // resolved guid. Arrival dispatches the same action.
+                                float swearYaw;
+                                Quaternion swearRot;
+                                if (WorldHeading.TryYawToTarget(tacticsSelf, patronPlayer, out swearYaw))
+                                    swearRot = WorldHeading.RotationFromYaw(swearYaw);
+                                else
+                                {
+                                    swearRot = tacticsSelf.Rotation;
+                                    swearYaw = 0f;
+                                }
+
+                                var swearDist = (float)Math.Sqrt(swearD2);
+                                motionTarget          = patronPlayer;
+                                motionRotation        = swearRot;
+                                lockedGoalKind        = GoalKind.SwearAllegiance;
+                                motionLockedGoalId    = goal.Id;
+                                motionLockStartedUtc  = DateTime.UtcNow;
+                                motionInitialDistance = swearDist;
+                                approachDistance.Record(
+                                    patronPlayer.Guid, patronPlayer.Name, swearDist, DateTime.UtcNow);
+
+                                autonomousPositionSent = true;
+                                autonomousPositionPacketIndex = count;
+
+                                var swearApPktSeq  = nextOutboundPacketSequence++;
+                                var swearApFragSeq = nextOutboundFragmentSequence++;
+                                var swearApBuf = new byte[GameActionAutonomousPositionMessage.PackedSize];
+                                var swearApLen = GameActionAutonomousPositionMessage.Pack(
+                                    swearApBuf,
+                                    cellId: tacticsSelfCell,
+                                    pos:    tacticsSelf.Position,
+                                    rot:    swearRot,
+                                    instanceSequence:      tacticsSelf.SeqInstance      ?? 0,
+                                    serverControlSequence: tacticsSelf.SeqServerControl ?? 0,
+                                    teleportSequence:      tacticsSelf.SeqTeleport      ?? 0,
+                                    forcePositionSequence: tacticsSelf.SeqForcePosition ?? 0,
+                                    contact: true);
+                                var swearApMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    swearApMsg.AddAckSequence(lastReceivedSeq);
+                                swearApMsg.AddBlobFragment(
+                                    fragSequence: swearApFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: swearApBuf.AsSpan(0, swearApLen));
+                                var swearApSent = swearApMsg.Pack(sendBuf, myClientId,
+                                                                  sequence: swearApPktSeq, iteration: 1,
+                                                                  encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, swearApSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL SwearAllegiance LOCK (walk-then-send): patron '{patronPlayer.Name}' " +
+                                    $"guid=0x{patronPlayer.Guid:X8} dist={swearDist:F2}u > swearRange={SwearServerRangeUnits:F1}u; " +
+                                    $"walking into range (goal stays active) source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                    $"sent AP yaw={swearYaw:F3}rad pktSeq={swearApPktSeq} fragSeq={swearApFragSeq} bytes={swearApSent}");
+                            }
+                            else
+                            {
+                                // Preserve the prior immediate-send behavior when distance
+                                // cannot be measured.
+                                var saPktSeq  = nextOutboundPacketSequence++;
+                                var saFragSeq = nextOutboundFragmentSequence++;
+                                var saBuf = new byte[GameActionSwearAllegianceMessage.PackedSize];
+                                var saLen = GameActionSwearAllegianceMessage.Pack(saBuf, patronPlayer.Guid);
+                                var saMsg = new OutboundPacket();
+                                if (lastReceivedSeq != 0)
+                                    saMsg.AddAckSequence(lastReceivedSeq);
+                                saMsg.AddBlobFragment(
+                                    fragSequence: saFragSeq,
+                                    fragId: OutboundFragmentId,
+                                    queue: (ushort)GameMessageGroup.UIQueue,
+                                    gameMessagePayload: saBuf.AsSpan(0, saLen));
+                                var saSent = saMsg.Pack(sendBuf, myClientId,
+                                                        sequence: saPktSeq, iteration: 1,
+                                                        encrypt: true, cryptoSend: cryptoSend);
+                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, saSent),
+                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL SwearAllegiance: patron '{patronPlayer.Name}' " +
+                                    $"guid=0x{patronPlayer.Guid:X8} source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                    $"pktSeq={saPktSeq} fragSeq={saFragSeq} bytes={saSent}");
+                                tactics.Clear("swear-allegiance dispatched", eventStream);
+                            }
                         }
                     }
                     else if (goal is not null && goal.Kind == GoalKind.BreakAllegiance)
@@ -10281,6 +10354,42 @@ internal sealed class HandshakeDriver : IDisposable
                         goto _slice_l_explore_done;
                     }
 
+                    // A timeout, lost target, or movement between STOP and
+                    // dispatch must not turn walk-then-send into an out-of-range
+                    // send. Re-read both snapshots and require confirmed range.
+                    if (lockedGoalKind == GoalKind.SwearAllegiance)
+                    {
+                        var liveSwearTarget = worldState.TryGet(motionTarget.Guid);
+                        var liveSwearSelf = worldState.Self;
+                        float? liveSwearDistanceSquared = null;
+                        if (liveSwearTarget is not null &&
+                            liveSwearSelf is not null &&
+                            WorldDistance.TrySquaredDistance(
+                                liveSwearSelf, liveSwearTarget, out var liveSwearD2))
+                        {
+                            liveSwearDistanceSquared = liveSwearD2;
+                        }
+
+                        if (liveSwearTarget is not { } confirmedSwearTarget ||
+                            !SwearApproach.IsConfirmedInRange(
+                                liveSwearDistanceSquared, SwearServerRangeUnits))
+                        {
+                            useSent = true;
+                            useSentAt = DateTime.UtcNow;
+                            suppressVisitedAddOnReset = true;
+                            var failure = liveSwearTarget is null
+                                ? "swear-allegiance target disappeared during approach"
+                                : "swear-allegiance target not confirmed in range after approach";
+                            Console.WriteLine(
+                                $"[strategy] LLM-GOAL SwearAllegiance not sent: {failure}; " +
+                                $"target=0x{motionTarget.Guid:X8} '{motionTarget.Name}'");
+                            tactics.Fail(failure, eventStream);
+                            goto _slice_l_explore_done;
+                        }
+
+                        motionTarget = confirmedSwearTarget;
+                    }
+
                     useSent = true;
                     useSentAt = DateTime.UtcNow;
                     lastActionDispatchAt = useSentAt;
@@ -10293,6 +10402,7 @@ internal sealed class HandshakeDriver : IDisposable
                     // moved to the LLM.
                     var isHostile = lockedGoalKind == GoalKind.Attack;
                     var isPickup  = lockedGoalKind == GoalKind.Pickup;
+                    var isSwear   = lockedGoalKind == GoalKind.SwearAllegiance;
 
                     // Target-vanished guard. If a hostile Attack target was
                     // removed from the world snapshot (e.g. killed +
@@ -10515,6 +10625,14 @@ internal sealed class HandshakeDriver : IDisposable
                             });
                         }
                     }
+                    else if (lockedGoalKind == GoalKind.SwearAllegiance)
+                    {
+                        actionName = "SWEAR";
+                        actionBuf  = new byte[GameActionSwearAllegianceMessage.PackedSize];
+                        payloadLen = GameActionSwearAllegianceMessage.Pack(actionBuf, motionTarget.Guid);
+                        fragSeq    = nextOutboundFragmentSequence++;
+                        suppressVisitedAddOnReset = true;
+                    }
                     else if (lockedGoalKind == GoalKind.Use || lockedGoalKind == GoalKind.Talk)
                     {
                         actionName = "USE";
@@ -10654,7 +10772,7 @@ internal sealed class HandshakeDriver : IDisposable
                     // handled separately by combatTargetGuid + the
                     // post-combat clear logic — they should NOT be
                     // marked satisfied here.
-                    if (!isPickup && !isHostile && motionTarget.WeenieClassId is uint useWcid)
+                    if (!isPickup && !isHostile && !isSwear && motionTarget.WeenieClassId is uint useWcid)
                     {
                         var useType = motionTarget.ItemType ?? 0u;
                         var isCreature = (useType & 0x00000010u) != 0;
