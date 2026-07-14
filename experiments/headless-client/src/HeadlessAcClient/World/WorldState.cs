@@ -1234,10 +1234,48 @@ internal sealed class WorldState
         if (msg.Property != PublicUpdateInstanceIdMessage.MonarchProperty)
             return false;
 
+        var prevMonarch = snap.MonarchGuid;
         snap.MonarchGuid = msg.Value == 0 ? (uint?)null : msg.Value;
         snap.Touch();
+
+        // Diagnostic: a SELF Monarch-property transition is the observable allegiance-bond
+        // event — a completed swear lands here (this Public variant, not a fresh ObjectCreate),
+        // so a new monarch guid other than own = the bot is now a vassal (the criterion for a
+        // formed allegiance bond); own guid = own monarch; cleared = allegiance removed. Logged
+        // ON CHANGE so a live run has a crisp in-log signal instead of inferring the bond from
+        // the prompt's allegiance-state line. Only the bot's OWN transition is logged (the same
+        // Monarch property can update on other players' snapshots). Pure decoded-wire-state
+        // observation; no decision, no game knowledge.
+        if (SelfGuid is uint selfG && msg.ObjectGuid == selfG)
+        {
+            var bondLine = AllegianceBondTransitionMessage(prevMonarch, snap.MonarchGuid, selfG);
+            if (bondLine is not null)
+                Console.WriteLine(bondLine);
+        }
         return true;
     }
+
+    /// <summary>
+    /// Classify a SELF allegiance-Monarch transition into the <c>[allegiance-bond]</c>
+    /// diagnostic line, or null when nothing meaningful changed (<paramref name="prev"/> ==
+    /// <paramref name="next"/>). A new monarch guid other than <paramref name="selfGuid"/> =
+    /// the bot became a vassal (a swear completed) — the observable formed-bond event; the own
+    /// guid = the bot is its own monarch; null = the allegiance was cleared. Pure decoded-wire
+    /// classification (static for unit testing); no decision, no game knowledge.
+    /// </summary>
+    internal static string? AllegianceBondTransitionMessage(uint? prev, uint? next, uint selfGuid)
+    {
+        if (prev == next) return null;
+        if (next is uint m)
+            return m == selfGuid
+                ? $"[allegiance-bond] now own monarch (guid=0x{m:X8}; was {DescribeMonarch(prev, selfGuid)})"
+                : $"[allegiance-bond] BOND FORMED: now a vassal of monarch guid=0x{m:X8} " +
+                  $"(was {DescribeMonarch(prev, selfGuid)})";
+        return $"[allegiance-bond] bond cleared: allegiance removed (was {DescribeMonarch(prev, selfGuid)})";
+    }
+
+    private static string DescribeMonarch(uint? g, uint selfGuid) =>
+        g is uint v ? (v == selfGuid ? "own monarch" : $"vassal of 0x{v:X8}") : "no allegiance";
 
     /// <summary>
     /// Apply a PrivateUpdatePropertyInt64 (0x02CF). Like

@@ -680,6 +680,62 @@ public class WorldStateTests
         return wire;
     }
 
+    // ---- [allegiance-bond] diagnostic (self Monarch transition) ----
+
+    [Fact]
+    public void AllegianceBondTransition_BecomesVassal_ReportsBondFormed()
+    {
+        var msg = WorldState.AllegianceBondTransitionMessage(prev: TestGuid, next: OtherGuid, selfGuid: TestGuid);
+        Assert.NotNull(msg);
+        Assert.Contains("BOND FORMED", msg!);
+        Assert.Contains($"0x{OtherGuid:X8}", msg!);
+    }
+
+    [Fact]
+    public void AllegianceBondTransition_NoChange_ReturnsNull()
+        => Assert.Null(WorldState.AllegianceBondTransitionMessage(OtherGuid, OtherGuid, TestGuid));
+
+    [Fact]
+    public void AllegianceBondTransition_Cleared_ReportsCleared()
+    {
+        var msg = WorldState.AllegianceBondTransitionMessage(prev: OtherGuid, next: null, selfGuid: TestGuid);
+        Assert.NotNull(msg);
+        Assert.Contains("cleared", msg!);
+        Assert.DoesNotContain("BOND FORMED", msg!);
+    }
+
+    [Fact]
+    public void AllegianceBondTransition_BecomesOwnMonarch_ReportsOwnMonarch()
+    {
+        var msg = WorldState.AllegianceBondTransitionMessage(prev: null, next: TestGuid, selfGuid: TestGuid);
+        Assert.NotNull(msg);
+        Assert.Contains("own monarch", msg!);
+        Assert.DoesNotContain("BOND FORMED", msg!);
+    }
+
+    [Fact]
+    public void PublicUpdateInstanceId_SelfBondFormed_LogsBondOnlyForSelf()
+    {
+        // Wiring: a self Monarch transition to another guid (a completed swear) emits ONE
+        // [allegiance-bond] BOND FORMED line; the SAME Monarch property updating on another
+        // player's snapshot must NOT emit a self bond line.
+        var ws = new WorldState();
+        ws.SetSelf(TestGuid);
+        var prevOut = Console.Out;
+        var sw = new System.IO.StringWriter();
+        Console.SetOut(sw);
+        try
+        {
+            ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(1, TestGuid, OtherGuid))!);   // self -> vassal
+            ws.Apply(GameMessageDecoder.Decode(BuildMonarchUpdate(1, OtherGuid, TestGuid))!);   // other player, not self
+        }
+        finally { Console.SetOut(prevOut); }
+        var output = sw.ToString();
+        Assert.Contains("[allegiance-bond] BOND FORMED", output);
+        Assert.Contains($"0x{OtherGuid:X8}", output);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(output, @"\[allegiance-bond\]"));
+    }
+
     [Fact]
     public void PublicUpdateInstanceId_SeqTrackerGoesWithSnapshot_OnDelete()
     {
