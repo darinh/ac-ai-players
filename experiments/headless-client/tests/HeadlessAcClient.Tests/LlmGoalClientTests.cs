@@ -384,6 +384,52 @@ public class LlmGoalClientTests
     }
 
     [Fact]
+    public async Task Cooldown_LongRetryAfter_CappedAtOneHour_RecoveredPrimaryReprobed()
+    {
+        // A GitHub Models per-day quota 429 can carry a multi-hour Retry-After
+        // (up to the daily reset). The cooldown is CAPPED at MaxModelCooldown (1h)
+        // so the periodic preferred-model re-probe re-tries a walled model within
+        // an hour of an EARLY quota recovery, instead of stranding the bot on the
+        // weaker fallback for the whole stated (up-to-24h) window. This pins the
+        // cap: with the pre-fix 24h cap the primary would still be skipped at
+        // T0+61min and the bot would stay on the fallback.
+        var clock = new FakeClock(T0);
+        var primaryWalled = true;
+        var handler = new ModelRoutingHandler(m =>
+            m == "A"
+                ? (primaryWalled ? TooMany(TimeSpan.FromHours(24)) : Ok("ok-A"))
+                : Ok("ok-B"));
+        var llm = new LlmGoalClient(new HttpClient(handler), Endpoint, "A", "key",
+            fallbackModels: "B", now: clock.Get);
+
+        var first = await llm.CompleteAsync("s", "u");   // A 429 (24h hint, capped 1h) -> B
+        Assert.True(first.Ok);
+        Assert.Equal("B", llm.Model);
+
+        primaryWalled = false;                           // quota recovered early
+
+        // Just before the 1h cap: A is still cooling -> the re-probe skips it,
+        // so the bot stays on the fallback (proves the cooldown wasn't collapsed
+        // to something tiny that defeats the "don't re-probe a walled model"
+        // purpose).
+        clock.Now = T0.AddMinutes(59);
+        var second = await llm.CompleteAsync("s", "u");
+        Assert.True(second.Ok);
+        Assert.Equal("B", llm.Model);
+
+        // At exactly the 1h cap boundary: the cooldown expiry is INCLUSIVE
+        // (`now < until` is false when now == until), so A's cooldown has just
+        // expired, the 45s re-probe restarts at the primary, and the recovered A
+        // is picked back up. Pre-fix (24h cap) this would still be "B"; a future
+        // `<` -> `<=` regression in the cooldown skip would also fail this.
+        clock.Now = T0.AddMinutes(60);
+        var third = await llm.CompleteAsync("s", "u");
+        Assert.True(third.Ok);
+        Assert.Equal("ok-A", third.Content);
+        Assert.Equal("A", llm.Model);
+    }
+
+    [Fact]
     public async Task PrimaryReprobe_RecoveredPrimary_PickedBackUp_AfterTransientFailover()
     {
         // A TRANSIENT (5xx) primary failure rotates to the fallback (no cooldown).
