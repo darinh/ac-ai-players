@@ -144,7 +144,19 @@ internal sealed class LlmGoalClient
     // pure rate-limit bookkeeping.
     private static readonly TimeSpan DefaultModelCooldown = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan MinModelCooldown = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan MaxModelCooldown = TimeSpan.FromHours(24);
+    // Cap on a 429 cooldown. GitHub Models' per-day quota wall returns a
+    // Retry-After that can be many hours (up to the daily reset). Honouring it
+    // verbatim strands the bot on a weaker fallback for that whole window even when
+    // the quota RECOVERS EARLIER than the stated reset (observed live: gpt-4o /
+    // gpt-4.1 / gpt-4.1-mini answered a direct probe ~6h after their 429 wall, yet
+    // the bot stayed on a weak fallback because their recorded cooldown had not
+    // expired). Capping the cooldown at 1h lets the existing PrimaryReprobeInterval
+    // re-probe (which is skipped while a model is cooling) re-try a walled model
+    // within an hour of any early recovery and pick the preferred model back up.
+    // A model that is genuinely walled longer simply 429s again on the re-probe and
+    // re-cools — at most one extra probe per hour per model. Transient 429s with a
+    // short Retry-After (< 1h) are unaffected. Pure rate-limit bookkeeping.
+    private static readonly TimeSpan MaxModelCooldown = TimeSpan.FromHours(1);
 
     // How long to skip LLM probing after the whole roster fails one call with an
     // infrastructure error (see _infraBackoffUntil). Short, so a recovered
