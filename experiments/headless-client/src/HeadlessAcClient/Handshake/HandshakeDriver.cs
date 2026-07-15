@@ -1013,6 +1013,14 @@ internal sealed class HandshakeDriver : IDisposable
         // own current goal. inventoryEquipSent alone can't be used: it also
         // holds LLM Pickup→equip and LLM Wield guids.
         var                  autoEquipFailureFilter = new Strategy.AutoEquipFailureFilter();
+        void TransferAutoEquipOwnershipToLlm(uint itemGuid)
+        {
+            autoEquipFailureFilter.ClearAutonomous(itemGuid);
+            equipRetry.Remove(itemGuid);
+            equipExplicitRejections.Remove(itemGuid);
+            pendingEquipItemSlots.Remove(itemGuid);
+            pendingEquipWcid.Remove(itemGuid);
+        }
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
         // creature (so we don't walk away mid-fight) and a retry timer
@@ -8344,10 +8352,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
                                 // cp-2273 — the LLM has explicitly taken ownership
-                                // of this guid. Drop any source-autonomous marker so
-                                // a subsequent InventoryServerSaveFailed for it
-                                // surfaces normally (the LLM asked for this wield).
-                                autoEquipFailureFilter.ClearAutonomous(wieldItem.Guid);
+                                // of this guid. Drop every source-autonomous retry
+                                // state entry so PHASE7F.4 cannot re-mark or resend
+                                // it while the LLM request awaits its response.
+                                TransferAutoEquipOwnershipToLlm(wieldItem.Guid);
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
                                 // Dequip-before-wield (weapon swap). The ACE
@@ -8408,6 +8416,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 {
                                   foreach (var blocker in blockers)
                                   {
+                                    // Moving this blocker is part of the LLM-owned
+                                    // wield transaction. Clear stale autonomous
+                                    // equip state so its dequip response cannot be
+                                    // suppressed as an old startup request.
+                                    TransferAutoEquipOwnershipToLlm(blocker);
                                     // A stale pending entry means the dequip
                                     // never acked (e.g. the pack was full) — do
                                     // not soft-lock this blocker forever; let it
