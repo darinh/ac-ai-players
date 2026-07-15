@@ -14218,13 +14218,9 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void NoQuestFallback_DoesNotAutoWieldShieldThatWouldDequipTwoHandedWeapon()
+    public void NoQuestFallback_DoesNotChooseShield()
     {
-        // Live cp2929: the bot wielded its trained 2H weapon, then the source
-        // fallback auto-wielded an unwielded Kite Shield — which (via the
-        // cp2928 swap) DEQUIPPED the 2H weapon, undoing the loadout. The
-        // fallback must NOT auto-equip gear whose wield would dequip a wielded
-        // WEAPON (a loadout downgrade the LLM owns).
+        // Equipment choice belongs to the LLM even when an item would conflict.
         var world = new WorldStateProjection
         {
             Self = new SelfProjection
@@ -14250,10 +14246,9 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void NoQuestFallback_StillAutoWieldsArmorThatDoesNotDequipAWeapon()
+    public void NoQuestFallback_DoesNotChooseNonConflictingArmor()
     {
-        // The guard must NOT over-filter: an unwielded armor piece (occupies an
-        // armor slot, conflicts with no weapon) is still auto-wielded.
+        // Lack of a collision does not authorize the fallback to choose gear.
         var world = new WorldStateProjection
         {
             Self = new SelfProjection
@@ -14272,9 +14267,9 @@ public class LlmGoalPolicyTests
             Visible = System.Array.Empty<VisibleObjectProjection>(),
         };
         var goal = new NoQuestKnowledgePolicy().ProposeGoal(world, new EventStream(), null);
-        Assert.True(
-            goal is { Kind: GoalKind.Wield } && goal.Item?.Guid == 0x333u,
-            $"fallback should auto-wield the non-conflicting armor; got {goal?.Kind} item={goal?.Item?.Name}");
+        Assert.False(
+            goal is { Kind: GoalKind.Wield },
+            $"fallback must not choose armor; got {goal?.Kind} item={goal?.Item?.Name}");
     }
 
     [Fact]

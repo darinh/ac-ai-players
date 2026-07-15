@@ -5,13 +5,13 @@
 //
 // This is pure, mechanical projection: it reads the wire-derived
 // ItemType + equip-slot bits of the player's own inventory and answers
-// "which currently-wielded weapon (if any) blocks this wield?". It
+// "which currently-wielded items block this wield?". It
 // encodes NO game knowledge — no wcids/names/landblocks, no "prefer
 // weapon X" tactics. The LLM still decides WHICH weapon to wield; this
 // only computes the mechanical prerequisite the server requires (move
 // the conflicting weapon to the pack first), mirroring the server's own
-// precondition. The empty-slot case (no weapon wielded) returns null and
-// the caller wields directly, unchanged.
+// precondition. The empty-slot case returns an empty blocker list and the
+// caller wields directly.
 
 using System.Collections.Generic;
 
@@ -91,33 +91,6 @@ internal static class WeaponSwap
     public static bool IsWieldedWeapon(ItemFacts item) =>
         item.WieldedAt is uint w && (w & MainWeaponSlotMask) != 0 && IsWeapon(item);
 
-    /// <summary>
-    /// True iff the item is a missile LAUNCHER that cannot currently fire: a
-    /// MAIN-WEAPON-slot item whose ItemType has the MissileWeapon bit and which
-    /// carries an <paramref name="ammoType"/> (a launcher — a self-firing THROWN
-    /// weapon has no AmmoType), while NO ammo is loaded
-    /// (<paramref name="hasLoadedAmmo"/> false). Such a launcher is not
-    /// combat-capable (the server cancels a shot with no ammo) and, once wielded,
-    /// forces Missile combat mode and blocks an unarmed-melee strike (a
-    /// LauncherNeedsDequip trap). The MAIN-WEAPON-slot requirement is essential:
-    /// bag AMMO also carries the MissileWeapon ItemType bit AND a non-null
-    /// AmmoType, differing only by valid slot (ammo → MissileAmmoSlot, launcher →
-    /// a <see cref="MainWeaponSlotMask"/> slot), so keying on ItemType+AmmoType
-    /// alone would misclassify loadable ammo as a launcher. Mirrors the
-    /// launcher+ammo leg of <c>LlmGoalPolicy.IsCombatCapable</c> /
-    /// <c>CombatWeaponSelection.ClassifyWeaponState</c> so the auto-wield
-    /// candidates never diverge from the combat-capability test. Pure wire-state
-    /// precondition (ItemType/AmmoType/valid-slot + ammo-slot occupancy); no game
-    /// knowledge. <paramref name="validLocations"/> is the item's ValidLocations
-    /// equip-slot mask.
-    /// </summary>
-    public static bool IsAmmolessLauncher(
-        uint? itemType, ushort? ammoType, uint? validLocations, bool hasLoadedAmmo)
-        => validLocations is uint vl && (vl & MainWeaponSlotMask) != 0
-           && itemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0
-           && ammoType is not null
-           && !hasLoadedAmmo;
-
     /// <summary>True if the item is currently wielded in the off-hand
     /// SHIELD slot (EquipMask.Shield). A wielded shield blocks a
     /// two-handed weapon wield but not a one-handed weapon.</summary>
@@ -160,35 +133,6 @@ internal static class WeaponSwap
     /// CheckWeaponCollision Shield case).</summary>
     public static bool IsWieldedBothHandsOccupant(ItemFacts item) =>
         item.WieldedAt is uint w && w != 0 && OccupiesBothHands(w, item.ItemType);
-
-    /// <summary>
-    /// Return the guid of a currently-wielded weapon that blocks wielding
-    /// <paramref name="target"/>, or null if none (the wield can proceed
-    /// directly). Returns null unless the target is a not-yet-wielded,
-    /// equippable weapon — so non-weapons (armor/cloak/hat), already-wielded
-    /// items, and items with no valid equip slot never trigger a dequip.
-    /// If multiple weapons are somehow wielded, the first encountered is
-    /// returned (deterministic by inventory order); a second pass would
-    /// dequip the next on a subsequent wield. This weapon-only view backs
-    /// the fallback's self-disarm guard; the swap dispatch uses the fuller
-    /// <see cref="FindBlockingWieldedItems"/> (which also dequips an
-    /// off-hand shield for a two-handed target).
-    /// </summary>
-    public static uint? FindBlockingWieldedWeapon(
-        ItemFacts target, IReadOnlyList<ItemFacts> inventory)
-    {
-        // Target must be a weapon we can equip and is not already wielded.
-        if (!IsWeapon(target)) return null;
-        if (target.WieldedAt is uint tw && tw != 0) return null;
-        if (!(target.ValidLocations is uint vl && vl != 0)) return null;
-
-        foreach (var item in inventory)
-        {
-            if (item.Guid == target.Guid) continue;
-            if (IsWieldedWeapon(item)) return item.Guid;
-        }
-        return null;
-    }
 
     /// <summary>
     /// Return the guids of ALL currently-wielded items that must be moved to

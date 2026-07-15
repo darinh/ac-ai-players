@@ -4,7 +4,7 @@
 // The ACE server refuses to wield a weapon while another weapon is
 // equipped; these tests pin the predicate that decides WHEN a wield must
 // be preceded by a dequip (and of WHICH currently-wielded weapon), and
-// confirm the common no-collision paths return null so the caller wields
+// confirm the common no-collision paths return no blockers so the caller wields
 // directly (byte-identical to before this slice).
 
 using System.Collections.Generic;
@@ -46,7 +46,7 @@ public class WeaponSwapTests
             target,
             Item(0x200, Armor, ShieldSlot, ShieldSlot), // wielded armor, not a weapon
         };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public class WeaponSwapTests
             Item(0x999, Melee, MeleeSlot, MeleeSlot), // wielded melee weapon
             target,
         };
-        Assert.Equal(0x999u, WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Equal(new[] { 0x999u }, WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -76,7 +76,7 @@ public class WeaponSwapTests
             Item(0x777, Melee, TwoHandSlot, TwoHandSlot),
             target,
         };
-        Assert.Equal(0x777u, WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Equal(new[] { 0x777u }, WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -88,7 +88,7 @@ public class WeaponSwapTests
             Item(0x555, Caster, HeldSlot, HeldSlot), // wielded wand/orb
             target,
         };
-        Assert.Equal(0x555u, WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Equal(new[] { 0x555u }, WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -101,7 +101,7 @@ public class WeaponSwapTests
             Item(0x999, Melee, MeleeSlot, MeleeSlot), // wielded weapon present
             target,
         };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -115,7 +115,7 @@ public class WeaponSwapTests
             Item(0x888, Armor, ShieldSlot, ShieldSlot), // wielded shield
             target,
         };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -130,7 +130,7 @@ public class WeaponSwapTests
             Item(0x444, Missile, AmmoSlot, AmmoSlot), // a loaded dart, in ammo slot
             target,
         };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -139,7 +139,7 @@ public class WeaponSwapTests
         // If the target is itself already wielded, nothing to do.
         var target = Item(0x100, Melee, MeleeSlot, MeleeSlot);
         var inv = new List<WeaponSwap.ItemFacts> { target };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public class WeaponSwapTests
             Item(0x999, Melee, MeleeSlot, MeleeSlot),
             target,
         };
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
+        Assert.Empty(WeaponSwap.FindBlockingWieldedItems(target, inv));
     }
 
     [Fact]
@@ -193,8 +193,6 @@ public class WeaponSwapTests
 
         var blockers = WeaponSwap.FindBlockingWieldedItems(target, inv);
         Assert.Equal(new[] { 0x8000060Cu }, blockers);
-        // The weapon-only view still returns null (a shield is not a weapon).
-        Assert.Null(WeaponSwap.FindBlockingWieldedWeapon(target, inv));
     }
 
     [Fact]
@@ -368,7 +366,7 @@ public class WeaponSwapTests
     }
 
     [Fact]
-    public void FindBlockingWieldedItems_OneHandedMeleeTarget_WeaponEquipped_MatchesWeaponOnlyView()
+    public void FindBlockingWieldedItems_OneHandedMeleeTarget_WeaponEquipped()
     {
         // For a one-handed MELEE target, FindBlockingWieldedItems agrees with
         // the weapon-only view: a wielded main-hand weapon is the sole blocker;
@@ -379,34 +377,6 @@ public class WeaponSwapTests
         var inv = new List<WeaponSwap.ItemFacts> { weapon, shield, target };
 
         Assert.Equal(new[] { 0x999u }, WeaponSwap.FindBlockingWieldedItems(target, inv));
-        Assert.Equal(0x999u, WeaponSwap.FindBlockingWieldedWeapon(target, inv));
     }
 
-    // ---- IsAmmolessLauncher ----------------------------------------------
-
-    [Theory]
-    // itemType, ammoType (0 => null), validLoc, hasLoadedAmmo, expected
-    [InlineData(Missile, 1, MissileSlot, false, true)]   // ammoless launcher -> excluded
-    [InlineData(Missile, 1, MissileSlot, true,  false)]  // launcher WITH loaded ammo
-    [InlineData(Missile, 0, MissileSlot, false, false)]  // THROWN weapon (no AmmoType)
-    [InlineData(Missile, 1, AmmoSlot,    false, false)]  // bag AMMO (ammo slot, not main-weapon)
-    [InlineData(Melee,   0, MeleeSlot,   false, false)]  // melee weapon
-    [InlineData(Armor,   0, BodyArmor,   false, false)]  // armor
-    [InlineData(Caster,  0, HeldSlot,    false, false)]  // caster (no missile bit)
-    public void IsAmmolessLauncher_TruthTable(
-        uint itemType, int ammoType, uint validLoc, bool hasLoadedAmmo, bool expected)
-    {
-        ushort? ammo = ammoType == 0 ? (ushort?)null : (ushort)ammoType;
-        Assert.Equal(expected,
-            WeaponSwap.IsAmmolessLauncher(itemType, ammo, validLoc, hasLoadedAmmo));
-    }
-
-    [Fact]
-    public void IsAmmolessLauncher_NullFields_NotLauncher()
-    {
-        // Defensive: missing wire fields never classify as an ammoless launcher.
-        Assert.False(WeaponSwap.IsAmmolessLauncher(null, 1, MissileSlot, false));
-        Assert.False(WeaponSwap.IsAmmolessLauncher(Missile, 1, null, false));
-        Assert.False(WeaponSwap.IsAmmolessLauncher(Missile, null, MissileSlot, false));
-    }
 }

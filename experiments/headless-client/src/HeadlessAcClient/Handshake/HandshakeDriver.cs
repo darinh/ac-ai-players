@@ -906,19 +906,6 @@ internal sealed class HandshakeDriver : IDisposable
         // emitting an explicit per-cycle goal. Set on candidate
         // selection, cleared when the picker picks nothing.
         PickerActivity? pickerActivityCurrent = null;
-        // Phase 6l — pickup→equip handoff. When PutItemInContainer is
-        // sent for a wearable item, we stash (itemGuid → equipLocation
-        // bitmask) here. On InventoryPutObjInContainer arrival for the
-        // same item guid, the next tick sends GetAndWieldItem in a
-        // fresh packet. We cannot bundle equip in the same packet as
-        // pickup — the server-side CreateMoveToChain captures rootOwner
-        // at FindObject time (still on landscape), then races against
-        // the pickup chain. By the time the equip MoveToChain callback
-        // runs, the item is in inventory, rootOwner is null, and
-        // line 1592 of Player_Inventory.cs fires ActionCancelled
-        // (WeenieError 0x36). Verified empirically in
-        // phase6l-equip-run-06-decoded.log on a fresh account.
-        var                  pendingEquip = new Dictionary<uint, uint>();
         // Dequip-before-wield (weapon swap). The ACE server's
         // CheckWeaponCollision refuses to wield a weapon while another
         // weapon is equipped (silent InventoryServerSaveFailed err=None).
@@ -927,10 +914,9 @@ internal sealed class HandshakeDriver : IDisposable
         // the BLOCKER into the pack; this dict maps the blocker's guid ->
         // (targetWeaponGuid, targetEquipSlot) so the blocker's put-ack
         // (which confirms it is now unequipped) drives the follow-up
-        // GetAndWieldItem of the intended weapon. Mirrors the PHASE6L
-        // pickup->equip handoff, but decouples the put item (blocker) from
-        // the wield item (target). The LLM still chose WHICH weapon; source
-        // only inserts the mechanical dequip the server requires.
+        // GetAndWieldItem of the intended weapon. The LLM still chose
+        // WHICH weapon; source only inserts the mechanical dequip the
+        // server requires.
         var                  pendingWieldAfterDequip = new Dictionary<uint, (uint TargetGuid, uint TargetSlot, DateTime StartedUtc)>();
         // cp060 Part 3 — standalone dequip of an objectively-useless ammoless
         // launcher. When a launcher is wielded with no ammo (LauncherNeedsDequip
@@ -943,84 +929,36 @@ internal sealed class HandshakeDriver : IDisposable
         // ack from permanently blocking re-dispatch.
         uint?                pendingLauncherDequipGuid = null;
         DateTime?            pendingLauncherDequipSentAt = null;
-        // Phase 6n — anti-starvation: after an item is successfully
-        // wielded, mark its weenie-class as "satisfied" so we stop
-        // chasing duplicate quest-reward copies. Also count successful
-        // pickups per name; this count is TELEMETRY ONLY — surfaced to
-        // the LLM as `picked_name_count=N` on each exploration candidate
-        // (picker-name-respawn-audit). The picker no longer drops items
-        // by name; whether a duplicate is worth re-collecting is the
-        // LLM's call.
-        var                  satisfiedEquipSlots = new HashSet<uint>();
+        // Phase 6n — after an explicitly requested wield succeeds, mark
+        // its weenie-class as satisfied. Also count successful pickups
+        // per name; this count is TELEMETRY ONLY — surfaced to the LLM
+        // as `picked_name_count=N` on each exploration candidate.
         var                  satisfiedWeenieClasses = new HashSet<uint>();
         var                  pickupCountByName = new Dictionary<string, int>();
-        // Phase 6n — guid -> weenie class for items we put in pendingEquip,
-        // so we can promote the class to satisfiedWeenieClasses when the
-        // wield ack arrives.
-        var                  pendingEquipWcid = new Dictionary<uint, uint>();
-        // Phase 7f.4 — startup equip-from-inventory pass. Items the
-        // server grants at character creation (a starter weapon tied to
-        // the character's trained skill, a starter consumable, etc.)
-        // arrive as ObjectCreate with ContainerGuid=self and
-        // WielderGuid=null. The pickup-equip path (Phase 6m) doesn't
-        // fire for these because there's no pickup - they're already
-        // in the bag. This set tracks guids we've already issued
-        // GetAndWieldItem for so a single tick re-scan doesn't spam
-        // duplicate equip requests while we wait for the WieldObject
-        // ack. The ack flips snap.WielderGuid != null which removes
-        // the item from the inventory-equip candidate set on the
-        // next tick.
-        var                  inventoryEquipSent = new HashSet<uint>();
-        // Optimistic per-slot serialization for the login auto-equip burst (see
-        // Phase7f4EquipDedup): guid -> the equip slot we SENT a wield for but have
-        // not yet seen resolve. The ack-based satisfiedEquipSlots cannot stop the
-        // pre-ack burst from firing a wield for every owned item that shares a slot
-        // (a whole weapon collection -> the one main-hand slot), each rejected
-        // InventoryServerSaveFailed(None). Marking the slot in-flight on send +
-        // releasing it on the item's ack (worn) or rejection (slot still free ->
-        // the next same-slot candidate may try) serializes each slot to one wield.
-        // The worn outcome is unchanged; only the doomed duplicate sends are removed.
-        var                  pendingEquipItemSlots = new Dictionary<uint, uint>();
-        var                  phase7f4SlotSerialize = Phase7f4EquipDedup.ResolveSerializeEnabled(
-            Environment.GetEnvironmentVariable("AC_BOTS_PHASE7F4_SLOT_SERIALIZE"));
-        // Per-guid send timestamp + attempt count for the login auto-equip RETRY.
-        // A wield can race the item-creation ack (silent InventoryServerSaveFailed
-        // err=None, no WieldObject ack) leaving the item unwielded; inventoryEquipSent
-        // alone would then never re-send it. AutoEquipRetryPolicy re-eligibles a
-        // still-unwielded guid after a cooldown (capped by MaxAttempts) so the retry
-        // lands once the creation ack settles. Keyed only by guid; no game knowledge.
-        var                  equipRetry = new Dictionary<uint, (DateTime SentAt, int Attempts)>();
-        // Explicit server rejection weight for each autonomous login-equip guid.
-        // The first None response can be the item-creation race above. A specific
-        // error or a second None response after a cooldown is conclusive instead
-        // of spending the remaining silent-response attempts.
-        var                  equipExplicitRejections = new Dictionary<uint, int>();
+        // Item guids participating in explicit Wield transactions, including
+        // a blocker that must first be moved into the pack. A None inventory
+        // failure only becomes an ActionRejected when it matches a request
+        // the bot actually dispatched.
+        var                  wieldTransactionGuids = new HashSet<uint>();
+        var                  pendingWieldRetries =
+            new Dictionary<uint, (uint Slot, DateTime SentAt, int Attempts, int ExplicitRejections)>();
+        void RecordWieldDispatch(uint itemGuid, uint slot)
+        {
+            pendingWieldRetries.TryGetValue(itemGuid, out var previous);
+            pendingWieldRetries[itemGuid] = (
+                slot,
+                DateTime.UtcNow,
+                previous.Attempts + 1,
+                previous.ExplicitRejections);
+            wieldTransactionGuids.Add(itemGuid);
+        }
         // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
         // server refuses (a non-takeable fixed object) returns a silent
-        // InventoryServerSaveFailed err=None whose queued auto-equip never fires
-        // (the pickup-ack never arrives), so the guid never reaches
-        // inventoryEquipSent and the failure would otherwise be suppressed —
-        // leaving the LLM to re-emit the same dead Pickup every cycle. Tracking
+        // InventoryServerSaveFailed err=None. Tracking
         // the dispatched pickup guid lets ShouldSurfaceInventoryFailure surface
         // that err=None as an ActionRejected so the policy's recently-rejected
         // dedup breaks the loop. Pure own-dispatch bookkeeping; no game knowledge.
         var                  pickupDispatchedGuids = new HashSet<uint>();
-        // cp-2273 — distinguishes guids the SOURCE autonomously auto-equipped
-        // (PHASE7F.4 below) from LLM-requested wields, so a server
-        // InventoryServerSaveFailed for an autonomous auto-equip (e.g. a
-        // level-gated starter cloak → 0x420 LevelTooLow) is NOT surfaced as a
-        // plan-invalidating ActionRejected the LLM would mis-attribute to its
-        // own current goal. inventoryEquipSent alone can't be used: it also
-        // holds LLM Pickup→equip and LLM Wield guids.
-        var                  autoEquipFailureFilter = new Strategy.AutoEquipFailureFilter();
-        void TransferAutoEquipOwnershipToLlm(uint itemGuid)
-        {
-            autoEquipFailureFilter.ClearAutonomous(itemGuid);
-            equipRetry.Remove(itemGuid);
-            equipExplicitRejections.Remove(itemGuid);
-            pendingEquipItemSlots.Remove(itemGuid);
-            pendingEquipWcid.Remove(itemGuid);
-        }
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
         // creature (so we don't walk away mid-fight) and a retry timer
@@ -2939,55 +2877,12 @@ internal sealed class HandshakeDriver : IDisposable
                                     pickupCountByName.TryGetValue(pickedSnap.Name!, out var pc);
                                     pickupCountByName[pickedSnap.Name!] = pc + 1;
                                 }
-                                // Phase 6n — for wearables, mark the
-                                // weenie class satisfied as soon as the
-                                // pickup acks (don't wait for WieldObject).
-                                // If the server later rejects the wield
-                                // (InventoryServerSaveFailed), we've
-                                // still got a copy in the bag and
-                                // grabbing a second duplicate won't help.
-                                // Without this, the bot loops on cap
-                                // respawns when the cap fails to wield.
-                                if (pendingEquipWcid.TryGetValue(putAck.ItemGuid, out var equipWcidEarly))
-                                {
-                                    satisfiedWeenieClasses.Add(equipWcidEarly);
-                                }
-
-                                if (pendingEquip.TryGetValue(putAck.ItemGuid, out var equipSlot))
-                                {
-                                    pendingEquip.Remove(putAck.ItemGuid);
-                                    var equipPktSeq = nextOutboundPacketSequence++;
-                                    var equipFragSeq = nextOutboundFragmentSequence++;
-                                    var equipBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                                    var equipLen = GameActionGetAndWieldItemMessage.Pack(
-                                        equipBuf,
-                                        itemGuid: putAck.ItemGuid,
-                                        equipLocation: (int)equipSlot);
-                                    var equipMsg = new OutboundPacket();
-                                    if (lastReceivedSeq != 0)
-                                        equipMsg.AddAckSequence(lastReceivedSeq);
-                                    equipMsg.AddBlobFragment(
-                                        fragSequence: equipFragSeq,
-                                        fragId: OutboundFragmentId,
-                                        queue: (ushort)GameMessageGroup.UIQueue,
-                                        gameMessagePayload: equipBuf.AsSpan(0, equipLen));
-                                    var equipSentLen = equipMsg.Pack(sendBuf, myClientId,
-                                                                     sequence: equipPktSeq, iteration: 1,
-                                                                     encrypt: true, cryptoSend: cryptoSend);
-                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, equipSentLen),
-                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                                    Console.WriteLine(
-                                        $"[observe]   -> PHASE6L SEND EQUIP: GetAndWieldItem(item=0x{putAck.ItemGuid:X8} slot=0x{equipSlot:X}) " +
-                                        $"pktSeq={equipPktSeq} fragSeq={equipFragSeq} totalBytes={equipSentLen}");
-                                }
-
                                 // Dequip-before-wield follow-up. The put-ack
                                 // for a dequipped weapon-swap BLOCKER confirms
                                 // it is now in the pack (unequipped), so the
                                 // intended target weapon can finally be wielded
                                 // without tripping CheckWeaponCollision. Send
-                                // the deferred GetAndWieldItem now (decoupled
-                                // from goal state, mirroring PHASE6L).
+                                // the deferred GetAndWieldItem now.
                                 // Capture swap-membership BEFORE the Remove below so
                                 // the cp060 latch check further down is not vacuous
                                 // (it must NOT clear the standalone-dequip latch on a
@@ -2997,6 +2892,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 if (pendingWieldAfterDequip.TryGetValue(putAck.ItemGuid, out var swap))
                                 {
                                     pendingWieldAfterDequip.Remove(putAck.ItemGuid);
+                                    wieldTransactionGuids.Remove(putAck.ItemGuid);
 
                                     // Multi-blocker swap: a two-handed weapon is
                                     // blocked by BOTH a main-hand weapon AND an
@@ -3051,33 +2947,38 @@ internal sealed class HandshakeDriver : IDisposable
                                     }
                                     else
                                     {
-                                    // Suppress the startup auto-equip pass from
-                                    // racing this exact wield.
-                                    inventoryEquipSent.Add(swap.TargetGuid);
-                                    var swapPktSeq = nextOutboundPacketSequence++;
-                                    var swapFragSeq = nextOutboundFragmentSequence++;
-                                    var swapBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                                    var swapLen = GameActionGetAndWieldItemMessage.Pack(
-                                        swapBuf,
-                                        itemGuid: swap.TargetGuid,
-                                        equipLocation: (int)swap.TargetSlot);
-                                    var swapMsg = new OutboundPacket();
-                                    if (lastReceivedSeq != 0)
-                                        swapMsg.AddAckSequence(lastReceivedSeq);
-                                    swapMsg.AddBlobFragment(
-                                        fragSequence: swapFragSeq,
-                                        fragId: OutboundFragmentId,
-                                        queue: (ushort)GameMessageGroup.UIQueue,
-                                        gameMessagePayload: swapBuf.AsSpan(0, swapLen));
-                                    var swapSentLen = swapMsg.Pack(sendBuf, myClientId,
-                                                                   sequence: swapPktSeq, iteration: 1,
-                                                                   encrypt: true, cryptoSend: cryptoSend);
-                                    await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, swapSentLen),
-                                                               SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                                    Console.WriteLine(
-                                        $"[strategy] SWAP-WIELD after dequip: blocker=0x{putAck.ItemGuid:X8} unequipped -> " +
-                                        $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
-                                        $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
+                                        var swapPktSeq = nextOutboundPacketSequence++;
+                                        var swapFragSeq = nextOutboundFragmentSequence++;
+                                        var swapBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                                        var swapLen = GameActionGetAndWieldItemMessage.Pack(
+                                            swapBuf,
+                                            itemGuid: swap.TargetGuid,
+                                            equipLocation: (int)swap.TargetSlot);
+                                        var swapMsg = new OutboundPacket();
+                                        if (lastReceivedSeq != 0)
+                                            swapMsg.AddAckSequence(lastReceivedSeq);
+                                        swapMsg.AddBlobFragment(
+                                            fragSequence: swapFragSeq,
+                                            fragId: OutboundFragmentId,
+                                            queue: (ushort)GameMessageGroup.UIQueue,
+                                            gameMessagePayload: swapBuf.AsSpan(0, swapLen));
+                                        var swapSentLen = swapMsg.Pack(
+                                            sendBuf,
+                                            myClientId,
+                                            sequence: swapPktSeq,
+                                            iteration: 1,
+                                            encrypt: true,
+                                            cryptoSend: cryptoSend);
+                                        await _socket!.SendToAsync(
+                                            new ArraySegment<byte>(sendBuf, 0, swapSentLen),
+                                            SocketFlags.None,
+                                            _serverPort0,
+                                            ct).ConfigureAwait(false);
+                                        RecordWieldDispatch(swap.TargetGuid, swap.TargetSlot);
+                                        Console.WriteLine(
+                                            $"[strategy] SWAP-WIELD after dequip: blocker=0x{putAck.ItemGuid:X8} unequipped -> " +
+                                            $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
+                                            $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
                                     }
                                 }
                                 // cp060 Part 3 — standalone launcher dequip ack.
@@ -3197,48 +3098,15 @@ internal sealed class HandshakeDriver : IDisposable
                                     });
                                 }
                             }
-                            // Phase 6n — wield ack: mark the slot mask
-                            // and the wcid as satisfied so the picker
-                            // stops chasing duplicate copies of the
-                            // same armor reward.
+                            // Phase 6n — a successful explicit Wield resolves
+                            // the transaction and updates the item projection.
                             if (ge.Payload?.WieldObject is { } wieldAck)
                             {
-                                // cp-2273 — a successful wield ack resolves one
-                                // source-autonomous dispatch for this guid. Consume
-                                // one response marker rather than clearing all:
-                                // a cooldown retry can overlap the original request,
-                                // and the other autonomous response must still be
-                                // suppressed if it arrives late. An explicit LLM
-                                // Wield clears every marker at dispatch time below.
-                                autoEquipFailureFilter.TryConsumeAutonomous(wieldAck.ItemGuid);
-                                // A successful wield also ends this guid's
-                                // login-equip RETRY eligibility: the retry only
-                                // exists for an equip whose ack was LOST to the
-                                // item-creation race. Once the ack arrives the item
-                                // is wielded, so drop the retry marker — otherwise a
-                                // LATER intentional dequip (WielderGuid -> null) would
-                                // let the login pass re-wield it (fighting the swap/
-                                // dequip). inventoryEquipSent stays, preserving the
-                                // prior one-shot suppression for that dequip case.
-                                equipRetry.Remove(wieldAck.ItemGuid);
-                                equipExplicitRejections.Remove(wieldAck.ItemGuid);
-                                if (wieldAck.NewLocation != 0)
-                                    satisfiedEquipSlots.Add(wieldAck.NewLocation);
-                                // In-flight login-equip wield resolved (worn): release
-                                // its pending-slot mark. The slot is now satisfied
-                                // (above), so same-slot candidates stay skipped.
-                                pendingEquipItemSlots.Remove(wieldAck.ItemGuid);
-                                if (pendingEquipWcid.TryGetValue(wieldAck.ItemGuid, out var wcEq))
-                                {
-                                    satisfiedWeenieClasses.Add(wcEq);
-                                    pendingEquipWcid.Remove(wieldAck.ItemGuid);
-                                }
-                                else
-                                {
-                                    var wieldedSnap = worldState.TryGet(wieldAck.ItemGuid);
-                                    if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
-                                        satisfiedWeenieClasses.Add(wc2);
-                                }
+                                pendingWieldRetries.Remove(wieldAck.ItemGuid);
+                                wieldTransactionGuids.Remove(wieldAck.ItemGuid);
+                                var wieldedSnap = worldState.TryGet(wieldAck.ItemGuid);
+                                if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
+                                    satisfiedWeenieClasses.Add(wc2);
                                 // Slice H follow-up: WieldObject is the only
                                 // notification the server sends when an item
                                 // transitions from inventory to equipped. The
@@ -3270,7 +3138,7 @@ internal sealed class HandshakeDriver : IDisposable
                                         equippedSnap.WielderGuid = sg;
                                 }
                                 Console.WriteLine(
-                                    $"[motion] satisfaction updated: slots=[{string.Join(",", satisfiedEquipSlots.Select(s => $"0x{s:X}"))}] " +
+                                    $"[motion] satisfaction updated: " +
                                     $"wcids=[{string.Join(",", satisfiedWeenieClasses.Select(c => c.ToString()))}]");
                             }
                             // Phase 7f — UpdateHealth tracking. If
@@ -3873,51 +3741,44 @@ internal sealed class HandshakeDriver : IDisposable
                             // so the LLM sees the give failed and picks a
                             // different action. Mechanical: keyed on the wire
                             // error event + the in-flight give guid; no game
-                            // knowledge. (Other benign None errors — e.g. the
-                            // source-autonomous auto-equip handled below — are
-                            // unaffected because they do not match the in-flight
-                            // give guid.)
-                            // Release an IN-FLIGHT login-equip slot the moment its
-                            // wield is rejected: the slot is still free, so the next
-                            // same-slot candidate may try it. Fires independently of
-                            // whether the failure is surfaced to the LLM below (a
-                            // Remove for a non-pending guid is a harmless no-op).
-                            if (ge.Payload?.InventoryServerSaveFailed is { } isfRelease)
-                                pendingEquipItemSlots.Remove(isfRelease.ItemGuid);
+                            // knowledge. Other benign None errors are unaffected
+                            // because they do not match an explicit in-flight
+                            // inventory action.
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
-                                AutoEquipFailureFilter.ShouldSurfaceInventoryFailure(
-                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryEquipSent,
+                                InventoryFailurePolicy.ShouldSurfaceInventoryFailure(
+                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, wieldTransactionGuids,
                                     pickupDispatchedGuids))
                             {
                                 var invLabel = isf.ErrorType != 0
                                     ? WeenieErrorLabels.Label(isf.ErrorType)
                                     : "rejected by the server (the item was not accepted)";
-                                // cp-2273 — a failure of a SOURCE-AUTONOMOUS
-                                // auto-equip (PHASE7F.4 chose to wield this item;
-                                // the LLM never asked) must not reach the Strategy
-                                // layer: surfaced as a semantic ActionRejected it
-                                // invalidates the in-flight plan AND the LLM
-                                // mis-attributes it to its own current goal (live:
-                                // a level-gated starter cloak's 0x420 LevelTooLow
-                                // made the LLM abandon its weapon-wield goal). Drop
-                                // it (one-shot, by guid); log for diagnostics. Any
-                                // LLM-requested wield/pickup failure surfaces below.
-                                if (autoEquipFailureFilter.TryConsumeAutonomous(isf.ItemGuid))
+                                if (pendingWieldRetries.TryGetValue(isf.ItemGuid, out var wieldRetry))
                                 {
-                                    var priorRejections =
-                                        equipExplicitRejections.TryGetValue(
-                                            isf.ItemGuid, out var rejectionCount)
-                                            ? rejectionCount : 0;
                                     var explicitRejections =
-                                        AutoEquipRetryPolicy.RecordExplicitRejection(
-                                            priorRejections, isf.ErrorType);
-                                    equipExplicitRejections[isf.ItemGuid] = explicitRejections;
-                                    Console.WriteLine(
-                                        $"[auto-equip] suppressed autonomous auto-equip rejection: " +
-                                        $"item=0x{isf.ItemGuid:X8} err=0x{isf.ErrorType:X} [{invLabel}] " +
-                                        $"explicit-rejections={explicitRejections} " +
-                                        $"(source-autonomous wield; not an LLM goal)");
-                                    break;
+                                        WieldRetryPolicy.RecordExplicitRejection(
+                                            wieldRetry.ExplicitRejections,
+                                            isf.ErrorType);
+                                    var canRetry =
+                                        isf.ErrorType == 0 &&
+                                        explicitRejections <
+                                            WieldRetryPolicy.ConclusiveExplicitRejectionCount &&
+                                        wieldRetry.Attempts < WieldRetryPolicy.MaxAttempts;
+                                    if (canRetry)
+                                    {
+                                        pendingWieldRetries[isf.ItemGuid] = (
+                                            wieldRetry.Slot,
+                                            wieldRetry.SentAt,
+                                            wieldRetry.Attempts,
+                                            explicitRejections);
+                                        Console.WriteLine(
+                                            $"[wield-retry] transient rejection retained for LLM-authored Wield: " +
+                                            $"item=0x{isf.ItemGuid:X8} attempt={wieldRetry.Attempts}/" +
+                                            $"{WieldRetryPolicy.MaxAttempts}; retry after cooldown.");
+                                        break;
+                                    }
+
+                                    pendingWieldRetries.Remove(isf.ItemGuid);
+                                    wieldTransactionGuids.Remove(isf.ItemGuid);
                                 }
                                 // A prerequisite dequip whose item the server
                                 // refuses to move. To wield an item that needs an
@@ -3957,6 +3818,9 @@ internal sealed class HandshakeDriver : IDisposable
                                     is { } swapReject)
                                 {
                                     pendingWieldAfterDequip.Remove(isf.ItemGuid);
+                                    pendingWieldRetries.Remove(swapReject.TargetGuid);
+                                    wieldTransactionGuids.Remove(isf.ItemGuid);
+                                    wieldTransactionGuids.Remove(swapReject.TargetGuid);
                                     Console.WriteLine(
                                         $"[strategy] SWAP-WIELD failed: blocker=0x{isf.ItemGuid:X8} could not be " +
                                         $"unequipped (err=0x{isf.ErrorType:X}); re-attributing rejection to target " +
@@ -5397,276 +5261,111 @@ internal sealed class HandshakeDriver : IDisposable
                         $"(loop-keeper; server no-ops if Attacking==true)");
                 }
 
-                // Phase 7f.4 — INVENTORY-EQUIP PASS.
-                //
-                // The pickup-driven equip path (Phase 6m, lines ~641-705
-                // and ~1755-1760) only fires when we PICK UP a wearable
-                // off the landscape: the InventoryPutObjInContainer ack
-                // triggers a fresh GetAndWieldItem send. That path
-                // misses items the server grants at character creation
-                // via PlayerFactory's starter-gear loop (Training
-                // Spadone for the Two-Handed-Combat skill, Handy
-                // Healing Kit, etc.) — those items arrive as
-                // ObjectCreate with ContainerGuid=self,
-                // WielderGuid=null, ValidLocations!=0 and are never
-                // wielded.
-                //
-                // Fix: on every loop iteration, scan worldState for
-                // wearables-in-inventory that we haven't already
-                // asked the server to wield, and send GetAndWieldItem
-                // for the FIRST one we find (at most one per tick to
-                // avoid burst-sending five equip packets in the same
-                // millisecond — the server processes them in any
-                // order and we'd rather pace the swing).
-                //
-                // Gates:
-                //   - LoginComplete already sent (server has flushed
-                //     the initial ObjectCreate firehose by then).
-                //   - worldState.Self exists (we know our own guid).
-                //   - No active combat lock (don't interrupt a swing
-                //     loop by introducing animation cooldown jitter;
-                //     equip-from-inventory triggers wield animations
-                //     that share the NextUseTime budget with melee).
-                //
-                // Slot picking matches Phase 6m: lowest set bit of
-                // ValidLocations. Multi-slot wearables (rings:
-                // FingerWearLeft|Right) get the lowest, which is the
-                // canonical default the AC GUI uses.
-                //
-                // Tracking: inventoryEquipSent records guids we've
-                // already issued an equip request for; the snapshot
-                // refresh on WieldObject moves WielderGuid != null
-                // which excludes the item naturally from subsequent
-                // scans, so this set is belt-and-suspenders against
-                // re-issuing the equip while waiting for the ack.
+                // Retry only a Wield target already selected by Strategy.
+                // This preserves recovery from a request that raced the
+                // item's arrival while keeping item choice out of Motor.
                 if (loginCompleteSent &&
                     combatTargetGuid is null &&
-                    worldState.Self is WorldObjectSnapshot ieSelf &&
-                    ieSelf.CellId is uint &&
-                    worldState.SelfGuid is uint ieSelfGuid)
+                    worldState.SelfGuid is uint wieldRetrySelfGuid &&
+                    pendingWieldRetries.Count > 0)
                 {
-                    // Snapshot the bot's own inventory (pack + worn) once so
-                    // the per-candidate weapon-collision check below mirrors
-                    // the server's CheckWeaponCollision precondition. Also OR the
-                    // slots occupied by currently-WORN gear (WielderGuid == self) into
-                    // ieWornSlots: a fresh character logs in with starter clothing
-                    // already worn (its chest/legs/etc. slots filled), so auto-wielding
-                    // a bag item into one of those slots is rejected
-                    // InventoryServerSaveFailed(None). The ack-based satisfiedEquipSlots
-                    // only knows about THIS-session wields, not gear worn before login,
-                    // so those doomed wields slip through; the single-slot skip below
-                    // uses this mask to drop them. Taken only from actually-worn items
-                    // (not a bag item's possibly-stale CurrentWieldedLocation).
-                    var ieInventory = new List<WeaponSwap.ItemFacts>();
-                    uint ieWornSlots = 0;
-                    foreach (var io in worldState.Objects.Values)
+                    (uint ItemGuid, uint Slot)? retryDue = null;
+                    foreach (var entry in pendingWieldRetries.ToArray())
                     {
-                        var ieOwnedBag  = io.ContainerGuid is uint icg && icg == ieSelfGuid;
-                        var ieOwnedWorn = io.WielderGuid   is uint iwg && iwg == ieSelfGuid;
-                        if (!ieOwnedBag && !ieOwnedWorn) continue;
-                        ieInventory.Add(new WeaponSwap.ItemFacts(
-                            io.Guid, io.ItemType, io.ValidLocations, io.CurrentWieldedLocation));
-                        if (ieOwnedWorn && io.CurrentWieldedLocation is uint cwl)
-                            ieWornSlots |= cwl;
-                    }
-                    // Loaded ammo occupies the missile-ammo slot; used below to
-                    // let the ammoless-launcher guard tell a fire-ready launcher
-                    // from one that cannot attack.
-                    var ieHasLoadedAmmo = ieInventory.Any(
-                        f => f.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
-
-                    // Liveness sweep (decoupled from candidate selection): drop any
-                    // in-flight slot mark whose item is no longer owned AND awaiting a
-                    // wield. The candidate-loop releases below only run for items still
-                    // in our inventory, so an item that was dropped/given/deleted (or
-                    // silently wielded without our ack) while its wield was in flight
-                    // would otherwise strand its slot permanently. Re-checking against
-                    // current world state each tick makes that impossible: a mark whose
-                    // item vanished or is now wielded is released here. (An item still
-                    // owned + unwielded — legitimately in flight, retrying, or given up
-                    // via the retry cap — is kept; the cap-exhaustion release below
-                    // frees that case.)
-                    if (phase7f4SlotSerialize && pendingEquipItemSlots.Count > 0)
-                    {
-                        List<uint>? ieStalePending = null;
-                        foreach (var pg in pendingEquipItemSlots.Keys)
+                        var itemGuid = entry.Key;
+                        var retry = entry.Value;
+                        var retrySnap = worldState.TryGet(itemGuid);
+                        var stillOwnedAndUnwielded =
+                            retrySnap is not null &&
+                            retrySnap.ContainerGuid == wieldRetrySelfGuid &&
+                            retrySnap.WielderGuid is null &&
+                            retrySnap.CurrentWieldedLocation is null or 0;
+                        if (!stillOwnedAndUnwielded)
                         {
-                            var psnap = worldState.TryGet(pg);
-                            var ownedAwaiting = psnap is not null
-                                && psnap.ContainerGuid is uint pcg && pcg == ieSelfGuid
-                                && psnap.WielderGuid is null;
-                            if (!ownedAwaiting)
-                                (ieStalePending ??= new List<uint>()).Add(pg);
+                            pendingWieldRetries.Remove(itemGuid);
+                            wieldTransactionGuids.Remove(itemGuid);
+                            continue;
                         }
-                        if (ieStalePending is not null)
-                            foreach (var pg in ieStalePending) pendingEquipItemSlots.Remove(pg);
-                    }
 
-                    WorldObjectSnapshot? ieCandidate = null;
-                    uint                 ieEquipSlot = 0;
-                    foreach (var snap in worldState.Objects.Values)
-                    {
-                        if (snap.ContainerGuid is not uint cg || cg != ieSelfGuid) continue;
-                        if (snap.WielderGuid is not null) continue;
-                        if (snap.ValidLocations is not uint ivl || ivl == 0) continue;
-                        if (inventoryEquipSent.Contains(snap.Guid))
+                        var now = DateTime.UtcNow;
+                        if (WieldRetryPolicy.TimedOut(
+                                retry.SentAt,
+                                retry.Attempts,
+                                retry.ExplicitRejections,
+                                now,
+                                WieldRetryPolicy.RetryCooldown,
+                                WieldRetryPolicy.MaxAttempts))
                         {
-                            // Retry a still-unwielded raced equip after a cooldown: its
-                            // wield likely raced the item-creation ack (silent
-                            // InventoryServerSaveFailed, no WieldObject ack), so the
-                            // one-shot dedup would otherwise strand it unwielded for the
-                            // session. Release it (fall through -> re-picked + re-sent
-                            // below), capped by MaxAttempts. WielderGuid != null is
-                            // already excluded above, so this only fires while unwielded.
-                            var explicitRejections =
-                                equipExplicitRejections.TryGetValue(
-                                    snap.Guid, out var rejectionCount)
-                                    ? rejectionCount : 0;
-                            if (equipRetry.TryGetValue(snap.Guid, out var er)
-                                && AutoEquipRetryPolicy.ShouldRetry(
-                                    er.SentAt, er.Attempts, explicitRejections,
-                                    DateTime.UtcNow,
-                                    AutoEquipRetryPolicy.RetryCooldown,
-                                    AutoEquipRetryPolicy.MaxAttempts))
+                            pendingWieldRetries.Remove(itemGuid);
+                            wieldTransactionGuids.Remove(itemGuid);
+                            var retryName = retrySnap!.Name ?? "(unknown)";
+                            eventStream.Append(new StreamEvent
                             {
-                                inventoryEquipSent.Remove(snap.Guid);
-                                // Liveness backstop: also release this guid's in-flight
-                                // slot mark. Normally the mark is cleared on the ack
-                                // (worn) or the InventoryServerSaveFailed (rejected),
-                                // but a TRULY silent wield (no response of either kind)
-                                // would otherwise strand the slot pending forever and
-                                // block this retry AND every same-slot item. Clearing
-                                // it on the retry-cooldown re-release guarantees the
-                                // slot is freed so the re-send below can proceed.
-                                pendingEquipItemSlots.Remove(snap.Guid);
-                            }
-                            else
-                            {
-                                // Not retrying now: either still within the retry
-                                // cooldown (awaiting the ack/ISF — keep the slot marked
-                                // in flight) OR the attempt cap is reached. On cap
-                                // exhaustion, release the slot so a DIFFERENT same-slot
-                                // item can be tried instead of leaving the slot
-                                // permanently empty (armed=False) behind a silently-lost
-                                // wield that will never get an ack or a rejection.
-                                if (equipRetry.TryGetValue(snap.Guid, out var erDone)
-                                    && erDone.Attempts >= AutoEquipRetryPolicy.MaxAttempts)
-                                    pendingEquipItemSlots.Remove(snap.Guid);
-                                continue;
-                            }
+                                Sequence = 0,
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.ActionRejected,
+                                Text =
+                                    $"Wield request for '{retryName}' received no server response " +
+                                    $"after {retry.Attempts} attempts.",
+                                ItemGuid = itemGuid,
+                                Wcid = retrySnap.WeenieClassId,
+                                Name = retryName,
+                                ErrorLabel = "no server response",
+                            });
+                            Console.WriteLine(
+                                $"[wield-retry] timed out: item=0x{itemGuid:X8} " +
+                                $"attempts={retry.Attempts}; surfaced ActionRejected.");
+                            continue;
                         }
-                        var slot = ivl & (~ivl + 1);
-                        // Skip a slot already SATISFIED (an item was wielded there)
-                        // OR, for a SINGLE-slot item with serialization on, one whose
-                        // wield is already IN FLIGHT, OR the single slot is already
-                        // occupied by WORN gear — so the pre-ack login burst does
-                        // not fire a wield for every owned item competing for the same
-                        // one slot (a whole weapon collection -> the single main-hand
-                        // slot), nor a bag item into a slot filled by starter gear
-                        // worn before login, each rejected InventoryServerSaveFailed. A
-                        // multi-slot item (ring/bracelet) keeps its prior behaviour (it
-                        // might equip in another of its slots). The worn outcome is
-                        // unchanged; the in-flight mark is released on the item's ack
-                        // (worn), its rejection (slot still free), or retry re-eligibility.
-                        var ivlSingleSlot = Phase7f4EquipDedup.IsSingleSlot(ivl);
-                        if (Phase7f4EquipDedup.SlotOccupied(
-                                slot, ivlSingleSlot, satisfiedEquipSlots, ieWornSlots,
-                                pendingEquipItemSlots.Values, phase7f4SlotSerialize))
-                            continue;
-                        if (snap.WeenieClassId is uint wcSat2 &&
-                            satisfiedWeenieClasses.Contains(wcSat2)) continue;
 
-                        // Don't auto-equip a primary weapon (melee/missile/
-                        // caster) the server would reject because another
-                        // primary weapon is already wielded — that wield
-                        // silently no-ops as InventoryServerSaveFailed
-                        // (err=None) and wastes a round-trip (a second primary
-                        // weapon vs an already-wielded one). Skip
-                        // it here; it stays a candidate for a later tick if the
-                        // blocker is dequipped. An intentional weapon SWAP is
-                        // the LLM Wield dispatch's job (it dequips the blocker
-                        // first via WeaponSwap). This mirrors the server
-                        // precondition mechanically — no weapon preference, no
-                        // game knowledge; non-weapons never trigger a blocker
-                        // and the first weapon (empty weapon slot) is unchanged.
-                        if (WeaponSwap.FindBlockingWieldedWeapon(
-                                new WeaponSwap.ItemFacts(
-                                    snap.Guid, snap.ItemType,
-                                    snap.ValidLocations, snap.CurrentWieldedLocation),
-                                ieInventory) is not null)
-                            continue;
-
-                        // Do not auto-wield an ammoless missile LAUNCHER: it can
-                        // never fire yet, once wielded, forces Missile mode and
-                        // blocks unarmed melee (a LauncherNeedsDequip trap that
-                        // leaves the bot not combat-capable). Mirrors the
-                        // NoQuestKnowledgePolicy fallback guard via the shared
-                        // WeaponSwap.IsAmmolessLauncher so the login auto-equip
-                        // never enters the trap the fallback would then unwind (and
-                        // so bag ammo — same MissileWeapon bit + AmmoType, but the
-                        // ammo slot — stays loadable). The LLM may still explicitly
-                        // wield a launcher.
-                        if (WeaponSwap.IsAmmolessLauncher(
-                                snap.ItemType, snap.AmmoType, snap.ValidLocations, ieHasLoadedAmmo))
-                            continue;
-
-                        ieCandidate = snap;
-                        ieEquipSlot = slot;
-                        break;
+                        if (retryDue is null &&
+                            WieldRetryPolicy.ShouldRetry(
+                                retry.SentAt,
+                                retry.Attempts,
+                                retry.ExplicitRejections,
+                                now,
+                                WieldRetryPolicy.RetryCooldown,
+                                WieldRetryPolicy.MaxAttempts))
+                        {
+                            retryDue = (itemGuid, retry.Slot);
+                        }
                     }
 
-                    if (ieCandidate is not null)
+                    if (retryDue is { } due)
                     {
-                        inventoryEquipSent.Add(ieCandidate.Guid);
-                        // Mark the chosen slot IN FLIGHT so same-slot candidates are
-                        // skipped until this wield resolves (WieldObject ack ->
-                        // satisfied/worn; InventoryServerSaveFailed -> released; retry
-                        // re-eligibility -> released). Only for a SINGLE-slot item —
-                        // a multi-slot item (ring/bracelet) is never serialized, so it
-                        // must not pollute the pending set either.
-                        if (phase7f4SlotSerialize && ieEquipSlot != 0 &&
-                            ieCandidate.ValidLocations is uint ieVl && Phase7f4EquipDedup.IsSingleSlot(ieVl))
-                            pendingEquipItemSlots[ieCandidate.Guid] = ieEquipSlot;
-                        // Stamp the send time + bump the attempt count so a raced
-                        // equip can be re-sent after the cooldown (see the candidate
-                        // skip above). Only the PHASE7F.4 login pass records this, so
-                        // other equip paths keep their one-shot behavior.
-                        equipRetry[ieCandidate.Guid] = (
-                            DateTime.UtcNow,
-                            (equipRetry.TryGetValue(ieCandidate.Guid, out var prevRetry)
-                                ? prevRetry.Attempts : 0) + 1);
-                        // cp-2273 — this wield is source-autonomous (the motor
-                        // chose it, the LLM never asked). If the server rejects
-                        // it, suppress the rejection rather than letting it
-                        // invalidate / mislead the LLM's plan.
-                        autoEquipFailureFilter.MarkAutonomous(ieCandidate.Guid);
-                        if (ieCandidate.WeenieClassId is uint ieWc)
-                            pendingEquipWcid[ieCandidate.Guid] = ieWc;
-
-                        var iePacketSeq = nextOutboundPacketSequence++;
-                        var ieFragSeq   = nextOutboundFragmentSequence++;
-                        var ieBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                        var ieLen = GameActionGetAndWieldItemMessage.Pack(
-                            ieBuf,
-                            itemGuid: ieCandidate.Guid,
-                            equipLocation: (int)ieEquipSlot);
-                        var ieOut = new OutboundPacket();
+                        var retryPacketSeq = nextOutboundPacketSequence++;
+                        var retryFragSeq = nextOutboundFragmentSequence++;
+                        var retryBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+                        var retryLen = GameActionGetAndWieldItemMessage.Pack(
+                            retryBuf,
+                            itemGuid: due.ItemGuid,
+                            equipLocation: (int)due.Slot);
+                        var retryMsg = new OutboundPacket();
                         if (lastReceivedSeq != 0)
-                            ieOut.AddAckSequence(lastReceivedSeq);
-                        ieOut.AddBlobFragment(
-                            fragSequence: ieFragSeq,
+                            retryMsg.AddAckSequence(lastReceivedSeq);
+                        retryMsg.AddBlobFragment(
+                            fragSequence: retryFragSeq,
                             fragId: OutboundFragmentId,
                             queue: (ushort)GameMessageGroup.UIQueue,
-                            gameMessagePayload: ieBuf.AsSpan(0, ieLen));
-                        var ieSent = ieOut.Pack(sendBuf, myClientId,
-                                                sequence: iePacketSeq, iteration: 1,
-                                                encrypt: true, cryptoSend: cryptoSend);
-                        await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, ieSent),
-                                                   SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                            gameMessagePayload: retryBuf.AsSpan(0, retryLen));
+                        var retrySent = retryMsg.Pack(
+                            sendBuf,
+                            myClientId,
+                            sequence: retryPacketSeq,
+                            iteration: 1,
+                            encrypt: true,
+                            cryptoSend: cryptoSend);
+                        await _socket!.SendToAsync(
+                            new ArraySegment<byte>(sendBuf, 0, retrySent),
+                            SocketFlags.None,
+                            _serverPort0,
+                            ct).ConfigureAwait(false);
+                        RecordWieldDispatch(due.ItemGuid, due.Slot);
                         Console.WriteLine(
-                            $"[observe]   -> PHASE7F.4 SEND INVENTORY-EQUIP: GetAndWieldItem(item=0x{ieCandidate.Guid:X8} " +
-                            $"name='{ieCandidate.Name}' wcid={ieCandidate.WeenieClassId} slot=0x{ieEquipSlot:X}) " +
-                            $"pktSeq={iePacketSeq} fragSeq={ieFragSeq} totalBytes={ieSent}");
+                            $"[wield-retry] SEND: item=0x{due.ItemGuid:X8} slot=0x{due.Slot:X} " +
+                            $"attempt={pendingWieldRetries[due.ItemGuid].Attempts}/" +
+                            $"{WieldRetryPolicy.MaxAttempts} pktSeq={retryPacketSeq} " +
+                            $"fragSeq={retryFragSeq} totalBytes={retrySent}");
                     }
                 }
 
@@ -6033,19 +5732,6 @@ internal sealed class HandshakeDriver : IDisposable
                                                             encrypt: true, cryptoSend: cryptoSend);
                                 await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, lootSent),
                                                            SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-
-                                // Hook the existing wearable equip
-                                // pipeline. If the loot is wearable
-                                // (ValidLocations != 0), the inventory
-                                // ack path will dispatch GetAndWieldItem
-                                // and the bot auto-equips upgraded gear.
-                                if (lootItem.ValidLocations is uint lvl && lvl != 0)
-                                {
-                                    var lEquipLoc = lvl & (~lvl + 1);
-                                    pendingEquip[lootItem.Guid] = lEquipLoc;
-                                    if (lootItem.WeenieClassId is uint lwc)
-                                        pendingEquipWcid[lootItem.Guid] = lwc;
-                                }
 
                                 Console.WriteLine(
                                     $"[loot] Slice Q PUTITEMINCONTAINER (no walk): " +
@@ -6546,14 +6232,10 @@ internal sealed class HandshakeDriver : IDisposable
                     //   - Attack: walk to creature, dispatch melee.
                     //   - Pickup: walk to landscape item, send Use
                     //           (PutItemInContainer pathway).
+                    //   - Wield: dispatched by the dedicated inventory
+                    //     transaction below. Only an explicit Wield goal
+                    //     chooses an item.
                     // NOT pre-empted:
-                    //   - Wield: the existing pickup→equip handoff
-                    //     pipeline (pendingEquip / GetAndWieldItem)
-                    //     handles this end-to-end. The LLM cannot
-                    //     improve on it AND the pre-emptor has no
-                    //     motor for it. If we ever need explicit
-                    //     wield-from-bag (re-equip best armor on
-                    //     login), add a dedicated dispatch here.
                     //   - Explore / GoTo: fall through to the
                     //     schema-only picker below.
                     //   - Talk: PRE-EMPTED. In AC, "talking to an NPC"
@@ -8325,19 +8007,14 @@ internal sealed class HandshakeDriver : IDisposable
                             }
                         }
 
-                        // Self-arming — explicit Wield dispatch. The canonical
-                        // Wield shape carries the weapon in goal.Item with
-                        // target=self; tolerate the LLM placing the weapon in
-                        // target instead. Either way the weapon must be an
+                        // Explicit Wield dispatch. The canonical Wield shape
+                        // carries the item in goal.Item with target=self;
+                        // tolerate the LLM placing the item in target instead.
+                        // Either way it must be an
                         // equippable item already in our bag (ContainerGuid==self
                         // and ValidLocations!=0). Purely mechanical: the LLM chose
                         // WHICH item; we only execute, equipping to the lowest
-                        // valid slot (the canonical default the AC GUI uses,
-                        // mirroring the PHASE7F.4 pickup->auto-equip path). No
-                        // source-side "best item" choice. Previously Wield was
-                        // unhandled — a dead schema verb; the bag weapon only got
-                        // wielded by the combat-gated PHASE7F.4 auto-equip pass,
-                        // so an LLM that correctly chose to arm had no effect.
+                        // valid slot. No source-side item choice.
                         if (goal.Kind == GoalKind.Wield)
                         {
                             // Prefer the resolved inventory item (goal.Item,
@@ -8351,11 +8028,22 @@ internal sealed class HandshakeDriver : IDisposable
                             if (wieldItem is not null &&
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
-                                // cp-2273 — the LLM has explicitly taken ownership
-                                // of this guid. Drop every source-autonomous retry
-                                // state entry so PHASE7F.4 cannot re-mark or resend
-                                // it while the LLM request awaits its response.
-                                TransferAutoEquipOwnershipToLlm(wieldItem.Guid);
+                                if (pendingWieldRetries.ContainsKey(wieldItem.Guid))
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Wield serialized: " +
+                                        $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} already pending.");
+                                    tactics.Clear("wield request already pending", eventStream);
+                                }
+                                else
+                                {
+                                foreach (var staleRetryGuid in pendingWieldRetries.Keys
+                                             .Where(g => g != wieldItem.Guid)
+                                             .ToArray())
+                                {
+                                    pendingWieldRetries.Remove(staleRetryGuid);
+                                    wieldTransactionGuids.Remove(staleRetryGuid);
+                                }
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
                                 // Dequip-before-wield (weapon swap). The ACE
@@ -8380,23 +8068,33 @@ internal sealed class HandshakeDriver : IDisposable
                                     swapInventory.Add(new WeaponSwap.ItemFacts(
                                         so.Guid, so.ItemType, so.ValidLocations, so.CurrentWieldedLocation));
                                 }
+                                var blockers = WeaponSwap.FindBlockingWieldedItems(
+                                    new WeaponSwap.ItemFacts(
+                                        wieldItem.Guid, wieldItem.ItemType,
+                                        wieldItem.ValidLocations, wieldItem.CurrentWieldedLocation),
+                                    swapInventory);
                                 // Retarget cleanup: the LLM has committed to
                                 // wieldItem as THIS decision's wield target. Drop
                                 // any stale deferred swap-wields aimed at a
-                                // DIFFERENT target left over from an abandoned
-                                // earlier multi-blocker swap, so a late blocker
-                                // put-ack cannot resurrect a wield the bot no
-                                // longer wants (e.g. it switched from a two-handed
-                                // weapon to a one-handed one mid-swap). Entries for
-                                // THIS target (a swap still in progress) are kept.
+                                // DIFFERENT target when their blocker is irrelevant
+                                // to the new target. Keep a shared blocker so the
+                                // in-flight dequip can be retargeted below without
+                                // sending a duplicate move request.
                                 if (pendingWieldAfterDequip.Count > 0)
                                 {
                                     var staleSwapKeys = new List<uint>();
                                     foreach (var pend2 in pendingWieldAfterDequip)
-                                        if (pend2.Value.TargetGuid != wieldItem.Guid)
+                                        if (pend2.Value.TargetGuid != wieldItem.Guid &&
+                                            !blockers.Contains(pend2.Key))
                                             staleSwapKeys.Add(pend2.Key);
                                     foreach (var staleKey in staleSwapKeys)
+                                    {
+                                        var staleTarget =
+                                            pendingWieldAfterDequip[staleKey].TargetGuid;
                                         pendingWieldAfterDequip.Remove(staleKey);
+                                        wieldTransactionGuids.Remove(staleKey);
+                                        wieldTransactionGuids.Remove(staleTarget);
+                                    }
                                 }
                                 // Find EVERY currently-wielded item that blocks
                                 // this wield. For a one-handed weapon this is the
@@ -8406,21 +8104,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 // put-ack handler fires the deferred wield only
                                 // once no blocker remains. Mirrors the server's
                                 // CheckWeaponCollision precondition.
-                                var blockers = WeaponSwap.FindBlockingWieldedItems(
-                                    new WeaponSwap.ItemFacts(
-                                        wieldItem.Guid, wieldItem.ItemType,
-                                        wieldItem.ValidLocations, wieldItem.CurrentWieldedLocation),
-                                    swapInventory);
-
                                 if (blockers.Count > 0)
                                 {
                                   foreach (var blocker in blockers)
                                   {
-                                    // Moving this blocker is part of the LLM-owned
-                                    // wield transaction. Clear stale autonomous
-                                    // equip state so its dequip response cannot be
-                                    // suppressed as an old startup request.
-                                    TransferAutoEquipOwnershipToLlm(blocker);
                                     // A stale pending entry means the dequip
                                     // never acked (e.g. the pack was full) — do
                                     // not soft-lock this blocker forever; let it
@@ -8442,9 +8129,10 @@ internal sealed class HandshakeDriver : IDisposable
                                         if (pend.TargetGuid != wieldItem.Guid ||
                                             pend.TargetSlot != wieldSlot)
                                         {
+                                            wieldTransactionGuids.Remove(pend.TargetGuid);
                                             pendingWieldAfterDequip[blocker] =
                                                 (wieldItem.Guid, wieldSlot, pend.StartedUtc);
-                                            inventoryEquipSent.Add(wieldItem.Guid);
+                                            RecordWieldDispatch(wieldItem.Guid, wieldSlot);
                                             Console.WriteLine(
                                                 $"[strategy] Wield swap retargeted: blocker=0x{blocker:X8} " +
                                                 $"now wields item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} " +
@@ -8458,15 +8146,9 @@ internal sealed class HandshakeDriver : IDisposable
                                     }
                                     else
                                     {
-                                        // Suppress the startup auto-equip pass from
-                                        // re-wielding the weapon we are dequipping,
-                                        // AND from racing a (doomed) wield of the
-                                        // target while the blocker is still equipped
-                                        // — the deferred put-ack wield owns the
-                                        // target.
                                         pendingWieldAfterDequip[blocker] = (wieldItem.Guid, wieldSlot, DateTime.UtcNow);
-                                        inventoryEquipSent.Add(blocker);
-                                        inventoryEquipSent.Add(wieldItem.Guid);
+                                        wieldTransactionGuids.Add(blocker);
+                                        wieldTransactionGuids.Add(wieldItem.Guid);
                                         var dqPktSeq  = nextOutboundPacketSequence++;
                                         var dqFragSeq = nextOutboundFragmentSequence++;
                                         var dqBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
@@ -8517,9 +8199,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                               encrypt: true, cryptoSend: cryptoSend);
                                 await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, wieldSent),
                                                            SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                                // Suppress a duplicate auto-equip for the same item
-                                // while we await the WieldObject ack (mirrors PHASE7F.4).
-                                inventoryEquipSent.Add(wieldItem.Guid);
+                                wieldTransactionGuids.Add(wieldItem.Guid);
                                 Console.WriteLine(
                                     $"[strategy] LLM-GOAL Wield direct: " +
                                     $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
@@ -8527,11 +8207,12 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"pktSeq={wieldPktSeq} fragSeq={wieldFragSeq} bytes={wieldSent}");
                                 tactics.Clear("wield dispatched", eventStream);
                                 }
+                                }
                             }
                             else
                             {
-                                // Cannot arm with this selector (not an equippable
-                                // in-bag weapon). FAIL explicitly so the goal is
+                                // Cannot equip this selector (not an equippable
+                                // in-bag item). FAIL explicitly so the goal is
                                 // rejected — NOT silently locked-to-self and then
                                 // completed as a no-op by the motor, which has no
                                 // Wield arrival handler.
@@ -8540,7 +8221,7 @@ internal sealed class HandshakeDriver : IDisposable
                                     $"item={(itemSnap is null ? "MISS" : "ok")} " +
                                     $"target={(targetSnap is null ? "MISS" : "ok")}; " +
                                     $"selector target={goal.Target} item={goal.Item}; failing.");
-                                tactics.Fail("wield: no equippable inventory weapon", eventStream);
+                                tactics.Fail("wield: no equippable inventory item", eventStream);
                             }
                         }
                         // M1.6 — inventory-Use direct dispatch. If
@@ -10769,34 +10450,6 @@ internal sealed class HandshakeDriver : IDisposable
                             gameMessagePayload: combatBufC.AsSpan(0, combatPayloadLenC));
                     }
 
-                    // Phase 6l (revised) — equip-after-pickup HANDOFF.
-                    // We DON'T bundle GetAndWieldItem in the same packet
-                    // as PutItemInContainer; the server's HandleAction-
-                    // GetAndWieldItem races against its own pickup chain
-                    // and emits InventoryServerSaveFailed(ActionCancelled).
-                    // Instead we stash (itemGuid → slot bitmask) and
-                    // dispatch the equip from the inbound message-handler
-                    // when InventoryPutObjInContainer arrives for the
-                    // same guid. This mirrors what a retail client does:
-                    // the AC GUI sends GetAndWieldItem only AFTER the
-                    // server acknowledges the inventory transfer.
-                    //
-                    // Slot selection: lowest set bit of ValidLocations.
-                    // - Single-slot items (gauntlets=HandWear=0x20, etc.)
-                    //   have one bit set.
-                    // - Multi-slot items (rings=FingerWearLeft|Right)
-                    //   pick the lowest, which is the canonical default.
-                    // - Items with ValidLocations==0 or null aren't
-                    //   wearable (food/keys/currency) — skip equip.
-                    uint? equipLoc = null;
-                    if (isPickup && motionTarget.ValidLocations is uint vl && vl != 0)
-                    {
-                        equipLoc = vl & (~vl + 1);
-                        pendingEquip[motionTarget.Guid] = equipLoc.Value;
-                        if (motionTarget.WeenieClassId is uint wcid)
-                            pendingEquipWcid[motionTarget.Guid] = wcid;
-                    }
-
                     // Phase 7c — USE-side wcid satisfaction. After we
                     // USE a Creature (NPC) or Writable (sign, book),
                     // mark its wcid as satisfied so the picker won't
@@ -10885,14 +10538,9 @@ internal sealed class HandshakeDriver : IDisposable
                                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
                     // Record the dispatched Pickup guid so a server refusal
                     // (InventoryServerSaveFailed err=None for a non-takeable object)
-                    // surfaces as an ActionRejected learning signal — otherwise the
-                    // failed pickup's queued auto-equip never fires and the loop is
-                    // invisible to the policy. Own-dispatch bookkeeping only.
+                    // surfaces as an ActionRejected learning signal.
                     if (isPickup)
                         pickupDispatchedGuids.Add(motionTarget.Guid);
-                    var equipNote = equipLoc is uint el
-                        ? $" (queued EQUIP loc=0x{el:X} for after pickup-ack)"
-                        : (isPickup ? " (not wearable; ValidLocations=null/0)" : "");
                     if (isHostile)
                     {
                         var qhNote = sendQueryHealth ? "+QueryHealth" : "";
@@ -10907,7 +10555,7 @@ internal sealed class HandshakeDriver : IDisposable
                     else
                     {
                         Console.WriteLine(
-                            $"[observe]   -> PHASE6E/6F {actionName}{equipNote}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
+                            $"[observe]   -> PHASE6E/6F {actionName}: target=0x{motionTarget.Guid:X8} name='{motionTarget.Name}' " +
                             $"itemType=0x{itemType:X} container=0x{chosenCharacterGuid:X8} " +
                             $"payload={payloadLen}B pktSeq={packetSeq} fragSeq={fragSeq} totalBytes={sentLen}");
                     }

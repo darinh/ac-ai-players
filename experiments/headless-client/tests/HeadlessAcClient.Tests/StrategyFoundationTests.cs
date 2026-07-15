@@ -2268,20 +2268,10 @@ public class StrategyFoundationTests
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_DoesNotProposeSameUnwieldedGearTwiceInARow()
+    public void NoQuestKnowledgePolicy_DoesNotChooseInventoryGear()
     {
-        // Regression for the portal02-spike bug: a wearable that the
-        // server fails to actuate (PHASE6L GetAndWieldItem raced the
-        // PUTITEMINCONTAINER ack and was rejected; WieldedAt stays
-        // null) leaves step 3 (Wield) firing every tick forever.
-        // Because the HandshakeDriver dispatcher has no Wield branch
-        // in its action allowlist, the goal is silently no-op'd and
-        // the picker takes over — meaning later steps (4 Pickup, 5b
-        // openable, 5c lifestone, 5d portal, 6 Talk) never run.
-        //
-        // Symmetric dedup with step 4 Pickup must apply: emit Wield
-        // once for the item, remember it, then fall through on
-        // subsequent ticks so downstream steps can fire.
+        // Equipment choice belongs to the LLM. The deterministic fallback
+        // must ignore an equippable bag item and continue to another action.
         const uint UnwieldedCapGuid = 0x80000483;
         const uint VisibleNpcGuid   = 0x80000700;
         var policy = new NoQuestKnowledgePolicy();
@@ -2314,28 +2304,17 @@ public class StrategyFoundationTests
         };
         var events = new EventStream();
 
-        var first = policy.ProposeGoal(proj, events, null);
-        Assert.NotNull(first);
-        Assert.Equal(GoalKind.Wield, first!.Kind);
-        Assert.Equal(UnwieldedCapGuid, first.Item!.Guid);
+        var goal = policy.ProposeGoal(proj, events, null);
 
-        var second = policy.ProposeGoal(proj, events, null);
-        Assert.NotNull(second);
-        // Second tick: cap is in _recentProposedGuids → step 3 must
-        // skip it, allowing step 6 (Talk) to fire on the NPC.
-        Assert.NotEqual(GoalKind.Wield, second!.Kind);
+        Assert.NotNull(goal);
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_SkipsWield_WhenWeaponCollidesWithWieldedWeapon()
+    public void NoQuestKnowledgePolicy_DoesNotChoose_WhenWeaponAlreadyWielded()
     {
-        // Regression: a melee weapon is already wielded; the bag holds a
-        // redundant missile weapon (Royal Atlatl) the server would refuse
-        // to wield (CheckWeaponCollision). The fallback must NOT propose
-        // Wield for it — otherwise the LLM Wield dispatch's dequip-before-
-        // wield swap (cp-2244) dequips the working melee weapon and leaves
-        // the bot holding an ammoless missile weapon (self-disarm). Step 3
-        // must skip the colliding weapon and fall through to Talk.
+        // A currently wielded item does not let the fallback choose a
+        // replacement from the bag.
         const uint WieldedSpadoneGuid = 0x80005514;
         const uint UnwieldedAtlatlGuid = 0x80009C7E;
         const uint VisibleNpcGuid = 0x80000700;
@@ -2381,12 +2360,9 @@ public class StrategyFoundationTests
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_ProposesWield_FirstWeaponIntoEmptySlot()
+    public void NoQuestKnowledgePolicy_DoesNotChoose_FirstWeaponIntoEmptySlot()
     {
-        // Positive control: with NO weapon wielded, the first unwielded
-        // weapon is NOT blocked (empty weapon slot) and the fallback DOES
-        // propose Wield for it. The collision guard only suppresses a
-        // SECOND weapon while one is already wielded.
+        // An empty slot does not authorize the fallback to choose an item.
         const uint UnwieldedAtlatlGuid = 0x80009C7E;
         var policy = new NoQuestKnowledgePolicy();
         var proj = new WorldStateProjection
@@ -2411,19 +2387,14 @@ public class StrategyFoundationTests
 
         var goal = policy.ProposeGoal(proj, events, null);
         Assert.NotNull(goal);
-        Assert.Equal(GoalKind.Wield, goal!.Kind);
-        Assert.Equal(UnwieldedAtlatlGuid, goal.Item!.Guid);
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_SkipsWield_AmmolessLauncher()
+    public void NoQuestKnowledgePolicy_DoesNotChoose_AmmolessLauncher()
     {
-        // Regression (armed=False): the fallback must NOT auto-wield a missile
-        // LAUNCHER (MissileWeapon ItemType + non-null AmmoType) with no loaded
-        // ammo. It cannot fire (the server cancels) and wielding it forces
-        // Missile mode + blocks a melee strike, leaving the bot not combat-
-        // capable. With only the ammoless launcher unwielded, the fallback
-        // skips it (falls through to a non-Wield step).
+        // The fallback does not choose equipment even when only one item
+        // could be considered.
         const uint AmmolessLauncherGuid = 0x80000C92;
         var policy = new NoQuestKnowledgePolicy();
         var proj = new WorldStateProjection
@@ -2454,11 +2425,9 @@ public class StrategyFoundationTests
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_ProposesWield_Launcher_WhenAmmoLoaded()
+    public void NoQuestKnowledgePolicy_DoesNotChoose_Launcher_WhenAmmoLoaded()
     {
-        // Positive control: the SAME launcher IS wieldable when ammo is loaded
-        // (an item occupying the missile-ammo slot 0x800000) — it can fire, so
-        // the ammoless-launcher guard does not apply.
+        // Mechanical usability still does not authorize a source-side choice.
         const uint LauncherGuid = 0x80000C92;
         const uint LoadedAmmoGuid = 0x80000C93;
         var policy = new NoQuestKnowledgePolicy();
@@ -2491,17 +2460,13 @@ public class StrategyFoundationTests
 
         var goal = policy.ProposeGoal(proj, new EventStream(), null);
         Assert.NotNull(goal);
-        Assert.Equal(GoalKind.Wield, goal!.Kind);
-        Assert.Equal(LauncherGuid, goal.Item!.Guid);
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_PrefersMelee_OverAmmolessLauncher()
+    public void NoQuestKnowledgePolicy_DoesNotChooseBetweenWeapons()
     {
-        // The real regression scenario: the bag holds an ammoless launcher AND
-        // a usable melee weapon, nothing wielded. Even with the launcher FIRST
-        // in iteration order, the fallback skips it and wields the melee weapon
-        // (so the bot ends combat-capable, not holding a useless launcher).
+        // The fallback may not rank two held weapons; the LLM owns the choice.
         const uint AmmolessLauncherGuid = 0x80000C92;
         const uint MeleeGuid = 0x800070DA;
         var policy = new NoQuestKnowledgePolicy();
@@ -2533,19 +2498,13 @@ public class StrategyFoundationTests
 
         var goal = policy.ProposeGoal(proj, new EventStream(), null);
         Assert.NotNull(goal);
-        Assert.Equal(GoalKind.Wield, goal!.Kind);
-        Assert.Equal(MeleeGuid, goal.Item!.Guid);
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
     }
 
     [Fact]
-    public void NoQuestKnowledgePolicy_ProposesWield_BagAmmo_NotTreatedAsAmmolessLauncher()
+    public void NoQuestKnowledgePolicy_DoesNotChoose_BagAmmo()
     {
-        // Regression guard for the launcher filter: bag AMMO also carries the
-        // MissileWeapon ItemType bit AND a non-null AmmoType, differing from a
-        // launcher only by its valid slot (MissileAmmoSlot 0x800000, NOT a main-
-        // weapon slot). The ammoless-launcher guard must NOT exclude it, so the
-        // fallback can still auto-load ammo (e.g. into an already-wielded empty
-        // launcher).
+        // Loading ammo is also an equipment choice and requires an LLM Wield.
         const uint BagAmmoGuid = 0x80000C93;
         var policy = new NoQuestKnowledgePolicy();
         var proj = new WorldStateProjection
@@ -2572,8 +2531,7 @@ public class StrategyFoundationTests
 
         var goal = policy.ProposeGoal(proj, new EventStream(), null);
         Assert.NotNull(goal);
-        Assert.Equal(GoalKind.Wield, goal!.Kind);
-        Assert.Equal(BagAmmoGuid, goal.Item!.Guid);
+        Assert.NotEqual(GoalKind.Wield, goal!.Kind);
     }
 
     [Fact]
