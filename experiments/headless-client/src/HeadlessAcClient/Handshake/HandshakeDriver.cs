@@ -990,6 +990,11 @@ internal sealed class HandshakeDriver : IDisposable
         // still-unwielded guid after a cooldown (capped by MaxAttempts) so the retry
         // lands once the creation ack settles. Keyed only by guid; no game knowledge.
         var                  equipRetry = new Dictionary<uint, (DateTime SentAt, int Attempts)>();
+        // Explicit server rejection weight for each autonomous login-equip guid.
+        // The first None response can be the item-creation race above. A specific
+        // error or a second None response after a cooldown is conclusive instead
+        // of spending the remaining silent-response attempts.
+        var                  equipExplicitRejections = new Dictionary<uint, int>();
         // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
         // server refuses (a non-takeable fixed object) returns a silent
         // InventoryServerSaveFailed err=None whose queued auto-equip never fires
@@ -3208,6 +3213,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // dequip). inventoryEquipSent stays, preserving the
                                 // prior one-shot suppression for that dequip case.
                                 equipRetry.Remove(wieldAck.ItemGuid);
+                                equipExplicitRejections.Remove(wieldAck.ItemGuid);
                                 if (wieldAck.NewLocation != 0)
                                     satisfiedEquipSlots.Add(wieldAck.NewLocation);
                                 // In-flight login-equip wield resolved (worn): release
@@ -3890,9 +3896,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 // LLM-requested wield/pickup failure surfaces below.
                                 if (autoEquipFailureFilter.TryConsumeAutonomous(isf.ItemGuid))
                                 {
+                                    var priorRejections =
+                                        equipExplicitRejections.TryGetValue(
+                                            isf.ItemGuid, out var rejectionCount)
+                                            ? rejectionCount : 0;
+                                    var explicitRejections =
+                                        AutoEquipRetryPolicy.RecordExplicitRejection(
+                                            priorRejections, isf.ErrorType);
+                                    equipExplicitRejections[isf.ItemGuid] = explicitRejections;
                                     Console.WriteLine(
                                         $"[auto-equip] suppressed autonomous auto-equip rejection: " +
                                         $"item=0x{isf.ItemGuid:X8} err=0x{isf.ErrorType:X} [{invLabel}] " +
+                                        $"explicit-rejections={explicitRejections} " +
                                         $"(source-autonomous wield; not an LLM goal)");
                                     break;
                                 }
@@ -5495,9 +5510,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // session. Release it (fall through -> re-picked + re-sent
                             // below), capped by MaxAttempts. WielderGuid != null is
                             // already excluded above, so this only fires while unwielded.
+                            var explicitRejections =
+                                equipExplicitRejections.TryGetValue(
+                                    snap.Guid, out var rejectionCount)
+                                    ? rejectionCount : 0;
                             if (equipRetry.TryGetValue(snap.Guid, out var er)
                                 && AutoEquipRetryPolicy.ShouldRetry(
-                                    er.SentAt, er.Attempts, DateTime.UtcNow,
+                                    er.SentAt, er.Attempts, explicitRejections,
+                                    DateTime.UtcNow,
                                     AutoEquipRetryPolicy.RetryCooldown,
                                     AutoEquipRetryPolicy.MaxAttempts))
                             {

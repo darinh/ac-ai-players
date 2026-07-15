@@ -69,8 +69,8 @@ public class AutoEquipFailureFilterTests
     [Fact]
     public void Remark_AfterConsume_SuppressesAgain()
     {
-        // If the source autonomously re-attempts a guid (hypothetically) it
-        // re-marks; a fresh marker yields a fresh single suppression.
+        // A mechanical retry re-marks the guid; the fresh dispatch receives
+        // its own single suppression.
         var f = new AutoEquipFailureFilter();
         f.MarkAutonomous(0x42u);
         Assert.True(f.TryConsumeAutonomous(0x42u));

@@ -9,11 +9,12 @@
 // sent" guids one-shot to avoid spamming duplicate equip requests while awaiting
 // the ack — but that one-shot dedup then NEVER re-sends a raced equip, leaving
 // the item stuck unwielded for the whole session (the bot logs in under-armored
-// / unarmed). This policy re-eligibles a still-unwielded guid for one more
-// GetAndWieldItem after a cooldown (so the retry lands once the creation ack has
-// settled), capped at a max attempt count so a genuinely un-equippable item does
-// not loop. Mirrors the server-side auto-wield retry cooldown pattern. Pure
-// timer/attempt bookkeeping; no game knowledge.
+// / unarmed). This policy re-eligibles a still-unwielded guid after a cooldown
+// (so the retry lands once the creation ack has settled), capped at a max
+// attempt count for requests that receive no response. The first None rejection
+// may be that creation race; a specific rejection or a second None rejection
+// after a cooldown is conclusive and stops further retries. Pure
+// response/timer/attempt bookkeeping; no game knowledge.
 
 using System;
 
@@ -21,6 +22,8 @@ namespace HeadlessAcClient.Strategy;
 
 internal static class AutoEquipRetryPolicy
 {
+    internal const int ConclusiveExplicitRejectionCount = 2;
+
     // Seconds a raced equip must sit unwielded before it is re-sent — long
     // enough for the item-creation ack to settle so the retry is not itself
     // raced. Env AC_BOTS_AUTO_EQUIP_RETRY_COOLDOWN_SECONDS overrides
@@ -59,17 +62,30 @@ internal static class AutoEquipRetryPolicy
         return Default;
     }
 
+    internal static int RecordExplicitRejection(int previousCount, uint errorType)
+        => errorType != 0
+            ? ConclusiveExplicitRejectionCount
+            : Math.Min(previousCount + 1, ConclusiveExplicitRejectionCount);
+
     /// <summary>
     /// True iff a still-unwielded, already-equip-sent guid should be RELEASED for
     /// another GetAndWieldItem now: the prior send is at least
     /// <paramref name="cooldown"/> old (its WieldObject ack was likely lost to the
-    /// item-creation race) AND the attempt cap is not yet reached. The caller only
-    /// invokes this for an item it can still see is unwielded, so returning true
-    /// means "the ack never came — try again"; false means "still awaiting the ack
-    /// (within cooldown) or gave up (attempts exhausted)". Pure predicate over the
-    /// send timestamp + attempt count; no side effects, no game knowledge.
+    /// item-creation race), the attempt cap is not yet reached, AND fewer than two
+    /// explicit rejection weight has accumulated. The first None rejection can be
+    /// the creation race itself. A specific error is immediately conclusive; for a
+    /// None response, a retry is sent only after the cooldown, so its second
+    /// rejection proves the server still refuses the settled item. Requests with
+    /// no response remain bounded by the attempt cap. Pure predicate over
+    /// response/timer/attempt bookkeeping; no side effects and no game knowledge.
     /// </summary>
     internal static bool ShouldRetry(
-        DateTime sentAt, int attempts, DateTime now, TimeSpan cooldown, int maxAttempts)
-        => attempts < maxAttempts && (now - sentAt) >= cooldown;
+        DateTime sentAt, int attempts, int explicitRejections,
+        DateTime now, TimeSpan cooldown, int maxAttempts)
+        => attempts < maxAttempts
+           && !HasConclusiveExplicitRejections(explicitRejections)
+           && (now - sentAt) >= cooldown;
+
+    internal static bool HasConclusiveExplicitRejections(int explicitRejections)
+        => explicitRejections >= ConclusiveExplicitRejectionCount;
 }

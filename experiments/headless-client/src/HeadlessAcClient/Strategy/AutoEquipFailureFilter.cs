@@ -17,16 +17,16 @@ using System.Collections.Generic;
 /// surface (the LLM has been observed mis-attributing such a rejection to
 /// its OWN current goal and abandoning it).
 ///
-/// One-shot consume: PHASE7F.4 attempts each guid exactly once (the
-/// caller's own dedup set prevents re-attempt), so there is exactly one
-/// autonomous failure per marked guid. <see cref="TryConsumeAutonomous"/>
-/// returns true exactly once per <see cref="MarkAutonomous"/> and removes
-/// the marker, so if the LLM LATER explicitly wields the same item and it
-/// fails, that failure surfaces normally (the LLM asked for it that time
-/// and should learn). The caller also clears the marker the moment the LLM
-/// explicitly takes ownership of the guid via its Wield dispatch (see
-/// <see cref="ClearAutonomous"/>) to close the race where the LLM emits a
-/// Wield for the same item before the autonomous failure arrives.
+/// One-shot consume: each autonomous dispatch marks its guid once.
+/// <see cref="TryConsumeAutonomous"/> returns true exactly once per
+/// <see cref="MarkAutonomous"/> and removes the marker. A mechanical retry
+/// re-marks the guid for its own response. If the LLM later explicitly
+/// wields the same item and it fails, that failure surfaces normally (the
+/// LLM asked for it that time and should learn). The caller also clears the
+/// marker the moment the LLM explicitly takes ownership of the guid via its
+/// Wield dispatch (see <see cref="ClearAutonomous"/>) to close the race where
+/// the LLM emits a Wield for the same item before the autonomous failure
+/// arrives.
 ///
 /// This is pure mechanical bookkeeping that distinguishes a
 /// source-autonomous wield from an LLM-requested one purely by which code
