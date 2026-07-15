@@ -14,6 +14,12 @@ internal enum InventoryWieldDispatchDecision
 
 internal static class InventoryWieldDispatchGate
 {
+    public static bool IsOwnedByActor(
+        uint actorGuid,
+        uint? containerGuid,
+        uint? wielderGuid) =>
+        containerGuid == actorGuid || wielderGuid == actorGuid;
+
     public static InventoryWieldDispatchDecision Evaluate(
         uint requestedItemGuid,
         bool targetAlreadyWielded,

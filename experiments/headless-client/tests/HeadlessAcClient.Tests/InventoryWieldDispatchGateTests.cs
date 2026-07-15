@@ -9,6 +9,27 @@ namespace HeadlessAcClient.Tests;
 public class InventoryWieldDispatchGateTests
 {
     [Fact]
+    public void IsOwnedByActor_ItemInBag_IsTrue()
+        => Assert.True(InventoryWieldDispatchGate.IsOwnedByActor(
+            0x500u,
+            containerGuid: 0x500u,
+            wielderGuid: null));
+
+    [Fact]
+    public void IsOwnedByActor_ItemWornByActor_IsTrue()
+        => Assert.True(InventoryWieldDispatchGate.IsOwnedByActor(
+            0x500u,
+            containerGuid: null,
+            wielderGuid: 0x500u));
+
+    [Fact]
+    public void IsOwnedByActor_ItemOwnedByAnotherActor_IsFalse()
+        => Assert.False(InventoryWieldDispatchGate.IsOwnedByActor(
+            0x500u,
+            containerGuid: 0x600u,
+            wielderGuid: 0x600u));
+
+    [Fact]
     public void Evaluate_NoPendingWield_Dispatches()
         => Assert.Equal(
             InventoryWieldDispatchDecision.Dispatch,

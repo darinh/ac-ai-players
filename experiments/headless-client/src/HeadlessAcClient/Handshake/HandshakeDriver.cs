@@ -8025,8 +8025,10 @@ internal sealed class HandshakeDriver : IDisposable
                         var dequipMatchCount = 0;
                         // Give and Dequip always carry an item; Use carries one only
                         // for a two-object "use item on target" (e.g. a key
-                        // on a locked chest). Wield's item must be in the pack;
-                        // Dequip's item must be currently wielded by this bot.
+                        // on a locked chest). Wield may resolve an item in the
+                        // pack or already worn by this bot; the latter completes
+                        // as an already-satisfied no-op. Dequip's item must be
+                        // currently wielded by this bot.
                         var goalCarriesItem =
                             goal.Kind is GoalKind.Give or GoalKind.Dequip ||
                             ((goal.Kind == GoalKind.Use || goal.Kind == GoalKind.Wield) &&
@@ -8047,10 +8049,19 @@ internal sealed class HandshakeDriver : IDisposable
                             else
                             {
                                 itemSnap = tactics.ResolveItem(worldState);
-                                // The item must be in our inventory. Resolver does
-                                // not filter on container; do that here.
-                                if (itemSnap is not null &&
-                                    !(itemSnap.ContainerGuid is uint icg && icg == tacticsSelf.Guid))
+                                // Resolver does not filter by ownership. Give and
+                                // inventory-Use require a bag item. Wield also
+                                // accepts an item already worn by this bot so the
+                                // dispatch gate can complete it without a packet.
+                                var itemOwnedForAction =
+                                    itemSnap is not null &&
+                                    (goal.Kind == GoalKind.Wield
+                                        ? InventoryWieldDispatchGate.IsOwnedByActor(
+                                            tacticsSelf.Guid,
+                                            itemSnap.ContainerGuid,
+                                            itemSnap.WielderGuid)
+                                        : itemSnap.ContainerGuid == tacticsSelf.Guid);
+                                if (!itemOwnedForAction)
                                 {
                                     itemSnap = null;
                                 }
@@ -8159,7 +8170,10 @@ internal sealed class HandshakeDriver : IDisposable
                             // as the target.
                             var wieldItem = itemSnap ??
                                 (targetSnap is not null &&
-                                 targetSnap.ContainerGuid is uint wtcg && wtcg == tacticsSelf.Guid
+                                 InventoryWieldDispatchGate.IsOwnedByActor(
+                                     tacticsSelf.Guid,
+                                     targetSnap.ContainerGuid,
+                                     targetSnap.WielderGuid)
                                     ? targetSnap : null);
                             if (wieldItem is not null &&
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
