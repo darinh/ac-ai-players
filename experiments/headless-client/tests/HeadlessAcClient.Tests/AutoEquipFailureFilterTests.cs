@@ -36,14 +36,27 @@ public class AutoEquipFailureFilterTests
     }
 
     [Fact]
-    public void MarkTwiceSameGuid_StillSingleSuppression()
+    public void MarkTwiceSameGuid_TracksBothDispatches()
     {
         var f = new AutoEquipFailureFilter();
         f.MarkAutonomous(0x55u);
         f.MarkAutonomous(0x55u);
-        // Set semantics: a single marker, a single suppression.
+        // Each in-flight autonomous dispatch owns one response suppression.
+        Assert.True(f.TryConsumeAutonomous(0x55u));
         Assert.True(f.TryConsumeAutonomous(0x55u));
         Assert.False(f.TryConsumeAutonomous(0x55u));
+    }
+
+    [Fact]
+    public void DelayedFirstResponseAfterRetry_DoesNotConsumeRetryMarker()
+    {
+        var f = new AutoEquipFailureFilter();
+        f.MarkAutonomous(0x56u); // initial request
+        f.MarkAutonomous(0x56u); // cooldown retry sent before response one arrives
+
+        Assert.True(f.TryConsumeAutonomous(0x56u));  // delayed initial response
+        Assert.True(f.TryConsumeAutonomous(0x56u));  // retry response
+        Assert.False(f.TryConsumeAutonomous(0x56u)); // no unrelated suppression
     }
 
     [Fact]
@@ -53,6 +66,7 @@ public class AutoEquipFailureFilterTests
         // before the autonomous failure arrives. Clearing the marker means a
         // subsequent failure is NOT suppressed (it surfaces normally).
         var f = new AutoEquipFailureFilter();
+        f.MarkAutonomous(0x99u);
         f.MarkAutonomous(0x99u);
         f.ClearAutonomous(0x99u);
         Assert.False(f.TryConsumeAutonomous(0x99u));

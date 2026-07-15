@@ -3195,14 +3195,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // same armor reward.
                             if (ge.Payload?.WieldObject is { } wieldAck)
                             {
-                                // cp-2273 — a successful wield ack resolves any
-                                // source-autonomous auto-equip attempt for this
-                                // guid: no failure is coming, so drop the marker
-                                // (otherwise it would linger and could swallow a
-                                // later LLM-owned inventory failure on the same
-                                // guid, e.g. dequipping this weapon as a swap
-                                // blocker).
-                                autoEquipFailureFilter.ClearAutonomous(wieldAck.ItemGuid);
+                                // cp-2273 — a successful wield ack resolves one
+                                // source-autonomous dispatch for this guid. Consume
+                                // one response marker rather than clearing all:
+                                // a cooldown retry can overlap the original request,
+                                // and the other autonomous response must still be
+                                // suppressed if it arrives late. An explicit LLM
+                                // Wield clears every marker at dispatch time below.
+                                autoEquipFailureFilter.TryConsumeAutonomous(wieldAck.ItemGuid);
                                 // A successful wield also ends this guid's
                                 // login-equip RETRY eligibility: the retry only
                                 // exists for an equip whose ack was LOST to the
