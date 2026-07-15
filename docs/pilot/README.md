@@ -46,6 +46,13 @@ Driving session plan: `~/.copilot/session-state/.../plan.md` (v5).
 | P-10 | Custom-content validation | Pending |
 | P-11 | Generalize for archetypes | Pending |
 
+## Live success criteria
+
+| Criterion | Status |
+|---|---|
+| 5. Form a fellowship with another bot | **Met (2026-07-15)** — fresh distributed clients formed a 2/2 fellowship in run `0715131441`. |
+| 6. Monarch accepts allegiance from a vassal bot | **Met (2026-07-15)** — `Mbb0715131028` swore to `Mba0715131028`; the leader approved request type 1 and the follower logged `BOND FORMED`. Both clients then logged off cleanly. |
+
 ## Live observation loop (continuous-improvement track)
 
 In addition to the milestone work above, an autonomous build-test-fix
