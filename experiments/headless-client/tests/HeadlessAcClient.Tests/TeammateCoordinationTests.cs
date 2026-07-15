@@ -514,11 +514,10 @@ public class TeammateCoordinationTests
     }
 
     [Fact]
-    public void Prompt_Follower_MonarchInSwearRange_SwearsInOneStep()
+    public void Prompt_Follower_MonarchVisible_SwearsInOneStep()
     {
-        // Monarch is a visible player WITHIN swear range (<= 2u) among other players: the
-        // proximity + name-keyed check resolves it -> ONE-step swear (no redundant GoTo;
-        // the server completes the pledge in place without commanding a client move).
+        // A visible monarch uses ONE SwearAllegiance decision. The Motor owns any
+        // required approach, so Strategy must not ask for a separate GoTo first.
         var world = AllegianceProjection("Mbb", monarchGuid: 0x5000000Bu, 1.0f, "Zzz", "Mba", "Qqq");
         var prompt = LlmGoalPolicy.BuildUserPromptForTest(
             world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
@@ -526,25 +525,31 @@ public class TeammateCoordinationTests
         Assert.Contains("Your monarch is", sec);
         Assert.Contains("Mba", sec);
         Assert.Contains("ONE step", sec);
-        Assert.DoesNotContain("GoTo", sec);
+        Assert.DoesNotContain("`GoTo` `Mba`", sec);
+        Assert.Contains("Motor will approach before sending if needed", sec);
+        Assert.Contains("exact next goal before any other goal", sec);
+        Assert.DoesNotContain("You MAY `SwearAllegiance`", sec);
+        Assert.DoesNotContain("BreakAllegiance", sec);
+        Assert.DoesNotContain("or skip it", sec);
         Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));
     }
 
     [Fact]
-    public void Prompt_Follower_MonarchVisibleButFar_KeepsGoToFirst()
+    public void Prompt_Follower_MonarchVisibleButFar_StillSwearsInOneStep()
     {
-        // Monarch is VISIBLE but outside swear range (~6u): the client cannot rely on the
-        // server to walk it there (this headless client ignores a server move-to-object),
-        // so the cue MUST keep the two-step GoTo-first path. Regression guard — a
-        // visibility-only gate would emit a one-step swear the server could never complete
-        // (the bot would stand still, out of range, while the server waits).
+        // Distance does not change the selected verb. The Motor retains the swear,
+        // approaches the visible target, and sends the original action in range.
         var world = AllegianceProjection("Mbb", monarchGuid: 0x5000000Bu, 6f, "Mba");
         var prompt = LlmGoalPolicy.BuildUserPromptForTest(
             world, new EventStream(), new HashSet<string>(new[] { "Mba" }, StringComparer.OrdinalIgnoreCase));
         var sec = Section(prompt, "## Allegiance guidance");
         Assert.Contains("Your monarch is", sec);
-        Assert.Contains("GoTo", sec);
-        Assert.DoesNotContain("ONE step", sec);
+        Assert.Contains("ONE step", sec);
+        Assert.DoesNotContain("`GoTo` `Mba`", sec);
+        Assert.Contains("Motor will approach before sending if needed", sec);
+        Assert.DoesNotContain("You MAY `SwearAllegiance`", sec);
+        Assert.DoesNotContain("BreakAllegiance", sec);
+        Assert.DoesNotContain("or skip it", sec);
         Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(prompt));
     }
 
@@ -575,7 +580,8 @@ public class TeammateCoordinationTests
     {
         // Drifted-apart-after-grouping: no teammate is VISIBLE, but the bot is in a
         // fellowship whose leader is its configured teammate -> the swear directive
-        // still renders (monarch resolved via fellowship membership, GoTo first).
+        // still renders (monarch resolved via fellowship membership, GoTo first because
+        // the Motor cannot resolve an unseen player target).
         var members = new[]
         {
             new FellowshipMemberProjection { Name = "Mba", Level = 5, IsSelf = false, IsLeader = true },

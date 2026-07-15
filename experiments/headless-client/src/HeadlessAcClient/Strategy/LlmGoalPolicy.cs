@@ -523,18 +523,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     private const float StationaryUseEpsilonSq = StationaryUseEpsilon * StationaryUseEpsilon;
     private const int StationaryUseRepeatThreshold = 3;
 
-    // Distance (world units) within which the one-step vassal-swear cue is offered. The
-    // server completes a swear only when the vassal is within Allegiance_MaxSwearDistance
-    // (2.0u) of the patron, measured by its cylinder reach test; this bot's perceived
-    // distance (WorldStateProjection.Distance) is a 2D horizontal distance outdoors, so a
-    // value held DELIBERATELY BELOW the server's 2.0u absorbs that metric difference plus
-    // client/server position slop. A conservative margin matters because this headless
-    // client does not act on a server-issued move-to-object (it walks only under its own
-    // GoTo/Explore/Use/Attack goals): if a one-step swear were offered while the server
-    // still saw the bot out of range, the swear would not complete and the bot would not
-    // move. Below this the one-step cue is offered; otherwise the cue keeps GoTo-first.
-    private const float SwearOneStepRangeUnits = 1.5f;
-
     // ── Landblock-scoped world-object USE churn loop-break (cp-2354) ──────
     // The stationary guard above resets on ANY movement, so it MISSES a TOUR
     // of several doors/openables within ONE landblock: the bot walks between
@@ -11366,20 +11354,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             monarchName = fleaderName;   // drifted-apart-after-grouping: monarch = fellowship leader
         }
-        // The swear is a ONE-step action ONLY when the monarch is already within the
-        // server's swear-completion distance. The server completes a swear by first moving
-        // the vassal up to that distance of the patron, but this headless client does not
-        // act on a server-issued move-to-object (it walks only under its own GoTo/Explore/
-        // Use/Attack motion goals), so a swear dispatched from beyond that distance would
-        // not complete — the client would not close the gap the server expects it to. When
-        // already in range no move is commanded and the pledge completes on dispatch, so a
-        // preceding client `GoTo` is redundant. Otherwise — monarch beyond range, or not
-        // currently visible (resolved from fellowship membership) — the cue keeps `GoTo`
-        // first so the client closes the distance itself and brings the monarch into
-        // perception for the Motor to resolve the name.
-        var monarchInSwearRange = monarchName is not null
+        // A visible monarch is always a ONE-step SwearAllegiance decision: the Motor
+        // retains that selected action while it approaches, then sends it in range.
+        // An out-of-view fellowship leader still needs GoTo first because the Motor
+        // cannot resolve an unseen player target.
+        var monarchIsVisible = monarchName is not null
             && world.Visible.Any(v => v.IsPlayer
-                && v.Distance is { } d && d <= SwearOneStepRangeUnits
                 && string.Equals(v.Name, monarchName, StringComparison.OrdinalIgnoreCase));
         var renderVassalSwear = monarchName is not null && !alreadyVassal;
         if (aPlayerIsInView || renderVassalSwear)
@@ -11389,26 +11369,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
             if (renderVassalSwear)
             {
-                var swearStep = monarchInSwearRange
+                var swearStep = monarchIsVisible
                     ? $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge NOW in ONE step " +
-                      "(they are right next to you — no need to travel to them first)"
+                      "(the Motor will approach before sending if needed; do NOT emit a separate `GoTo`)"
                     : $"`GoTo` `{monarchName}` to reach them (a swear needs you near them), then " +
                       $"`SwearAllegiance{{target: {{name: \"{monarchName}\"}}}}` to pledge";
                 sb.AppendLine(
                     $"- Your monarch is `{monarchName}` (your team's leader). You are NOT yet their vassal. " +
-                    swearStep + ". This is DIRECTED team coordination — do it before an OPTIONAL hunt/explore.");
+                    swearStep + ". This is DIRECTED team coordination. Emit that exact next goal before any other goal.");
             }
 
             // The generic "swear to anyone" affordance is for a bot that is not already
-            // a vassal (an existing vassal must BreakAllegiance first, so offering it
-            // then would loop); an own-monarch/unaffiliated bot still sees it. Gated on a
-            // visible player (the Motor needs a visible target to resolve).
-            if (aPlayerIsInView && !alreadyVassal)
+            // a vassal and has no configured-team directive. Do not append contradictory
+            // OPTIONAL framing after directing the bot to its selected teammate.
+            if (aPlayerIsInView && !alreadyVassal && !renderVassalSwear)
                 sb.AppendLine(
                     "- A `player` is in view. You MAY `SwearAllegiance` to a visible `player` by name " +
                     "(only when exactly one visible `player` matches that name); this makes you that " +
                     "player's vassal. OPTIONAL — you decide whether and to whom, or skip it.");
-            if (aPlayerIsInView && world.Self.IsInAllegiance)
+            if (aPlayerIsInView && world.Self.IsInAllegiance && !renderVassalSwear)
                 sb.AppendLine(
                     "- You ARE in an allegiance (see `## Allegiance state`). You MAY `BreakAllegiance` " +
                     "from a visible `player` by name (only when exactly one visible `player` matches that " +
@@ -16296,4 +16275,3 @@ internal sealed record TrainingDecision
     public required string LlmRawResponse { get; init; }
     public required string? LlmError { get; init; }
 }
-
