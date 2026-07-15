@@ -25,9 +25,6 @@ internal static class InventoryWieldDispatchGate
         bool targetAlreadyWielded,
         IEnumerable<uint> pendingItemGuids)
     {
-        if (targetAlreadyWielded)
-            return InventoryWieldDispatchDecision.AlreadyWielded;
-
         var sameTargetPending = false;
         foreach (var pendingItemGuid in pendingItemGuids)
         {
@@ -36,6 +33,9 @@ internal static class InventoryWieldDispatchGate
 
             sameTargetPending = true;
         }
+
+        if (targetAlreadyWielded)
+            return InventoryWieldDispatchDecision.AlreadyWielded;
 
         return sameTargetPending
             ? InventoryWieldDispatchDecision.SameTargetPending

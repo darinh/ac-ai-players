@@ -75,11 +75,20 @@ public class InventoryWieldDispatchGateTests
                 pendingItemGuids: [0x200u, 0x100u]));
 
     [Fact]
-    public void Evaluate_AlreadyWielded_WinsOverPendingOtherTarget()
+    public void Evaluate_PendingOtherTarget_WinsOverAlreadyWielded()
+        => Assert.Equal(
+            InventoryWieldDispatchDecision.DifferentTargetPending,
+            InventoryWieldDispatchGate.Evaluate(
+                0x200u,
+                targetAlreadyWielded: true,
+                pendingItemGuids: [0x100u]));
+
+    [Fact]
+    public void Evaluate_AlreadyWielded_WinsOverPendingSameTarget()
         => Assert.Equal(
             InventoryWieldDispatchDecision.AlreadyWielded,
             InventoryWieldDispatchGate.Evaluate(
                 0x200u,
                 targetAlreadyWielded: true,
-                pendingItemGuids: [0x100u]));
+                pendingItemGuids: [0x200u]));
 }

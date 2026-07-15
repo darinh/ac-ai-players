@@ -8285,11 +8285,22 @@ internal sealed class HandshakeDriver : IDisposable
                                   {
                                     if (pendingDequipRetries.ContainsKey(blocker))
                                     {
+                                        var priorTarget =
+                                            pendingWieldAfterDequip.TryGetValue(
+                                                blocker,
+                                                out var priorSwap)
+                                                ? priorSwap.TargetGuid
+                                                : (uint?)null;
                                         pendingWieldAfterDequip[blocker] =
                                             (wieldItem.Guid, wieldSlot, DateTime.UtcNow);
+                                        if (priorTarget is uint supersededTarget &&
+                                            supersededTarget != wieldItem.Guid)
+                                        {
+                                            ReleaseInventoryTransaction(supersededTarget);
+                                        }
                                         inventoryTransactionGuids.Add(wieldItem.Guid);
                                         Console.WriteLine(
-                                            $"[strategy] Wield waits for LLM Dequip: blocker=0x{blocker:X8}; " +
+                                            $"[strategy] Wield waits for in-flight Dequip: blocker=0x{blocker:X8}; " +
                                             $"will wield item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} " +
                                             "after the in-flight dequip ack.");
                                         continue;
