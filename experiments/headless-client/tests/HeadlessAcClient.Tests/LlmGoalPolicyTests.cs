@@ -6518,7 +6518,7 @@ public class LlmGoalPolicyTests
         // The vassal-swear DIRECTIVE ("Your monarch is ...") -> true.
         var directive =
             "## Allegiance guidance\n- Your monarch is `Mba` (your team's leader). You are NOT yet " +
-            "their vassal. `GoTo` `Mba` ... then `SwearAllegiance{target: {name: \"Mba\"}}` to pledge.";
+            "their vassal. `SwearAllegiance{target: {name: \"Mba\"}}` to pledge NOW in ONE step.";
         Assert.True(LlmGoalPolicy.PromptHasVassalSwearDirective(directive));
     }
 
