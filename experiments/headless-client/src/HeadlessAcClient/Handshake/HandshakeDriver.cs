@@ -8167,8 +8167,21 @@ internal sealed class HandshakeDriver : IDisposable
                                 var wieldDispatchDecision =
                                     InventoryWieldDispatchGate.Evaluate(
                                         wieldItem.Guid,
-                                        pendingWieldRetries.Keys);
+                                        targetAlreadyWielded:
+                                            (wieldItem.WielderGuid is uint wearerGuid &&
+                                             wearerGuid == tacticsSelf.Guid) ||
+                                            (wieldItem.CurrentWieldedLocation is uint wieldedAt &&
+                                             wieldedAt != 0),
+                                        pendingItemGuids: pendingWieldRetries.Keys);
                                 if (wieldDispatchDecision ==
+                                    InventoryWieldDispatchDecision.AlreadyWielded)
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Wield already satisfied: " +
+                                        $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8}; no packet sent.");
+                                    tactics.Clear("wield already satisfied", eventStream);
+                                }
+                                else if (wieldDispatchDecision ==
                                     InventoryWieldDispatchDecision.SameTargetPending)
                                 {
                                     Console.WriteLine(

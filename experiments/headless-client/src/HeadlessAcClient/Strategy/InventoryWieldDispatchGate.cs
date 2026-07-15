@@ -7,6 +7,7 @@ namespace HeadlessAcClient.Strategy;
 internal enum InventoryWieldDispatchDecision
 {
     Dispatch,
+    AlreadyWielded,
     SameTargetPending,
     DifferentTargetPending,
 }
@@ -15,8 +16,12 @@ internal static class InventoryWieldDispatchGate
 {
     public static InventoryWieldDispatchDecision Evaluate(
         uint requestedItemGuid,
+        bool targetAlreadyWielded,
         IEnumerable<uint> pendingItemGuids)
     {
+        if (targetAlreadyWielded)
+            return InventoryWieldDispatchDecision.AlreadyWielded;
+
         var sameTargetPending = false;
         foreach (var pendingItemGuid in pendingItemGuids)
         {
