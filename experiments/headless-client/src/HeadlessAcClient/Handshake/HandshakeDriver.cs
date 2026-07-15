@@ -2066,6 +2066,62 @@ internal sealed class HandshakeDriver : IDisposable
         // I?" / "what's nearby?" / "what's my health?" without
         // re-parsing the firehose.
         var worldState = new WorldState();
+        bool TryFailPendingSwap(
+            uint blockerGuid,
+            uint? errorCode,
+            string errorLabel,
+            string? detail = null)
+        {
+            if (!pendingWieldAfterDequip.ContainsKey(blockerGuid))
+                return false;
+
+            var swapReject = SwapRejectionAttribution.ForRejectedBlocker(
+                blockerGuid,
+                g => pendingWieldAfterDequip.TryGetValue(g, out var swap)
+                    ? swap.TargetGuid
+                    : (uint?)null,
+                g =>
+                {
+                    var snapshot = worldState.TryGet(g);
+                    return (snapshot?.Name, snapshot?.WeenieClassId);
+                });
+            if (swapReject is null)
+                return false;
+
+            var failedTargetGuid = swapReject.Value.TargetGuid;
+            var relatedBlockers = pendingWieldAfterDequip
+                .Where(kv => kv.Value.TargetGuid == failedTargetGuid)
+                .Select(kv => kv.Key)
+                .ToArray();
+            foreach (var relatedBlocker in relatedBlockers)
+            {
+                pendingWieldAfterDequip.Remove(relatedBlocker);
+                pendingDequipRetries.Remove(relatedBlocker);
+                ReleaseInventoryTransaction(relatedBlocker);
+            }
+
+            pendingWieldRetries.Remove(failedTargetGuid);
+            ReleaseInventoryTransaction(failedTargetGuid);
+            eventStream.Append(new StreamEvent
+            {
+                Sequence = 0,
+                Utc = DateTimeOffset.UtcNow,
+                Kind = EventKind.ActionRejected,
+                Text = detail is null
+                    ? swapReject.Value.Text
+                    : $"{swapReject.Value.Text} {detail}",
+                ItemGuid = failedTargetGuid,
+                Wcid = swapReject.Value.Wcid,
+                Name = swapReject.Value.Name,
+                ErrorCode = errorCode,
+                ErrorLabel = errorLabel,
+            });
+            Console.WriteLine(
+                $"[strategy] SWAP-WIELD failed: blocker=0x{blockerGuid:X8}; " +
+                $"target='{swapReject.Value.Name}' guid=0x{failedTargetGuid:X8}; " +
+                $"clearedBlockers={relatedBlockers.Length} error={errorLabel}.");
+            return true;
+        }
 
         // combat-feel ledger: per-mob-kind kill/death/near-death memory,
         // surfaced to the LLM as raw "## Combat history" facts. Persisted
@@ -3778,13 +3834,20 @@ internal sealed class HandshakeDriver : IDisposable
                                             dequipRetry.Attempts,
                                             explicitRejections);
                                         Console.WriteLine(
-                                            $"[dequip-retry] transient rejection retained for LLM-authored Dequip: " +
+                                            $"[dequip-retry] transient rejection retained for explicit inventory Dequip: " +
                                             $"item=0x{isf.ItemGuid:X8} attempt={dequipRetry.Attempts}/" +
                                             $"{InventoryActionRetryPolicy.MaxAttempts}; retry after cooldown.");
                                         break;
                                     }
 
                                     pendingDequipRetries.Remove(isf.ItemGuid);
+                                    if (TryFailPendingSwap(
+                                            isf.ItemGuid,
+                                            isf.ErrorType,
+                                            invLabel))
+                                    {
+                                        break;
+                                    }
                                     ReleaseInventoryTransaction(isf.ItemGuid);
                                 }
                                 if (pendingWieldRetries.TryGetValue(isf.ItemGuid, out var wieldRetry))
@@ -3814,65 +3877,6 @@ internal sealed class HandshakeDriver : IDisposable
 
                                     pendingWieldRetries.Remove(isf.ItemGuid);
                                     ReleaseInventoryTransaction(isf.ItemGuid);
-                                }
-                                // A prerequisite dequip whose item the server
-                                // refuses to move. To wield an item that needs an
-                                // occupied slot freed, the Motor dequips the
-                                // blocking item first (PutItemInContainer) and
-                                // defers the wield to that dequip's put-ack
-                                // (pendingWieldAfterDequip). If the server rejects
-                                // the dequip, the put-ack never arrives, the
-                                // deferred wield never fires, and the rejection is
-                                // keyed on the BLOCKING item — but the policy's
-                                // recently-rejected dedup keys on a goal's TARGET,
-                                // so a blocker-keyed rejection never dedups the
-                                // repeated wield goal and it is re-emitted every
-                                // cycle. Only for a FRESH in-flight swap entry
-                                // (the same StartedUtc window the dispatch loop's
-                                // pendingFresh check uses), re-attribute the
-                                // rejection to the deferred TARGET so the dedup
-                                // keys align and the policy re-deliberates; clear
-                                // the consumed pending entry. A STALE entry is
-                                // ignored — an abandoned swap must not intercept a
-                                // later unrelated rejection of the same item guid,
-                                // which falls through to the generic surface below.
-                                // Mechanical: keyed on the wire rejection guid +
-                                // the in-flight swap map + its dispatch timestamp;
-                                // no game knowledge.
-                                if (SwapRejectionAttribution.ForRejectedBlocker(
-                                        isf.ItemGuid,
-                                        g => pendingWieldAfterDequip.TryGetValue(g, out var sw)
-                                             && (DateTime.UtcNow - sw.StartedUtc) < TimeSpan.FromSeconds(10)
-                                            ? sw.TargetGuid
-                                            : (uint?)null,
-                                        g =>
-                                        {
-                                            var s = worldState.TryGet(g);
-                                            return (s?.Name, s?.WeenieClassId);
-                                        })
-                                    is { } swapReject)
-                                {
-                                    pendingWieldAfterDequip.Remove(isf.ItemGuid);
-                                    pendingWieldRetries.Remove(swapReject.TargetGuid);
-                                    ReleaseInventoryTransaction(isf.ItemGuid);
-                                    ReleaseInventoryTransaction(swapReject.TargetGuid);
-                                    Console.WriteLine(
-                                        $"[strategy] SWAP-WIELD failed: blocker=0x{isf.ItemGuid:X8} could not be " +
-                                        $"unequipped (err=0x{isf.ErrorType:X}); re-attributing rejection to target " +
-                                        $"'{swapReject.Name}' guid=0x{swapReject.TargetGuid:X8} so the wield loop breaks.");
-                                    eventStream.Append(new StreamEvent
-                                    {
-                                        Sequence = 0,
-                                        Utc = DateTimeOffset.UtcNow,
-                                        Kind = EventKind.ActionRejected,
-                                        Text = swapReject.Text,
-                                        ItemGuid = swapReject.TargetGuid,
-                                        Wcid = swapReject.Wcid,
-                                        Name = swapReject.Name,
-                                        ErrorCode = isf.ErrorType,
-                                        ErrorLabel = invLabel,
-                                    });
-                                    break;
                                 }
                                 // Look up the failed item by guid in the full
                                 // object set (worldState.TryGet), NOT a spatial
@@ -5303,6 +5307,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 InventoryActionRetryPolicy.MaxAttempts))
                         {
                             pendingDequipRetries.Remove(itemGuid);
+                            if (TryFailPendingSwap(
+                                    itemGuid,
+                                    errorCode: null,
+                                    errorLabel: "no server response",
+                                    detail:
+                                        $"The prerequisite move received no server response " +
+                                        $"after {retry.Attempts} attempts."))
+                            {
+                                Console.WriteLine(
+                                    $"[dequip-retry] swap timed out: item=0x{itemGuid:X8} " +
+                                    $"attempts={retry.Attempts}; failed deferred Wield.");
+                                continue;
+                            }
+
                             ReleaseInventoryTransaction(itemGuid);
                             var retryName = retrySnap.Name ?? "(unknown)";
                             eventStream.Append(new StreamEvent
@@ -8134,22 +8152,31 @@ internal sealed class HandshakeDriver : IDisposable
                             if (wieldItem is not null &&
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
-                                if (pendingWieldRetries.ContainsKey(wieldItem.Guid))
+                                var wieldDispatchDecision =
+                                    InventoryWieldDispatchGate.Evaluate(
+                                        wieldItem.Guid,
+                                        pendingWieldRetries.Keys);
+                                if (wieldDispatchDecision ==
+                                    InventoryWieldDispatchDecision.SameTargetPending)
                                 {
                                     Console.WriteLine(
                                         $"[strategy] LLM-GOAL Wield serialized: " +
                                         $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} already pending.");
                                     tactics.Clear("wield request already pending", eventStream);
                                 }
+                                else if (wieldDispatchDecision ==
+                                         InventoryWieldDispatchDecision.DifferentTargetPending)
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Wield deferred: " +
+                                        $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8}; " +
+                                        "a different wield packet is still awaiting a server response.");
+                                    tactics.Fail(
+                                        "wield: another wield request is still pending",
+                                        eventStream);
+                                }
                                 else
                                 {
-                                foreach (var staleRetryGuid in pendingWieldRetries.Keys
-                                             .Where(g => g != wieldItem.Guid)
-                                             .ToArray())
-                                {
-                                    pendingWieldRetries.Remove(staleRetryGuid);
-                                    ReleaseInventoryTransaction(staleRetryGuid);
-                                }
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
                                 // Dequip-before-wield (weapon swap). The ACE
@@ -8287,6 +8314,7 @@ internal sealed class HandshakeDriver : IDisposable
                                                                 encrypt: true, cryptoSend: cryptoSend);
                                         await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, dqSent),
                                                                    SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
+                                        RecordDequipDispatch(blocker);
                                         Console.WriteLine(
                                             $"[strategy] LLM-GOAL Wield needs swap: dequip blocker=0x{blocker:X8} then " +
                                             $"wield item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
