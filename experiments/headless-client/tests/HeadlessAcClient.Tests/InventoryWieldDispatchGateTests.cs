@@ -36,6 +36,7 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x100u,
                 targetAlreadyWielded: false,
+                targetDequipPending: false,
                 pendingItemGuids: []));
 
     [Fact]
@@ -45,6 +46,17 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x100u,
                 targetAlreadyWielded: true,
+                targetDequipPending: false,
+                pendingItemGuids: []));
+
+    [Fact]
+    public void Evaluate_TargetDequipPending_DoesNotCompleteAsAlreadyWielded()
+        => Assert.Equal(
+            InventoryWieldDispatchDecision.TargetDequipPending,
+            InventoryWieldDispatchGate.Evaluate(
+                0x100u,
+                targetAlreadyWielded: true,
+                targetDequipPending: true,
                 pendingItemGuids: []));
 
     [Fact]
@@ -54,6 +66,7 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x100u,
                 targetAlreadyWielded: false,
+                targetDequipPending: false,
                 pendingItemGuids: [0x100u]));
 
     [Fact]
@@ -63,6 +76,7 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x200u,
                 targetAlreadyWielded: false,
+                targetDequipPending: false,
                 pendingItemGuids: [0x100u]));
 
     [Fact]
@@ -72,6 +86,7 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x200u,
                 targetAlreadyWielded: false,
+                targetDequipPending: false,
                 pendingItemGuids: [0x200u, 0x100u]));
 
     [Fact]
@@ -81,6 +96,7 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x200u,
                 targetAlreadyWielded: true,
+                targetDequipPending: false,
                 pendingItemGuids: [0x100u]));
 
     [Fact]
@@ -90,5 +106,6 @@ public class InventoryWieldDispatchGateTests
             InventoryWieldDispatchGate.Evaluate(
                 0x200u,
                 targetAlreadyWielded: true,
+                targetDequipPending: false,
                 pendingItemGuids: [0x200u]));
 }

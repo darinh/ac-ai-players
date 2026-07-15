@@ -8,6 +8,7 @@ internal enum InventoryWieldDispatchDecision
 {
     Dispatch,
     AlreadyWielded,
+    TargetDequipPending,
     SameTargetPending,
     DifferentTargetPending,
 }
@@ -23,6 +24,7 @@ internal static class InventoryWieldDispatchGate
     public static InventoryWieldDispatchDecision Evaluate(
         uint requestedItemGuid,
         bool targetAlreadyWielded,
+        bool targetDequipPending,
         IEnumerable<uint> pendingItemGuids)
     {
         var sameTargetPending = false;
@@ -33,6 +35,9 @@ internal static class InventoryWieldDispatchGate
 
             sameTargetPending = true;
         }
+
+        if (targetDequipPending)
+            return InventoryWieldDispatchDecision.TargetDequipPending;
 
         if (targetAlreadyWielded)
             return InventoryWieldDispatchDecision.AlreadyWielded;

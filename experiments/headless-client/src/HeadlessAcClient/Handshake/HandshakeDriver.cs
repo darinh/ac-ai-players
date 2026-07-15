@@ -8186,8 +8186,21 @@ internal sealed class HandshakeDriver : IDisposable
                                              wearerGuid == tacticsSelf.Guid) ||
                                             (wieldItem.CurrentWieldedLocation is uint wieldedAt &&
                                              wieldedAt != 0),
+                                        targetDequipPending:
+                                            pendingDequipRetries.ContainsKey(wieldItem.Guid),
                                         pendingItemGuids: pendingWieldRetries.Keys);
                                 if (wieldDispatchDecision ==
+                                    InventoryWieldDispatchDecision.TargetDequipPending)
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Wield deferred: " +
+                                        $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8}; " +
+                                        "a Dequip for this item is still awaiting a server response.");
+                                    tactics.Fail(
+                                        "wield: selected item has a dequip request pending",
+                                        eventStream);
+                                }
+                                else if (wieldDispatchDecision ==
                                     InventoryWieldDispatchDecision.AlreadyWielded)
                                 {
                                     Console.WriteLine(
