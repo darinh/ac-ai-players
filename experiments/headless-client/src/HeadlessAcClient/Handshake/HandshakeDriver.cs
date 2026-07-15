@@ -932,7 +932,7 @@ internal sealed class HandshakeDriver : IDisposable
         var                  pendingWieldRetries =
             new Dictionary<uint, (uint Slot, DateTime SentAt, int Attempts, int ExplicitRejections)>();
         var                  pendingDequipRetries =
-            new Dictionary<uint, (DateTime SentAt, int Attempts, int ExplicitRejections)>();
+            new Dictionary<uint, PendingDequipRetry>();
         void ReleaseInventoryTransaction(uint itemGuid)
         {
             var stillOwned =
@@ -953,13 +953,19 @@ internal sealed class HandshakeDriver : IDisposable
                 previous.ExplicitRejections);
             inventoryTransactionGuids.Add(itemGuid);
         }
-        void RecordDequipDispatch(uint itemGuid)
+        void RecordDequipDispatch(
+            uint itemGuid,
+            DequipTransactionOwner? owner = null)
         {
-            pendingDequipRetries.TryGetValue(itemGuid, out var previous);
-            pendingDequipRetries[itemGuid] = (
+            var hadPrevious =
+                pendingDequipRetries.TryGetValue(itemGuid, out var previous);
+            pendingDequipRetries[itemGuid] = new PendingDequipRetry(
                 DateTime.UtcNow,
                 previous.Attempts + 1,
-                previous.ExplicitRejections);
+                previous.ExplicitRejections,
+                owner ?? (hadPrevious
+                    ? previous.Owner
+                    : DequipTransactionOwner.ExplicitGoal));
             inventoryTransactionGuids.Add(itemGuid);
         }
         async Task<(uint PacketSequence, uint FragmentSequence, int Bytes)>
@@ -2096,7 +2102,9 @@ internal sealed class HandshakeDriver : IDisposable
             foreach (var relatedBlocker in relatedBlockers)
             {
                 pendingWieldAfterDequip.Remove(relatedBlocker);
-                pendingDequipRetries.Remove(relatedBlocker);
+                PendingDequipRetryOwnership.RemoveIfSwapOwned(
+                    relatedBlocker,
+                    pendingDequipRetries);
                 ReleaseInventoryTransaction(relatedBlocker);
             }
 
@@ -3829,10 +3837,11 @@ internal sealed class HandshakeDriver : IDisposable
                                         dequipRetry.Attempts < InventoryActionRetryPolicy.MaxAttempts;
                                     if (canRetry)
                                     {
-                                        pendingDequipRetries[isf.ItemGuid] = (
+                                        pendingDequipRetries[isf.ItemGuid] = new PendingDequipRetry(
                                             dequipRetry.SentAt,
                                             dequipRetry.Attempts,
-                                            explicitRejections);
+                                            explicitRejections,
+                                            dequipRetry.Owner);
                                         Console.WriteLine(
                                             $"[dequip-retry] transient rejection retained for explicit inventory Dequip: " +
                                             $"item=0x{isf.ItemGuid:X8} attempt={dequipRetry.Attempts}/" +
@@ -8078,6 +8087,9 @@ internal sealed class HandshakeDriver : IDisposable
                                                  .ToArray())
                                     {
                                         pendingWieldAfterDequip.Remove(staleSwap.Key);
+                                        PendingDequipRetryOwnership.RemoveIfSwapOwned(
+                                            staleSwap.Key,
+                                            pendingDequipRetries);
                                         ReleaseInventoryTransaction(staleSwap.Key);
                                     }
                                     ReleaseInventoryTransaction(itemSnap.Guid);
@@ -8225,6 +8237,9 @@ internal sealed class HandshakeDriver : IDisposable
                                         var staleTarget =
                                             pendingWieldAfterDequip[staleKey].TargetGuid;
                                         pendingWieldAfterDequip.Remove(staleKey);
+                                        PendingDequipRetryOwnership.RemoveIfSwapOwned(
+                                            staleKey,
+                                            pendingDequipRetries);
                                         ReleaseInventoryTransaction(staleKey);
                                         ReleaseInventoryTransaction(staleTarget);
                                     }
@@ -8314,7 +8329,9 @@ internal sealed class HandshakeDriver : IDisposable
                                                                 encrypt: true, cryptoSend: cryptoSend);
                                         await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, dqSent),
                                                                    SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                                        RecordDequipDispatch(blocker);
+                                        RecordDequipDispatch(
+                                            blocker,
+                                            DequipTransactionOwner.WieldSwap);
                                         Console.WriteLine(
                                             $"[strategy] LLM-GOAL Wield needs swap: dequip blocker=0x{blocker:X8} then " +
                                             $"wield item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
