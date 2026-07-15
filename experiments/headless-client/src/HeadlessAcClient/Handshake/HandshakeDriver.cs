@@ -990,6 +990,11 @@ internal sealed class HandshakeDriver : IDisposable
         // still-unwielded guid after a cooldown (capped by MaxAttempts) so the retry
         // lands once the creation ack settles. Keyed only by guid; no game knowledge.
         var                  equipRetry = new Dictionary<uint, (DateTime SentAt, int Attempts)>();
+        // Explicit server rejection weight for each autonomous login-equip guid.
+        // The first None response can be the item-creation race above. A specific
+        // error or a second None response after a cooldown is conclusive instead
+        // of spending the remaining silent-response attempts.
+        var                  equipExplicitRejections = new Dictionary<uint, int>();
         // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
         // server refuses (a non-takeable fixed object) returns a silent
         // InventoryServerSaveFailed err=None whose queued auto-equip never fires
@@ -1008,6 +1013,14 @@ internal sealed class HandshakeDriver : IDisposable
         // own current goal. inventoryEquipSent alone can't be used: it also
         // holds LLM Pickup→equip and LLM Wield guids.
         var                  autoEquipFailureFilter = new Strategy.AutoEquipFailureFilter();
+        void TransferAutoEquipOwnershipToLlm(uint itemGuid)
+        {
+            autoEquipFailureFilter.ClearAutonomous(itemGuid);
+            equipRetry.Remove(itemGuid);
+            equipExplicitRejections.Remove(itemGuid);
+            pendingEquipItemSlots.Remove(itemGuid);
+            pendingEquipWcid.Remove(itemGuid);
+        }
         // Phase 7f — combat state. Locked when bot dispatches a melee
         // attack. While locked, the picker keeps targeting the same
         // creature (so we don't walk away mid-fight) and a retry timer
@@ -3190,14 +3203,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // same armor reward.
                             if (ge.Payload?.WieldObject is { } wieldAck)
                             {
-                                // cp-2273 — a successful wield ack resolves any
-                                // source-autonomous auto-equip attempt for this
-                                // guid: no failure is coming, so drop the marker
-                                // (otherwise it would linger and could swallow a
-                                // later LLM-owned inventory failure on the same
-                                // guid, e.g. dequipping this weapon as a swap
-                                // blocker).
-                                autoEquipFailureFilter.ClearAutonomous(wieldAck.ItemGuid);
+                                // cp-2273 — a successful wield ack resolves one
+                                // source-autonomous dispatch for this guid. Consume
+                                // one response marker rather than clearing all:
+                                // a cooldown retry can overlap the original request,
+                                // and the other autonomous response must still be
+                                // suppressed if it arrives late. An explicit LLM
+                                // Wield clears every marker at dispatch time below.
+                                autoEquipFailureFilter.TryConsumeAutonomous(wieldAck.ItemGuid);
                                 // A successful wield also ends this guid's
                                 // login-equip RETRY eligibility: the retry only
                                 // exists for an equip whose ack was LOST to the
@@ -3208,6 +3221,7 @@ internal sealed class HandshakeDriver : IDisposable
                                 // dequip). inventoryEquipSent stays, preserving the
                                 // prior one-shot suppression for that dequip case.
                                 equipRetry.Remove(wieldAck.ItemGuid);
+                                equipExplicitRejections.Remove(wieldAck.ItemGuid);
                                 if (wieldAck.NewLocation != 0)
                                     satisfiedEquipSlots.Add(wieldAck.NewLocation);
                                 // In-flight login-equip wield resolved (worn): release
@@ -3890,9 +3904,18 @@ internal sealed class HandshakeDriver : IDisposable
                                 // LLM-requested wield/pickup failure surfaces below.
                                 if (autoEquipFailureFilter.TryConsumeAutonomous(isf.ItemGuid))
                                 {
+                                    var priorRejections =
+                                        equipExplicitRejections.TryGetValue(
+                                            isf.ItemGuid, out var rejectionCount)
+                                            ? rejectionCount : 0;
+                                    var explicitRejections =
+                                        AutoEquipRetryPolicy.RecordExplicitRejection(
+                                            priorRejections, isf.ErrorType);
+                                    equipExplicitRejections[isf.ItemGuid] = explicitRejections;
                                     Console.WriteLine(
                                         $"[auto-equip] suppressed autonomous auto-equip rejection: " +
                                         $"item=0x{isf.ItemGuid:X8} err=0x{isf.ErrorType:X} [{invLabel}] " +
+                                        $"explicit-rejections={explicitRejections} " +
                                         $"(source-autonomous wield; not an LLM goal)");
                                     break;
                                 }
@@ -5495,9 +5518,14 @@ internal sealed class HandshakeDriver : IDisposable
                             // session. Release it (fall through -> re-picked + re-sent
                             // below), capped by MaxAttempts. WielderGuid != null is
                             // already excluded above, so this only fires while unwielded.
+                            var explicitRejections =
+                                equipExplicitRejections.TryGetValue(
+                                    snap.Guid, out var rejectionCount)
+                                    ? rejectionCount : 0;
                             if (equipRetry.TryGetValue(snap.Guid, out var er)
                                 && AutoEquipRetryPolicy.ShouldRetry(
-                                    er.SentAt, er.Attempts, DateTime.UtcNow,
+                                    er.SentAt, er.Attempts, explicitRejections,
+                                    DateTime.UtcNow,
                                     AutoEquipRetryPolicy.RetryCooldown,
                                     AutoEquipRetryPolicy.MaxAttempts))
                             {
@@ -8324,10 +8352,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 wieldItem.ValidLocations is uint wieldVl && wieldVl != 0)
                             {
                                 // cp-2273 — the LLM has explicitly taken ownership
-                                // of this guid. Drop any source-autonomous marker so
-                                // a subsequent InventoryServerSaveFailed for it
-                                // surfaces normally (the LLM asked for this wield).
-                                autoEquipFailureFilter.ClearAutonomous(wieldItem.Guid);
+                                // of this guid. Drop every source-autonomous retry
+                                // state entry so PHASE7F.4 cannot re-mark or resend
+                                // it while the LLM request awaits its response.
+                                TransferAutoEquipOwnershipToLlm(wieldItem.Guid);
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
                                 // Dequip-before-wield (weapon swap). The ACE
@@ -8388,6 +8416,11 @@ internal sealed class HandshakeDriver : IDisposable
                                 {
                                   foreach (var blocker in blockers)
                                   {
+                                    // Moving this blocker is part of the LLM-owned
+                                    // wield transaction. Clear stale autonomous
+                                    // equip state so its dequip response cannot be
+                                    // suppressed as an old startup request.
+                                    TransferAutoEquipOwnershipToLlm(blocker);
                                     // A stale pending entry means the dequip
                                     // never acked (e.g. the pack was full) — do
                                     // not soft-lock this blocker forever; let it

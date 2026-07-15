@@ -23,7 +23,8 @@ public class AutoEquipRetryPolicyTests
     {
         // Sent 10s ago (== cooldown), 1 attempt < 4: release for a retry.
         Assert.True(AutoEquipRetryPolicy.ShouldRetry(
-            sentAt: T0, attempts: 1, now: T0 + TimeSpan.FromSeconds(10),
+            sentAt: T0, attempts: 1, explicitRejections: 0,
+            now: T0 + TimeSpan.FromSeconds(10),
             cooldown: Cooldown, maxAttempts: MaxAttempts));
     }
 
@@ -32,7 +33,8 @@ public class AutoEquipRetryPolicyTests
     {
         // Sent 9s ago (< 10s cooldown): still awaiting the ack — do not re-send.
         Assert.False(AutoEquipRetryPolicy.ShouldRetry(
-            sentAt: T0, attempts: 1, now: T0 + TimeSpan.FromSeconds(9),
+            sentAt: T0, attempts: 1, explicitRejections: 0,
+            now: T0 + TimeSpan.FromSeconds(9),
             cooldown: Cooldown, maxAttempts: MaxAttempts));
     }
 
@@ -41,7 +43,8 @@ public class AutoEquipRetryPolicyTests
     {
         // At the cap, never retry again even long after the cooldown.
         Assert.False(AutoEquipRetryPolicy.ShouldRetry(
-            sentAt: T0, attempts: MaxAttempts, now: T0 + TimeSpan.FromSeconds(600),
+            sentAt: T0, attempts: MaxAttempts, explicitRejections: 0,
+            now: T0 + TimeSpan.FromSeconds(600),
             cooldown: Cooldown, maxAttempts: MaxAttempts));
     }
 
@@ -50,7 +53,8 @@ public class AutoEquipRetryPolicyTests
     {
         // attempts == max-1 is still under the cap: one final retry is allowed.
         Assert.True(AutoEquipRetryPolicy.ShouldRetry(
-            sentAt: T0, attempts: MaxAttempts - 1, now: T0 + TimeSpan.FromSeconds(30),
+            sentAt: T0, attempts: MaxAttempts - 1, explicitRejections: 0,
+            now: T0 + TimeSpan.FromSeconds(30),
             cooldown: Cooldown, maxAttempts: MaxAttempts));
     }
 
@@ -60,8 +64,53 @@ public class AutoEquipRetryPolicyTests
         // MaxAttempts=1 disables the retry (one-shot): the first (and only) send
         // already counts as attempt 1, so a further release never fires.
         Assert.False(AutoEquipRetryPolicy.ShouldRetry(
-            sentAt: T0, attempts: 1, now: T0 + TimeSpan.FromSeconds(600),
+            sentAt: T0, attempts: 1, explicitRejections: 0,
+            now: T0 + TimeSpan.FromSeconds(600),
             cooldown: Cooldown, maxAttempts: 1));
+    }
+
+    [Fact]
+    public void ShouldRetry_FirstExplicitRejection_CooldownElapsed_True()
+    {
+        // The first rejection can be the item-creation race. Preserve one
+        // cooldown-delayed retry so the settled item gets another attempt.
+        Assert.True(AutoEquipRetryPolicy.ShouldRetry(
+            sentAt: T0, attempts: 1, explicitRejections: 1,
+            now: T0 + Cooldown,
+            cooldown: Cooldown, maxAttempts: MaxAttempts));
+    }
+
+    [Fact]
+    public void ShouldRetry_SecondExplicitRejection_UnderAttemptCap_False()
+    {
+        // The cooldown-delayed retry was rejected too. Even though the silent
+        // response attempt cap has room, another send repeats a known failure.
+        Assert.False(AutoEquipRetryPolicy.ShouldRetry(
+            sentAt: T0, attempts: 2,
+            explicitRejections: AutoEquipRetryPolicy.ConclusiveExplicitRejectionCount,
+            now: T0 + TimeSpan.FromSeconds(600),
+            cooldown: Cooldown, maxAttempts: MaxAttempts));
+    }
+
+    [Fact]
+    public void RecordExplicitRejection_NoneResponsesBecomeConclusiveAtSecond()
+    {
+        var first = AutoEquipRetryPolicy.RecordExplicitRejection(
+            previousCount: 0, errorType: 0);
+        var second = AutoEquipRetryPolicy.RecordExplicitRejection(
+            previousCount: first, errorType: 0);
+
+        Assert.Equal(1, first);
+        Assert.Equal(AutoEquipRetryPolicy.ConclusiveExplicitRejectionCount, second);
+    }
+
+    [Fact]
+    public void RecordExplicitRejection_SpecificErrorIsImmediatelyConclusive()
+    {
+        var count = AutoEquipRetryPolicy.RecordExplicitRejection(
+            previousCount: 0, errorType: 0x420);
+
+        Assert.Equal(AutoEquipRetryPolicy.ConclusiveExplicitRejectionCount, count);
     }
 
     [Theory]

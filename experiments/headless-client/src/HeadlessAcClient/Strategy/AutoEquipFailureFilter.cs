@@ -17,16 +17,16 @@ using System.Collections.Generic;
 /// surface (the LLM has been observed mis-attributing such a rejection to
 /// its OWN current goal and abandoning it).
 ///
-/// One-shot consume: PHASE7F.4 attempts each guid exactly once (the
-/// caller's own dedup set prevents re-attempt), so there is exactly one
-/// autonomous failure per marked guid. <see cref="TryConsumeAutonomous"/>
-/// returns true exactly once per <see cref="MarkAutonomous"/> and removes
-/// the marker, so if the LLM LATER explicitly wields the same item and it
-/// fails, that failure surfaces normally (the LLM asked for it that time
-/// and should learn). The caller also clears the marker the moment the LLM
+/// Counted consume: each autonomous dispatch adds one pending response for its
+/// guid. A retry can overlap the first request while that response is missing,
+/// so a set would collapse two in-flight dispatches into one suppression.
+/// <see cref="TryConsumeAutonomous"/> removes exactly one pending response per
+/// call. If the LLM later explicitly wields the same item and it fails, that
+/// failure surfaces normally (the LLM asked for it that time and should learn).
+/// The caller clears every pending autonomous response the moment the LLM
 /// explicitly takes ownership of the guid via its Wield dispatch (see
-/// <see cref="ClearAutonomous"/>) to close the race where the LLM emits a
-/// Wield for the same item before the autonomous failure arrives.
+/// <see cref="ClearAutonomous"/>) to close the race where the LLM emits a Wield
+/// for the same item before an autonomous failure arrives.
 ///
 /// This is pure mechanical bookkeeping that distinguishes a
 /// source-autonomous wield from an LLM-requested one purely by which code
@@ -35,25 +35,38 @@ using System.Collections.Generic;
 /// </summary>
 internal sealed class AutoEquipFailureFilter
 {
-    private readonly HashSet<uint> _autonomous = new();
+    private readonly Dictionary<uint, int> _autonomous = new();
 
     /// <summary>Record that the source autonomously auto-equipped this guid.</summary>
-    public void MarkAutonomous(uint itemGuid) => _autonomous.Add(itemGuid);
+    public void MarkAutonomous(uint itemGuid)
+        => _autonomous[itemGuid] =
+            (_autonomous.TryGetValue(itemGuid, out var count) ? count : 0) + 1;
 
     /// <summary>
-    /// Clear any autonomous marker for this guid without consuming a
-    /// suppression. Call this when the LLM explicitly takes ownership of the
+    /// Clear all pending autonomous responses for this guid without consuming
+    /// suppressions. Call this when the LLM explicitly takes ownership of the
     /// guid (its own Wield dispatch) so a subsequent failure surfaces.
     /// </summary>
     public void ClearAutonomous(uint itemGuid) => _autonomous.Remove(itemGuid);
 
     /// <summary>
-    /// If <paramref name="itemGuid"/> was marked as a source-autonomous
-    /// auto-equip, remove the marker and return true (the caller should
+    /// If <paramref name="itemGuid"/> has a pending source-autonomous
+    /// auto-equip response, remove one and return true (the caller should
     /// suppress the rejection). Otherwise return false (surface normally).
-    /// Returns true at most once per <see cref="MarkAutonomous"/>.
+    /// Returns true exactly once per <see cref="MarkAutonomous"/> unless
+    /// <see cref="ClearAutonomous"/> discards the pending responses first.
     /// </summary>
-    public bool TryConsumeAutonomous(uint itemGuid) => _autonomous.Remove(itemGuid);
+    public bool TryConsumeAutonomous(uint itemGuid)
+    {
+        if (!_autonomous.TryGetValue(itemGuid, out var count))
+            return false;
+
+        if (count == 1)
+            _autonomous.Remove(itemGuid);
+        else
+            _autonomous[itemGuid] = count - 1;
+        return true;
+    }
 
     /// <summary>
     /// Decide whether an <c>InventoryServerSaveFailed</c> game event should be
