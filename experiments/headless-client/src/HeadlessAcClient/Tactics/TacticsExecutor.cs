@@ -210,8 +210,9 @@ internal sealed class TacticsExecutor
     }
 
     /// <summary>
-    /// Resolve the current goal's Item Selector (only meaningful for
-    /// Give goals). Returns null if no item selector or no match.
+    /// Resolve the current goal's Item Selector. Returns null if no item
+    /// selector or no match; the motor applies action-specific ownership
+    /// checks after resolution.
     /// </summary>
     public WorldObjectSnapshot? ResolveItem(WorldState world)
     {

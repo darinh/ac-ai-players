@@ -65,7 +65,7 @@ internal sealed class WorldObjectSnapshot
     // server's CreateObject serializer). For an un-equipped item carried
     // in the bot's inventory, the ObjectCreate carries ContainerGuid = self
     // and WielderGuid = null - i.e. "in your bag, not yet equipped". The
-    // startup equip-from-inventory pass uses these to decide what to wield.
+    // explicit Wield/Dequip executors use these links for ownership checks.
     public uint? ContainerGuid { get; internal set; }
     public uint? WielderGuid { get; internal set; }
 

@@ -5,19 +5,22 @@ namespace HeadlessAcClient.Strategy;
 using System;
 
 /// <summary>
-/// Retry timing for an LLM-authored Wield transaction. The policy only
-/// operates on a guid and slot already selected by Strategy.
+/// Retry timing for an LLM-authored inventory transaction. The policy only
+/// operates on an item already selected by Strategy.
 /// </summary>
-internal static class WieldRetryPolicy
+internal static class InventoryActionRetryPolicy
 {
     internal const int ConclusiveExplicitRejectionCount = 2;
 
     internal static readonly TimeSpan RetryCooldown =
         TimeSpan.FromSeconds(ResolveCooldownSeconds(
+            Environment.GetEnvironmentVariable("AC_BOTS_INVENTORY_RETRY_COOLDOWN_SECONDS") ??
             Environment.GetEnvironmentVariable("AC_BOTS_WIELD_RETRY_COOLDOWN_SECONDS")));
 
     internal static readonly int MaxAttempts =
-        ResolveMaxAttempts(Environment.GetEnvironmentVariable("AC_BOTS_WIELD_MAX_ATTEMPTS"));
+        ResolveMaxAttempts(
+            Environment.GetEnvironmentVariable("AC_BOTS_INVENTORY_MAX_ATTEMPTS") ??
+            Environment.GetEnvironmentVariable("AC_BOTS_WIELD_MAX_ATTEMPTS"));
 
     internal static double ResolveCooldownSeconds(string? envValue)
     {

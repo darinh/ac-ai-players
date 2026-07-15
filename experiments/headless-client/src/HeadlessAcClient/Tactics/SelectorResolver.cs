@@ -117,6 +117,26 @@ internal static class SelectorResolver
             .First().o;
     }
 
+    /// <summary>
+    /// Resolve a selector to exactly one item currently wielded by the actor.
+    /// Dequip is intentionally strict: zero or several matches return null so
+    /// the motor never chooses which equipped item the LLM meant.
+    /// </summary>
+    public static WorldObjectSnapshot? ResolveUniqueWieldedByActor(
+        Selector sel,
+        WorldState world,
+        uint actorGuid,
+        IWeenieRepository? weenies,
+        out int matchCount)
+    {
+        var matches = Resolve(sel, world, weenies)
+            .Where(o => o.WielderGuid == actorGuid)
+            .Take(2)
+            .ToList();
+        matchCount = matches.Count;
+        return matches.Count == 1 ? matches[0] : null;
+    }
+
     // An Attack goal must bind a target the server flags Attackable that is
     // NOT a fellow player. A selector can match a world object by NAME yet be a
     // non-attackable non-creature (an item whose name merely contains a

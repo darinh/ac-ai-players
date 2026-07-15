@@ -2074,11 +2074,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // Selector match for inventory items — mirrors VisibleMatchesSelector above
-    // but operates on an InventoryItemProjection. Used by the useless-launcher
-    // Wield drop guard to confirm a Wield selector resolves to a specific bag
-    // item before testing whether that item is loadable. Requires at least one
-    // identity field (Guid/Name/NameContains/Wcid) so an empty selector never
-    // matches-all. Pure wire-value comparison; no names/wcids in source.
+    // but operates on an InventoryItemProjection. Requires at least one identity
+    // field so an empty selector never matches-all.
     private static bool InventoryMatchesSelector(Selector sel, InventoryItemProjection i)
     {
         var hasIdentity = sel.Guid is not null
@@ -2096,11 +2093,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && !i.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase))
             return false;
         if (sel.Wcid is uint w && i.Wcid != w) return false;
-        // Mirror SelectorResolver.MatchesItemTypeMask / MatchesShortDescContains so the
-        // useless-launcher guard resolves a Wield selector EXACTLY like the Motor's wield
-        // executor — otherwise an item_type_mask or short_desc_contains selector matches
-        // a different item here than the executor would actually wield (the guard could
-        // drop a legitimate Wield or miss the useless launcher).
+        // Mirror SelectorResolver.MatchesItemTypeMask / MatchesShortDescContains.
         if (sel.ItemTypeMask is uint m && !(i.ItemType is uint it && (it & m) != 0)) return false;
         if (!string.IsNullOrEmpty(sel.ShortDescContains)
             && !(i.ShortDesc is not null
@@ -4931,25 +4924,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: repeated Wield with no equippable inventory weapon");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield no-weapon");
-        }
-
-        // Useless-launcher Wield drop (cp061): a bag missile LAUNCHER with no
-        // loadable ammo cannot fire and cp060 will dequip it immediately after
-        // wield — producing an infinite LLM-wield / Motor-dequip ping-pong that
-        // prevents the bot from ever fighting unarmed. Drop the Wield and defer
-        // to the fallback so cp047 autonomous combat runs unarmed instead.
-        // Self-limiting: once the bot acquires loadable ammo the guard returns
-        // false and the normal Wield path resumes. Thrown weapons (AmmoType null)
-        // are their own projectile and are NEVER dropped. Pure loadout arithmetic
-        // (ItemType + AmmoType + ValidLocations); no game knowledge.
-        if (IsWieldOfUnusableLauncher(goal, world))
-        {
-            Console.WriteLine(
-                $"[llm-override] useless-launcher wield drop: item={goal.Item ?? goal.Target}" +
-                " — bag launcher has no loadable ammo and would be immediately re-dequipped by cp060; deferring to fallback.");
-            _training?.RecordParseError(decisionId,
-                "dropped-by-override: Wield of an ammoless launcher with no loadable ammo");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield useless launcher");
         }
 
         // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
@@ -8616,7 +8590,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static bool IsObjectPursuitKind(GoalKind kind) => kind switch
     {
         GoalKind.Give or GoalKind.Use or GoalKind.Attack or GoalKind.Pickup
-            or GoalKind.Wield or GoalKind.GoTo or GoalKind.Talk => true,
+            or GoalKind.Wield or GoalKind.Dequip or GoalKind.GoTo or GoalKind.Talk => true,
         _ => false,
     };
 
@@ -9406,7 +9380,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine("""
 {
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -9426,7 +9400,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   // -- per-cycle tactical goal (REQUIRED — the tactics layer
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
-  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
+  "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
   "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
@@ -9565,7 +9539,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var selfArmCombatEffective =
             selfArmMeleeWielded || selfArmThrownWielded || (selfArmMissileWielded && selfArmAmmoLoaded);
         if (!selfArmCombatEffective)
-        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` your fists fight at a big DISADVANTAGE (much lower accuracy and damage than a trained weapon) — you can usually beat only the WEAKEST monsters and anything tougher is risky until you arm up. Prefer to arm before OPTIONAL combat, but you CAN still fight unarmed, so don't wander empty-handed: arm if you can, else hunt the weak monsters you CAN beat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` or a `[missile weapon/ammo]` you can afford, `Buy` it by its exact name — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. After buying it lands in your inventory: a thrown weapon then shows as a `throwable weapon` to Wield (arming you directly, no ammo needed); a launcher and its ammo arm you only as a PAIR — BOTH must be in your bag before the `missile launcher + compatible ammo` hint appears. So if you bought a launcher (or ammo) and see no arming hint, you are missing the matching piece: buy THAT (or a thrown weapon) instead — do NOT re-buy the same item expecting a hint. If you have no weapon to `Wield`/`Pickup` and the `Vendor offerings` you have browsed here have nothing you can afford, then getting coin is your TOP priority — above more NPC-talk, vendor-browsing, or contract-buying: `Explore` to the WEAKEST monsters and `Attack` them to LOOT a weapon and coin from their corpses (a looted weapon arms you; looted coin then buys one). That loot-to-arm hunt is the ONE exception to arming before combat. A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
+        sb.AppendLine("- SELF-ARM before fighting: if `Combat readiness` says `UNARMED` your fists fight at a big DISADVANTAGE (much lower accuracy and damage than a trained weapon) — you can usually beat only the WEAKEST monsters and anything tougher is risky until you arm up. Prefer to arm before OPTIONAL combat, but you CAN still fight unarmed, so don't wander empty-handed: arm if you can, else hunt the weak monsters you CAN beat. If it lists a `melee weapon in your inventory`, emit `Wield` for that item; else if it lists a `melee weapon nearby`, emit `Pickup` for it. If it lists a `throwable weapon in your inventory`, emit `Wield` for it — a thrown weapon is its own projectile, so once wielded you can `Attack` with NO ammo. If a `missile weapon` is wielded but `missile ammo: EMPTY`, you cannot fire — if it lists `missile ammo in your inventory`, emit `Wield` for that ammo before attacking; if it instead names the empty wielded launcher in a `Dequip` cue, emit `Dequip` for that exact item so you can fight unarmed or wield a usable weapon. Do NOT re-emit a `Wield`/`Pickup` the policy rejected or that is unreachable — try the other source or move on. If you have NO weapon to `Wield` or `Pickup` but a `vendor` is in view, `Use` it to reveal its `Vendor offerings`, and if those list a `[weapon]` or a `[missile weapon/ammo]` you can afford, `Buy` it by its exact name — buying a weapon to arm yourself is DIRECTED progress that outranks optional grinding. After buying it lands in your inventory: a thrown weapon then shows as a `throwable weapon` to Wield (arming you directly, no ammo needed); a launcher and its ammo arm you only as a PAIR — BOTH must be in your bag before the `missile launcher + compatible ammo` hint appears. So if you bought a launcher (or ammo) and see no arming hint, you are missing the matching piece: buy THAT (or a thrown weapon) instead — do NOT re-buy the same item expecting a hint. If you have no weapon to `Wield`/`Pickup` and the `Vendor offerings` you have browsed here have nothing you can afford, then getting coin is your TOP priority — above more NPC-talk, vendor-browsing, or contract-buying: `Explore` to the WEAKEST monsters and `Attack` them to LOOT a weapon and coin from their corpses (a looted weapon arms you; looted coin then buys one). That loot-to-arm hunt is the ONE exception to arming before combat. A `HOSTILE` attacker still takes priority — defend or flee even while unarmed.");
         // Connect XP-spend to the arming bootstrap. The loot-to-arm hunt above assumes the
         // weakest monsters drop a weapon/coin, but the very weakest can drop nothing useful
         // while the loot-bearing kinds are too tough to beat unarmed — leaving the bot looting
@@ -10546,6 +10520,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var hostilesInView = world.Visible.Count(v => !v.IsCorpse && v.ObservedHostile);
         sb.AppendLine("## Combat readiness");
         sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
+        if (wieldedMissileLauncher is { AmmoType: not null } emptyLauncher &&
+            !ammoLoaded && bagAmmo is null)
+            sb.AppendLine(
+                $"- EMPTY WIELDED LAUNCHER: emit `Dequip` with item `{emptyLauncher.Name}` now" +
+                " (use that exact `name`) so unarmed melee or a usable weapon can execute.");
         if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string crSkillAdvisory)
             sb.AppendLine($"- {crSkillAdvisory}");
         if (WieldedWeaponUntrainedAccuracyNote(world) is string crUntrainedNote)
@@ -10581,10 +10560,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "- missile launcher + compatible ammo in your inventory (Wield the launcher," +
                 $" then Wield the ammo to load): {bla1.Launcher.Name} + {bla1.Ammo.Name}");
-        // Ammoless-bag-launcher note (cp061): when unarmed and a bag launcher
-        // has no compatible ammo, the LLM tends to re-wield it believing that
-        // will arm the bot — it won't (launcher fires nothing, cp060 dequips it
-        // immediately). Surface a plain fact so the LLM understands: fight
+        // Ammoless-bag-launcher note: when unarmed and a bag launcher has no
+        // compatible ammo, the LLM tends to re-wield it believing that will arm
+        // the bot. Surface a plain fact so the LLM understands: fight
         // unarmed (unarmed melee is available) or obtain ammo first. No names
         // in source — the item name comes from the projection at runtime. Pure
         // typed-affordance projection; the LLM still decides.
@@ -10603,13 +10581,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     $"- NOTE: you have a missile launcher in your bag ({uselessBagLauncher.Name})" +
                     " but NO compatible ammo — a launcher without ammo CANNOT fire; wielding it" +
-                    " does NOT arm you and will be immediately un-wielded." +
+                    " does NOT arm you." +
                     " Fight unarmed (unarmed melee is always available) or find ammo first.");
         }
         // cp062 — commit-to-unarmed-combat. When the bot has NO weapon to wield or buy
         // here AND a monster is in view, the weak model tends to keep emitting `Wield`
-        // for the empty launcher (dropped every time by the loop-break) instead of
-        // fighting. Unarmed melee (fists) is always available, so direct the LLM to
+        // for the empty launcher instead of fighting. Unarmed melee (fists) is
+        // always available, so direct the LLM to
         // ATTACK the visible monster NOW rather than re-attempting a useless wield.
         // Surfaces the action affordance; the LLM still chooses the target and still
         // weighs the COMBAT SAFETY rule (a doomed/beaten engagement is vetoed
@@ -10621,7 +10599,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "- FIGHT NOW: you have NO weapon to wield or buy here, but a monster is in" +
                 " view and unarmed melee (fists) is ALWAYS available — emit `Attack` on a" +
                 " visible monster to fight it. Do NOT emit `Wield` (no usable weapon exists;" +
-                " an empty launcher cannot fire and is immediately un-wielded) — wielding wastes the turn.");
+                " an empty launcher cannot fire) — wielding wastes the turn.");
         if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
             bagAmmo is null && bagLauncherAmmo is null &&
             world.Vendor is null && armVendor is not null)
@@ -13866,6 +13844,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Combat readiness (re-surfaced because `## Combat readiness` above can be trimmed to fit the prompt)");
             sb.AppendLine($"- weapon: {WeaponReadinessLine(meleeWeaponWielded, missileWeaponWielded, ammoLoaded, bagAmmo is not null, wieldedThrownWeapon)}");
+            if (wieldedMissileLauncher is { AmmoType: not null } tailEmptyLauncher &&
+                !ammoLoaded && bagAmmo is null)
+                sb.AppendLine(
+                    $"- EMPTY WIELDED LAUNCHER: emit `Dequip` with item `{tailEmptyLauncher.Name}` now" +
+                    " (use that exact `name`) so unarmed melee or a usable weapon can execute.");
             if (WeaponSkillSwapAdvisory(world, recentlyServerRefusedGuids) is string capSkillAdvisory)
                 sb.AppendLine($"- {capSkillAdvisory}");
             if (WieldedWeaponUntrainedAccuracyNote(world) is string capUntrainedNote)
@@ -13915,7 +13898,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "- FIGHT NOW: you have NO weapon to wield or buy here, but a monster is in" +
                     " view and unarmed melee (fists) is ALWAYS available — emit `Attack` on a" +
                     " visible monster to fight it. Do NOT emit `Wield` (no usable weapon exists;" +
-                    " an empty launcher cannot fire and is immediately un-wielded) — wielding wastes the turn.");
+                    " an empty launcher cannot fire) — wielding wastes the turn.");
             if (bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
                 bagAmmo is null && bagLauncherAmmo is null &&
                 world.Vendor is null && armVendor is not null)
@@ -15421,11 +15404,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// True when at least one of the bot's OWN bag items is loadable ammo for a
     /// wielded launcher: an item whose ValidLocations carries the missile-ammo
     /// SLOT bit (<see cref="ItemTypeMasks.MissileAmmoSlot"/>) and whose AmmoType is
-    /// <see cref="AmmoTypeCompatible"/> with the launcher's. Mirrors the body's
-    /// `bagAmmo` detection so the Motor's autonomous launcher-dequip never fires
-    /// while the bot could instead LOAD ammo and keep the (more effective)
-    /// launcher. Caller passes already-ownership-filtered bag items. Pure
-    /// wire-value projection; no names/wcids, no game knowledge.
+    /// <see cref="AmmoTypeCompatible"/> with the launcher's. Caller passes
+    /// already-ownership-filtered bag items. Pure wire-value projection.
     /// </summary>
     internal static bool HasLoadableBagAmmoForLauncher(
         IEnumerable<(uint? ValidLocations, ushort? AmmoType)> ownedBagItems,
@@ -15458,105 +15438,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 if (HasLoadableBagAmmoForLauncher(bagAmmo, i.AmmoType)) return false; // launcher+ammo
             }
         }
-        return true;
-    }
-
-    /// <summary>
-    /// True when a Wield goal targets a bag missile LAUNCHER that has no
-    /// loadable ammo in the bag — so wielding it would be immediately
-    /// reversed by the Motor's cp060 dequip, producing an infinite
-    /// dequip/re-wield loop. A THROWN weapon (AmmoType null) is its own
-    /// projectile and returns false. A launcher WITH compatible bag ammo
-    /// returns false (the bot should wield it). Non-Wield goals always
-    /// return false. Pure wire-state projection; no names/wcids, no
-    /// game knowledge — the check is fully mechanical loadout arithmetic.
-    /// </summary>
-    internal static bool IsWieldOfUnusableLauncher(Goal goal, WorldStateProjection world)
-    {
-        if (goal.Kind != GoalKind.Wield) return false;
-        // Provable-harmlessness gate: only intervene when the bot has NO usable weapon
-        // anywhere (nothing combat-capable wielded, and no bag melee/thrown weapon or
-        // launcher+compatible-ammo it could wield). In that genuinely-weaponless state —
-        // the cp060 unarmed loop — dropping a Wield can never lose a usable weapon, so
-        // the loop-break is harmless REGARDLESS of how the Motor resolves the selector
-        // (over stale/off-screen objects the Strategy projection cannot see). When a
-        // usable weapon IS available, the guard defers entirely and the prompt note +
-        // self-arm affordances steer the LLM to that weapon instead.
-        if (!HasNoUsableWeaponAnywhere(world)) return false;
-        // The Motor's wield executor resolves goal.Item first and falls back to goal.Target
-        // ONLY when Item resolves to no owned item (HandshakeDriver: itemSnap ?? targetSnap,
-        // each filtered to ContainerGuid==self). The Strategy projection cannot reproduce
-        // the executor's full-object-set resolution order, so this guard acts only on an
-        // UNAMBIGUOUS single owned bag match and DEFERS on any ambiguity (>1 bag match, or a
-        // visible world object the selector could also resolve) — it never drops a Wield the
-        // Motor might resolve to a different object. An ambiguous Item does NOT fall through
-        // to Target: the executor would still wield one of the Item matches, so retargeting
-        // here would be wrong.
-        var (item, itemAmbiguous) = ResolveBagWieldCandidate(goal.Item, world);
-        if (itemAmbiguous) return false;
-        var wielded = item;
-        if (wielded is null)
-        {
-            var (target, targetAmbiguous) = ResolveBagWieldCandidate(goal.Target, world);
-            if (targetAmbiguous) return false;
-            wielded = target;
-        }
-        if (wielded is null) return false;
-        // Useless iff a missile LAUNCHER (MissileWeapon bit + a non-null AmmoType — a
-        // THROWN weapon has null AmmoType and is usable) with NO loadable bag ammo.
-        if (!(wielded.ItemType is uint it && (it & ItemTypeMasks.MissileWeapon) != 0)
-            || wielded.AmmoType is null)
-            return false;
-        var bagAmmoItems = world.Inventory
-            .Where(i => i.WieldedAt is not uint bw || bw == 0)
-            .Select(i => (i.ValidLocations, i.AmmoType));
-        return !HasLoadableBagAmmoForLauncher(bagAmmoItems, wielded.AmmoType);
-    }
-
-    // Resolves a wield selector against the bot's own un-wielded bag, returning the single
-    // match (or null) plus an Ambiguous flag. Ambiguous = the selector matches >1 bag item
-    // OR a visible world object the executor's full-object resolver could also pick — in
-    // both cases the projection cannot decide which item the Motor wields, so the guard
-    // must defer. The visible check (VisibleCouldMatchWieldSelector) mirrors the resolver's
-    // evaluable fields (guid/name/name_contains/wcid/item_type_mask). short_desc_contains is
-    // not projected on visible objects; an all-short_desc selector is matched on the bag via
-    // InventoryMatchesSelector, and a same-name visible collision is caught by the name
-    // check (AC item names correlate with item type, so a same-name/different-type visible
-    // object — the only residual short_desc ambiguity — is not realizable).
-    private static (InventoryItemProjection? Item, bool Ambiguous) ResolveBagWieldCandidate(
-        Selector? sel, WorldStateProjection world)
-    {
-        if (sel is null || sel.IsEmpty) return (null, false);
-        if (world.Visible.Any(v => VisibleCouldMatchWieldSelector(sel, v))) return (null, true);
-        var bagMatches = world.Inventory
-            .Where(i => (i.WieldedAt is not uint w || w == 0) && InventoryMatchesSelector(sel, i))
-            .Take(2)
-            .ToList();
-        if (bagMatches.Count > 1) return (null, true);
-        return (bagMatches.Count == 1 ? bagMatches[0] : null, false);
-    }
-
-    // Visible-object counterpart of InventoryMatchesSelector for the wield ambiguity check:
-    // honors the SelectorResolver fields evaluable on a VisibleObjectProjection
-    // (guid/name/name_contains/wcid/item_type_mask). Requires at least one such field so a
-    // bare/short_desc-only selector never matches-all here.
-    private static bool VisibleCouldMatchWieldSelector(Selector sel, VisibleObjectProjection v)
-    {
-        var hasIdentity = sel.Guid is not null
-            || !string.IsNullOrEmpty(sel.Name)
-            || !string.IsNullOrEmpty(sel.NameContains)
-            || sel.Wcid is not null
-            || sel.ItemTypeMask is not null;
-        if (!hasIdentity) return false;
-        if (sel.Guid is uint g && v.Guid != g) return false;
-        if (!string.IsNullOrEmpty(sel.Name)
-            && !string.Equals(v.Name, sel.Name, StringComparison.OrdinalIgnoreCase))
-            return false;
-        if (!string.IsNullOrEmpty(sel.NameContains)
-            && (v.Name is null || !v.Name.Contains(sel.NameContains, StringComparison.OrdinalIgnoreCase)))
-            return false;
-        if (sel.Wcid is uint w && !(v.Wcid is uint vw && vw == w)) return false;
-        if (sel.ItemTypeMask is uint m && !(v.ItemType is uint it && (it & m) != 0)) return false;
         return true;
     }
 
@@ -15668,8 +15549,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                    "TRAINED weapon skill will NOT improve THIS weapon's hit rate — raise COORDINATION for " +
                    "accuracy (or arm a weapon governed by a skill you HAVE trained for a real upgrade).";
         }
-        // Case 2: genuinely fighting unarmed (no main-weapon wielded AND no usable
-        // weapon anywhere — the cp060/cp061/cp062 stuck state). Unarmed swing TO-HIT is the
+        // Case 2: genuinely fighting unarmed (no main weapon wielded and no usable
+        // weapon anywhere). Unarmed swing TO-HIT is the
         // UnarmedCombat skill (half Strength + half Coordination) and unarmed DAMAGE is
         // Strength-based, so STRENGTH is the better unarmed lever — it raises both accuracy
         // and damage, while Coordination raises accuracy only. Surface it so a weaponless bot
@@ -16104,16 +15985,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // target — its payload is the `message`, validated below. Accept them
                 // rather than discarding the LLM's decision to the heuristic fallback.
                 //
-                // Wield's wielded object is logically the `item`, not the
-                // `target`: the Motor's Wield dispatch reads goal.Item (or an
-                // in-bag target) and already tolerates an empty target. The
-                // prompt schema lists both fields but never directs the LLM to
-                // set target=self for Wield, so the model legitimately emits the
-                // weapon in `item` with target=null. Accept an item-only Wield
-                // instead of discarding the LLM's decision to the heuristic
-                // fallback. All other verbs still require a target.
+                // Wield and Dequip act on the `item`, not a world `target`.
+                // Accept either as an item-only action.
                 bool wieldHasItem =
                     parsed.Kind == GoalKind.Wield &&
+                    parsed.Item is not null && !parsed.Item.IsEmpty;
+                bool dequipHasItem =
+                    parsed.Kind == GoalKind.Dequip &&
                     parsed.Item is not null && !parsed.Item.IsEmpty;
                 // Self-Use (read / activate / "double-click" an inventory item ON
                 // yourself) is, like Wield, logically an ITEM action with no world
@@ -16125,7 +16003,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 bool useHasItem =
                     parsed.Kind == GoalKind.Use &&
                     parsed.Item is not null && !parsed.Item.IsEmpty;
-                if (!wieldHasItem && !useHasItem)
+                if (!wieldHasItem && !dequipHasItem && !useHasItem)
                 {
                     error = "target selector missing or empty";
                     return false;
@@ -16134,6 +16012,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (parsed.Kind == GoalKind.Give && (parsed.Item is null || parsed.Item.IsEmpty))
             {
                 error = "Give goal requires non-empty item selector";
+                return false;
+            }
+            if (parsed.Kind == GoalKind.Dequip &&
+                (parsed.Item is null || parsed.Item.IsEmpty) &&
+                parsed.Target.IsEmpty)
+            {
+                error = "Dequip goal requires non-empty item or target selector";
                 return false;
             }
             if (parsed.Kind == GoalKind.Say && string.IsNullOrWhiteSpace(parsed.Message))

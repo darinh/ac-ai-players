@@ -6,7 +6,7 @@ using System;
 using HeadlessAcClient.Strategy;
 using Xunit;
 
-public class WieldRetryPolicyTests
+public class InventoryActionRetryPolicyTests
 {
     private static readonly DateTime T0 = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
     private static readonly TimeSpan Cooldown = TimeSpan.FromSeconds(10);
@@ -14,53 +14,53 @@ public class WieldRetryPolicyTests
 
     [Fact]
     public void ShouldRetry_CooldownElapsed_UnderCap()
-        => Assert.True(WieldRetryPolicy.ShouldRetry(
+        => Assert.True(InventoryActionRetryPolicy.ShouldRetry(
             T0, 1, 0, T0 + Cooldown, Cooldown, MaxAttempts));
 
     [Fact]
     public void ShouldRetry_WithinCooldown_IsFalse()
-        => Assert.False(WieldRetryPolicy.ShouldRetry(
+        => Assert.False(InventoryActionRetryPolicy.ShouldRetry(
             T0, 1, 0, T0 + TimeSpan.FromSeconds(9), Cooldown, MaxAttempts));
 
     [Fact]
     public void ShouldRetry_SecondExplicitRejection_IsFalse()
-        => Assert.False(WieldRetryPolicy.ShouldRetry(
-            T0, 2, WieldRetryPolicy.ConclusiveExplicitRejectionCount,
+        => Assert.False(InventoryActionRetryPolicy.ShouldRetry(
+            T0, 2, InventoryActionRetryPolicy.ConclusiveExplicitRejectionCount,
             T0 + TimeSpan.FromMinutes(1), Cooldown, MaxAttempts));
 
     [Fact]
     public void RecordExplicitRejection_FirstNoneAllowsOneRetry()
     {
-        var count = WieldRetryPolicy.RecordExplicitRejection(0, 0);
+        var count = InventoryActionRetryPolicy.RecordExplicitRejection(0, 0);
 
         Assert.Equal(1, count);
-        Assert.True(WieldRetryPolicy.ShouldRetry(
+        Assert.True(InventoryActionRetryPolicy.ShouldRetry(
             T0, 1, count, T0 + Cooldown, Cooldown, MaxAttempts));
     }
 
     [Fact]
     public void RecordExplicitRejection_SecondNoneIsConclusive()
     {
-        var first = WieldRetryPolicy.RecordExplicitRejection(0, 0);
-        var second = WieldRetryPolicy.RecordExplicitRejection(first, 0);
+        var first = InventoryActionRetryPolicy.RecordExplicitRejection(0, 0);
+        var second = InventoryActionRetryPolicy.RecordExplicitRejection(first, 0);
 
-        Assert.Equal(WieldRetryPolicy.ConclusiveExplicitRejectionCount, second);
+        Assert.Equal(InventoryActionRetryPolicy.ConclusiveExplicitRejectionCount, second);
     }
 
     [Fact]
     public void RecordExplicitRejection_SpecificErrorIsConclusive()
         => Assert.Equal(
-            WieldRetryPolicy.ConclusiveExplicitRejectionCount,
-            WieldRetryPolicy.RecordExplicitRejection(0, 0x420));
+            InventoryActionRetryPolicy.ConclusiveExplicitRejectionCount,
+            InventoryActionRetryPolicy.RecordExplicitRejection(0, 0x420));
 
     [Fact]
     public void TimedOut_AtCapAfterCooldown()
-        => Assert.True(WieldRetryPolicy.TimedOut(
+        => Assert.True(InventoryActionRetryPolicy.TimedOut(
             T0, MaxAttempts, 0, T0 + Cooldown, Cooldown, MaxAttempts));
 
     [Fact]
     public void TimedOut_BeforeCooldown_IsFalse()
-        => Assert.False(WieldRetryPolicy.TimedOut(
+        => Assert.False(InventoryActionRetryPolicy.TimedOut(
             T0, MaxAttempts, 0, T0 + TimeSpan.FromSeconds(9), Cooldown, MaxAttempts));
 
     [Theory]
@@ -72,7 +72,7 @@ public class WieldRetryPolicyTests
     [InlineData("15", 15.0)]
     [InlineData("500", 120.0)]
     public void ResolveCooldownSeconds_ClampsAndDefaults(string? value, double expected)
-        => Assert.Equal(expected, WieldRetryPolicy.ResolveCooldownSeconds(value));
+        => Assert.Equal(expected, InventoryActionRetryPolicy.ResolveCooldownSeconds(value));
 
     [Theory]
     [InlineData(null, 4)]
@@ -83,5 +83,5 @@ public class WieldRetryPolicyTests
     [InlineData("7", 7)]
     [InlineData("999", 20)]
     public void ResolveMaxAttempts_ClampsAndDefaults(string? value, int expected)
-        => Assert.Equal(expected, WieldRetryPolicy.ResolveMaxAttempts(value));
+        => Assert.Equal(expected, InventoryActionRetryPolicy.ResolveMaxAttempts(value));
 }

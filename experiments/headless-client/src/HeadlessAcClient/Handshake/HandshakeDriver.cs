@@ -918,30 +918,31 @@ internal sealed class HandshakeDriver : IDisposable
         // WHICH weapon; source only inserts the mechanical dequip the
         // server requires.
         var                  pendingWieldAfterDequip = new Dictionary<uint, (uint TargetGuid, uint TargetSlot, DateTime StartedUtc)>();
-        // cp060 Part 3 — standalone dequip of an objectively-useless ammoless
-        // launcher. When a launcher is wielded with no ammo (LauncherNeedsDequip
-        // state) AND the LLM has an active kill commitment + a monster is in view,
-        // the Motor sends a PutItemInContainer for the launcher so the bot reaches
-        // UnarmedMeleeOnly and CanUnarmedMelee enables the combat chain.
-        // This guid is set when the dequip is in-flight; cleared when the put-ack
-        // arrives (see the InventoryPutObjInContainer ack handler below). A simple
-        // staleness timeout (10s, mirrors pendingWieldAfterDequip) prevents a lost
-        // ack from permanently blocking re-dispatch.
-        uint?                pendingLauncherDequipGuid = null;
-        DateTime?            pendingLauncherDequipSentAt = null;
         // Phase 6n — after an explicitly requested wield succeeds, mark
         // its weenie-class as satisfied. Also count successful pickups
         // per name; this count is TELEMETRY ONLY — surfaced to the LLM
         // as `picked_name_count=N` on each exploration candidate.
         var                  satisfiedWeenieClasses = new HashSet<uint>();
         var                  pickupCountByName = new Dictionary<string, int>();
-        // Item guids participating in explicit Wield transactions, including
-        // a blocker that must first be moved into the pack. A None inventory
-        // failure only becomes an ActionRejected when it matches a request
-        // the bot actually dispatched.
-        var                  wieldTransactionGuids = new HashSet<uint>();
+        // Item guids participating in explicit Wield or Dequip transactions,
+        // including a blocker that must first be moved into the pack. A None
+        // inventory failure only becomes an ActionRejected when it matches a
+        // request the bot actually dispatched.
+        var                  inventoryTransactionGuids = new HashSet<uint>();
         var                  pendingWieldRetries =
             new Dictionary<uint, (uint Slot, DateTime SentAt, int Attempts, int ExplicitRejections)>();
+        var                  pendingDequipRetries =
+            new Dictionary<uint, (DateTime SentAt, int Attempts, int ExplicitRejections)>();
+        void ReleaseInventoryTransaction(uint itemGuid)
+        {
+            var stillOwned =
+                pendingWieldRetries.ContainsKey(itemGuid) ||
+                pendingDequipRetries.ContainsKey(itemGuid) ||
+                pendingWieldAfterDequip.ContainsKey(itemGuid) ||
+                pendingWieldAfterDequip.Values.Any(v => v.TargetGuid == itemGuid);
+            if (!stillOwned)
+                inventoryTransactionGuids.Remove(itemGuid);
+        }
         void RecordWieldDispatch(uint itemGuid, uint slot)
         {
             pendingWieldRetries.TryGetValue(itemGuid, out var previous);
@@ -950,7 +951,49 @@ internal sealed class HandshakeDriver : IDisposable
                 DateTime.UtcNow,
                 previous.Attempts + 1,
                 previous.ExplicitRejections);
-            wieldTransactionGuids.Add(itemGuid);
+            inventoryTransactionGuids.Add(itemGuid);
+        }
+        void RecordDequipDispatch(uint itemGuid)
+        {
+            pendingDequipRetries.TryGetValue(itemGuid, out var previous);
+            pendingDequipRetries[itemGuid] = (
+                DateTime.UtcNow,
+                previous.Attempts + 1,
+                previous.ExplicitRejections);
+            inventoryTransactionGuids.Add(itemGuid);
+        }
+        async Task<(uint PacketSequence, uint FragmentSequence, int Bytes)>
+            SendWieldAndRecordAsync(uint itemGuid, uint slot)
+        {
+            var packetSequence = nextOutboundPacketSequence++;
+            var fragmentSequence = nextOutboundFragmentSequence++;
+            var payload = new byte[GameActionGetAndWieldItemMessage.PackedSize];
+            var payloadLength = GameActionGetAndWieldItemMessage.Pack(
+                payload,
+                itemGuid: itemGuid,
+                equipLocation: (int)slot);
+            var packet = new OutboundPacket();
+            if (lastReceivedSeq != 0)
+                packet.AddAckSequence(lastReceivedSeq);
+            packet.AddBlobFragment(
+                fragSequence: fragmentSequence,
+                fragId: OutboundFragmentId,
+                queue: (ushort)GameMessageGroup.UIQueue,
+                gameMessagePayload: payload.AsSpan(0, payloadLength));
+            var sent = packet.Pack(
+                sendBuf,
+                myClientId,
+                sequence: packetSequence,
+                iteration: 1,
+                encrypt: true,
+                cryptoSend: cryptoSend);
+            await _socket!.SendToAsync(
+                new ArraySegment<byte>(sendBuf, 0, sent),
+                SocketFlags.None,
+                _serverPort0,
+                ct).ConfigureAwait(false);
+            RecordWieldDispatch(itemGuid, slot);
+            return (packetSequence, fragmentSequence, sent);
         }
         // Guids the bot has dispatched an LLM Pickup opcode for. A Pickup the
         // server refuses (a non-takeable fixed object) returns a silent
@@ -2872,10 +2915,20 @@ internal sealed class HandshakeDriver : IDisposable
                                 // picked_name_count=N (picker-name-respawn-
                                 // audit). No longer used to filter the picker.
                                 var pickedSnap = worldState.TryGet(putAck.ItemGuid);
-                                if (pickedSnap is not null && !string.IsNullOrEmpty(pickedSnap.Name))
+                                var wasDispatchedPickup =
+                                    pickupDispatchedGuids.Remove(putAck.ItemGuid);
+                                if (wasDispatchedPickup &&
+                                    pickedSnap is not null &&
+                                    !string.IsNullOrEmpty(pickedSnap.Name))
                                 {
                                     pickupCountByName.TryGetValue(pickedSnap.Name!, out var pc);
                                     pickupCountByName[pickedSnap.Name!] = pc + 1;
+                                }
+                                if (pendingDequipRetries.Remove(putAck.ItemGuid))
+                                {
+                                    ReleaseInventoryTransaction(putAck.ItemGuid);
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Dequip acknowledged: item=0x{putAck.ItemGuid:X8}");
                                 }
                                 // Dequip-before-wield follow-up. The put-ack
                                 // for a dequipped weapon-swap BLOCKER confirms
@@ -2883,16 +2936,10 @@ internal sealed class HandshakeDriver : IDisposable
                                 // intended target weapon can finally be wielded
                                 // without tripping CheckWeaponCollision. Send
                                 // the deferred GetAndWieldItem now.
-                                // Capture swap-membership BEFORE the Remove below so
-                                // the cp060 latch check further down is not vacuous
-                                // (it must NOT clear the standalone-dequip latch on a
-                                // SWAP-path dequip ack for the same guid).
-                                var wasSwapDequipAck =
-                                    pendingWieldAfterDequip.ContainsKey(putAck.ItemGuid);
                                 if (pendingWieldAfterDequip.TryGetValue(putAck.ItemGuid, out var swap))
                                 {
                                     pendingWieldAfterDequip.Remove(putAck.ItemGuid);
-                                    wieldTransactionGuids.Remove(putAck.ItemGuid);
+                                    ReleaseInventoryTransaction(putAck.ItemGuid);
 
                                     // Multi-blocker swap: a two-handed weapon is
                                     // blocked by BOTH a main-hand weapon AND an
@@ -2947,56 +2994,16 @@ internal sealed class HandshakeDriver : IDisposable
                                     }
                                     else
                                     {
-                                        var swapPktSeq = nextOutboundPacketSequence++;
-                                        var swapFragSeq = nextOutboundFragmentSequence++;
-                                        var swapBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                                        var swapLen = GameActionGetAndWieldItemMessage.Pack(
-                                            swapBuf,
-                                            itemGuid: swap.TargetGuid,
-                                            equipLocation: (int)swap.TargetSlot);
-                                        var swapMsg = new OutboundPacket();
-                                        if (lastReceivedSeq != 0)
-                                            swapMsg.AddAckSequence(lastReceivedSeq);
-                                        swapMsg.AddBlobFragment(
-                                            fragSequence: swapFragSeq,
-                                            fragId: OutboundFragmentId,
-                                            queue: (ushort)GameMessageGroup.UIQueue,
-                                            gameMessagePayload: swapBuf.AsSpan(0, swapLen));
-                                        var swapSentLen = swapMsg.Pack(
-                                            sendBuf,
-                                            myClientId,
-                                            sequence: swapPktSeq,
-                                            iteration: 1,
-                                            encrypt: true,
-                                            cryptoSend: cryptoSend);
-                                        await _socket!.SendToAsync(
-                                            new ArraySegment<byte>(sendBuf, 0, swapSentLen),
-                                            SocketFlags.None,
-                                            _serverPort0,
-                                            ct).ConfigureAwait(false);
-                                        RecordWieldDispatch(swap.TargetGuid, swap.TargetSlot);
+                                        var swapDispatch = await SendWieldAndRecordAsync(
+                                            swap.TargetGuid,
+                                            swap.TargetSlot);
                                         Console.WriteLine(
                                             $"[strategy] SWAP-WIELD after dequip: blocker=0x{putAck.ItemGuid:X8} unequipped -> " +
                                             $"GetAndWieldItem(item=0x{swap.TargetGuid:X8} slot=0x{swap.TargetSlot:X}) " +
-                                            $"pktSeq={swapPktSeq} fragSeq={swapFragSeq} totalBytes={swapSentLen}");
+                                            $"pktSeq={swapDispatch.PacketSequence} " +
+                                            $"fragSeq={swapDispatch.FragmentSequence} " +
+                                            $"totalBytes={swapDispatch.Bytes}");
                                     }
-                                }
-                                // cp060 Part 3 — standalone launcher dequip ack.
-                                // When the put-ack guid matches the in-flight
-                                // launcher dequip (not the swap path above), clear
-                                // the latch so the item is no longer considered
-                                // "dequip in-flight". On the next Motor tick the
-                                // weapon state is UnarmedMeleeOnly and the combat
-                                // chain dispatches TargetedMeleeAttack (fists).
-                                if (pendingLauncherDequipGuid is uint ldguid &&
-                                    ldguid == putAck.ItemGuid &&
-                                    !wasSwapDequipAck)
-                                {
-                                    pendingLauncherDequipGuid  = null;
-                                    pendingLauncherDequipSentAt = null;
-                                    Console.WriteLine(
-                                        $"[motor] cp060 launcher dequip ack 0x{putAck.ItemGuid:X8} — " +
-                                        "launcher removed; unarmed melee path now unblocked.");
                                 }
                             }
                             // M1.6 — PopupString is the canonical
@@ -3103,7 +3110,7 @@ internal sealed class HandshakeDriver : IDisposable
                             if (ge.Payload?.WieldObject is { } wieldAck)
                             {
                                 pendingWieldRetries.Remove(wieldAck.ItemGuid);
-                                wieldTransactionGuids.Remove(wieldAck.ItemGuid);
+                                ReleaseInventoryTransaction(wieldAck.ItemGuid);
                                 var wieldedSnap = worldState.TryGet(wieldAck.ItemGuid);
                                 if (wieldedSnap is not null && wieldedSnap.WeenieClassId is uint wc2)
                                     satisfiedWeenieClasses.Add(wc2);
@@ -3746,23 +3753,51 @@ internal sealed class HandshakeDriver : IDisposable
                             // inventory action.
                             if (ge.Payload?.InventoryServerSaveFailed is { } isf &&
                                 InventoryFailurePolicy.ShouldSurfaceInventoryFailure(
-                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, wieldTransactionGuids,
+                                    isf.ErrorType, isf.ItemGuid, pendingGiveItemGuid, inventoryTransactionGuids,
                                     pickupDispatchedGuids))
                             {
                                 var invLabel = isf.ErrorType != 0
                                     ? WeenieErrorLabels.Label(isf.ErrorType)
                                     : "rejected by the server (the item was not accepted)";
+                                pickupDispatchedGuids.Remove(isf.ItemGuid);
+                                if (pendingDequipRetries.TryGetValue(isf.ItemGuid, out var dequipRetry))
+                                {
+                                    var explicitRejections =
+                                        InventoryActionRetryPolicy.RecordExplicitRejection(
+                                            dequipRetry.ExplicitRejections,
+                                            isf.ErrorType);
+                                    var canRetry =
+                                        isf.ErrorType == 0 &&
+                                        explicitRejections <
+                                            InventoryActionRetryPolicy.ConclusiveExplicitRejectionCount &&
+                                        dequipRetry.Attempts < InventoryActionRetryPolicy.MaxAttempts;
+                                    if (canRetry)
+                                    {
+                                        pendingDequipRetries[isf.ItemGuid] = (
+                                            dequipRetry.SentAt,
+                                            dequipRetry.Attempts,
+                                            explicitRejections);
+                                        Console.WriteLine(
+                                            $"[dequip-retry] transient rejection retained for LLM-authored Dequip: " +
+                                            $"item=0x{isf.ItemGuid:X8} attempt={dequipRetry.Attempts}/" +
+                                            $"{InventoryActionRetryPolicy.MaxAttempts}; retry after cooldown.");
+                                        break;
+                                    }
+
+                                    pendingDequipRetries.Remove(isf.ItemGuid);
+                                    ReleaseInventoryTransaction(isf.ItemGuid);
+                                }
                                 if (pendingWieldRetries.TryGetValue(isf.ItemGuid, out var wieldRetry))
                                 {
                                     var explicitRejections =
-                                        WieldRetryPolicy.RecordExplicitRejection(
+                                        InventoryActionRetryPolicy.RecordExplicitRejection(
                                             wieldRetry.ExplicitRejections,
                                             isf.ErrorType);
                                     var canRetry =
                                         isf.ErrorType == 0 &&
                                         explicitRejections <
-                                            WieldRetryPolicy.ConclusiveExplicitRejectionCount &&
-                                        wieldRetry.Attempts < WieldRetryPolicy.MaxAttempts;
+                                            InventoryActionRetryPolicy.ConclusiveExplicitRejectionCount &&
+                                        wieldRetry.Attempts < InventoryActionRetryPolicy.MaxAttempts;
                                     if (canRetry)
                                     {
                                         pendingWieldRetries[isf.ItemGuid] = (
@@ -3773,12 +3808,12 @@ internal sealed class HandshakeDriver : IDisposable
                                         Console.WriteLine(
                                             $"[wield-retry] transient rejection retained for LLM-authored Wield: " +
                                             $"item=0x{isf.ItemGuid:X8} attempt={wieldRetry.Attempts}/" +
-                                            $"{WieldRetryPolicy.MaxAttempts}; retry after cooldown.");
+                                            $"{InventoryActionRetryPolicy.MaxAttempts}; retry after cooldown.");
                                         break;
                                     }
 
                                     pendingWieldRetries.Remove(isf.ItemGuid);
-                                    wieldTransactionGuids.Remove(isf.ItemGuid);
+                                    ReleaseInventoryTransaction(isf.ItemGuid);
                                 }
                                 // A prerequisite dequip whose item the server
                                 // refuses to move. To wield an item that needs an
@@ -3819,8 +3854,8 @@ internal sealed class HandshakeDriver : IDisposable
                                 {
                                     pendingWieldAfterDequip.Remove(isf.ItemGuid);
                                     pendingWieldRetries.Remove(swapReject.TargetGuid);
-                                    wieldTransactionGuids.Remove(isf.ItemGuid);
-                                    wieldTransactionGuids.Remove(swapReject.TargetGuid);
+                                    ReleaseInventoryTransaction(isf.ItemGuid);
+                                    ReleaseInventoryTransaction(swapReject.TargetGuid);
                                     Console.WriteLine(
                                         $"[strategy] SWAP-WIELD failed: blocker=0x{isf.ItemGuid:X8} could not be " +
                                         $"unequipped (err=0x{isf.ErrorType:X}); re-attributing rejection to target " +
@@ -5065,110 +5100,6 @@ internal sealed class HandshakeDriver : IDisposable
                     ClearCombatFightStats();
                 }
 
-                // cp060 Part 3 — standalone dequip of a provably-useless ammoless
-                // launcher so the bot can reach UnarmedMeleeOnly and fist-attack.
-                //
-                // A wielded launcher with no loaded ammo forces Missile combat
-                // mode, and Player_Missile.cs cancels any attack without ammo —
-                // the launcher is mechanically useless right now. Dequipping it
-                // lets SelectAttackMode → Melee (no weapon) → TargetedMeleeAttack
-                // (fists, which the server ALLOWS with no weapon in hand).
-                //
-                // Gate: LauncherNeedsDequip state AND combat is on the agenda
-                // (an active kill-count commitment OR an active combat-target lock —
-                // see the inline note below) AND at least one monster is in view AND
-                // no loadable bag ammo. This restricts the mechanical dequip to
-                // ticks where the LLM has chosen combat.
-                //
-                // Anti-spam: one in-flight dequip at a time; stale latches time
-                // out after 10 s (mirrors pendingWieldAfterDequip's StartedUtc
-                // timeout pattern) to recover from a lost ack.
-                // Combat is on the agenda when EITHER the LLM committed to a
-                // kill-count grind (IsActiveKillCommitment) OR the Motor is already
-                // locked onto a combat target (combatTargetGuid) — e.g. a
-                // self-defense Attack the cp049 exemption kept, or any in-progress
-                // engagement. Both are LLM-chosen combat; the dequip only makes the
-                // chosen engagement executable (a launcher with no ammo cannot fire
-                // and blocks unarmed melee). Gating on EITHER ensures self-defense
-                // and active combat reach unarmed melee, not only kill-count grinds.
-                // (Known gap: a bare optional Attack on a PASSIVE monster with no
-                // commitment and no lock is dropped by cp049 and does not trigger
-                // the dequip — the LLM is steered to commit a grind instead; see
-                // the unarmed-melee readiness note.)
-                if (CombatCommitment.IsActiveKillCommitment(intentStack.Top, out _) ||
-                    combatTargetGuid is not null)
-                {
-                    var ldWieldedItems = worldState.Objects.Values
-                        .Where(s => s.WielderGuid is uint wg && wg == chosenCharacterGuid)
-                        .Select(s => new WeaponStateItem(
-                            s.Guid, s.ItemType, s.CurrentWieldedLocation, s.AmmoType));
-                    var (ldState, ldGuid) = CombatWeaponSelection.ClassifyWeaponState(ldWieldedItems);
-
-                    if (ldState == WeaponReadiness.LauncherNeedsDequip &&
-                        ldGuid is uint launcherToRemove &&
-                        (pendingLauncherDequipGuid is null ||
-                         (pendingLauncherDequipSentAt is DateTime ldSentAt &&
-                          (DateTime.UtcNow - ldSentAt).TotalSeconds > 10.0)))
-                    {
-                        // Require at least one monster in the current world state
-                        // (all worldState objects are already within perception
-                        // range — no extra distance filter needed).
-                        var ldMonsterVisible = worldState.Objects.Values.Any(s =>
-                            s.WielderGuid is null &&
-                            EntityClassifier.IsMonster(
-                                s.Guid,
-                                s.ItemType ?? 0u,
-                                s.ObjectDescriptionFlags ?? 0u,
-                                s.WeenieFlags ?? 0u));
-
-                        // Do NOT dequip while the bot could instead LOAD ammo for
-                        // this launcher (a loaded launcher is more effective than
-                        // fists) — mirror the body's bagAmmo detection over the
-                        // bot's OWN bag items so the autonomous dequip never races
-                        // ahead of the cp052 wield-ammo path.
-                        var ldLauncherAmmoType = worldState.Objects.Values
-                            .FirstOrDefault(s => s.Guid == launcherToRemove)?.AmmoType;
-                        var ldOwnedBagAmmo = worldState.Objects.Values
-                            .Where(s => s.ContainerGuid is uint scg && scg == chosenCharacterGuid)
-                            .Select(s => (s.ValidLocations, s.AmmoType));
-                        var ldHasLoadableBagAmmo = LlmGoalPolicy.HasLoadableBagAmmoForLauncher(
-                            ldOwnedBagAmmo, ldLauncherAmmoType);
-
-                        if (ldMonsterVisible && !ldHasLoadableBagAmmo)
-                        {
-                            pendingLauncherDequipGuid   = launcherToRemove;
-                            pendingLauncherDequipSentAt = DateTime.UtcNow;
-
-                            var ldPktSeq  = nextOutboundPacketSequence++;
-                            var ldFragSeq = nextOutboundFragmentSequence++;
-                            var ldBuf     = new byte[GameActionPutItemInContainerMessage.PackedSize];
-                            var ldLen     = GameActionPutItemInContainerMessage.Pack(
-                                ldBuf,
-                                itemGuid:      launcherToRemove,
-                                containerGuid: chosenCharacterGuid,
-                                placement:     0);
-                            var ldPkt = new OutboundPacket();
-                            if (lastReceivedSeq != 0)
-                                ldPkt.AddAckSequence(lastReceivedSeq);
-                            ldPkt.AddBlobFragment(
-                                fragSequence: ldFragSeq,
-                                fragId: OutboundFragmentId,
-                                queue: (ushort)GameMessageGroup.UIQueue,
-                                gameMessagePayload: ldBuf.AsSpan(0, ldLen));
-                            var ldSentLen = ldPkt.Pack(sendBuf, myClientId,
-                                                       sequence: ldPktSeq, iteration: 1,
-                                                       encrypt: true, cryptoSend: cryptoSend);
-                            await _socket!.SendToAsync(
-                                new ArraySegment<byte>(sendBuf, 0, ldSentLen),
-                                SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                            Console.WriteLine(
-                                $"[motor] cp060 dequip useless launcher 0x{launcherToRemove:X8} " +
-                                "(no ammo, no other weapon, kill-intent active, monster in view) " +
-                                $"pktSeq={ldPktSeq} fragSeq={ldFragSeq} totalBytes={ldSentLen}");
-                        }
-                    }
-                }
-
                 // Phase 7f.2 — RE-ENGAGE safety net. With AutoRepeatAttacks
                 // enabled (sent once at Phase 7f.0 after LoginComplete), AC1's
                 // melee is a server-side loop: one TargetedMeleeAttack starts
@@ -5283,21 +5214,21 @@ internal sealed class HandshakeDriver : IDisposable
                         if (!stillOwnedAndUnwielded)
                         {
                             pendingWieldRetries.Remove(itemGuid);
-                            wieldTransactionGuids.Remove(itemGuid);
+                            ReleaseInventoryTransaction(itemGuid);
                             continue;
                         }
 
                         var now = DateTime.UtcNow;
-                        if (WieldRetryPolicy.TimedOut(
+                        if (InventoryActionRetryPolicy.TimedOut(
                                 retry.SentAt,
                                 retry.Attempts,
                                 retry.ExplicitRejections,
                                 now,
-                                WieldRetryPolicy.RetryCooldown,
-                                WieldRetryPolicy.MaxAttempts))
+                                InventoryActionRetryPolicy.RetryCooldown,
+                                InventoryActionRetryPolicy.MaxAttempts))
                         {
                             pendingWieldRetries.Remove(itemGuid);
-                            wieldTransactionGuids.Remove(itemGuid);
+                            ReleaseInventoryTransaction(itemGuid);
                             var retryName = retrySnap!.Name ?? "(unknown)";
                             eventStream.Append(new StreamEvent
                             {
@@ -5319,13 +5250,13 @@ internal sealed class HandshakeDriver : IDisposable
                         }
 
                         if (retryDue is null &&
-                            WieldRetryPolicy.ShouldRetry(
+                            InventoryActionRetryPolicy.ShouldRetry(
                                 retry.SentAt,
                                 retry.Attempts,
                                 retry.ExplicitRejections,
                                 now,
-                                WieldRetryPolicy.RetryCooldown,
-                                WieldRetryPolicy.MaxAttempts))
+                                InventoryActionRetryPolicy.RetryCooldown,
+                                InventoryActionRetryPolicy.MaxAttempts))
                         {
                             retryDue = (itemGuid, retry.Slot);
                         }
@@ -5333,13 +5264,89 @@ internal sealed class HandshakeDriver : IDisposable
 
                     if (retryDue is { } due)
                     {
+                        var retryDispatch = await SendWieldAndRecordAsync(
+                            due.ItemGuid,
+                            due.Slot);
+                        Console.WriteLine(
+                            $"[wield-retry] SEND: item=0x{due.ItemGuid:X8} slot=0x{due.Slot:X} " +
+                            $"attempt={pendingWieldRetries[due.ItemGuid].Attempts}/" +
+                            $"{InventoryActionRetryPolicy.MaxAttempts} pktSeq={retryDispatch.PacketSequence} " +
+                            $"fragSeq={retryDispatch.FragmentSequence} totalBytes={retryDispatch.Bytes}");
+                    }
+                }
+
+                // Retry only the exact equipped item selected by an LLM Dequip.
+                if (loginCompleteSent &&
+                    worldState.SelfGuid is uint dequipRetrySelfGuid &&
+                    pendingDequipRetries.Count > 0)
+                {
+                    uint? dequipRetryDue = null;
+                    foreach (var entry in pendingDequipRetries.ToArray())
+                    {
+                        var itemGuid = entry.Key;
+                        var retry = entry.Value;
+                        var retrySnap = worldState.TryGet(itemGuid);
+                        if (retrySnap?.WielderGuid != dequipRetrySelfGuid)
+                        {
+                            pendingDequipRetries.Remove(itemGuid);
+                            ReleaseInventoryTransaction(itemGuid);
+                            continue;
+                        }
+
+                        var now = DateTime.UtcNow;
+                        if (InventoryActionRetryPolicy.TimedOut(
+                                retry.SentAt,
+                                retry.Attempts,
+                                retry.ExplicitRejections,
+                                now,
+                                InventoryActionRetryPolicy.RetryCooldown,
+                                InventoryActionRetryPolicy.MaxAttempts))
+                        {
+                            pendingDequipRetries.Remove(itemGuid);
+                            ReleaseInventoryTransaction(itemGuid);
+                            var retryName = retrySnap.Name ?? "(unknown)";
+                            eventStream.Append(new StreamEvent
+                            {
+                                Sequence = 0,
+                                Utc = DateTimeOffset.UtcNow,
+                                Kind = EventKind.ActionRejected,
+                                Text =
+                                    $"Dequip request for '{retryName}' received no server response " +
+                                    $"after {retry.Attempts} attempts.",
+                                ItemGuid = itemGuid,
+                                Wcid = retrySnap.WeenieClassId,
+                                Name = retryName,
+                                ErrorLabel = "no server response",
+                            });
+                            Console.WriteLine(
+                                $"[dequip-retry] timed out: item=0x{itemGuid:X8} " +
+                                $"attempts={retry.Attempts}; surfaced ActionRejected.");
+                            continue;
+                        }
+
+                        if (dequipRetryDue is null &&
+                            InventoryActionRetryPolicy.ShouldRetry(
+                                retry.SentAt,
+                                retry.Attempts,
+                                retry.ExplicitRejections,
+                                now,
+                                InventoryActionRetryPolicy.RetryCooldown,
+                                InventoryActionRetryPolicy.MaxAttempts))
+                        {
+                            dequipRetryDue = itemGuid;
+                        }
+                    }
+
+                    if (dequipRetryDue is uint dueGuid)
+                    {
                         var retryPacketSeq = nextOutboundPacketSequence++;
                         var retryFragSeq = nextOutboundFragmentSequence++;
-                        var retryBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                        var retryLen = GameActionGetAndWieldItemMessage.Pack(
+                        var retryBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
+                        var retryLen = GameActionPutItemInContainerMessage.Pack(
                             retryBuf,
-                            itemGuid: due.ItemGuid,
-                            equipLocation: (int)due.Slot);
+                            itemGuid: dueGuid,
+                            containerGuid: dequipRetrySelfGuid,
+                            placement: 0);
                         var retryMsg = new OutboundPacket();
                         if (lastReceivedSeq != 0)
                             retryMsg.AddAckSequence(lastReceivedSeq);
@@ -5360,11 +5367,11 @@ internal sealed class HandshakeDriver : IDisposable
                             SocketFlags.None,
                             _serverPort0,
                             ct).ConfigureAwait(false);
-                        RecordWieldDispatch(due.ItemGuid, due.Slot);
+                        RecordDequipDispatch(dueGuid);
                         Console.WriteLine(
-                            $"[wield-retry] SEND: item=0x{due.ItemGuid:X8} slot=0x{due.Slot:X} " +
-                            $"attempt={pendingWieldRetries[due.ItemGuid].Attempts}/" +
-                            $"{WieldRetryPolicy.MaxAttempts} pktSeq={retryPacketSeq} " +
+                            $"[dequip-retry] SEND: item=0x{dueGuid:X8} " +
+                            $"attempt={pendingDequipRetries[dueGuid].Attempts}/" +
+                            $"{InventoryActionRetryPolicy.MaxAttempts} pktSeq={retryPacketSeq} " +
                             $"fragSeq={retryFragSeq} totalBytes={retrySent}");
                     }
                 }
@@ -7915,6 +7922,7 @@ internal sealed class HandshakeDriver : IDisposable
                          goal.Kind == GoalKind.Talk ||
                          goal.Kind == GoalKind.Attack ||
                          goal.Kind == GoalKind.Wield ||
+                         goal.Kind == GoalKind.Dequip ||
                          goal.Kind == GoalKind.Pickup))
                     {
                         // Build the recently-killed guid suppression set (lazily,
@@ -7987,26 +7995,124 @@ internal sealed class HandshakeDriver : IDisposable
                             combatDeferredAttack = true;
                         }
                         WorldObjectSnapshot? itemSnap = null;
-                        // Give always carries an item; Use carries one only
+                        var dequipMatchCount = 0;
+                        // Give and Dequip always carry an item; Use carries one only
                         // for a two-object "use item on target" (e.g. a key
-                        // on a locked chest). In both cases the item must be
-                        // in our inventory.
+                        // on a locked chest). Wield's item must be in the pack;
+                        // Dequip's item must be currently wielded by this bot.
                         var goalCarriesItem =
-                            goal.Kind == GoalKind.Give ||
+                            goal.Kind is GoalKind.Give or GoalKind.Dequip ||
                             ((goal.Kind == GoalKind.Use || goal.Kind == GoalKind.Wield) &&
                              goal.Item is not null && !goal.Item.IsEmpty);
                         if (goalCarriesItem)
                         {
-                            itemSnap = tactics.ResolveItem(worldState);
-                            // The item must be in our inventory. Resolver does
-                            // not filter on container; do that here.
-                            if (itemSnap is not null &&
-                                !(itemSnap.ContainerGuid is uint icg && icg == tacticsSelf.Guid))
+                            if (goal.Kind == GoalKind.Dequip)
                             {
-                                itemSnap = null;
+                                var dequipSelector =
+                                    goal.Item is { IsEmpty: false } ? goal.Item : goal.Target;
+                                itemSnap = SelectorResolver.ResolveUniqueWieldedByActor(
+                                    dequipSelector,
+                                    worldState,
+                                    tacticsSelf.Guid,
+                                    weenies,
+                                    out dequipMatchCount);
+                            }
+                            else
+                            {
+                                itemSnap = tactics.ResolveItem(worldState);
+                                // The item must be in our inventory. Resolver does
+                                // not filter on container; do that here.
+                                if (itemSnap is not null &&
+                                    !(itemSnap.ContainerGuid is uint icg && icg == tacticsSelf.Guid))
+                                {
+                                    itemSnap = null;
+                                }
                             }
                         }
 
+                        // Explicit Dequip dispatch. The selector must identify
+                        // exactly one item currently wielded by this bot.
+                        if (goal.Kind == GoalKind.Dequip)
+                        {
+                            if (itemSnap is not null)
+                            {
+                                if (pendingDequipRetries.ContainsKey(itemSnap.Guid))
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Dequip serialized: " +
+                                        $"item='{itemSnap.Name}' guid=0x{itemSnap.Guid:X8} already pending.");
+                                    tactics.Clear("dequip request already pending", eventStream);
+                                }
+                                else if (pendingWieldAfterDequip.ContainsKey(itemSnap.Guid))
+                                {
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Dequip serialized with Wield swap: " +
+                                        $"item='{itemSnap.Name}' guid=0x{itemSnap.Guid:X8} already moving.");
+                                    tactics.Clear("dequip already pending for wield swap", eventStream);
+                                }
+                                else
+                                {
+                                    // A newer Dequip supersedes any retry or
+                                    // deferred swap that would re-wield this item.
+                                    pendingWieldRetries.Remove(itemSnap.Guid);
+                                    foreach (var staleSwap in pendingWieldAfterDequip
+                                                 .Where(kv => kv.Value.TargetGuid == itemSnap.Guid)
+                                                 .ToArray())
+                                    {
+                                        pendingWieldAfterDequip.Remove(staleSwap.Key);
+                                        ReleaseInventoryTransaction(staleSwap.Key);
+                                    }
+                                    ReleaseInventoryTransaction(itemSnap.Guid);
+
+                                    var dequipPktSeq = nextOutboundPacketSequence++;
+                                    var dequipFragSeq = nextOutboundFragmentSequence++;
+                                    var dequipBuf =
+                                        new byte[GameActionPutItemInContainerMessage.PackedSize];
+                                    var dequipLen = GameActionPutItemInContainerMessage.Pack(
+                                        dequipBuf,
+                                        itemGuid: itemSnap.Guid,
+                                        containerGuid: tacticsSelf.Guid,
+                                        placement: 0);
+                                    var dequipMsg = new OutboundPacket();
+                                    if (lastReceivedSeq != 0)
+                                        dequipMsg.AddAckSequence(lastReceivedSeq);
+                                    dequipMsg.AddBlobFragment(
+                                        fragSequence: dequipFragSeq,
+                                        fragId: OutboundFragmentId,
+                                        queue: (ushort)GameMessageGroup.UIQueue,
+                                        gameMessagePayload: dequipBuf.AsSpan(0, dequipLen));
+                                    var dequipSent = dequipMsg.Pack(
+                                        sendBuf,
+                                        myClientId,
+                                        sequence: dequipPktSeq,
+                                        iteration: 1,
+                                        encrypt: true,
+                                        cryptoSend: cryptoSend);
+                                    await _socket!.SendToAsync(
+                                        new ArraySegment<byte>(sendBuf, 0, dequipSent),
+                                        SocketFlags.None,
+                                        _serverPort0,
+                                        ct).ConfigureAwait(false);
+                                    RecordDequipDispatch(itemSnap.Guid);
+                                    Console.WriteLine(
+                                        $"[strategy] LLM-GOAL Dequip direct: " +
+                                        $"item='{itemSnap.Name}' guid=0x{itemSnap.Guid:X8} " +
+                                        $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
+                                        $"pktSeq={dequipPktSeq} fragSeq={dequipFragSeq} bytes={dequipSent}");
+                                    tactics.Clear("dequip dispatched", eventStream);
+                                }
+                            }
+                            else
+                            {
+                                Console.WriteLine(
+                                    $"[strategy] LLM-GOAL Dequip unresolved -- " +
+                                    $"wieldedMatches={dequipMatchCount}; selector " +
+                                    $"target={goal.Target} item={goal.Item}; failing.");
+                                tactics.Fail(
+                                    "dequip: selector must match exactly one equipped item",
+                                    eventStream);
+                            }
+                        }
                         // Explicit Wield dispatch. The canonical Wield shape
                         // carries the item in goal.Item with target=self;
                         // tolerate the LLM placing the item in target instead.
@@ -8015,7 +8121,7 @@ internal sealed class HandshakeDriver : IDisposable
                         // and ValidLocations!=0). Purely mechanical: the LLM chose
                         // WHICH item; we only execute, equipping to the lowest
                         // valid slot. No source-side item choice.
-                        if (goal.Kind == GoalKind.Wield)
+                        else if (goal.Kind == GoalKind.Wield)
                         {
                             // Prefer the resolved inventory item (goal.Item,
                             // already filtered to in-bag above); fall back to an
@@ -8042,7 +8148,7 @@ internal sealed class HandshakeDriver : IDisposable
                                              .ToArray())
                                 {
                                     pendingWieldRetries.Remove(staleRetryGuid);
-                                    wieldTransactionGuids.Remove(staleRetryGuid);
+                                    ReleaseInventoryTransaction(staleRetryGuid);
                                 }
                                 var wieldSlot = wieldVl & (~wieldVl + 1);
 
@@ -8092,8 +8198,8 @@ internal sealed class HandshakeDriver : IDisposable
                                         var staleTarget =
                                             pendingWieldAfterDequip[staleKey].TargetGuid;
                                         pendingWieldAfterDequip.Remove(staleKey);
-                                        wieldTransactionGuids.Remove(staleKey);
-                                        wieldTransactionGuids.Remove(staleTarget);
+                                        ReleaseInventoryTransaction(staleKey);
+                                        ReleaseInventoryTransaction(staleTarget);
                                     }
                                 }
                                 // Find EVERY currently-wielded item that blocks
@@ -8108,6 +8214,17 @@ internal sealed class HandshakeDriver : IDisposable
                                 {
                                   foreach (var blocker in blockers)
                                   {
+                                    if (pendingDequipRetries.ContainsKey(blocker))
+                                    {
+                                        pendingWieldAfterDequip[blocker] =
+                                            (wieldItem.Guid, wieldSlot, DateTime.UtcNow);
+                                        inventoryTransactionGuids.Add(wieldItem.Guid);
+                                        Console.WriteLine(
+                                            $"[strategy] Wield waits for LLM Dequip: blocker=0x{blocker:X8}; " +
+                                            $"will wield item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} " +
+                                            "after the in-flight dequip ack.");
+                                        continue;
+                                    }
                                     // A stale pending entry means the dequip
                                     // never acked (e.g. the pack was full) — do
                                     // not soft-lock this blocker forever; let it
@@ -8129,10 +8246,10 @@ internal sealed class HandshakeDriver : IDisposable
                                         if (pend.TargetGuid != wieldItem.Guid ||
                                             pend.TargetSlot != wieldSlot)
                                         {
-                                            wieldTransactionGuids.Remove(pend.TargetGuid);
                                             pendingWieldAfterDequip[blocker] =
                                                 (wieldItem.Guid, wieldSlot, pend.StartedUtc);
-                                            RecordWieldDispatch(wieldItem.Guid, wieldSlot);
+                                            ReleaseInventoryTransaction(pend.TargetGuid);
+                                            inventoryTransactionGuids.Add(wieldItem.Guid);
                                             Console.WriteLine(
                                                 $"[strategy] Wield swap retargeted: blocker=0x{blocker:X8} " +
                                                 $"now wields item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} " +
@@ -8147,8 +8264,8 @@ internal sealed class HandshakeDriver : IDisposable
                                     else
                                     {
                                         pendingWieldAfterDequip[blocker] = (wieldItem.Guid, wieldSlot, DateTime.UtcNow);
-                                        wieldTransactionGuids.Add(blocker);
-                                        wieldTransactionGuids.Add(wieldItem.Guid);
+                                        inventoryTransactionGuids.Add(blocker);
+                                        inventoryTransactionGuids.Add(wieldItem.Guid);
                                         var dqPktSeq  = nextOutboundPacketSequence++;
                                         var dqFragSeq = nextOutboundFragmentSequence++;
                                         var dqBuf = new byte[GameActionPutItemInContainerMessage.PackedSize];
@@ -8181,30 +8298,16 @@ internal sealed class HandshakeDriver : IDisposable
                                 }
                                 else
                                 {
-                                var wieldPktSeq  = nextOutboundPacketSequence++;
-                                var wieldFragSeq = nextOutboundFragmentSequence++;
-                                var wieldBuf = new byte[GameActionGetAndWieldItemMessage.PackedSize];
-                                var wieldLen = GameActionGetAndWieldItemMessage.Pack(
-                                    wieldBuf, itemGuid: wieldItem.Guid, equipLocation: (int)wieldSlot);
-                                var wieldMsg = new OutboundPacket();
-                                if (lastReceivedSeq != 0)
-                                    wieldMsg.AddAckSequence(lastReceivedSeq);
-                                wieldMsg.AddBlobFragment(
-                                    fragSequence: wieldFragSeq,
-                                    fragId: OutboundFragmentId,
-                                    queue: (ushort)GameMessageGroup.UIQueue,
-                                    gameMessagePayload: wieldBuf.AsSpan(0, wieldLen));
-                                var wieldSent = wieldMsg.Pack(sendBuf, myClientId,
-                                                              sequence: wieldPktSeq, iteration: 1,
-                                                              encrypt: true, cryptoSend: cryptoSend);
-                                await _socket!.SendToAsync(new ArraySegment<byte>(sendBuf, 0, wieldSent),
-                                                           SocketFlags.None, _serverPort0, ct).ConfigureAwait(false);
-                                wieldTransactionGuids.Add(wieldItem.Guid);
+                                var wieldDispatch = await SendWieldAndRecordAsync(
+                                    wieldItem.Guid,
+                                    wieldSlot);
                                 Console.WriteLine(
                                     $"[strategy] LLM-GOAL Wield direct: " +
                                     $"item='{wieldItem.Name}' guid=0x{wieldItem.Guid:X8} slot=0x{wieldSlot:X} " +
                                     $"source={goal.Source} rationale=\"{goal.Rationale}\"; " +
-                                    $"pktSeq={wieldPktSeq} fragSeq={wieldFragSeq} bytes={wieldSent}");
+                                    $"pktSeq={wieldDispatch.PacketSequence} " +
+                                    $"fragSeq={wieldDispatch.FragmentSequence} " +
+                                    $"bytes={wieldDispatch.Bytes}");
                                 tactics.Clear("wield dispatched", eventStream);
                                 }
                                 }
