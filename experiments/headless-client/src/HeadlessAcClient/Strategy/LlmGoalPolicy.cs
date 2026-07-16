@@ -12658,12 +12658,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "`{}`, and empty-string selectors FAIL for those kinds. The schema's targetless self/social and " +
                 "item-only exceptions remain valid.");
             sb.AppendLine(
-                "  5. REQUIRED STACK SHAPE: when gate 3's Active-TOP condition holds, draft " +
+                "  3a. REQUIRED STACK SHAPE: when gate 3's Active-TOP condition holds, draft " +
                 "`\"stack_revision\": <shown revision>` and " +
                 "`\"stack_ops\": [{\"op\":\"mark_top_blocked\",...}, ...]` BEFORE drafting the goal. JSON that " +
                 "omits those fields or starts with `push` still FAILS even when its goal is valid.");
             sb.AppendLine(
-                "  6. If any gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
+                "  5. If any gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
                 "Revise the goal/stack operations, choose an action grounded in shown evidence, and run this audit " +
                 "again. Emit JSON only after all four gates pass.");
         }
