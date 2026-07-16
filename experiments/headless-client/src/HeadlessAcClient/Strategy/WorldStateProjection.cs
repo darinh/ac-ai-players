@@ -633,17 +633,6 @@ internal sealed record WorldStateProjection
     public IReadOnlyList<CombatHistoryEntry>? CombatHistoryFull { get; init; }
 
     /// <summary>
-    /// cold-start egress: kind-keys (<see cref="CombatFeelLedger.KeyOf"/>
-    /// form) of monster kinds the bot has killed since entering the current
-    /// landblock. Copied from <see cref="WorldState.KilledKindsThisDwell"/>.
-    /// Consumed only by the mechanical hunt-egress override to recognise an
-    /// already-farmed-here kind once the bot is tapped out — raw bot-owned
-    /// outcome data, no danger/value label. Not serialised to the LLM prompt.
-    /// </summary>
-    [JsonIgnore]
-    public IReadOnlySet<string>? KilledKindsThisDwell { get; init; }
-
-    /// <summary>
     /// immobile-stuck telemetry: consecutive full movement block-stops with
     /// no self-position change (copied from
     /// <see cref="WorldState.MovementBlockStopsSinceSelfMoved"/>). Rendered as
@@ -1154,7 +1143,6 @@ internal sealed record WorldStateProjection
             OpenedCorpseGuids = world.OpenedCorpseGuids,
             CombatHistory = world.CombatHistory,
             CombatHistoryFull = world.CombatHistoryFull,
-            KilledKindsThisDwell = world.KilledKindsThisDwell,
             MovementBlockStopsSinceSelfMoved = world.MovementBlockStopsSinceSelfMoved,
             NamedSearchTargetName = world.NamedSearchTargetName,
             NamedSearchProbeCount = world.NamedSearchProbeCount,

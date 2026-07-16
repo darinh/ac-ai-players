@@ -1421,32 +1421,6 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildRunSummaryLine_BeatenVetoes_ShownOnlyWhenPositive()
-    {
-        var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
-        var with = LlmGoalPolicy.BuildRunSummaryLine(
-            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
-            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
-            beatenVetoes: 18);
-        Assert.Contains("beaten-vetoes=18", with);
-
-        // beaten-vetoes renders AFTER kills (combat outcome, then the un-winnable churn).
-        var both = LlmGoalPolicy.BuildRunSummaryLine(
-            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
-            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
-            kills: 2, beatenVetoes: 18);
-        Assert.True(both.IndexOf("kills=", StringComparison.Ordinal)
-            < both.IndexOf("beaten-vetoes=", StringComparison.Ordinal));
-
-        // Zero vetoes -> omitted (the healthy norm; no noise).
-        var none = LlmGoalPolicy.BuildRunSummaryLine(
-            decisions: 5, triggerCounts: triggers, distinctLandblocks: 1,
-            lastLandblock: 0xA9B4u, level: 14, totalXp: 80000L, model: "m",
-            beatenVetoes: 0);
-        Assert.DoesNotContain("beaten-vetoes=", none);
-    }
-
-    [Fact]
     public void BuildRunSummaryLine_Kills_ShownOnlyWhenPositive()
     {
         var triggers = new Dictionary<string, int> { ["no-current-goal"] = 5 };
@@ -2847,76 +2821,6 @@ public class LlmGoalPolicyTests
         var buy = new Goal
         { Kind = GoalKind.Buy, Target = new Selector { Name = "Merchant" }, Item = new Selector { Name = "weapon" } };
         Assert.Equal(0x7A9B5200u, LlmGoalPolicy.TryResolveBuyVendorNoPanel(buy, world));
-    }
-
-    [Fact]
-    public void EscapeHeadingForLandblock_DeterministicAndNullSafe()
-    {
-        Assert.Null(LlmGoalPolicy.EscapeHeadingForLandblock(null));
-        // Deterministic: same landblock -> same heading.
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
-                     LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u));
-        // A valid 8-way compass bearing.
-        Assert.Contains(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
-            new[] { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" });
-    }
-
-    [Fact]
-    public void WithEscapeDirection_StampsUndirectedAnywhereExploreOnLongStallOnly()
-    {
-        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
-        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
-        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
-
-        // Long stall -> a committed compass Direction is stamped (matches the landblock bearing).
-        var stamped = LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, 0x0125u);
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), stamped.Direction);
-
-        // Below the threshold -> unchanged (undirected).
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, shortDwell, 0x0125u).Direction);
-
-        // An LLM-chosen Direction is NEVER overridden.
-        var directed = explore with { Direction = "north" };
-        Assert.Equal("north", LlmGoalPolicy.WithEscapeDirectionForTest(directed, longDwell, 0x0125u).Direction);
-
-        // A TARGETED Explore (a concrete place, not "anywhere") is not stamped.
-        var targeted = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "SomeNamedPlace" } };
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(targeted, longDwell, 0x0125u).Direction);
-
-        // A non-Explore goal passes through untouched.
-        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Chicken" } };
-        var afterAttack = LlmGoalPolicy.WithEscapeDirectionForTest(attack, longDwell, 0x0125u);
-        Assert.Equal(GoalKind.Attack, afterAttack.Kind);
-        Assert.Null(afterAttack.Direction);
-
-        // Unknown landblock -> no heading -> unchanged.
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, null).Direction);
-    }
-
-    [Fact]
-    public void NonEgressBarrenEscape_EscapesUnarmedWildernessStallButDefersToMonsterAndUse()
-    {
-        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
-        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
-
-        // No winnable monster + long barren stall + undirected Explore -> directional escape
-        // stamped (the case the combat-ready egress latch cancels for an UNARMED bot).
-        var escaped = LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, longDwell, 0x0125u);
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), escaped.Direction);
-
-        // A WINNABLE monster in view -> pass through (fight it), even on a long stall.
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: true, longDwell, 0x0125u).Direction);
-
-        // No monster but a town `Use` goal (not Explore) -> untouched, so a bot can still Use a
-        // vendor to self-arm rather than being sent wandering.
-        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Grocer" } };
-        var afterUse = LlmGoalPolicy.NonEgressBarrenEscape(use, winnableMonsterInView: false, longDwell, 0x0125u);
-        Assert.Equal(GoalKind.Use, afterUse.Kind);
-        Assert.Null(afterUse.Direction);
-
-        // Below the dwell threshold -> unchanged even with no monster.
-        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, shortDwell, 0x0125u).Direction);
     }
 
     [Fact]
@@ -8576,15 +8480,35 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void SpendBeforeWander_FalseWhenWinnableMonsterInView()
+    public void SpendBeforeWander_FalseWhenAnyAttackableMonsterInView()
     {
-        // A winnable (non-corpse) monster in view -> there IS a fight here -> not the no-fight
-        // wander situation (engage it per the NON-HOSTILE rule).
+        // Any attackable monster wakes Strategy; source does not judge the matchup.
         var world = BuildXpWorld(69296, 5475) with
         {
             Visible = new[] { new VisibleObjectProjection { Guid = 0x80001001u, Name = "Drudge", IsMonster = true } },
         };
         Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(new IntentStack(), world, secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_RepeatedDeathHistoryDoesNotHideVisibleMonster()
+    {
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Recorded Loss", 99u, Kills: 0, Deaths: 3,
+                    NearDeaths: 1, Fights: 4, LastOutcome: "death"),
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                    { Guid = 0x80001001u, Name = "Recorded Loss", Wcid = 99u, IsMonster = true },
+            },
+        };
+
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), world, secondsSinceLastDeath: null));
     }
 
     [Fact]
@@ -8735,7 +8659,7 @@ public class LlmGoalPolicyTests
     public void SpendBeforeWander_FiresViaWanderStreak_WithNoNoObjectiveTrigger()
     {
         // A NULL stack makes StackHasNoActiveObjective FALSE, so the gate can ONLY fire via the
-        // new wander-streak path: >=2 untargeted Explores + unspent XP + no winnable monster.
+        // new wander-streak path: >=2 untargeted Explores + unspent XP + no attackable monster.
         var es = WanderEventStream(
             UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
         Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
@@ -8774,9 +8698,9 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void SpendBeforeWander_WanderStreak_StillSuppressedByWinnableMonster()
+    public void SpendBeforeWander_WanderStreak_StillSuppressedByAnyAttackableMonster()
     {
-        // A winnable monster in view => there IS a fight here => engage it, not the no-fight wander.
+        // Any attackable monster wakes Strategy rather than this no-fight cue.
         var es = WanderEventStream(
             UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
         var world = BuildXpWorld(69296, 5475) with
@@ -11533,7 +11457,7 @@ public class LlmGoalPolicyTests
             capsuleText);
     }
 
-    private static WorldStateProjection BuildTappedOutWorld(int level)
+    private static WorldStateProjection BuildLevelProgressWorld(int level)
     {
         var inv = new[]
         {
@@ -11545,27 +11469,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_RendersTappedOutFactInTail()
+    public void BuildUserPrompt_ProtectedLocationCapsule_RendersRawEntryAndCurrentLevels()
     {
-        // cp2917: the body `## Combat readiness` tapped-out fact (combat-ready +
-        // farmed this area with +0 levels) is dropped by the dense-scene body
-        // hard-cut, leaving the always-rendered TAPPED OUT rule with no fact to
-        // act on. Re-surface it in the protected capsule so the rule can fire.
-        var world = BuildTappedOutWorld(level: 9);
+        var world = BuildLevelProgressWorld(level: 9);
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             world, new EventStream(), null, null, null, null,
             dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
-            levelAtLandblockEntry: 9);
+            levelAtLandblockEntry: 5);
 
-        int capsule = prompt.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        int capsule = prompt.IndexOf("## Location (re-surfaced", System.StringComparison.Ordinal);
         Assert.True(capsule > 0);
-        Assert.Contains("tapped out: level 9", prompt.Substring(capsule));
+        var tail = prompt.Substring(capsule);
+        Assert.Contains("level when this landblock was entered: 5; current level: 9", tail);
+        Assert.DoesNotContain("tapped out:", prompt);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_TappedOutSurvivesBodyHardCut()
+    public void BuildUserPrompt_ProtectedLocationCapsule_RawLevelsSurviveBodyHardCut()
     {
-        var world = BuildTappedOutWorld(level: 9);
+        var world = BuildLevelProgressWorld(level: 9);
         var entry = System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10);
         var full = LlmGoalPolicy.BuildUserPrompt(
             world, new EventStream(), null, null, null, null,
@@ -11579,21 +11501,8 @@ public class LlmGoalPolicyTests
             dwellEntryUtc: entry, levelAtLandblockEntry: 9, promptCeiling: bodyIdx);
 
         Assert.True(tight.Length <= bodyIdx);
-        Assert.Contains("## Combat readiness (re-surfaced", tight);
-        Assert.Contains("tapped out: level 9", tight);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_OmitsTappedOutWhenLevelGained()
-    {
-        // Gained a level here (level 9 > entry 5) => the area is still
-        // productive => HuntTappedOutFact returns null => no tapped-out line.
-        var world = BuildTappedOutWorld(level: 9);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, null, null, null,
-            dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
-            levelAtLandblockEntry: 5);
-        Assert.DoesNotContain("tapped out: level", prompt);
+        Assert.Contains("## Location (re-surfaced", tight);
+        Assert.Contains("level when this landblock was entered: 9; current level: 9", tight);
     }
 
     [Fact]
@@ -11659,111 +11568,39 @@ public class LlmGoalPolicyTests
         BuildXpWorld(69296, 0) with { CombatHistoryFull = full };
 
     [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_RendersBeatenButNotWinnableKinds()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_RendersRawOutcomesWithoutClassification()
     {
-        // cp2916: the body combat-history lines are dropped by the dense-scene
-        // body hard-cut, so the LLM keeps ordering Attack on a kind its own
-        // ledger marks beaten and the Motor veto drops it. Re-surface the
-        // beaten kinds (the SAME predicate the veto uses: a recorded death +
-        // IsBeatenKind, not out-levelled) in the protected tail. A kind with
-        // kills (winnable) or a survived loss (Deaths==0) must NOT appear.
         var world = BuildBeatenLedgerWorld(
             new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
+                NearDeaths: 1, Fights: 2, LastOutcome: "death"),
             new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
             new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
                 NearDeaths: 3, Fights: 3, LastOutcome: "near-death"),
-            // A lethal loss the bot has since OUT-LEVELLED (loss at level 5, bot
-            // now level 9): the veto re-tests it (lethalRetestableWhenOutleveled)
-            // so it is no longer beaten and must NOT appear.
             new CombatHistoryEntry("Outlevelled Kind", 99u, Kills: 0, Deaths: 1,
-                NearDeaths: 0, Fights: 1, LastOutcome: "death", MaxLossBotLevel: 5));
+                NearDeaths: 0, Fights: 1, LastOutcome: "death"));
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
 
-        Assert.Contains("## Beaten kinds", prompt);
-        // Scope to the beaten-kinds SECTION only (up to the next `## ` header,
-        // now the sibling `## Winnable kinds` capsule) so winnable kinds listed
-        // later in the tail don't leak into this beaten-only assertion.
-        int beatenStart = prompt.IndexOf("## Beaten kinds", System.StringComparison.Ordinal);
-        int beatenEnd = prompt.IndexOf("## ", beatenStart + 3, System.StringComparison.Ordinal);
-        var capsuleText = beatenEnd > beatenStart
-            ? prompt.Substring(beatenStart, beatenEnd - beatenStart)
-            : prompt.Substring(beatenStart);
+        var capsuleText = prompt[prompt.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("evidence only", capsuleText);
         Assert.Contains("Drudge Slinker: fights 2, kills 0, deaths 2", capsuleText);
-        // Winnable (has kills) and survived-loss (Deaths==0) kinds are excluded —
-        // the veto would not drop an Attack on them.
-        Assert.DoesNotContain("Black Rabbit", capsuleText);
-        Assert.DoesNotContain("Mosswart", capsuleText);
-        // An out-levelled lethal kind is re-testable, so it is excluded too.
-        Assert.DoesNotContain("Outlevelled Kind", capsuleText);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_SurvivesBodyHardCut()
-    {
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
-        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
-        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
-        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
-        Assert.True(bodyIdx > 0);
-
-        var tight = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
-
-        Assert.True(tight.Length <= bodyIdx);
-        // Body sections cut, but the beaten-kinds capsule survived in the tail.
-        Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
-        Assert.Contains("## Beaten kinds", tight);
-        Assert.Contains("Drudge Slinker", tight);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_OmittedWhenNoBeatenKinds()
-    {
-        // A ledger of only winnable / survived-loss kinds yields no capsule.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("## Beaten kinds", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_RendersOnlyClearlyWinnableKinds()
-    {
-        // cp2918 (reduce-llm-call-volume): the LLM needs to see which kinds it is
-        // ALREADY winning against to push a kill-count grind commitment (the
-        // evidence is otherwise truncated). Clearly-winnable = kills recorded AND
-        // no death. A beaten kind (no kills) and an ambiguous kind (kills BUT a
-        // death) must NOT appear — only a clean win qualifies.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
-            new CombatHistoryEntry("Mosswart", 8u, Kills: 3, Deaths: 1,
-                NearDeaths: 0, Fights: 4, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-
-        Assert.Contains("## Winnable kinds", prompt);
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
         Assert.Contains("Black Rabbit: fights 12, kills 12, deaths 0", capsuleText);
-        Assert.DoesNotContain("Drudge Slinker", capsuleText); // no kills
-        Assert.DoesNotContain("Mosswart", capsuleText);       // has a death
+        Assert.Contains("Mosswart: fights 3, kills 0, deaths 0", capsuleText);
+        Assert.Contains("Outlevelled Kind: fights 1, kills 0, deaths 1", capsuleText);
+        Assert.DoesNotContain("## Beaten kinds", capsuleText);
+        Assert.DoesNotContain("## Winnable kinds", capsuleText);
+        Assert.DoesNotContain("Motor DECLINES", capsuleText);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_SurvivesBodyHardCut()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_SurvivesBodyHardCut()
     {
         var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death"));
         var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack(), null, null);
         var nl = full.Contains("\r\n") ? "\r\n" : "\n";
-        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", StringComparison.Ordinal);
         Assert.True(bodyIdx > 0);
 
         var tight = LlmGoalPolicy.BuildUserPrompt(
@@ -11771,61 +11608,47 @@ public class LlmGoalPolicyTests
 
         Assert.True(tight.Length <= bodyIdx);
         Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
-        Assert.Contains("## Winnable kinds", tight);
-        Assert.Contains("Black Rabbit", tight);
-        // cp2920: the whole ## Winnable kinds capsule (header + the stack-gated
-        // commit-nudge bullet + the per-kind lines) lives in the protected
-        // salience tail, so the imperative nudge survives the body hard-cut.
+        Assert.Contains("## Combat history", tight);
+        Assert.Contains("Drudge Slinker", tight);
         Assert.Contains("ACT ON THIS NOW", tight);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_ReStatesCommitDirectiveImperatively()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_IsRecencyBounded()
     {
-        // cp2920 (salience): listing winnable kinds was not enough — live, the LLM
-        // pushed 0 kill-count commitments over 59 decisions, so the cp2918
-        // autonomous kill-chain never fired and every kill cost a full LLM cycle.
-        // The COMMIT A WINNING GRIND directive lives in the long preamble (reliably
-        // ignored per the cp-2336/2337 salience finding). Re-state it IMPERATIVELY
-        // in the decision-proximate tail capsule so the LLM acts on it (the cp-2387
-        // precedent), pointing back to the preamble rule for the exact shape. Gated
-        // on a non-null IntentStack (the nudge references `stack_ops`).
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
-        Assert.Contains("ACT ON THIS NOW", capsuleText);
-        Assert.Contains("stack_ops", capsuleText);
-        Assert.Contains("kill-count", capsuleText);
+        var rows = Enumerable.Range(1, 7)
+            .Select(i => new CombatHistoryEntry(
+                $"Recent Kind {i}", (uint)i, Kills: i, Deaths: 0,
+                NearDeaths: 0, Fights: i, LastOutcome: "kill"))
+            .ToArray();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildBeatenLedgerWorld(rows), new EventStream(), null);
+        var capsuleText = prompt[prompt.IndexOf("## Combat history", StringComparison.Ordinal)..];
+
+        for (int i = 1; i <= 6; i++)
+            Assert.Contains($"Recent Kind {i}", capsuleText);
+        Assert.DoesNotContain("Recent Kind 7", capsuleText);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmitsCommitNudgeWhenStackDisabled()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_GatesStackNudge()
     {
-        // The commit nudge references `stack_ops`, which is absent from the schema
-        // when the IntentStack is disabled (stack == null). The capsule (and its
-        // kind list) still render, but the stack_ops nudge must NOT — otherwise we
-        // instruct the LLM to emit a field the schema omits.
         var world = BuildBeatenLedgerWorld(
             new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, (IntentStack?)null);
-        Assert.Contains("## Winnable kinds", prompt);
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
-        Assert.Contains("Black Rabbit", capsuleText);
-        Assert.DoesNotContain("ACT ON THIS NOW", capsuleText);
-    }
 
-    [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmittedWhenNoCleanWins()
-    {
-        // Only a beaten kind (no kills) → no winnable capsule.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("## Winnable kinds", prompt);
+        var enabled = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack());
+        var enabledCapsule = enabled[enabled.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("ACT ON THIS NOW", enabledCapsule);
+        Assert.Contains("stack_ops", enabledCapsule);
+        Assert.Contains("kill-count", enabledCapsule);
+
+        var disabled = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, (IntentStack?)null);
+        var disabledCapsule = disabled[disabled.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("Black Rabbit", disabledCapsule);
+        Assert.DoesNotContain("ACT ON THIS NOW", disabledCapsule);
     }
 
 
@@ -17857,10 +17680,7 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("door open", prompt[(prompt.IndexOf("wcid=9000", StringComparison.Ordinal))..]);
     }
 
-    // ---- IsOptionalAttackOnBeatenKind (beaten-kind Attack veto) ----
-    // The explicit LLM Attack path lacked the IsBeatenKind guard the autonomous
-    // kill-commitment picker has, so a weak model could re-pick a KIND its own
-    // ledger shows it loses to. These pin the veto AND its self-defense exempt.
+    // ---- Explicit Attack ledger regression fixtures ----
 
     private static WorldStateProjection BuildWorldBeaten(
         IReadOnlyList<CombatHistoryEntry>? fullHistory, int? selfLevel,
@@ -17871,10 +17691,8 @@ public class LlmGoalPolicyTests
         {
             CombatHistoryFull = fullHistory,
             Self = w.Self with { Level = selfLevel },
-            // The beaten-kind veto is about an ARMED bot that keeps losing to a
-            // specific kind, so the bot must be combat-capable (a wielded melee
-            // weapon) — else the cp049 unarmed-Attack drop would preempt the
-            // beaten-kind path. An unarmed bot has no kind-specific beaten problem.
+            // Keep end-to-end Attack tests mechanically combat-capable so the
+            // unrelated unusable-weapon guard cannot preempt ledger behavior.
             Inventory = new[]
             {
                 new InventoryItemProjection
@@ -17886,289 +17704,6 @@ public class LlmGoalPolicyTests
     private static CombatHistoryEntry[] LethalBeaten(string name, uint wcid)
         => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 3, NearDeaths: 2,
             Fights: 5, LastOutcome: "death", Ineffective: 0) };
-
-    // A kind the bot has 0 kills against but many INEFFECTIVE (no-damage) fights — the
-    // can't-DAMAGE-it wedge (live: 89 stuck-timeouts cycling 50s no-damage abandons).
-    // MaxLossBotLevel = the level the bot kept failing at (the runtime records it on every
-    // ineffective abandon); without it the veto re-tests once, so the fixtures set it.
-    private static CombatHistoryEntry[] IneffectiveBeaten(
-        string name, uint wcid, int ineffective = 8, int? maxLossLevel = 15)
-        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: ineffective, LastOutcome: "ineffective", Ineffective: ineffective,
-            MaxLossBotLevel: maxLossLevel) };
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_FiresAtThreshold_NotBelow()
-    {
-        var below = IneffectiveBeaten("Gnawer Shreth", 99u,
-            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold - 1);
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(below, 99u, "Gnawer Shreth", 15));
-        var at = IneffectiveBeaten("Gnawer Shreth", 99u,
-            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(at, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_NotWhenKindHasAKill()
-    {
-        // A kill -> the bot CAN damage/beat it, so it is not a can't-damage wedge.
-        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
-            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15) };
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hasKill, 99u, "X", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_CoversSingleDeathPlusManyIneffective()
-    {
-        // The Deaths==1 first-death reprieve makes IsLethalBeatenKind FALSE, but a kind the bot
-        // ALSO cannot DAMAGE (0 kills, many ineffective) must still be avoided — this branch
-        // covers it regardless of the single death (a kind DIED to 2+ times is held by the lethal
-        // veto). Without this the bot stays wedged re-attacking an un-damageable kind it died to once.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
-            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, 99u, "Gnawer Shreth", 15)); // first-death reprieve
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
-        // ... and it re-tests once the bot out-levels the level it kept failing at.
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_NoFailingLevelRecorded_RetestsOnce()
-    {
-        // A loss recorded with no failing level (the field did not exist yet, or self level was
-        // momentarily unknown) deserializes null; rather than bar the kind forever (no out-level
-        // escape), re-test once so a fresh attempt records the level this veto then bounds.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0,
-            NearDeaths: 0, Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: null) };
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_RetestableOnceOutLevelled()
-    {
-        // MaxLossBotLevel records the level the bot kept failing at; once it out-levels that,
-        // the kind is re-testable (the bot may now be strong enough).
-        var rec = new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15);
-        var hist = new[] { rec };
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));  // same level
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
-    }
-
-    // A kind the bot SWUNG at repeatedly for 0 total damage (the precise out-defended signal,
-    // distinct from the broader Ineffective which also counts no-swing can't-close abandons).
-    private static CombatHistoryEntry[] OutDefended(
-        string name, uint wcid, int swungZeroDamage = 4, int? ineffective = null, int? maxLossLevel = 15)
-        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: Math.Max(swungZeroDamage, ineffective ?? swungZeroDamage),
-            LastOutcome: "ineffective", Ineffective: ineffective ?? swungZeroDamage,
-            MaxLossBotLevel: maxLossLevel, SwungZeroDamage: swungZeroDamage) };
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_FiresAtThreshold_NotBelow()
-    {
-        var below = OutDefended("Gnawer Shreth", 99u,
-            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold - 1);
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(below, 99u, "Gnawer Shreth", 15));
-        var at = OutDefended("Gnawer Shreth", 99u,
-            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold);
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(at, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_NotWhenKindHasAKill()
-    {
-        // A kill -> the bot CAN damage it, so it is not an out-defended wedge.
-        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
-            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15,
-            SwungZeroDamage: 8) };
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hasKill, 99u, "X", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_FiresEarlierThanIneffectiveThreshold()
-    {
-        // The whole point: a kind SWUNG at for 0 damage SwungZeroDamageUnwinnableThreshold times,
-        // but with Ineffective still BELOW ExhaustedIneffectiveFightsThreshold, is vetoed by the
-        // tighter swung-zero-damage verdict EARLIER than IsExhaustedIneffectiveKind would fire.
-        Assert.True(LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold
-            < LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
-        var hist = OutDefended("Gnawer Shreth", 99u,
-            swungZeroDamage: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold,
-            ineffective: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold); // < the ineffective threshold
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_RetestableOnceOutLevelled()
-    {
-        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: 15);
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));  // same level
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_NoFailingLevelRecorded_RetestsOnce()
-    {
-        // A loss recorded with no failing level deserializes null -> re-test once (mirrors the
-        // IsExhaustedIneffectiveKind re-test) rather than bar the kind forever.
-        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: null);
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_IneffectiveExhaustedKind_Vetoes()
-    {
-        // The can't-DAMAGE-it wedge: a survived-loss kind re-attempted past the allowance is now
-        // vetoed (was not, under the lethal-only IsLethalBeatenKind).
-        var world = BuildWorldBeaten(IneffectiveBeaten("Gnawer Shreth", 99u), selfLevel: 15);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Gnawer Shreth"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_SingleDeathIneffectiveExhausted_Vetoes()
-    {
-        // The Deaths==1 + can't-damage hole, end-to-end at the explicit-Attack decision gate:
-        // the first-death reprieve does NOT leave an un-damageable kind re-attemptable.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
-            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
-        var world = BuildWorldBeaten(hist, selfLevel: 15);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Gnawer Shreth"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_IneffectiveBelowThreshold_DoesNotVeto()
-    {
-        // The deadlock-fix allowance is preserved: a FEW ineffective attempts are still allowed.
-        var world = BuildWorldBeaten(
-            IneffectiveBeaten("Gnawer Shreth", 99u, LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold - 1),
-            selfLevel: 15);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Gnawer Shreth"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_IneffectiveExhausted_ActivelyHostile_Exempt()
-    {
-        // Self-defense still wins: if the ineffective-exhausted kind is attacking now, fight back.
-        var world = BuildWorldBeaten(IneffectiveBeaten("Gnawer Shreth", 99u), selfLevel: 15,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Gnawer Shreth", Wcid = 99u,
-                Distance = 3f, IsMonster = true, ObservedHostile = true,
-            });
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Gnawer Shreth"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_BeatenKindNotInView_Vetoes()
-    {
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_ActivelyHostileSameKind_Exempt()
-    {
-        // Self-defense: the beaten kind is in view AND attacking the bot now.
-        // The veto must NOT fire — the Motor's flee/disengage reflexes own it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 3f, IsMonster = true, ObservedHostile = true,
-            });
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_BeatenKindVisibleButNotHostile_Vetoes()
-    {
-        // In view but NOT hostile (a chosen engagement of a passive beaten
-        // kind) is still optional -> veto.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 6f, IsMonster = true, ObservedHostile = false,
-            });
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_PartialNameActivelyHostile_Exempt()
-    {
-        // The model names the hostile by the distinctive part of a title-laden
-        // wire name ("Skulker" for "Drudge Skulker"). The self-defense exemption
-        // must recognize the UNIQUE partial-name match the Motor will resolve and
-        // NOT veto — the bot is fighting back the thing engaging it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 3f, IsMonster = true, ObservedHostile = true,
-            });
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_AmbiguousPartialName_StillVetoes()
-    {
-        // An ambiguous partial ("Drudge" matches two visible hostiles) is NOT a
-        // unique Motor resolution, so the self-defense exemption must NOT fire and
-        // the beaten-kind veto stands.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge", 7u), selfLevel: 11,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 3f, IsMonster = true, ObservedHostile = true,
-            },
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid + 1, Name = "Drudge Slinker", Wcid = 8u,
-                Distance = 5f, IsMonster = true, ObservedHostile = true,
-            });
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NotBeatenKind_DoesNotFire()
-    {
-        // A kind the bot has killed (no losses) is not beaten -> never vetoed.
-        var hist = new[] { new CombatHistoryEntry("Rabbit", 9u, Kills: 4, Deaths: 0,
-            NearDeaths: 0, Fights: 4, LastOutcome: "kill", Ineffective: 0) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Rabbit"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NoHistory_DoesNotFire()
-    {
-        var world = BuildWorldBeaten(fullHistory: null, selfLevel: 11);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NonAttackKind_DoesNotFire()
-    {
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Drudge Skulker" } },
-            world));
-    }
 
     [Fact]
     public void IsOptionalAttackWhileNotCombatCapable_TrulyUnarmed_AllowsUnarmedMelee()
@@ -18272,187 +17807,7 @@ public class LlmGoalPolicyTests
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Chicken" } }, world));
     }
 
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NoTargetName_DoesNotFire()
-    {
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "  " } }, world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_NotVetoed_WhenOutleveled()
-    {
-        // A SURVIVED (non-lethal: no deaths) beaten kind is not vetoed on the
-        // explicit LLM Attack path. Out-leveling is sufficient but, after the
-        // deadlock fix, no longer required (see the not-out-leveled case below).
-        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
-            NearDeaths: 2, Fights: 2, LastOutcome: "near-death", Ineffective: 0,
-            MaxLossBotLevel: 9) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Mosswart"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NonLethalLoss_NotVetoed_EvenWhenNotOutleveled()
-    {
-        // DEADLOCK FIX (was: vetoed). A survived (no-death) beaten kind is no
-        // longer vetoed on the explicit LLM Attack path even at/below the loss
-        // level. The bot survived (the Motor's low-health flee gate owns
-        // survival); re-engaging to land more hits or use better gear is the
-        // strategist's WHAT. Pins the early-game trap: near-death at one's own
-        // level with no kill (so no level-up) would otherwise bar the bot
-        // forever from re-attempting the only available target.
-        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
-            NearDeaths: 1, Fights: 1, LastOutcome: "near-death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1);   // at-level, not out-leveled
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Mosswart"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_IneffectiveOnlyLoss_NotVetoed()
-    {
-        // A purely INEFFECTIVE survived loss (no deaths, no near-deaths — could
-        // not land enough hits) is an offense deficit, not a death risk, so the
-        // explicit Attack is honored regardless of level.
-        var hist = new[] { new CombatHistoryEntry("Mite Scion", 9u, Kills: 0, Deaths: 0,
-            NearDeaths: 0, Fights: 3, LastOutcome: "ineffective", Ineffective: 3,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Mite Scion"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_LethalLoss_RetestableWhenOutleveled()
-    {
-        // A LETHAL beaten kind (deaths recorded) is re-testable on the EXPLICIT
-        // LLM path once the bot out-levels the loss — the explicit order opts in
-        // to the out-level re-test. selfLevel 12 > MaxLossBotLevel 9 -> allowed.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 9) };
-        var world = BuildWorldBeaten(hist, selfLevel: 12);
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_LethalLoss_StillBeatenWhenNotOutleveled()
-    {
-        // Same lethal record but the bot has NOT out-leveled it (at or below the
-        // loss level) -> still vetoed. Pins the at-level death loop.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 12) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_SingleLethalLoss_NotVetoed_EvenWhenNotOutleveled()
-    {
-        // DEATH-SPIRAL FIX. A kind the bot died to exactly ONCE (first-encounter
-        // death) is NO LONGER vetoed on the explicit LLM Attack path, even at the
-        // loss level with no kill. Pins the live-observed L1 wedge: the bot died
-        // once to the only monster in view, which then locked the only XP source
-        // out (re-testable only once out-leveled) so the bot could never level to
-        // re-test -> permanently parked. One death is not proof the kind is
-        // unbeatable; the explicit order opts in to re-test.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1);   // at-level, not out-leveled
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Sparring Golem"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_SecondLethalLoss_StillBeatenWhenNotOutleveled()
-    {
-        // The first-death re-test is a ONE-shot reprieve: a SECOND recorded lethal
-        // loss (Deaths>=2) is now real evidence the kind is unbeatable at this
-        // power, so the out-level lock is restored and the explicit Attack is
-        // vetoed again until the bot out-levels it.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 2, NearDeaths: 1, Fights: 2, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1);
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Sparring Golem"), world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_WcidOnlySelector_Vetoes()
-    {
-        // A wcid-only Attack selector (no name) still matches the ledger by wcid
-        // -> a beaten wcid is vetoed (closes the name-only bypass).
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        var goal = new Goal { Kind = GoalKind.Attack, Target = new Selector { Wcid = 7u } };
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(goal, world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_NameContainsSelector_Vetoes()
-    {
-        // A name_contains selector resolving to a beaten kind's name is vetoed
-        // (closes the name-only bypass for the substring hook).
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        var goal = new Goal
-        {
-            Kind = GoalKind.Attack,
-            Target = new Selector { NameContains = "Drudge Skulker" },
-        };
-        Assert.True(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(goal, world));
-    }
-
-    [Fact]
-    public void IsOptionalAttackOnBeatenKind_MixedVisibleSet_HostileAndPassiveSameName_Exempt()
-    {
-        // Name-only selectors cannot tell two identically named creatures apart:
-        // if ANY same-name creature is actively hostile, the self-defense
-        // exemption fires for the whole goal (documents the name-only limit).
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 3f, IsMonster = true, ObservedHostile = true,
-            },
-            new VisibleObjectProjection
-            {
-                Guid = MobGuid + 1, Name = "Drudge Skulker", Wcid = 7u,
-                Distance = 9f, IsMonster = true, ObservedHostile = false,
-            });
-        Assert.False(LlmGoalPolicy.IsOptionalAttackOnBeatenKind(
-            AttackGoal("Drudge Skulker"), world));
-    }
-
-    [Fact]
-    public void IsBeatenKind_LethalLoss_PermanentForAutonomousButRetestableForExplicit()
-    {
-        // Default (autonomous) keeps a lethal kind beaten even when out-leveled;
-        // the explicit opt-in re-tests it once the bot out-levels the loss.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 2, NearDeaths: 0, Fights: 2, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
-            currentLevel: 20));
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
-            currentLevel: 20, lethalRetestableWhenOutleveled: true));
-    }
-
-    // ---- OnlyBeatenMonstersInView (beaten-kind STALEMATE egress gate) ----
-    // When EVERY attackable monster in view is a LETHAL-beaten kind, the bot is
-    // parked among targets the veto will always drop; the general stuck-loop
-    // egress can't fire (a beaten kind still counts as a monster-in-view), so the
-    // LLM is re-asked every decision and re-picks the same vetoed Attack. This
-    // gate lets the veto path Explore OUT instead. Matches the veto's LETHAL-only
-    // definition so a re-attemptable SURVIVED kind, a winnable kind, or a live
-    // hostile in view all DEFER the egress.
+    // Shared ledger fixtures.
 
     private static CombatHistoryEntry Winnable(string name, uint wcid)
         => new(name, wcid, Kills: 4, Deaths: 0, NearDeaths: 0, Fights: 4,
@@ -18467,224 +17822,11 @@ public class LlmGoalPolicyTests
         };
 
     [Fact]
-    public void OnlyBeatenMonstersInView_SingleLethalBeatenPassive_True()
-    {
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_AllLethalBeaten_True()
-    {
-        var hist = new[]
-        {
-            LethalBeaten("Drudge Skulker", 7u)[0],
-            LethalBeaten("Mosswart", 8u)[0],
-        };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Mosswart", 8u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SingleDeathIneffectiveExhausted_True()
-    {
-        // A Deaths==1 + ineffective-exhausted kind is avoid-beaten (NOT lethal-beaten), so a view
-        // of only that kind must still let the stalemate egress fire — else the bot is parked
-        // among un-damageable targets the veto always drops, re-asked every decision.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
-            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
-        var world = BuildWorldBeaten(hist, selfLevel: 15, Mob(MobGuid, "Gnawer Shreth", 99u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_WinnableAlsoInView_False()
-    {
-        // A winnable (not-beaten) monster in view means there IS something to
-        // engage — do not wander off. Pins the over-fire guard.
-        var hist = new[] { LethalBeaten("Drudge Skulker", 7u)[0], Winnable("Rabbit", 9u) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Rabbit", 9u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SurvivedKindInView_False()
-    {
-        // A merely SURVIVED (non-lethal: no deaths) beaten kind in view is one
-        // the bot MAY still re-attempt (the veto honors that, per the deadlock
-        // fix), so it must DEFER the egress — the bot should not leave a kind it
-        // is allowed to keep trying.
-        var hist = new[]
-        {
-            LethalBeaten("Drudge Skulker", 7u)[0],
-            new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0, NearDeaths: 2,
-                Fights: 2, LastOutcome: "near-death", Ineffective: 0),
-        };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Mosswart", 8u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_HostileInView_False()
-    {
-        // A live hostile (even a beaten kind) is a threat the Motor's flee/defend
-        // reflexes own — never wander away from it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u, hostile: true));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_NoMonsterInView_False()
-    {
-        // Nothing in view -> the general stuck-loop egress / fallback owns it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void HasWinnableMonsterInView_TrueOnlyWhenANonBeatenMonsterIsAttackable()
-    {
-        // A winnable (non-beaten) monster in view -> true (fight it; the barren-escape must DEFER).
-        Assert.True(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(new[] { Winnable("Rabbit", 9u) }, selfLevel: 11, Mob(MobGuid, "Rabbit", 9u))));
-        // ONLY a lethal-beaten kind in view -> false (no winnable target). This is the gpt-5.4 BLOCKING
-        // case ComputeEffectiveMonsterInView missed for an UNARMED bot: the barren-escape MUST still fire
-        // when the only monsters around are ones the veto drops.
-        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11, Mob(MobGuid, "Drudge Skulker", 7u))));
-        // No monster in view -> false (nothing to fight here).
-        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11)));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_OutleveledLethalKind_False()
-    {
-        // Once the bot out-levels the death, the kind is no longer beaten (it may
-        // win now) -> defer the egress and let it engage.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        var world = BuildWorldBeaten(hist, selfLevel: 20,
-            Mob(MobGuid, "Drudge Skulker", 7u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SingleDeathKind_False()
-    {
-        // First-death re-test propagation (gpt-5.4 review): a kind the bot died to
-        // exactly ONCE is no longer lethal-beaten on the shared verdict, so the
-        // stalemate egress must NOT classify the scene as "only beaten monsters" —
-        // the bot stays to re-engage rather than wandering off (the live wedge).
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1,
-            Mob(MobGuid, "Sparring Golem", 12698u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_CorpseOnly_False()
-    {
-        // A corpse is not an attackable monster -> no stalemate.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u, corpse: true));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    // ---- IsLethalBeatenKind (shared verdict for the veto + the egress gate) ----
-    // Single source of truth so IsOptionalAttackOnBeatenKind and
-    // OnlyBeatenMonstersInView can never disagree about which kinds count.
-
-    [Fact]
-    public void IsLethalBeatenKind_RecordedDeathNotOutleveled_True()
-    {
-        var hist = LethalBeaten("Drudge Skulker", 7u);
-        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 11));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SurvivedNoDeath_False()
-    {
-        // No death recorded -> not LETHAL-beaten (the deadlock-fix boundary): the
-        // bot may re-attempt it.
-        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
-            NearDeaths: 3, Fights: 3, LastOutcome: "near-death", Ineffective: 0) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 8u, "Mosswart", currentLevel: 11));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_OutleveledDeath_False()
-    {
-        // Once the bot out-levels the death the kind is re-testable -> not beaten.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 20));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SingleDeathNotOutleveled_False()
-    {
-        // DEATH-SPIRAL FIX: a kind that killed the bot exactly ONCE is re-testable
-        // on the shared lethal verdict (which the veto + stalemate egress + the
-        // ## Beaten kinds capsule all consult) even at the loss level. So the
-        // first-encounter death no longer wedges the bot when the kind is the only
-        // monster in view.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SecondDeathNotOutleveled_True()
-    {
-        // A SECOND lethal loss restores the out-level lock on the shared verdict.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 2, NearDeaths: 1, Fights: 2, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsBeatenKind_AutonomousPath_SingleDeath_StillBeaten()
-    {
-        // The first-death reprieve is EXPLICIT-ORDER ONLY. The autonomous picker
-        // path (lethalRetestableWhenOutleveled defaults to false) still treats a
-        // single death as beaten, protecting the no-death record: the Motor never
-        // suicides a target the bot has died to without the LLM deliberately
-        // ordering it.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_NoRecord_False()
-    {
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(
-            new[] { Winnable("Rabbit", 9u) }, wcid: 7u, "Drudge Skulker", currentLevel: 11));
-    }
-
-    [Fact]
-    public async Task ProposeGoal_BeatenKindStalemate_SubstitutesExploreEgress()
+    public async Task ProposeGoal_BeatenKindAttack_IsReturnedUnchanged()
     {
         // End-to-end: the LLM orders Attack on a lethal-beaten kind that is the
-        // only thing in view. The veto drops it AND, because every monster in
-        // view is beaten, the bot Explores OUT instead of re-deferring to the
-        // fallback (which would leave it parked to re-pick the vetoed Attack).
+        // only thing in view. Combat history remains evidence for Strategy; source
+        // returns the authored Attack rather than substituting travel or fallback.
         var canned = JsonSerializer.Serialize(new
         {
             choices = new[] { new { message = new { content =
@@ -18708,18 +17850,18 @@ public class LlmGoalPolicyTests
         var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
-        Assert.Equal(GoalKind.Explore, goal!.Kind);
-        Assert.Equal("override:beaten-kind-egress", goal.Source);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal("Drudge Skulker", goal.Target?.Name);
+        Assert.Equal("x", goal.Rationale);
+        Assert.Equal(3, goal.Priority);
+        Assert.StartsWith("llm:", goal.Source);
     }
 
     [Fact]
-    public async Task ProposeGoal_SingleDeathKind_AttackHonored_NotVetoed()
+    public async Task ProposeGoal_SingleDeathKind_AttackHonored()
     {
-        // End-to-end first-death re-test (gpt-5.4 review): the LLM orders Attack on
-        // a kind it died to exactly ONCE, the only monster in view. The veto must
-        // NOT fire and the Attack is RETURNED (not substituted to the beaten-kind
-        // Explore egress) — the bot re-engages to try for its first kill. This is
-        // the end-to-end mirror of the live A/B that produced the first kills.
+        // A single recorded death likewise remains evidence rather than a
+        // source-side reason to replace the authored Attack.
         var canned = JsonSerializer.Serialize(new
         {
             choices = new[] { new { message = new { content =
@@ -18735,8 +17877,7 @@ public class LlmGoalPolicyTests
             MinCallInterval = TimeSpan.Zero,
         };
         var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0) };
         var world = BuildWorldBeaten(hist, selfLevel: 1,
             Mob(MobGuid, "Sparring Golem", 12698u));
         var events = new EventStream();
@@ -18747,18 +17888,15 @@ public class LlmGoalPolicyTests
 
         Assert.NotNull(goal);
         Assert.Equal(GoalKind.Attack, goal!.Kind);
-        Assert.DoesNotContain("egress", goal.Source ?? "");
+        Assert.Equal("Sparring Golem", goal.Target?.Name);
+        Assert.StartsWith("llm:", goal.Source);
     }
 
     [Fact]
-    public async Task ProposeGoal_BeatenKindVeto_WinnableInView_DoesNotEgress()
+    public async Task ProposeGoal_BeatenKindAttack_WithWinnableAlternative_IsStillHonored()
     {
-        // End-to-end mutation guard: the same vetoed Attack, but a WINNABLE
-        // monster is also in view. The egress must NOT fire — there is something
-        // the bot can win against — so the veto DEFERS to the fallback (which
-        // owns engaging the winnable kind). We assert the returned goal came from
-        // the fallback path, NOT the egress: if the OnlyBeatenMonstersInView gate
-        // were dropped, the bot would wrongly Explore away via the egress.
+        // A second kind with recorded wins does not authorize source to replace
+        // the LLM's selected target with fallback behavior.
         var canned = JsonSerializer.Serialize(new
         {
             choices = new[] { new { message = new { content =
@@ -18784,10 +17922,88 @@ public class LlmGoalPolicyTests
         var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
-        Assert.NotEqual("override:beaten-kind-egress", goal!.Source);
-        // The veto deferred to the fallback (the gate's contract) rather than
-        // substituting the egress — proving the defer, not merely "not egress".
-        Assert.StartsWith("fallback:", goal.Source);
+        Assert.Equal(GoalKind.Attack, goal!.Kind);
+        Assert.Equal("Drudge Skulker", goal.Target?.Name);
+        Assert.StartsWith("llm:", goal.Source);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_LongDwellTalk_IsReturnedUnchanged()
+    {
+        var policy = CannedGoalPolicy(
+            "{\"kind\":\"Talk\",\"target\":{\"name\":\"Npc 90000010\"},\"rationale\":\"continue dialog\",\"priority\":2}");
+        var world = BuildVisibleWorld(CivilianNpc(NpcGuid)) with
+        {
+            Inventory = ChainCombatLoadout(),
+        };
+        var events = LongDwellEvents(world.Self.Landblock);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal("Npc 90000010", goal.Target?.Name);
+        Assert.Equal("continue dialog", goal.Rationale);
+        Assert.StartsWith("llm:", goal.Source);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_LongDwellStationaryUse_IsReturnedUnchanged()
+    {
+        var policy = CannedGoalPolicy(
+            "{\"kind\":\"Use\",\"target\":{\"name\":\"Test Mechanism\"},\"rationale\":\"try interaction\",\"priority\":2}");
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x90000011u,
+            Name = "Test Mechanism",
+            Distance = 3f,
+        }) with
+        {
+            Inventory = ChainCombatLoadout(),
+        };
+        var events = LongDwellEvents(world.Self.Landblock);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal("Test Mechanism", goal.Target?.Name);
+        Assert.Equal("try interaction", goal.Rationale);
+        Assert.StartsWith("llm:", goal.Source);
+    }
+
+    private static LlmGoalPolicy CannedGoalPolicy(string goalJson)
+    {
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        return new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+    }
+
+    private static EventStream LongDwellEvents(uint? landblock)
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(10),
+            Kind = EventKind.LandblockChanged,
+            LandblockTo = landblock,
+        });
+        return events;
     }
 
     // ---- Helpers ----
@@ -20786,153 +20002,11 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
         Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
     }
-    //
-    // Pure decision behind the mechanical backstop: when the bot is
-    // demonstrably stuck in a tapped-out, monster-free safe zone the policy
-    // substitutes a targetless Explore for a social Talk/Give the LLM keeps
-    // emitting against the existing prompt rules. dwell threshold = 5min,
-    // no-progress grace = 2min. ComputeEgressActive is a sticky latch (stays
-    // engaged across landblock seams so the bot leaves the town cluster
-    // instead of ping-ponging); IsEgressOverridableVerb gates which goal
-    // kinds get substituted while the latch is engaged.
-
-    private static readonly TimeSpan StuckGrace = TimeSpan.FromMinutes(3);
-
-    [Fact]
-    public void HuntEgress_EngagesWhenStuckPastThreshold()
-    {
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Theory]
-    [InlineData((int)GoalKind.Talk, true)]
-    [InlineData((int)GoalKind.Give, true)]
-    [InlineData((int)GoalKind.Use, false)]
-    [InlineData((int)GoalKind.Pickup, false)]
-    [InlineData((int)GoalKind.Wield, false)]
-    [InlineData((int)GoalKind.Attack, false)]
-    [InlineData((int)GoalKind.Explore, false)]
-    public void HuntEgress_OnlyOverridesSocialVerbs(int kind, bool expected)
-    {
-        // Use can be a door/portal transition (the egress action itself);
-        // Pickup can be self-arming; Attack/Explore are already progress.
-        Assert.Equal(expected, LlmGoalPolicy.IsEgressOverridableVerb((GoalKind)kind));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhenUnarmed()
-    {
-        // A weaponless bot keeps its full town grace (not ready to hunt).
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: false, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhenMonsterInView()
-    {
-        // A monster is engageable here — do not flee the hunt.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    // --- stuck-loop egress gate (cp-2266) -----------------------------------
-    // When a fixation guard has detected a proven no-progress interaction loop,
-    // ShouldEscapeStuckLoop decides whether to send a tapped-out, combat-ready,
-    // unthreatened bot away with Explore instead of deferring to the fallback
-    // (which re-picks the same dead-end class of stationary object).
-
-    [Fact]
-    public void StuckLoop_EscapesWhenCombatReadyTappedOutAndNoMonster()
-    {
-        Assert.True(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedWhenUnarmed()
-    {
-        // An UNARMED bot may legitimately need to Use objects to progress —
-        // do not send it wandering off.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: false, tappedOut: true, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedBeforeTappedOut()
-    {
-        // Early in a zone a Use loop may be a genuine progress attempt.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: false, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedWhenMonsterInView()
-    {
-        // A monster is in view (hostile OR non-hostile — the caller passes
-        // AnyAttackableMonsterInView): the egress exists to LEAVE and find
-        // monsters, so when one is already in view the bot should engage it
-        // (defend/flee a hostile, or fight a non-hostile XP target), never wander
-        // off to find a monster it can already see.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, monsterInView: true));
-    }
-
-    // --- silent-NPC Talk-loop early egress (cp-2328) ------------------------
-    // A combat-ready bot in a monster-free safe zone Talk-loops a SILENT NPC
-    // (no dialog) for minutes because the actual Explore that physically moves
-    // it is gated behind a 5-min tapped-out clock. ShouldEarlyEscapeTalkLoop
-    // breaks the loop the instant the stationary fixation is proven (Talk loop
-    // kind only), and IsTalkLoopEgressActive keeps substituting the re-emitted
-    // Talk/Give with Explore until the bot actually leaves the landblock.
-
-    [Fact]
-    public void EarlyTalkLoopEgress_FiresForTalkLoopWhenSafe()
-    {
-        Assert.True(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedForOtherLoopKinds()
-    {
-        // The Talk-loop early-escape is Talk-only; a world-object Use loop has
-        // its OWN escape (ShouldEscapeWorldUseLoop, cp-2372), so this Talk
-        // predicate correctly does not fire for it.
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "Use", monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedWhenMonsterInView()
-    {
-        // A monster is in view (hostile OR non-hostile — the caller passes
-        // AnyAttackableMonsterInView): engage the visible XP target instead of
-        // wandering off to break the talk loop (cp-2378/cp-2379 principle).
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: true, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedWhenFreshDirective()
-    {
-        // The server is actively guiding the bot — let it follow the directive.
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: false, freshDirective: true));
-    }
-
     // --- exhausted-NPC break-contact (cp070, hardened per council review) ----
     // A single-NPC Talk fixation PROVEN by the bot's own recent goal history (the
     // cp069 signal) means the bot is provably stuck: not advancing the directive
     // it re-greets, and not engaging any monster in view. ShouldBreakContact
-    // ExhaustedNpc fires UNCONDITIONALLY for the Talk loop kind once proven — it is
-    // deliberately NOT gated on freshDirective or monster-in-view, because the
-    // latched early egress AND the tapped-out stuck-loop egress are both
-    // monster-in-view-gated, so in a monster-present zone a proven fixation would
-    // otherwise wedge with no egress able to fire (livelock). The caller substitutes
+    // ExhaustedNpc fires for the Talk loop kind once proven. The caller substitutes
     // a target-less Explore and re-deliberates next tick.
 
     [Fact]
@@ -20946,8 +20020,7 @@ public class LlmGoalPolicyTests
     public void BreakContact_SuppressedWhenFixationNotProven()
     {
         // Below the history threshold (or a multi-NPC churn that no single name
-        // dominates): not a proven single-NPC fixation, so the other egresses /
-        // fallback handle it as before.
+        // dominates): not a proven single-NPC fixation, so fallback handles it.
         Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
             loopKind: "NPC Talk", provenSingleNpcTalkFixation: false));
     }
@@ -20961,32 +20034,19 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BreakContact_FiresWhereEarlyEgressIsSuppressed()
+    public void BreakContact_DoesNotInterpretWorldContext()
     {
-        // The livelock fix: in EVERY case where the latched ShouldEarlyEscapeTalkLoop
-        // stands down for a Talk loop (a monster is in view, OR the server is freshly
-        // guiding the bot), a PROVEN fixation must STILL break contact — otherwise the
-        // bot wedges with no egress able to fire. So break-contact is true wherever a
-        // proven Talk fixation exists, independent of those two suppressors.
-        foreach (var monster in new[] { true, false })
-        foreach (var fresh in new[] { true, false })
-        {
-            var early = LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-                loopKind: "NPC Talk", monsterInView: monster, freshDirective: fresh);
-            var breakContact = LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-                loopKind: "NPC Talk", provenSingleNpcTalkFixation: true);
-            Assert.True(breakContact);
-            // Whenever the early egress is suppressed, break-contact still covers it.
-            if (!early)
-                Assert.True(breakContact);
-        }
+        // The bounded recovery consumes only the proven repeat signal and loop kind;
+        // it does not rank directives, combat targets, or area productivity.
+        Assert.True(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: true));
     }
 
     // --- world-object Use-loop egress (cp-2372) ----------------------------
     // A confirmed bare world-object Use churn (the cp-2354 churn guard already
     // fired) Explores to travel through/past the looped object instead of
-    // deferring to the fallback. NOT gated on freshDirective (re-Using one
-    // object cannot be "finishing guided training"); only a hostile suppresses.
+    // deferring to the fallback. A changed combat scene suppresses the recovery
+    // so the next deliberation sees it.
 
     [Fact]
     public void WorldUseLoopEgress_FiresForUseChurnWhenSafe()
@@ -21008,8 +20068,7 @@ public class LlmGoalPolicyTests
     [Fact]
     public void WorldUseLoopEgress_SuppressedForOtherLoopKinds()
     {
-        // Only the world-object Use churn kind uses this escape; a Talk loop has
-        // its own (freshDirective-gated) path.
+        // Only the world-object Use churn kind uses this escape.
         Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
             loopKind: "NPC Talk", monsterInView: false));
     }
@@ -21067,406 +20126,6 @@ public class LlmGoalPolicyTests
             Distance = 2f, IsMonster = false, ObservedHostile = false, IsCorpse = false,
         });
         Assert.False(LlmGoalPolicy.AnyAttackableMonsterInView(world));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_WhileInWindowAndSameLandblock()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.True(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveAfterTimeout()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(-1),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenLandblockChanged()
-    {
-        // Leaving the landblock means the loop is already broken — stop overriding.
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B2u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenMonsterOrDirective()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: true, freshDirective: false));
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: true));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenNoLatchRecorded()
-    {
-        // Default state (no loop ever detected) never reports active.
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: DateTimeOffset.MinValue,
-            latchLandblock: null, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedBeforeDwellThreshold()
-    {
-        // Just arrived / brief visit — let the bot work the area first.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 4.9, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhileMaterialProgressRecent()
-    {
-        // A quest actively handing over items keeps its grace.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 9.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
-    }
-
-    [Fact]
-    public void HuntEgress_EngagesExactlyAtThresholdBoundaries()
-    {
-        // dwell == 5min and sinceProgress == 2min are both "stuck enough".
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 5.0, sinceMaterialProgress: TimeSpan.FromMinutes(2)));
-    }
-
-    [Fact]
-    public void HuntEgress_StaysEngagedAcrossSeamDespiteDwellReset()
-    {
-        // Already egressing; bot just crossed a seam so dwell reset to 0.
-        // The sticky latch must keep egress engaged so it keeps leaving the
-        // town cluster instead of reverting to Talk and pathing back.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByMonster()
-    {
-        // Reached the hunt zone — disengage egress so the bot can fight.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: true,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByRecentProgress()
-    {
-        // Inventory changed mid-egress (looted / received item) — yield to
-        // whatever the LLM wants to do next.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByDisarm()
-    {
-        // Lost the weapon mid-egress — no longer hunt-ready.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: false, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_BypassesLootGrace()
-    {
-        // cp-2260 live regression: a tapped-out bot re-farming trivial mobs
-        // loots a corpse every <2min, so sinceMaterialProgress never reaches
-        // the 2min grace and egress would never engage. When tapped out, the
-        // grace is bypassed (the bot's own 0-levels signal is the authority),
-        // so egress engages despite very recent inventory churn.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    [Fact]
-    public void HuntEgress_NotTappedOut_LootGraceStillApplies()
-    {
-        // Same recent-loot churn but NOT tapped out (e.g. still leveling here)
-        // → the grace is preserved, egress defers.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: false));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_StillCancelledByMonster()
-    {
-        // Tapped-out bypasses only the loot grace — an engageable (unfarmed/
-        // hostile) monster still cancels egress so the bot fights it.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_StillRequiresCombatReady()
-    {
-        // Tapped-out does not override the disarmed cancel.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: false, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    // ---- Seam-independent barren-stall first-trigger (cp-2263 oscillation) ----
-    // A combat-ready bot oscillating between two adjacent safe landblocks resets
-    // per-landblock dwell at every seam, so dwellMinutes never reaches the
-    // threshold and the dwell first-trigger can never fire. sinceMaterialProgress
-    // does NOT reset at seams, so a long no-progress span ENGAGES egress even at
-    // dwell == 0. Threshold = 2x dwell (10min).
-
-    [Fact]
-    public void HuntEgress_BarrenStall_EngagesAtDwellZeroWhenNoProgressPastTimeout()
-    {
-        // The exact live loophole: dwell keeps resetting (0), not yet egressing,
-        // armed, monster-free, no material progress for 10min → engage.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
-    }
-
-    [Fact]
-    public void HuntEgress_BarrenStall_DefersJustBelowTimeout()
-    {
-        // 9.9min < 10min barren-stall timeout AND dwell below threshold → defer.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(9.9)));
-    }
-
-    [Fact]
-    public void HuntEgress_BarrenStall_CancelledByMonsterEvenPastTimeout()
-    {
-        // An engageable monster still cancels — the bot reached a hunt.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
-    }
-
-    // ---- fresh-directive egress veto (cp-2285 academy-completion) ----------
-    // A low-level bot still being actively guided by the server (a fresh,
-    // DISTINCT tutorial PopupString it has not acted on) must finish that
-    // training before the dwell/stall egress fires it out to hunt. Wired as a
-    // top-tier ComputeEgressActive cancel fed by the RecentFreshDirective
-    // freshness gate (PopupString-only, distinct-text, ages out so it can't
-    // deadlock). Answers the user question "should it value the academy XP?".
-
-    [Fact]
-    public void HuntEgress_FreshDirective_VetoesEvenPastDwellAndTappedOut()
-    {
-        // The exact academy bailout case: combat-ready, no monster, dwell well
-        // past threshold, tappedOut (no level gained yet) — would normally
-        // ENGAGE — but a fresh server directive is active, so egress is vetoed.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
-            tappedOut: true, recentFreshDirective: true));
-    }
-
-    [Fact]
-    public void HuntEgress_FreshDirective_CancelsInProgressEgress()
-    {
-        // The veto is top-tier: it even cancels an egress already latched on.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
-            tappedOut: true, recentFreshDirective: true));
-    }
-
-    [Fact]
-    public void HuntEgress_NoFreshDirective_StillEngagesPastDwell()
-    {
-        // Regression guard: with no fresh directive, behaviour is unchanged —
-        // a tapped-out bot past the dwell threshold still egresses.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.FromMinutes(10),
-            tappedOut: true, recentFreshDirective: false));
-    }
-
-    // ---- RecentFreshDirective freshness gate (cp-2285) ---------------------
-    // Distinct-text + ages-out semantics that keep the veto from deadlocking.
-
-    private static LlmGoalPolicy NewBarePolicy()
-    {
-        var http = new HttpClient(new StubHandler((_, _) =>
-            new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("x") }));
-        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
-        return new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
-    }
-
-    [Fact]
-    public void RecentFreshDirective_FirstDistinctPopup_CreditsAndAgesOut()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Use the bow." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // Still held a minute later with no new events (within the 2min grace).
-        Assert.True(policy.RecentFreshDirective(es, t0.AddMinutes(1)));
-        // Ages out just past the grace — so it can never deadlock.
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_RepeatedIdenticalPopup_DoesNotReExtend()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // A REPEAT of the same text (the anti-idle loop) must NOT reset the grace,
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
-        // so by t0+2.01min the veto has aged out and egress is allowed again.
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_NewDistinctPopup_ReExtends()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Step one." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // A genuinely NEW instruction that ARRIVES later (its own Utc is t1)
-        // re-extends the grace from its own emit time.
-        var t1 = t0.AddMinutes(1.5);
-        es.Append(new StreamEvent { Sequence = -1, Utc = t1, Kind = EventKind.PopupString, Text = "Step two." });
-        Assert.True(policy.RecentFreshDirective(es, t1));
-        Assert.True(policy.RecentFreshDirective(es, t1.AddMinutes(1.0)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_StalePopup_DoesNotCredit()
-    {
-        // A popup whose OWN timestamp is older than the grace (e.g. an old
-        // login popup seen on the first whole-buffer scan, or one processed
-        // after a delay) must NOT grant a fresh veto — freshness is anchored to
-        // the directive's emit time, not the processing time.
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Old login popup." });
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(3)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_NonPopupEvents_DoNotCredit()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        // NpcDialog is deliberately NOT credited (a town full of NPCs would
-        // otherwise pin the bot forever); ServerMessage broadcast is ignored too.
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.NpcDialog, Name = "Trainer", Text = "Welcome, adventurer." });
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.ServerMessage, Text = "Someone says hi." });
-        Assert.False(policy.RecentFreshDirective(es, t0));
-    }
-
-    // ---- IsEgressOverridableStationaryUse (cp-2263 forge fixation) ----
-    // While egressing, a Use of a STATIONARY non-transit world object extends the
-    // dwell like Talk/Give and is substituted; transit/interactive affordances
-    // (door/portal/corpse/openable) are preserved so the bot can still leave/loot.
-
-    private static WorldStateProjection StationaryUseWorld(
-        params VisibleObjectProjection[] visible)
-        => new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-            },
-            Inventory = System.Array.Empty<InventoryItemProjection>(),
-            Visible = visible,
-        };
-
-    private static Goal UseGoal(string name)
-        => new Goal { Kind = GoalKind.Use, Target = new Selector { Name = name } };
-
-    [Fact]
-    public void StationaryUse_OverridesPlainStationaryObject()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        Assert.True(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Fletching Forge"), world));
-    }
-
-    [Theory]
-    [InlineData("door")]
-    [InlineData("portal")]
-    [InlineData("openable")]
-    [InlineData("corpse")]
-    public void StationaryUse_PreservesTransitAndInteractiveAffordances(string flag)
-    {
-        var v = new VisibleObjectProjection
-        {
-            Guid = 0x9u, Name = "Thing", Distance = 6f,
-            IsDoor = flag == "door",
-            IsPortal = flag == "portal",
-            IsOpenable = flag == "openable",
-            IsCorpse = flag == "corpse",
-        };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Thing"), StationaryUseWorld(v)));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideNonUseKind()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Fletching Forge" } };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(talk, world));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideUnresolvedTarget()
-    {
-        // Target not in view → conservative: pass through (could be a transit
-        // object the bot is walking toward).
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Something Else", Distance = 6f });
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Fletching Forge"), world));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideEmptySelector()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector() };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(goal, world));
     }
 
     [Fact]
@@ -23552,75 +22211,6 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenIneffectiveKindNoKill()
-    {
-        // cp-2410/cp-2411: a monster kind the bot fought but never killed is
-        // the can't-win-fights bottleneck — it renders beside the spend
-        // decision so the SPEND XP rule can weigh offense, not just survival.
-        // An `ineffective` stalemate (cp-2410's original case) still qualifies.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.Contains("monster kind(s) you have not killed", prompt);
-        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
-        // Exact full clause (guards the middle "and have fought N" half too).
-        Assert.Contains(
-            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
-            prompt);
-        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
-        var offenseIdx = prompt.IndexOf("monster kind(s) you have not killed", System.StringComparison.Ordinal);
-        Assert.True(offenseIdx > capsuleIdx, "offense fact should render within the ## Unspent XP capsule");
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenDiedToKindNoIneffective()
-    {
-        // cp-2411: the kinds that WALL the live bot record a `death` (or
-        // `near-death`), NOT `ineffective` — cp-2410's `Ineffective > 0` gate
-        // MISSED them. A died-to kind with 0 kills and 0 ineffective must now
-        // surface as the can't-win-fights bottleneck beside the spend decision.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Mite Scion", 22600u, Kills: 0, Deaths: 2,
-                    NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.Contains("1 monster kind(s) you have not killed", prompt);
-        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
-        Assert.Contains(
-            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
-            prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenKindHasKills()
-    {
-        // A kind the bot HAS killed is not a bottleneck -> no can't-win fact.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Rabbit", 48u, Kills: 3, Deaths: 0,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "kill", Ineffective: 0),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
-    }
-
-    [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_InlinesAttributeValues()
     {
         // cp-2419: the bot's RAW attribute values render INSIDE the ## Unspent XP
@@ -23673,22 +22263,6 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.DoesNotContain("## Unspent XP", prompt);
         Assert.DoesNotContain("your attributes are", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenNoUnspentXp()
-    {
-        // No unspent XP -> the whole capsule (incl. the can't-win fact) is omitted.
-        var world = BuildXpWorld(69296, 0) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
     }
 
     [Fact]
@@ -25040,54 +23614,6 @@ public class LlmGoalPolicyTests
         Assert.Equal("", LlmGoalPolicy.FormatCombatRecordFor(hist, 7u, "Drudge Skulker"));
     }
 
-    // ---- IsBeatenKind shared verdict (fallback skip + frontier mob-bias) ----
-
-    [Fact]
-    public void IsBeatenKind_FalseWhenNoRecord()
-    {
-        Assert.False(LlmGoalPolicy.IsBeatenKind(null, 7u, "X", 5));
-        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 7u, "Drudge Skulker", 5)); // no match
-    }
-
-    [Fact]
-    public void IsBeatenKind_FalseWhenHasKill()
-    {
-        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 3, 1, 0, 4, "kill") };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 14u, "Cow", 5)); // Kills>0 => not beaten
-    }
-
-    [Fact]
-    public void IsBeatenKind_TrueWhenLostNoKill_RegardlessOfLevelForDeath()
-    {
-        // A death loss stays beaten at any level (no MaxLossBotLevel re-test).
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 1, 3, "death", MaxLossBotLevel: 3) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 99));
-    }
-
-    [Fact]
-    public void IsBeatenKind_NonLethalLoss_FalseAfterLevelUp_TrueBefore()
-    {
-        // Deaths==0, only near-death/ineffective, lost at level 3.
-        var hist = new[] { new CombatHistoryEntry("Mite Scion", 22600u, 0, 0, 3, 3, "near-death", MaxLossBotLevel: 3) };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 8)); // 8 > 3 -> re-test
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 3));  // 3 not > 3 -> beaten
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", null)); // unknown level -> beaten
-    }
-
-    [Fact]
-    public void IsBeatenKind_AggregatesSameName_KillOnSiblingUnbeats()
-    {
-        // Same display name, different wcids: a loss on the visible wcid but a
-        // kill on a sibling -> aggregate Kills>0 -> not beaten.
-        var hist = new[]
-        {
-            new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 0, 2, "death", MaxLossBotLevel: 3),
-            new CombatHistoryEntry("Drudge Skulker", 7u, 5, 0, 0, 5, "kill"),
-        };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 3));
-    }
-
     [Fact]
     public void FormatThreatSummary_NullWhenNoMonsters()
     {
@@ -25374,9 +23900,6 @@ public class LlmGoalPolicyTests
         Assert.Contains("double-click", p);
         // combat target discrimination + proactive leveling
         Assert.Contains("LEVELING is core progress", p);
-        // tapped-out bot attacks visible monsters even mid-directive (cp071)
-        Assert.Contains("TAPPED-OUT EXCEPTION", p);
-        Assert.Contains("monster", p);
         // proven-low-value grind: pursue an unacted objective step over farming
         Assert.Contains("OBJECTIVE-OVER-GRIND", p);
         // self-arming before optional combat
@@ -25416,9 +23939,6 @@ public class LlmGoalPolicyTests
         Assert.Contains("town-stuck", p);
         Assert.Contains("HUNT EXCURSION", p);
         Assert.Contains("KEEP emitting it", p);
-        // tapped-out: corrected leveling steer (cp-2270) — prefer beatable, no "tougher for XP"
-        Assert.Contains("monsters you can DEFEAT", p);
-        Assert.Contains("do NOT chase `tougher` monsters for more XP", p);
         // NOTE: the BLOCKED-targets rule is now conditional — cp-2402 gates it
         // on a recent ActionRejected `Blocked`/`Unreachable` (it only tells the
         // LLM how to react to one), which this fresh-EventStream world has none
@@ -26938,463 +25458,6 @@ public class LlmGoalPolicyTests
         policy.ProposeGoal(world, events, null);
         await policy.WaitForInFlightAsync();
         Assert.Equal(2, reqs.Count);    // intent-left-top → ended → real call
-    }
-
-    // ---- HuntTappedOutFact (coldstart hunt-zone discovery perception) ----
-
-    [Fact]
-    public void HuntTappedOutFact_NotCombatReady_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: false, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownLevel_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: null, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownEntryLevel_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: null,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_DwellBelowThreshold_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 4.9, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownDwell_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: null, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_LeveledHere_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 4, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_TappedOut_ReturnsFact()
-    {
-        var fact = LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 7.0, dwellThresholdMinutes: 5.0);
-        Assert.NotNull(fact);
-        Assert.Contains("tapped out", fact);
-        Assert.Contains("7 min", fact);
-        Assert.Contains("level", fact);
-        // Raw self-data only — no verb directive embedded (audit finding #1).
-        Assert.DoesNotContain("Explore", fact);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_TappedOut_SurfacesFactInCombatReadiness()
-    {
-        // Combat-ready (melee wielded), dwelled > threshold, no level gained
-        // since entry → the tapped-out fact must appear under Combat readiness.
-        var world = new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-                Level = 3,
-            },
-            Inventory = new[]
-            {
-                new InventoryItemProjection
-                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
-            },
-            Visible = System.Array.Empty<VisibleObjectProjection>(),
-        };
-        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, stack: null, pickerActivity: null,
-            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
-            levelAtLandblockEntry: 3);
-        Assert.Contains("tapped out: level", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_LeveledHere_OmitsTappedOutFact()
-    {
-        // Same dwell, but the bot gained a level here → fact suppressed.
-        var world = new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-                Level = 4,
-            },
-            Inventory = new[]
-            {
-                new InventoryItemProjection
-                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
-            },
-            Visible = System.Array.Empty<VisibleObjectProjection>(),
-        };
-        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, stack: null, pickerActivity: null,
-            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
-            levelAtLandblockEntry: 3);
-        Assert.DoesNotContain("tapped out: level", prompt);
-    }
-
-    // ---- cp-2260 cold-start trivial-farm egress override helpers ----
-
-    private static VisibleObjectProjection Mob(
-        uint guid, string name, uint? wcid, bool corpse = false, bool hostile = false)
-        => new VisibleObjectProjection
-        {
-            Guid = guid, Name = name, Wcid = wcid, ItemType = 0x10u, Distance = 2f,
-            IsCreature = true, IsMonster = true, IsCorpse = corpse, ObservedHostile = hostile,
-        };
-
-    [Fact]
-    public void IsFarmedHere_NotTappedOut_False()
-    {
-        var v = Mob(0x1u, "Chicken", 10u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsFarmedHere_ObservedHostile_False()
-    {
-        var v = Mob(0x1u, "Chicken", 10u, hostile: true);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_NullOrEmptyKilledSet_False()
-    {
-        var v = Mob(0x1u, "Chicken", 10u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(v, null, tappedOut: true));
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string>(), tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_KindInSet_True()
-    {
-        var v = Mob(0x1u, "Chicken", 10u);
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"));
-        Assert.NotNull(key);
-        Assert.True(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { key! }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_UnknownKind_False()
-    {
-        var v = Mob(0x1u, "Drudge", 99u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_AllFarmed_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) };
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_UnknownKindPresent_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_FarmedButCorpse_IgnoredAndNotEffective()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var visible = new[] { Mob(0x1u, "Chicken", 10u, corpse: true) };
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_FarmedKindAttackingBot_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // Same farmed kind, but it's HOSTILE (attacking) → still counts.
-        var visible = new[] { Mob(0x1u, "Chicken", 10u, hostile: true) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    // ---- ignored-kind liveness backstop (visible-but-unengaged) ----
-
-    [Fact]
-    public void IsIgnoredHere_NotTappedOut_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(
-            v, new HashSet<string> { "w:14" }, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_ObservedHostile_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u, hostile: true);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(
-            v, new HashSet<string> { "w:14" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_NullOrEmptySet_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, null, tappedOut: true));
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string>(), tappedOut: true));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_KindInSet_True()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        Assert.True(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_IgnoredKind_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        var visible = new[] { Mob(0x1u, "Cow", 14u) };
-        // Not in the KILLED set, but in the IGNORED set → no longer effective.
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true));
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_IgnoredSetButHostile_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        var visible = new[] { Mob(0x1u, "Cow", 14u, hostile: true) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
-    }
-
-    private static readonly System.Collections.Generic.IReadOnlySet<string> NoEngaged =
-        new HashSet<string>();
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_NotEligible_ClearsAndEmpty()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>
-        {
-            ["w:14"] = DateTimeOffset.UnixEpoch,
-        };
-        var now = DateTimeOffset.UnixEpoch.AddMinutes(10);
-        var result = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged,
-            eligibleContext: false, now, TimeSpan.FromMinutes(5));
-        Assert.Empty(result);
-        Assert.Empty(dict); // tracker cleared when not eligible
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_DefersBeforeTimeout_ThenIgnoresAtTimeout()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        // First eligible observation stamps the clock, not yet ignored.
-        var r1 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        Assert.Empty(r1);
-        // Just before timeout → still deferred.
-        var r2 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
-        Assert.Empty(r2);
-        // At/after timeout → ignored.
-        var r3 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(5), TimeSpan.FromMinutes(5));
-        Assert.Contains("w:14", r3);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_AbsenceResetsContinuity()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        // Kind leaves PVS for a tick → dropped from tracker.
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, System.Array.Empty<(string, bool)>(), NoEngaged, true, t0.AddMinutes(4), TimeSpan.FromMinutes(5));
-        Assert.DoesNotContain("w:14", dict.Keys);
-        // Reappears → clock restarts; 4.9 min after FIRST sighting is < timeout from the restart.
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_HostileNeverAccrues()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", true) }, NoEngaged, true, t0.AddMinutes(100), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-        Assert.Empty(dict);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_EngagedKindDropped()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        // Bot now Attacks this kind → it is engaged, so dropped from the tracker.
-        var engaged = (System.Collections.Generic.IReadOnlySet<string>)new HashSet<string> { "w:14" };
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, engaged, true, t0.AddMinutes(10), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-        Assert.Empty(dict);
-    }
-
-    private static WorldStateProjection EgressWorld(
-        IReadOnlyList<VisibleObjectProjection> visible,
-        IReadOnlySet<string>? killed,
-        CombatFightStatus? fight = null)
-        => new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f, Level = 3,
-            },
-            Inventory = System.Array.Empty<InventoryItemProjection>(),
-            Visible = visible,
-            KilledKindsThisDwell = killed,
-            CurrentFight = fight,
-        };
-
-    private static Goal AttackGoal(Selector target) => new Goal
-    {
-        Kind = GoalKind.Attack, Target = target, Source = "llm",
-    };
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NotTappedOut_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NonAttackGoal_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Chicken" }, Source = "llm" };
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(talk, world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_EmptySelector_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector()), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NoKillsHere_False()
-    {
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, null);
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_HostileInView_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // A different mob is attacking the bot → self-defense outranks egress.
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u, hostile: true) },
-            new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_MidFight_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key },
-            fight: new CombatFightStatus(0x1u, "Chicken", 0, 0, 0));
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_AllMatchesFarmed_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) },
-            new HashSet<string> { key });
-        Assert.True(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NoVisibleMatch_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // Killed a Chicken here, but the Attack selector names a Drudge not in view.
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Drudge" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_MixedMatchUnfarmed_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Rat"))!;
-        // Two visible "Rat" by NAME selector: one farmed wcid 10, one fresh wcid 99.
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Rat", 10u), Mob(0x2u, "Rat", 99u) },
-            new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Rat" }), world, tappedOut: true));
     }
 
     // ---- FitPromptToCeiling (request-size ceiling; prevents HTTP 413) ----

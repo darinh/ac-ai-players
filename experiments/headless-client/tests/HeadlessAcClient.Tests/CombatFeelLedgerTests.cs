@@ -299,95 +299,6 @@ public class CombatFeelLedgerTests
         Assert.Equal(2, b.Snapshot()!.Single().Kills);
     }
 
-    // ---- MaxLossBotLevel (adaptive beaten-kind re-test signal) --------
-
-    [Fact]
-    public void RecordLoss_WithBotLevel_StampsMaxLossBotLevel()
-    {
-        var l = new CombatFeelLedger();
-        l.RecordDeath(Wcid(211u, "Mudlurk Mosswart"), botLevel: 5);
-        Assert.Equal(5, Assert.Single(l.Snapshot()!).MaxLossBotLevel);
-
-        var n = new CombatFeelLedger();
-        n.RecordNearDeath(Wcid(212u, "Auroch"), botLevel: 4);
-        Assert.Equal(4, Assert.Single(n.Snapshot()!).MaxLossBotLevel);
-
-        var i = new CombatFeelLedger();
-        i.RecordIneffective(Wcid(213u, "Wasp"), botLevel: 6);
-        Assert.Equal(6, Assert.Single(i.Snapshot()!).MaxLossBotLevel);
-    }
-
-    [Fact]
-    public void LossLevel_TakesMaxAcrossRepeatedLosses_NotLatest()
-    {
-        // A later loss at a LOWER level must not lower the recorded max — the
-        // re-test trigger compares the bot's current level to the HIGHEST level
-        // it ever lost at (monotonic, conservative).
-        var l = new CombatFeelLedger();
-        l.RecordNearDeath(Wcid(7u, "Drudge"), botLevel: 3);
-        l.RecordNearDeath(Wcid(7u, "Drudge"), botLevel: 7);
-        l.RecordIneffective(Wcid(7u, "Drudge"), botLevel: 5);
-        Assert.Equal(7, Assert.Single(l.Snapshot()!).MaxLossBotLevel);
-    }
-
-    [Fact]
-    public void RecordKill_DoesNotStampLossLevel_AndLossWithoutLevelIsNull()
-    {
-        // A kill carries no loss level; a loss recorded with an unknown level
-        // (default null) leaves the field null -> re-test disabled, kind stays
-        // beaten exactly as before this feature.
-        var l = new CombatFeelLedger();
-        l.RecordKill(Wcid(24937u, "The Chicken"));
-        Assert.Null(Assert.Single(l.Snapshot()!).MaxLossBotLevel);
-
-        var d = new CombatFeelLedger();
-        d.RecordDeath(Named("Drudge Skulker")); // no botLevel
-        Assert.Null(Assert.Single(d.Snapshot()!).MaxLossBotLevel);
-    }
-
-    [Fact]
-    public void JsonRoundTrip_PreservesMaxLossBotLevel()
-    {
-        var l = new CombatFeelLedger();
-        l.RecordNearDeath(Wcid(211u, "Mudlurk Mosswart"), botLevel: 8);
-        var restored = CombatFeelLedger.FromJson(l.ToJson());
-        Assert.Equal(8, Assert.Single(restored.Snapshot()!).MaxLossBotLevel);
-    }
-
-    [Fact]
-    public void FromJson_OldLedgerWithoutLossLevelField_DeserializesToNull()
-    {
-        // A ledger persisted before MaxLossBotLevel existed has no such key.
-        // The optional DTO field must deserialize to null (NOT crash, NOT wipe
-        // the entry) so old learning survives the upgrade and behaves as today.
-        const string oldJson =
-            "{\"Version\":1,\"Order\":1,\"Entries\":[{\"Key\":\"w:211\"," +
-            "\"DisplayName\":\"Mudlurk Mosswart\",\"Wcid\":211,\"Kills\":0," +
-            "\"Deaths\":1,\"NearDeaths\":0,\"Ineffective\":0,\"Fights\":1," +
-            "\"LastOutcome\":\"death\",\"LastOutcomeOrder\":1}]}";
-        var restored = CombatFeelLedger.FromJson(oldJson);
-        var e = Assert.Single(restored.Snapshot()!);
-        Assert.Equal(1, e.Deaths);           // entry preserved
-        Assert.Null(e.MaxLossBotLevel);      // missing field -> null
-    }
-
-    [Fact]
-    public void MergeFrom_MaxMergesLossLevel()
-    {
-        var mine = new CombatFeelLedger();
-        mine.RecordNearDeath(Wcid(7u, "Drudge"), botLevel: 3);
-        var other = new CombatFeelLedger();
-        other.RecordNearDeath(Wcid(7u, "Drudge"), botLevel: 7); // higher
-        mine.MergeFrom(other);
-        Assert.Equal(7, Assert.Single(mine.Snapshot()!).MaxLossBotLevel);
-
-        // Reverse direction must not lower it.
-        var lower = new CombatFeelLedger();
-        lower.RecordNearDeath(Wcid(7u, "Drudge"), botLevel: 2);
-        mine.MergeFrom(lower);
-        Assert.Equal(7, Assert.Single(mine.Snapshot()!).MaxLossBotLevel);
-    }
-
     // ---- SwungZeroDamage (out-defended signal) ------------------------
 
     [Fact]
@@ -409,7 +320,7 @@ public class CombatFeelLedgerTests
     public void JsonRoundTrip_PreservesSwungZeroDamage()
     {
         var l = new CombatFeelLedger();
-        l.RecordIneffective(Wcid(20u, "Auroch Bull"), botLevel: 11, swungZeroDamage: true);
+        l.RecordIneffective(Wcid(20u, "Auroch Bull"), swungZeroDamage: true);
         var restored = CombatFeelLedger.FromJson(l.ToJson());
         Assert.Equal(1, Assert.Single(restored.Snapshot()!).SwungZeroDamage);
     }
@@ -419,7 +330,7 @@ public class CombatFeelLedgerTests
     {
         // A ledger persisted before SwungZeroDamage existed has no such key. The
         // optional DTO field must deserialize to 0 (NOT crash) so old learning
-        // survives the upgrade and the new veto simply does not fire on it.
+        // survives the upgrade with no invented evidence.
         const string oldJson =
             "{\"Version\":1,\"Order\":1,\"Entries\":[{\"Key\":\"w:211\"," +
             "\"DisplayName\":\"Mudlurk Mosswart\",\"Wcid\":211,\"Kills\":0," +

@@ -1369,14 +1369,6 @@ internal sealed class HandshakeDriver : IDisposable
         // observed-hostile horizon so both lines describe the same recency.
         var                  recentInboundHits = new List<InboundHit>();
         const double         InboundDamageWindowSeconds = ObservedHostileTtlSeconds;
-        // cold-start egress: stable kind-keys (CombatFeelLedger.KeyOf) of
-        // monster kinds the bot has KILLED since entering the current
-        // landblock. Cleared on landblock change; published to
-        // worldState.KilledKindsThisDwell before each projection build so the
-        // hunt-egress override can see which visible kinds the bot has already
-        // farmed HERE (proven non-leveling once the bot is tapped out). Bot's
-        // own outcome bookkeeping — no danger/value label.
-        var                  killedKindsThisLandblock = new HashSet<string>(StringComparer.Ordinal);
         // loot-fresh-kills (cp-2357): recent OWN kills (creature name + time), kept
         // briefly so a freshly-spawned corpse can be matched to the kill by
         // name+recency and surfaced as a loot opportunity. The "opened" check
@@ -2228,7 +2220,7 @@ internal sealed class HandshakeDriver : IDisposable
                 DateTime.UtcNow, CombatDeathAttribution.DefaultFreshness);
             if (deathFoe is { } foe)
             {
-                combatFeel.RecordDeath(foe, ReadSelfLevel(worldState));
+                combatFeel.RecordDeath(foe);
                 Console.WriteLine(
                     $"[combat-feel] self DEATH attributed to '{foe.Name ?? "?"}' " +
                     $"wcid={(foe.Wcid?.ToString() ?? "?")}");
@@ -3295,11 +3287,6 @@ internal sealed class HandshakeDriver : IDisposable
                                             recentKills.Add(new Strategy.RecentKill(killGx, killGy, killNow));
                                             recentKills.RemoveAll(k => killNow - k.At > freshKillRecencyWindow);
                                         }
-                                        // cold-start egress: remember this KIND was killed in
-                                        // the current landblock so the egress override can treat
-                                        // it as already-farmed-here (bot's own outcome; no label).
-                                        if (CombatFeelLedger.KeyOf(killIdentity) is string killKindKey)
-                                            killedKindsThisLandblock.Add(killKindKey);
                                         PublishCombatHistory();
                                         // The kill resolves the engagement —
                                         // a later self-death is NOT this foe.
@@ -4388,11 +4375,6 @@ internal sealed class HandshakeDriver : IDisposable
                             // The new area re-arms inbound-episode detection: forget the
                             // last-emitted attacker so the first hit here surfaces an event.
                             lastInboundEpisodeAttacker = null;
-                            // cold-start egress: a new landblock is a fresh hunt
-                            // zone — the per-dwell killed-kind set must not carry
-                            // across the seam (mirrors the dwell/level reset in
-                            // LlmGoalPolicy.UpdateDwellTracking).
-                            killedKindsThisLandblock.Clear();
                             // Commit B — the inter-landblock edge is
                             // recorded below (after we have created the
                             // arrival node via RecordVisit). Setting
@@ -4753,7 +4735,7 @@ internal sealed class HandshakeDriver : IDisposable
                     var dgIdentity = new CombatFeelLedger.MobIdentity(
                         dgFoe?.WeenieClassId ?? lastCombatFoe?.Wcid,
                         dgFoe?.Name ?? combatTargetName ?? lastCombatFoe?.Name);
-                    combatFeel.RecordNearDeath(dgIdentity, ReadSelfLevel(worldState));
+                    combatFeel.RecordNearDeath(dgIdentity);
                     PublishCombatHistory();
                     // combat-feel: the disengage is the last confirmed moment we
                     // were fighting this foe. Anchor the death-attribution foe
@@ -5047,7 +5029,6 @@ internal sealed class HandshakeDriver : IDisposable
                                 combatSwingsLanded, combatSwingsEvaded, combatDamageDealt);
                             combatFeel.RecordIneffective(
                                 new CombatFeelLedger.MobIdentity(abandonFoe.Wcid, abandonFoe.Name),
-                                ReadSelfLevel(worldState),
                                 swungZeroDamage: swungZeroDamage);
                             PublishCombatHistory();
                         }
@@ -5940,13 +5921,6 @@ internal sealed class HandshakeDriver : IDisposable
                     worldState.OpenedCorpseGuids = corpseOpenedByBotAt.Count > 0
                         ? new HashSet<uint>(corpseOpenedByBotAt.Keys)
                         : null;
-                    // cold-start egress: publish the per-landblock killed-kind
-                    // set so the projection (and the hunt-egress override that
-                    // reads it) sees which kinds the bot has already farmed here.
-                    worldState.KilledKindsThisDwell = killedKindsThisLandblock.Count > 0
-                        ? new HashSet<string>(killedKindsThisLandblock, StringComparer.Ordinal)
-                        : null;
-
                     // immobile-stuck telemetry: if the bot has moved away
                     // from the wedge anchor by ANY cause (walk progress,
                     // teleport, server reposition) since the last block-stop,
@@ -7799,9 +7773,7 @@ internal sealed class HandshakeDriver : IDisposable
                             var outdoorFrontier = TryChooseOutdoorFrontierDest(
                                 tacticsSelfCell, tacticsSelf.Position, navGraph,
                                 frontierCellCooldownUntil, huntBiasAuthorized, goal.Direction, out var outdoorPathCells,
-                                fallbackSweepHeading: exploreSweepHeading,
-                                avoidBeatenHistory: worldState.CombatHistoryFull,
-                                selfLevelForBeaten: ReadSelfLevel(worldState));
+                                fallbackSweepHeading: exploreSweepHeading);
                             if (outdoorFrontier is not null)
                             {
                                 exploreTarget = outdoorFrontier;
@@ -12393,10 +12365,7 @@ internal sealed class HandshakeDriver : IDisposable
     /// When <paramref name="huntBiasAuthorized"/> is true (the active Explore
     /// belongs to an LLM/operator-authorized HUNT excursion — see the call
     /// site), the bot's OWN remembered recent Mob sightings break a near-tie
-    /// in the geometric direction score toward a known hunt bearing — EXCLUDING
-    /// kinds the bot's own combat-feel (<paramref name="avoidBeatenHistory"/> +
-    /// <paramref name="selfLevelForBeaten"/>) marks as beaten-and-not-out-leveled,
-    /// so the walk is never biased back toward mobs it cannot beat. This is
+    /// in the geometric direction score toward a known hunt bearing. This is
     /// mechanical execution of an already-authorized hunt (the LLM still owns
     /// WHETHER to hunt and emits the Attack when a Mob enters view); it never
     /// fires for a non-hunt Explore, and it cannot override a clearly-more-
@@ -12410,9 +12379,7 @@ internal sealed class HandshakeDriver : IDisposable
         bool huntBiasAuthorized,
         string? headingDirection,
         out IReadOnlySet<uint>? pathCells,
-        string? fallbackSweepHeading = null,
-        IReadOnlyList<CombatHistoryEntry>? avoidBeatenHistory = null,
-        int? selfLevelForBeaten = null)
+        string? fallbackSweepHeading = null)
     {
         pathCells = null;
         if (Strategy.AcCoords.IsIndoor(currentCellId))
@@ -12456,16 +12423,6 @@ internal sealed class HandshakeDriver : IDisposable
             {
                 if (s.Kind != EntityKind.Mob) continue;
                 if (s.LastSeenUtc < ttlCutoff) continue;
-                // Don't bias the hunt-walk toward a kind the bot's OWN
-                // combat-feel says it loses to and has not out-leveled (the SAME
-                // beaten verdict cp-2385/cp-2420 use to skip ATTACKING it).
-                // Without this, the explore-bias walks the bot back into an area
-                // dense with mobs it cannot beat, contradicting the attack-time
-                // avoidance. Bot-owned outcomes + own level only; no game
-                // knowledge. Null history (caller passed none) => no exclusion.
-                if (Strategy.LlmGoalPolicy.IsBeatenKind(
-                        avoidBeatenHistory, s.Wcid, s.Name, selfLevelForBeaten))
-                    continue;
                 (mobSightings ??= new()).Add(
                     new Strategy.OutdoorFrontierExplorer.MonsterSighting(s.WorldX, s.WorldY));
             }
@@ -12667,9 +12624,7 @@ internal sealed class HandshakeDriver : IDisposable
 
     /// <summary>
     /// The bot's current Level from the self snapshot's PropertyInts, or null
-    /// when self/level is not yet known. Used to stamp combat-feel loss
-    /// records with the level at which a loss occurred (the fallback's
-    /// adaptive beaten-kind re-test reads it back).
+    /// when self/level is not yet known.
     /// </summary>
     private static int? ReadSelfLevel(WorldState worldState) =>
         worldState.Self?.PropertyInts is { } pi && pi.TryGetValue(LevelPropertyIntId, out var lv)
