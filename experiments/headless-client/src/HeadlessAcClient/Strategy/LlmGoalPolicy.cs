@@ -196,96 +196,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // stale, falsely-large dwell.
     private static readonly TimeSpan DwellSessionGap = TimeSpan.FromSeconds(60);
 
-    // Town-stuck hunt-egress enforcement (mechanical LLM-COMPLIANCE
-    // backstop). The LOOP-BREAK(town-stuck) + HUNT EXCURSION + PERSIST
-    // prompt rules (BuildUserPrompt RULES block) tell the LLM to leave a
-    // tapped-out, monster-free safe zone once dwell exceeds a few minutes,
-    // but the model observably IGNORES them and keeps Talking town NPCs
-    // forever (live Diseng62715: stayed in 0xA9B4 the whole ~19min run,
-    // 291 positions all in one landblock, 0 Explore, dwell well past 5min).
-    // When the bot is demonstrably stuck we MECHANICALLY substitute a
-    // targetless Explore so the existing OutdoorFrontierExplorer drives
-    // egress. This is enforcement of an existing prompt directive, NOT new
-    // strategy: a targetless Explore interacts with no LLM-unrequested
-    // object, and every gate is a typed wire affordance or a timer (no NPC
-    // names, wcids, landblock ids, or English-dialog parsing). Mirrors the
-    // accepted server-side recovery-tick pattern (ac-ai-players#110).
-    private const double EgressDwellMinutes = 5.0;
-    private static readonly TimeSpan EgressNoProgressGrace = TimeSpan.FromMinutes(2);
-    // Seam-independent barren-stall first-trigger. The dwellMinutes trigger is
-    // per-landblock and resets at every seam, so a bot oscillating between two
-    // adjacent safe landblocks never accumulates the threshold in either and
-    // egress never engages. sinceMaterialProgress does NOT reset at seams (only
-    // on real own-progress: an inventory delta or a level gain), so this trigger
-    // catches a bot stalled across a small landblock cluster regardless of how
-    // it split its time. 2x the dwell threshold: even a perfectly even split
-    // across two landblocks accumulates here before either hits the per-landblock
-    // threshold, while a productive hunt resets it on every loot/level.
-    private static readonly TimeSpan BarrenStallTimeout =
-        TimeSpan.FromMinutes(2 * EgressDwellMinutes);
-    // Threshold past which an undirected barren-stall egress escalates to a DIRECTIONAL
-    // escape. The undirected egress (Explore{anywhere}) had its chance for the first
-    // ~LongBarrenStallDwellMinutes but the Motor's frontier only fans the LOCAL unexplored
-    // cells, so a bot in a monster-free landblock keeps re-covering it without leaving. Past
-    // this dwell, commit a compass bearing so the bot travels SUSTAINED out of the landblock.
-    private static readonly double LongBarrenStallDwellMinutes = 3 * EgressDwellMinutes;
-    // Deterministic 8-way compass escape bearing from the bot's OWN landblock id: STABLE while
-    // the bot is stuck in one landblock (same id => same heading => sustained escape that way),
-    // rotating when it crosses to a new landblock (a fresh bearing for the next excursion until
-    // a monster appears). A mechanical SEARCH direction to try, NOT a known monster location;
-    // no map, no game knowledge.
-    private static readonly string[] BarrenEscapeCompass =
-        { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" };
-    internal static string? EscapeHeadingForLandblock(uint? landblock)
-        => landblock is uint lb ? BarrenEscapeCompass[(int)(lb % 8u)] : null;
-
-    // On a LONG barren-stall, stamp an UNDIRECTED Explore{anywhere} with a COMMITTED compass
-    // `Direction` so the Motor travels SUSTAINED out of the tapped-out landblock (Goal.Direction
-    // drives the headingDominant frontier path) instead of fanning the LOCAL frontier and never
-    // leaving. Only an undirected Explore is stamped — an LLM-chosen Direction is never
-    // overridden, and a non-Explore goal passes through untouched. Mechanical escape bearing
-    // from the bot's OWN landblock id; no map, no game knowledge.
-    private static Goal WithEscapeDirectionIfLongStall(Goal goal, double dwellMin, uint? landblock)
-    {
-        if (dwellMin < LongBarrenStallDwellMinutes) return goal;
-        if (goal.Direction is not null || !IsUntargetedExploreGoal(goal)) return goal;
-        if (EscapeHeadingForLandblock(landblock) is not string heading) return goal;
-        return goal with { Direction = heading };
-    }
-
-    // Test seam for the directional-escape rewrite above (private overload keeps the call sites
-    // terse; this internal one lets a unit test drive it with an explicit dwell/landblock).
-    internal static Goal WithEscapeDirectionForTest(Goal goal, double dwellMin, uint? landblock)
-        => WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
-
-    // Exposed for unit tests: the long-barren-stall dwell threshold (minutes).
-    internal static double LongBarrenStallDwellMinutesForTest => LongBarrenStallDwellMinutes;
-
-    // The directional-escape gate applied on the NON-egressing path (combat-ready
-    // not required). Any attackable monster in view leaves Strategy's Explore
-    // unchanged; source does not judge the matchup from combat history. Otherwise
-    // the long-stall escape may stamp an undirected Explore bearing.
-    internal static Goal NonEgressBarrenEscape(
-        Goal goal, bool monsterInView, double dwellMin, uint? landblock)
-        => monsterInView ? goal : WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
-    // Fresh-directive egress veto window. A low-level bot still being actively
-    // guided by the server (a NEW, distinct tutorial/instruction PopupString it
-    // has not yet acted on) is making progress even with no inventory/level
-    // delta — finishing available guided training grants outsized early rewards
-    // (XP, skill credits, gear) and outranks an optional hunt. While a fresh
-    // distinct directive is within this window the egress latch is vetoed
-    // (same tier as a visible monster). BOUNDED so it can NEVER deadlock: only
-    // server-pushed PopupStrings count (low-volume, directed-at-self, NOT the
-    // per-NPC dialog the town-stuck loop is built from, and never self-driven
-    // by the bot's own Talk loop), only DISTINCT text resets it (a repeated
-    // popup does not), and the veto ages out FreshDirectiveGrace after the last
-    // distinct directive — so once training stops instructing, egress proceeds.
-    // Enforcement-only: mechanically mirrors the LLM-facing HUNT EXCURSION
-    // prompt rule ("Quest progress outranks an optional hunt … a NEW
-    // server/quest directive … interrupts the hunt") in BuildUserPrompt; if
-    // that bullet is removed, revisit this veto so it stays prompt-anchored.
-    private static readonly TimeSpan FreshDirectiveGrace = TimeSpan.FromMinutes(2);
-
     // Debounce for the `## Unseen objective target` salience capsule: only flag
     // an active objective whose named target has never been observed AFTER it has
     // been pursued at least this long, so a just-pushed objective whose target the
@@ -294,36 +204,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // threshold; the bot re-deliberates every few seconds, so this is a few
     // decisions of grace before the never-observed fact surfaces.
     private static readonly TimeSpan UnseenObjectiveTargetGrace = TimeSpan.FromSeconds(20);
-    // Liveness backstop for the monster-in-view egress veto. Once the bot is
-    // tapped out, a NON-HOSTILE monster KIND that stays visible-but-unengaged
-    // (the bot keeps choosing overridable social/stationary goals instead of
-    // attacking it or leaving) for this long no longer counts as a reason to
-    // stay. This is the ONLY signal — source assigns the kind no value/danger
-    // label; an ObservedHostile attacker is NEVER ignored, and the override it
-    // unblocks can only redirect a social/stationary verb (Attack/Pickup/
-    // Explore/transit-Use/corpse-loot stay preserved), so a false positive
-    // costs at most one redirected Talk. Without it, a single passive
-    // attackable creature (which legitimately passes IsMonster) pins a
-    // tapped-out bot in one zone forever via the monsterInView veto.
-    private static readonly TimeSpan IgnoredKindExposureTimeout =
-        TimeSpan.FromMinutes(EgressDwellMinutes);
-    private static readonly IReadOnlySet<string> EmptyKindSet =
-        new HashSet<string>();
-    // Wielded weapon bits that count as "combat-ready" for egress: Melee
-    // (0x1) | Missile (0x100) | Caster (0x8000). A bot with no weapon is
-    // not yet ready to hunt, so it keeps its full town grace.
-    private const uint EgressWieldedWeaponMask =
-        ItemTypeMasks.MeleeWeapon | 0x100u | 0x8000u;
-    private int _egressLastInventoryCount = -1;
-    // Wall-clock of the bot's last MATERIAL own-progress: an inventory-count
-    // delta OR a level gain. Deliberately seam-independent (a landblock change
-    // is NOT progress). Feeds sinceMaterialProgress for both the no-progress
-    // grace and the seam-independent barren-stall trigger.
-    private DateTimeOffset _egressLastProgressUtc = DateTimeOffset.MinValue;
-    // Last observed self-level, for detecting a level gain as own-progress
-    // (resets the no-progress clock so an XP-only productive hunt is not
-    // flagged barren-stalled). Own data only — audit-safe.
-    private int? _egressLastObservedLevel;
     // Own-death recency for the prompt. The server-tracked NumDeaths is a
     // CUMULATIVE count (persists across sessions), so it cannot tell the LLM
     // whether a death just happened or was long ago. These track the wall-clock
@@ -331,7 +211,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // recency telemetry the LLM uses to decide whether to head back out and
     // resume hunting. First observation only anchors the count (a pre-existing
     // total is NOT a fresh death); only an increment stamps the clock. Own
-    // outcome + a timer — no game content. Mirrors _egressLastObservedLevel.
+    // outcome + a timer — no game content.
     private int? _lastObservedDeaths;
     private DateTimeOffset? _lastOwnDeathUtc;
     // Rolling window of the bot's OWN death timestamps (one per observed death
@@ -367,44 +247,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // inbound trend. Bookkeeping window, not a game constant.
     private static readonly TimeSpan GoalProgressFreshnessWindow = TimeSpan.FromSeconds(4);
 
-    // Fresh-directive tracking (paired with FreshDirectiveGrace above).
-    // _egressLastDirectiveSeqSeen is the high-water event sequence already
-    // examined (so each tick scans only NEW events — idempotent + cheap).
-    // _egressLastCreditedDirectiveText is the last popup text that reset the
-    // grace, used to reject a REPEATED identical popup (the anti-idle loop).
-    // _egressLastFreshDirectiveUtc is the wall-clock of the last DISTINCT
-    // directive; the veto holds while now - it < FreshDirectiveGrace. Own
-    // observation only (typed event kind + freshness) — audit-safe.
-    private long _egressLastDirectiveSeqSeen = -1;
-    private string? _egressLastCreditedDirectiveText;
-    private DateTimeOffset _egressLastFreshDirectiveUtc = DateTimeOffset.MinValue;
-    // Sticky egress latch. Once egress triggers we keep it engaged across
-    // landblock seams until a monster appears, the bot disarms, or it makes
-    // material progress. Without this latch the override would drop the tick
-    // after the bot crosses a seam (dwell resets to 0), reverting to Talk and
-    // pathing back — an infinite ping-pong between two adjacent safe zones.
-    private bool _isEgressing;
-    // Per monster-KIND wall-clock of when it first became CONTINUOUSLY visible
-    // while the bot was tapped out and choosing an overridable (non-engaging,
-    // non-leaving) goal. A kind whose continuous eligible exposure passes
-    // IgnoredKindExposureTimeout joins the per-dwell "ignored" set so it stops
-    // vetoing egress (see ComputeEffectiveMonsterInView). Reset per kind on PVS
-    // absence, on the LLM engaging the kind (Attack), and whenever the bot is
-    // not tapped-out-and-ignoring; cleared wholesale on a landblock change.
-    // Own observed behavior only.
-    private readonly Dictionary<string, DateTimeOffset> _ignoredKindFirstEligibleUtc = new();
-    private uint? _ignoredExposureLandblock;
-    // Kinds already logged as "ignored" this dwell, so the observability line
-    // fires once per kind per dwell (cleared with the tracker on a landblock
-    // change). Pure logging bookkeeping.
-    private readonly HashSet<string> _loggedIgnoredKinds = new();
-    // The bot's OWN self-level captured when it entered the current dwell
-    // landblock (snapshotted in UpdateDwellTracking; lazily filled if level
-    // was not yet observed at entry). Compared against the current level to
-    // surface a "hunt tapped out" perception fact: combat-ready + dwelled
-    // past the threshold + no level gained here = this area no longer levels
-    // the bot, so it should travel for tougher monsters. Own-progress signal
-    // only — no monster type/level judgement, audit-safe.
+    // The bot's self-level captured when it entered the current landblock.
+    // Rendered with current level as raw prompt evidence; Strategy interprets
+    // whether the area is productive.
     private int? _levelAtCurrentLandblockEntry;
 
     // Sticky LLM-objective (call-volume reduction). _lastLlmGoal holds
@@ -769,30 +614,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         EventKind.BookText,
     };
 
-    // Early Talk-loop egress (2026-06-07). A PROVEN stationary NPC Talk
-    // fixation (IsExhaustedNpcTalkRepeat — 4 same-NPC Talks with no movement
-    // and no inventory change) is time-INDEPENDENT dead-end evidence: re-Talking
-    // it can never make progress. The general hunt-egress only breaks such a
-    // loop once dwell passes EgressDwellMinutes (5 min), so a bot in a monster-
-    // free safe zone wastes ~5 min Talk-looping a silent NPC the picker keeps
-    // re-parking it at (live-observed: a Pathwarden Talk-looped ~8x for ~5 min).
-    // This breaks the loop the moment the fixation is proven, WITHOUT the dwell/
-    // tapped-out gate, as long as no hostile is in view (defend/flee that) and
-    // the server is not actively guiding the bot with a fresh directive. A short
-    // latch stops the picker re-parking on the same dead NPC the next tick (the
-    // first Explore step moves the bot, which resets the per-emission fixation
-    // counter, so without the latch the loop would just re-accrue). The "loop
-    // kind" tag is the bot's OWN goal verb (Talk), NOT any NPC identity; the
-    // substitute is a generic Explore{anywhere}. No NPC names/wcids/priorities —
-    // own-signal mechanical loop recovery, audit-safe.
+    // Stable tag for generic repeated-Talk loop bookkeeping.
     private const string NpcTalkLoopKind = "NPC Talk";
     // cp-2372: the loopKind tag passed to EscapeOrFallback for a confirmed bare
     // world-object Use churn (stationary repeat OR landblock tour). The bot's
     // OWN goal verb (Use), not any object identity.
     private const string WorldUseLoopKind = "world-object Use";
-    private DateTimeOffset _talkLoopEgressUntilUtc = DateTimeOffset.MinValue;
-    private uint? _talkLoopEgressLandblock;
-    private static readonly TimeSpan TalkLoopEgressDuration = TimeSpan.FromSeconds(90);
 
     // Slice V (ac-ai-players#86): the picker's most-recent activity
     // surfaced to the LLM as a parallel "## Autonomous picker
@@ -1059,8 +886,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     {
         // Enforce durable goal-history (emission/failure) retention against the CURRENT
         // time at the single decision entry, BEFORE any durable-history read this tick
-        // (the run-summary diagnostic below, ProposeGoalCore's loop-break/fixation reads,
-        // and the hunt-egress override). Append-time pruning alone would leave stale
+        // (the run-summary diagnostic below and ProposeGoalCore's loop-break/fixation reads).
+        // Append-time pruning alone would leave stale
         // entries alive on a wall-clock stuck-timeout re-deliberation that re-reads history
         // with no intervening append.
         events.PruneGoalHistory(DateTimeOffset.UtcNow);
@@ -1088,201 +915,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // LLM is walled. Pure observability; never affects the goal returned.
         if (ShouldEmitTimeBasedSummary(_lastSummaryEmitAtUtc, DateTimeOffset.UtcNow))
             EmitRunSummary(world, events);
-        return ApplyHuntEgressOverride(ProposeGoalCore(world, events, currentGoal), world, events);
+        return ProposeGoalCore(world, events, currentGoal);
     }
 
-    // Mechanical hunt-egress enforcement. Applied to EVERY goal this policy
-    // would return (LLM-accepted, fallback, held, or re-driven) so it also
-    // covers the 429/backoff/parse-fail paths that defer to the fallback —
-    // which itself Talks town NPCs before its Explore default
-    // (NoQuestKnowledgePolicy step 6 vs step 7). See the field-doc above for
-    // the architecture rationale. Counter-free + time-based so it is
-    // idempotent per tick: a held social goal that stays stuck is overridden
-    // every tick (driving continuous egress) with no double-counting.
-    private Goal? ApplyHuntEgressOverride(Goal? goal, WorldStateProjection world, EventStream events)
-    {
-        if (goal is null) return goal;
-
-        var nowUtc = DateTimeOffset.UtcNow;
-        var lb = world.Self.Landblock;
-
-        // Track MATERIAL progress: an inventory delta (received/spent a
-        // quest item, looted) OR a level gain stamps a fresh "last progress"
-        // time. Repeated identical NPC dialog is NOT progress (that is the loop
-        // we break) — so we deliberately do NOT look at dialog/hint events here.
-        // A landblock change is deliberately NOT treated as progress: crossing
-        // an invisible spatial seam into another safe zone must NOT reset the
-        // clock, or the bot ping-pongs between adjacent town landblocks
-        // (each crossing granting a fresh grace). The sticky _isEgressing
-        // latch (below) carries egress through seams, and the seam-independent
-        // barren-stall trigger ENGAGES it even when the per-landblock dwell
-        // keeps resetting.
-        var invCount = world.Inventory.Count;
-        if (_egressLastInventoryCount < 0)
-            // First observation this session: anchor the no-progress clock to
-            // now. The field default (MinValue) would otherwise read as years
-            // and fire the barren-stall trigger on the very first tick.
-            _egressLastProgressUtc = nowUtc;
-        else if (invCount != _egressLastInventoryCount)
-            _egressLastProgressUtc = nowUtc;
-        _egressLastInventoryCount = invCount;
-        // A level gain is the purest own-progress signal: a productive hunt
-        // that yields XP-only progression (no inventory delta) must also reset
-        // the no-progress clock so it is not flagged barren-stalled mid-hunt.
-        if (world.Self.Level is int egLvlNow)
-        {
-            if (_egressLastObservedLevel is int egPrevLvl && egLvlNow > egPrevLvl)
-                _egressLastProgressUtc = nowUtc;
-            _egressLastObservedLevel = egLvlNow;
-        }
-
-        // Early Talk-loop egress sustain: while the talk-loop latch is active
-        // (still in the same landblock, no monster in view, no fresh server
-        // directive), keep substituting the social dwell-extending verbs the LLM
-        // loops on (Talk/Give) with Explore so the bot actually walks OUT instead
-        // of the picker re-parking it on the dead NPC every tick. The latch
-        // self-clears on a landblock change (loop broken — bot left), an
-        // attackable monster appearing (engage it), a fresh directive, or timeout.
-        // Non-social verbs (the bot's own Explore/Pickup/Attack) pass through and
-        // themselves break the loop.
-        if (IsTalkLoopEgressActive(
-                nowUtc, _talkLoopEgressUntilUtc, _talkLoopEgressLandblock, lb,
-                AnyAttackableMonsterInView(world), RecentFreshDirective(events, nowUtc)))
-        {
-            if (IsEgressOverridableVerb(goal.Kind))
-            {
-                Console.WriteLine(
-                    $"[llm-override] talk-loop egress (sustained): substituting {goal.Kind} " +
-                    $"target={goal.Target} with Explore{{anywhere}} until the bot leaves the loop.");
-                return MakeEgressExploreGoal(
-                    nowUtc, "override:talk-loop-egress",
-                    "mechanical talk-loop egress (sustained): still in the dead-end " +
-                    "conversation landblock; leaving to break the loop");
-            }
-        }
-        else if (_talkLoopEgressLandblock is not null)
-        {
-            // Latch lapsed (timed out, left the landblock, hostile / directive
-            // appeared) — clear the recorded landblock so it cannot match later.
-            _talkLoopEgressLandblock = null;
-        }
-
-        var dwellEntry = DwellEntryForPrompt(lb);
-        var dwellMin = dwellEntry is DateTimeOffset de
-            ? Math.Max(0.0, (nowUtc - de).TotalMinutes)
-            : 0.0;
-
-        var combatReady = world.Inventory.Any(i =>
-            i.WieldedAt is uint w && w != 0 &&
-            i.ItemType is uint it && (it & EgressWieldedWeaponMask) != 0);
-
-        // "Tapped out" = combat-ready, dwelled past the threshold here, and
-        // gained 0 levels since arriving (the bot's OWN raw self-progress
-        // signal — see HuntTappedOutFact).
-        var tappedOut = HuntTappedOutFact(
-            combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
-            dwellMin, EgressDwellMinutes) is not null;
-
-        // A visible monster keeps the bot here (cancels egress). Liveness
-        // backstop: drop a non-hostile kind the bot has kept
-        // visible-but-unengaged for a sustained tapped-out window (it keeps
-        // choosing overridable goals rather than attacking it or leaving) so a
-        // single passive attackable creature cannot pin a tapped-out bot here
-        // forever. Reset the tracker on a landblock change; accrue only while
-        // tapped out AND the goal this tick is
-        // overridable (Talk/Give/Use) — engaging (Attack/Pickup/Wield) or
-        // leaving (Explore) is not "ignoring".
-        if (_ignoredExposureLandblock != lb)
-        {
-            _ignoredKindFirstEligibleUtc.Clear();
-            _loggedIgnoredKinds.Clear();
-            _ignoredExposureLandblock = lb;
-        }
-        var ignoreEligible = tappedOut && IsEgressIgnoreEligibleGoal(goal.Kind);
-        var engagedKinds = goal.Kind == GoalKind.Attack
-            ? VisibleKindKeysMatching(goal.Target, world)
-            : EmptyKindSet;
-        var ignoredKinds = UpdateIgnoredKindExposure(
-            _ignoredKindFirstEligibleUtc,
-            VisibleMonsterKindKeys(world),
-            engagedKinds, ignoreEligible, nowUtc, IgnoredKindExposureTimeout);
-        foreach (var ik in ignoredKinds)
-            if (_loggedIgnoredKinds.Add(ik))
-                // Observability: a non-hostile kind has been visible-but-
-                // unengaged past the timeout this dwell, so it no longer vetoes
-                // egress. Logged once per kind per dwell (opaque kind-key only).
-                Console.WriteLine(
-                    $"[llm-override] hunt-egress ignored-kind: '{ik}' visible-but-unengaged " +
-                    $">= {IgnoredKindExposureTimeout.TotalMinutes:F0}min while tapped out — " +
-                    $"no longer vetoes egress.");
-
-        var effectiveMonsterInView = ComputeEffectiveMonsterInView(
-            world.Visible, tappedOut, ignoredKinds);
-
-        var sinceProgress = nowUtc - _egressLastProgressUtc;
-        // A fresh, distinct server tutorial/instruction directive vetoes egress
-        // for a bounded grace (see FreshDirectiveGrace) so a low-level bot
-        // finishes available guided training before being forced out to hunt.
-        var recentFreshDirective = RecentFreshDirective(events, nowUtc);
-        // Update the sticky latch every tick (idempotent). It engages once
-        // dwell passes the threshold and DIS-engages the moment a cancel
-        // condition holds, regardless of the current landblock.
-        var wasEgressing = _isEgressing;
-        _isEgressing = ComputeEgressActive(
-            _isEgressing, combatReady, effectiveMonsterInView, dwellMin, sinceProgress,
-            tappedOut, recentFreshDirective);
-        if (_isEgressing && !wasEgressing)
-            // Latch just engaged — log once per engagement so the trigger is
-            // observable even when the current goal is not overridable (e.g.
-            // the bot is looping on a preserved transit Use). dwell vs the
-            // seam-independent stall timer tells which first-trigger fired.
-            Console.WriteLine(
-                $"[llm-override] hunt-egress ENGAGED: dwell={dwellMin:F1}min, " +
-                $"no-progress={sinceProgress.TotalMinutes:F1}min, tappedOut={tappedOut}, " +
-                $"trigger={(dwellMin >= EgressDwellMinutes ? "dwell" : "barren-stall")}.");
-        if (!_isEgressing)
-            // The combat-ready egress latch above (ComputeEgressActive) CANCELS for a NOT-
-            // combat-ready (unarmed) bot — by design, so an unarmed bot in a TOWN can `Use`
-            // vendors/objects to self-arm rather than wander off. But an unarmed bot stuck in a
-            // monster-free WILDERNESS landblock has no objects to Use and is just as barren-
-            // stalled (it emits undirected `Explore{anywhere}` with nothing else to do). So when
-            // NOT egressing and NO attackable monster is in view, still apply the long-barren-stall
-            // directional escape: it only stamps an UNDIRECTED Explore{anywhere} past the dwell
-            // threshold (a town bot Using a vendor emits `Use`, not Explore, so it is untouched),
-            // letting an unarmed wilderness-stuck bot travel OUT instead of re-fanning local cells.
-            return NonEgressBarrenEscape(goal, AnyAttackableMonsterInView(world), dwellMin, lb);
-
-        // Egress is engaged. Substitute the goals that would keep the bot
-        // stuck in this tapped-out zone: the social dwell-extending verbs
-        // (Talk/Give) the LLM loops on. Everything else passes through
-        // untouched, including every LLM-authored Attack.
-        string? overrideReason = null;
-        if (IsEgressOverridableVerb(goal.Kind))
-            overrideReason = "social-verb";
-        else if (IsEgressOverridableStationaryUse(goal, world))
-            overrideReason = "stationary-use";
-
-        if (overrideReason is null)
-            return WithEscapeDirectionIfLongStall(goal, dwellMin, lb);
-
-        Console.WriteLine(
-            $"[llm-override] town-stuck hunt-egress: dwell={dwellMin:F1}min, combat-ready, " +
-            $"reason={overrideReason}, no effective monster in view, no inventory " +
-            $"progress for {sinceProgress.TotalMinutes:F1}min — substituting {goal.Kind} " +
-            $"target={goal.Target} with Explore{{anywhere}} to leave the tapped-out zone.");
-
-        return WithEscapeDirectionIfLongStall(MakeEgressExploreGoal(
-            nowUtc, "override:hunt-egress",
-            "mechanical hunt-egress: tapped-out monster-free safe zone, dwell past threshold " +
-            "with no material progress; leaving to find monsters (enforces the HUNT EXCURSION rule)"),
-            dwellMin, lb);
-    }
-
-    // Construct the generic targetless Explore{anywhere} goal that the egress
-    // mechanisms substitute to leave a tapped-out zone. Centralized so every
-    // egress path mints an identical goal (the picker/frontier explorer drives
-    // the actual direction). Pure factory — no game knowledge.
-    private static Goal MakeEgressExploreGoal(DateTimeOffset nowUtc, string source, string rationale)
+    // Construct a generic targetless Explore{anywhere} for mechanical recovery
+    // paths that continue a prior Explore or break a proven transport loop.
+    private static Goal MakeUntargetedExploreGoal(
+        DateTimeOffset nowUtc, string source, string rationale)
         => new Goal
         {
             Kind = GoalKind.Explore,
@@ -1294,87 +933,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Rationale = rationale,
         };
 
-    // Pure gate for the stuck-loop egress substitution (below). A combat-ready
-    // bot that is ALSO tapped out (dwelled past the threshold here with 0 levels
-    // gained) and has NO attackable monster in view has nothing left to gain in
-    // this zone, so a proven no-progress interaction loop should send it away
-    // rather than to the fallback (which re-picks the same dead-end class of
-    // object). When a monster IS in view the egress must defer — the bot should
-    // engage the visible XP target, not wander off to "find monsters" it already
-    // sees. Extracted for deterministic unit testing. Own signals only — no game
-    // content.
-    internal static bool ShouldEscapeStuckLoop(
-        bool combatReady, bool tappedOut, bool monsterInView)
-        => combatReady && tappedOut && !monsterInView;
-
-    // When a fixation guard has detected a proven no-progress interaction loop
-    // (a door/forge/chest/NPC re-tried with no movement and no inventory
-    // change), substitute a generic Explore so a tapped-out combat-ready bot
-    // LEAVES instead of deferring to the fallback — which re-selects the same
-    // dead-end class of stationary object, keeping the bot wedged in a town.
-    // This enforces the LOOP-BREAK / HUNT EXCURSION prompt rules mechanically
-    // when a weak model ignores them, and works INDEPENDENTLY of the egress
-    // latch (which a persistent non-hostile creature in PVS can keep suppressed
-    // via the monster-in-view cancel). Gated tightly:
-    //   - combat-ready (typed wielded weapon) — an UNARMED bot may legitimately
-    //     need to Use objects to progress; do not send it wandering.
-    //   - tapped out (HuntTappedOutFact: dwelled past EgressDwellMinutes with 0
-    //     levels gained since arriving) — early in a zone a Use loop may be a
-    //     genuine progress attempt.
-    //   - no attackable monster in view — engage a visible monster (defend/flee a
-    //     hostile, or fight a non-hostile XP target) instead of wandering off to
-    //     find one that is already in view.
-    // Own signals only (typed wield, own dwell/level, own monster-in-view
-    // perception); the trigger is the already-audited fixation guard. No
-    // door/chest/monster-kind knowledge; substitutes a generic Explore.
-    private bool ShouldEscapeStuckLoopWithExplore(WorldStateProjection world, DateTimeOffset nowUtc)
-    {
-        var combatReady = world.Inventory.Any(i =>
-            i.WieldedAt is uint w && w != 0 &&
-            i.ItemType is uint it && (it & EgressWieldedWeaponMask) != 0);
-        var dwellEntry = DwellEntryForPrompt(world.Self.Landblock);
-        var dwellMin = dwellEntry is DateTimeOffset de
-            ? Math.Max(0.0, (nowUtc - de).TotalMinutes) : 0.0;
-        var tappedOut = HuntTappedOutFact(
-            combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
-            dwellMin, EgressDwellMinutes) is not null;
-        return ShouldEscapeStuckLoop(combatReady, tappedOut, AnyAttackableMonsterInView(world));
-    }
-
-    // A fixation guard fired (proven no-progress interaction loop). Either send
-    // a tapped-out combat-ready bot away with Explore (stuck-loop egress) or, if
-    // not in that state, defer to the fallback as before.
+    // A fixation guard fired. A small set of generic transport-loop recoveries
+    // can break contact; otherwise defer to the fallback.
     private Goal? EscapeOrFallback(
         WorldStateProjection world, EventStream events, Goal? currentGoal,
         DateTimeOffset nowUtc, string loopKind, string? loopTargetName = null)
     {
-        // Shared egress signals, read ONCE. RecentFreshDirective has per-tick side
-        // effects (advances the directive high-water sequence, may log a grace
-        // credit), so it is read here exactly once AND only for a Talk loop — the
-        // sole egress below that consults it (ShouldEarlyEscapeTalkLoop) is
-        // Talk-only, so a Use / interaction / attack drop must not advance the Talk
-        // directive grace.
         var monsterInView = AnyAttackableMonsterInView(world);
-        var freshDirective = loopKind == NpcTalkLoopKind && RecentFreshDirective(events, nowUtc);
 
-        // Exhausted-NPC break-contact (cp070): when the bot's OWN goal history PROVES
-        // a single-NPC Talk fixation — it Talked this one NPC >= the fixation
-        // threshold of its last N emitted goals (the cp069 signal, immune to the
-        // interleaved combat/loot that resets the stationary and roving guards) — it
-        // is provably NOT doing anything productive: not advancing the directive it
-        // keeps re-greeting, and not engaging any monster in view (it has chosen Talk
-        // over Attack at least threshold times). Break the loop with ONE generic
-        // Explore FIRST and UNCONDITIONALLY — NOT gated on a fresh directive (a
-        // proven-stale fixation is not finishing guided training) NOR on
-        // monster-in-view: the latched Talk egress and the tapped-out stuck-loop
-        // egress below are BOTH monster-in-view-gated, so in a zone that always shows
-        // a monster (e.g. a training yard full of practice constructs) a proven
-        // fixation would otherwise wedge with NO egress able to fire — re-prompting
-        // the LLM every tick forever. This egress is UNLATCHED: it relocates the bot
-        // one step and RE-DELIBERATES next tick, so a same-landblock next room is not
-        // overshot and, if a monster is in view, the LLM can Attack it on
-        // the very next decision. Audit-clean: generic Explore{anywhere} — the Motor
-        // selects NO target; the LLM picks the next interactable next decision.
+        // Bounded break-contact after repeated emissions against the same Talk
+        // target. It emits one targetless Explore and re-deliberates on the next
+        // tick; no replacement interaction target is selected.
         var provenSingleNpcTalkFixation =
             loopTargetName is { Length: > 0 } breakContactNpc
             && CountTalkGoalsToNameInLastN(events, breakContactNpc, SingleNpcTalkHistoryWindowGoals)
@@ -1385,43 +954,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "[llm-override] exhausted-npc break-contact: proven single-NPC Talk fixation " +
                 "in recent goal history — one UNLATCHED Explore{anywhere} to break contact and " +
                 "re-deliberate with fresh perception (Motor picks no target).");
-            return MakeEgressExploreGoal(
+            return MakeUntargetedExploreGoal(
                 nowUtc, "override:exhausted-npc-breakcontact",
                 "mechanical break-contact: proven single-NPC Talk fixation in recent goal " +
                 "history; one unlatched Explore to leave the spent conversation and re-deliberate");
         }
 
-        if (ShouldEscapeStuckLoopWithExplore(world, nowUtc))
-        {
-            Console.WriteLine(
-                "[llm-override] stuck-loop egress: tapped-out combat-ready bot looping " +
-                $"{loopKind} with no progress and no monster in view — " +
-                "substituting Explore{anywhere} to leave the zone.");
-            return MakeEgressExploreGoal(
-                nowUtc, "override:stuck-loop-egress",
-                $"mechanical stuck-loop egress: tapped-out, looping {loopKind} with no " +
-                "progress; leaving to find monsters (enforces the LOOP-BREAK rules)");
-        }
-        // Early Talk-loop egress: a PROVEN stationary NPC Talk fixation is a
-        // dead end regardless of dwell time, so break it now (before the 5-min
-        // tapped-out gate the general egress needs) unless an attackable monster
-        // is in view (engage that XP target) or the server is actively guiding the
-        // bot. Latch it briefly so the picker cannot re-park on the same dead NPC
-        // next tick.
-        if (ShouldEarlyEscapeTalkLoop(
-                loopKind, monsterInView, freshDirective))
-        {
-            _talkLoopEgressUntilUtc = nowUtc + TalkLoopEgressDuration;
-            _talkLoopEgressLandblock = world.Self.Landblock;
-            Console.WriteLine(
-                "[llm-override] talk-loop egress: proven stationary NPC Talk fixation, " +
-                "no monster in view — substituting Explore{anywhere} " +
-                $"(latched {TalkLoopEgressDuration.TotalSeconds:F0}s) to break the loop.");
-            return MakeEgressExploreGoal(
-                nowUtc, "override:talk-loop-egress",
-                "mechanical talk-loop egress: proven stationary NPC Talk fixation with no " +
-                "monster in view; leaving to break the dead-end conversation loop");
-        }
         // cp-2372: a confirmed bare world-object Use churn (this method is only
         // reached AFTER the cp-2354 churn guard fired — the bot has re-Used the
         // SAME object, or toured interior objects, with NO egress and NO inventory
@@ -1429,19 +967,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // intent ("Explore OUT instead of re-touring interior doors") with a
         // generic Explore so the bot travels THROUGH/past the looped object,
         // instead of deferring to the fallback (which just re-picks the same
-        // interior objects). Unlike a Talk loop — which may be following a fresh
-        // NPC instruction — re-Using one object cannot be "finishing guided
-        // training", so this fires even within FreshDirectiveGrace; an attackable
-        // monster in view still takes priority (engage the visible XP target —
-        // defend/flee a hostile or fight a non-hostile — never wander off to find
-        // a monster already in view).
+        // interior objects). A newly visible monster suppresses this recovery so
+        // the changed scene returns to normal deliberation.
         if (ShouldEscapeWorldUseLoop(loopKind, monsterInView))
         {
             Console.WriteLine(
                 "[llm-override] use-loop egress: confirmed world-object Use churn with no " +
                 "monster in view — substituting Explore{anywhere} to travel through/past the " +
                 "looped object (enforces the LOOP-BREAK / PASSAGE-OPENED rules).");
-            return MakeEgressExploreGoal(
+            return MakeUntargetedExploreGoal(
                 nowUtc, "override:use-loop-egress",
                 "mechanical use-loop egress: confirmed bare world-object Use churn with no " +
                 "egress, no inventory gain, no monster in view; Exploring to travel through " +
@@ -1450,14 +984,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return _fallback.ProposeGoal(world, events, currentGoal);
     }
 
-    // True iff the bot has any non-corpse monster in view that it can attack —
-    // hostile (already attacking it) OR a non-hostile creature that still grants
-    // XP. The Explore-egress substitutions above exist to LEAVE and FIND monsters,
-    // so they must DEFER when a monster is ALREADY in view: the bot should engage
-    // it (defend/flee a hostile, or fight a non-hostile XP target), not wander off
-    // to look for one it can already see. Mirrors the `## Monsters in view`
-    // capsule predicate (cp-2335/2366). Own-perception wire flags only — no game
-    // content.
+    // True iff any non-corpse monster or active attacker is in perception.
     internal static bool AnyAttackableMonsterInView(WorldStateProjection world)
         => world.Visible.Any(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile));
 
@@ -1569,308 +1096,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return selector.Length > 0 && selector != "<empty>";
     }
 
-    // Pure decision: a freshly PROVEN stationary NPC Talk fixation should break
-    // the loop immediately (early egress) when no attackable monster is in view
-    // and the server is not actively guiding the bot with a fresh directive.
-    // Scoped to the Talk loop kind ONLY — a world-object Use loop may be a genuine
-    // early-zone progress attempt, so it keeps the dwell-gated path. The egress
-    // exists to LEAVE and find activity, so it defers when a monster is already in
-    // view — the bot should engage that XP target (defend/flee a hostile, or fight
-    // a non-hostile) rather than wander off (cp-2378 principle, applied to the
-    // third egress path). Extracted for deterministic unit testing; own-signal
-    // only, no game content.
-    internal static bool ShouldEarlyEscapeTalkLoop(
-        string loopKind, bool monsterInView, bool freshDirective)
-        => loopKind == NpcTalkLoopKind && !monsterInView && !freshDirective;
-
-    // Pure decision: a single-NPC Talk fixation PROVEN by the bot's OWN recent
-    // goal-emission history (it Talked one NPC past the cp069 fixation threshold of
-    // its last N emitted goals — immune to the interleaved combat/loot that resets
-    // the stationary and roving guards) should break contact with ONE unlatched
-    // Explore. Fires UNCONDITIONALLY for the Talk loop kind once the fixation is
-    // proven — NOT gated on a fresh directive (a proven-stale fixation is not
-    // finishing guided training, it is stuck re-greeting a spent step) and NOT on
-    // monster-in-view (the latched Talk egress and the tapped-out stuck-loop egress
-    // are BOTH monster-in-view-gated, so in a zone that always shows a monster a
-    // proven fixation would wedge with no egress able to fire; and a bot that has
-    // chosen Talk over Attack >= threshold times is provably not going to engage the
-    // monster, so deferring to it just loops). The caller substitutes a target-less
-    // generic Explore and re-deliberates next tick, so a visible monster can still
-    // be Attacked on the following decision. Extracted for deterministic unit
-    // testing; own-signal only (own emission history), no game content; the Motor
-    // chooses no target.
+    // A bounded same-target Talk repeat may break contact with one targetless
+    // Explore before re-deliberating. It selects no replacement interaction.
     internal static bool ShouldBreakContactExhaustedNpc(
         string loopKind, bool provenSingleNpcTalkFixation)
         => loopKind == NpcTalkLoopKind && provenSingleNpcTalkFixation;
 
-    // Pure decision: a confirmed bare world-object Use churn should break the
-    // loop with a generic Explore (travel through/past the looped object) rather
-    // than defer to the fallback. NOT gated on freshDirective — re-Using the
-    // SAME object cannot be "finishing guided training", so a confirmed churn
-    // overrides the directive grace (unlike a Talk loop). Only an attackable
-    // monster in view suppresses it: the egress exists to LEAVE and find monsters,
-    // so when one is already in view the bot should engage it (defend/flee a
-    // hostile or fight a non-hostile XP target) instead of wandering. Extracted
-    // for deterministic unit testing; own-signal only, no game content.
+    // A confirmed same-object Use transport churn may break contact with one
+    // targetless Explore. A changed combat scene returns to deliberation.
     internal static bool ShouldEscapeWorldUseLoop(string loopKind, bool monsterInView)
         => loopKind == WorldUseLoopKind && !monsterInView;
 
-    // Pure decision: the early Talk-loop egress latch is still ACTIVE this tick.
-    // Active while within the latch window AND still in the same landblock the
-    // loop was detected in (leaving the landblock means the loop is broken) AND
-    // no attackable monster has appeared (engage that XP target instead of
-    // continuing to wander) AND the server is not freshly guiding the bot.
-    // Extracted for deterministic unit testing; own-signal only, no game content.
-    internal static bool IsTalkLoopEgressActive(
-        DateTimeOffset nowUtc, DateTimeOffset until, uint? latchLandblock,
-        uint? currentLandblock, bool monsterInView, bool freshDirective)
-        => nowUtc < until
-           && latchLandblock is uint lb && currentLandblock is uint cur && lb == cur
-           && !monsterInView
-           && !freshDirective;
-
-    // Returns true while a FRESH, distinct server tutorial/instruction popup is
-    // within FreshDirectiveGrace — the signal that the bot is actively being
-    // guided and should finish training before egress. Idempotent per tick:
-    // scans only events newer than the high-water sequence, credits the grace
-    // ONLY on a PopupString whose text differs from the last credited one (a
-    // repeated popup is the anti-idle loop and must NOT reset it), and lets the
-    // veto age out so it can never deadlock. PopupString only (NOT NpcDialog):
-    // popups are low-volume, server-pushed, directed-at-self, and never emitted
-    // by the bot's own Talk loop — so a town full of NPCs cannot pin the bot.
-    // Typed event-kind + freshness; no names/wcids/landblocks — audit-safe.
-    internal bool RecentFreshDirective(EventStream events, DateTimeOffset nowUtc)
-    {
-        var newestSeq = _egressLastDirectiveSeqSeen;
-        string? freshText = null;
-        var freshUtc = DateTimeOffset.MinValue;
-        foreach (var e in events.Recent()) // newest-first
-        {
-            if (e.Sequence <= _egressLastDirectiveSeqSeen) break;
-            if (e.Sequence > newestSeq) newestSeq = e.Sequence;
-            if (e.Kind != EventKind.PopupString) continue;
-            var t = e.Text?.Trim();
-            if (string.IsNullOrEmpty(t)) continue;
-            // First (newest) distinct popup in this batch wins.
-            if (freshText is null && t != _egressLastCreditedDirectiveText)
-            {
-                freshText = t;
-                freshUtc = e.Utc;
-            }
-        }
-        _egressLastDirectiveSeqSeen = newestSeq;
-        // Credit the grace from the DIRECTIVE'S OWN timestamp, not call time,
-        // and only if the directive itself is recent. A stale popup (e.g. an
-        // old login popup picked up on the first whole-buffer scan, or one
-        // processed after a delay) must NOT grant a full fresh veto when no
-        // current guidance exists. Clamp the stamp to <= now so a future-dated
-        // event can't over-extend.
-        if (freshText is not null && (nowUtc - freshUtc) < FreshDirectiveGrace)
-        {
-            _egressLastCreditedDirectiveText = freshText;
-            _egressLastFreshDirectiveUtc = freshUtc < nowUtc ? freshUtc : nowUtc;
-            Console.WriteLine(
-                "[llm-override] hunt-egress directive-grace: fresh server directive " +
-                $"credited — deferring egress up to {FreshDirectiveGrace.TotalMinutes:F0}min " +
-                "to finish guided training.");
-        }
-        return _egressLastFreshDirectiveUtc != DateTimeOffset.MinValue
-            && (nowUtc - _egressLastFreshDirectiveUtc) < FreshDirectiveGrace;
-    }
-
-    // Pure sticky-latch transition for hunt-egress. Engages once the bot has
-    // dwelled past the threshold in a tapped-out monster-free safe zone, and
-    // STAYS engaged across landblock seams (so the bot actually leaves the
-    // town cluster instead of nudging one seam and reverting) until a cancel
-    // condition holds. All inputs are typed affordances / timers — no game
-    // content. Extracted for deterministic unit testing.
-    internal static bool ComputeEgressActive(
-        bool currentlyEgressing, bool combatReady, bool monsterInView,
-        double dwellMinutes, TimeSpan sinceMaterialProgress, bool tappedOut = false,
-        bool recentFreshDirective = false)
-    {
-        // Highest-priority cancel: the bot is actively being guided by the
-        // server (a fresh, distinct, not-yet-acted tutorial/instruction popup
-        // within FreshDirectiveGrace). Finishing available guided training
-        // outranks an optional hunt, so veto egress entirely — including an
-        // egress already in progress. This can NEVER deadlock: only DISTINCT
-        // server popups credit it (a repeat does not) and it ages out once the
-        // server stops instructing, after which the dwell/stall triggers below
-        // fire normally. See FreshDirectiveGrace + RecentFreshDirective.
-        if (recentFreshDirective)
-            return false;
-        // Cancel conditions take priority — they end an egress in progress:
-        //  - a monster is now engageable here (we reached the hunt);
-        //  - the bot is no longer combat-ready (disarmed);
-        //  - material (inventory) progress happened recently (real quest) —
-        //    UNLESS the bot is tapped out. When tapped out (combat-ready,
-        //    dwelled past the threshold, 0 levels gained here) the inventory
-        //    churn is just trivial-corpse loot from re-farming the same kinds;
-        //    the bot's own 0-levels self-progress signal is the authority, so
-        //    the loot grace must not keep deferring egress forever.
-        if (monsterInView || !combatReady)
-            return false;
-        if (!tappedOut && sinceMaterialProgress < EgressNoProgressGrace)
-            return false;
-        // Sticky: stay engaged once started, regardless of dwell reset at seams.
-        if (currentlyEgressing) return true;
-        // First-trigger A: dwelled past the threshold in THIS landblock.
-        // First-trigger B (seam-independent): combat-ready, monster-free, and no
-        // material progress for well past the dwell threshold — catches a bot
-        // oscillating between adjacent safe landblocks where per-landblock dwell
-        // keeps resetting and trigger A can never fire.
-        return dwellMinutes >= EgressDwellMinutes
-            || sinceMaterialProgress >= BarrenStallTimeout;
-    }
-
-    // Only social, dwell-extending verbs are substituted unconditionally while
-    // egressing. Pickup/Wield/Attack/Explore are never overridden here (Pickup
-    // may be self-arming; the rest are already progress). A Use is handled
-    // separately by IsEgressOverridableStationaryUse so transit Uses survive.
-    internal static bool IsEgressOverridableVerb(GoalKind kind)
-        => kind == GoalKind.Talk || kind == GoalKind.Give;
-
-    // While egressing, a Use targeting a STATIONARY non-transit world object
-    // (e.g. a crafting station the LLM fixates on and re-walks to) extends the
-    // dwell exactly like Talk/Give, so substitute it with Explore. Transit and
-    // interactive affordances are PRESERVED so the bot can still leave and loot:
-    // a door/portal Use is the way OUT, a corpse Use is looting, an openable
-    // (container) Use is real interaction. Decision uses ONLY typed wire-bit
-    // projection flags (IsPortal/IsDoor/IsOpenable/IsCorpse) — no object names,
-    // wcids, landblocks, or priorities. Conservative: overrides only when the
-    // target resolves to visible object(s) ALL confirmed non-transit; an
-    // unresolved or mixed target passes through untouched.
-    internal static bool IsEgressOverridableStationaryUse(
-        Goal goal, WorldStateProjection world)
-    {
-        if (goal.Kind != GoalKind.Use) return false;
-        var sel = goal.Target;
-        if (sel.IsEmpty) return false;
-        var matches = world.Visible
-            .Where(v => VisibleMatchesSelector(sel, v))
-            .ToList();
-        if (matches.Count == 0) return false;
-        return matches.All(v =>
-            !v.IsPortal && !v.IsDoor && !v.IsOpenable && !v.IsCorpse);
-    }
-
-    // Cold-start egress: like the plain "any monster in view" check, except a
-    // kind kept visible-but-unengaged past the liveness timeout (see
-    // IsIgnoredHere) does not count while tapped out. Combat outcomes do not
-    // alter this predicate. ignoredThisDwell is optional so existing callers
-    // are unaffected.
-    internal static bool ComputeEffectiveMonsterInView(
-        IReadOnlyList<VisibleObjectProjection> visible,
-        bool tappedOut,
-        IReadOnlySet<string>? ignoredThisDwell = null)
-        => visible.Any(v => v.IsMonster && !v.IsCorpse
-                            && !IsIgnoredHere(v, ignoredThisDwell, tappedOut));
-
-    // Liveness backstop: true when a visible non-hostile monster's kind-key is
-    // in the per-dwell "ignored" set (the
-    // bot kept it visible-but-unengaged past IgnoredKindExposureTimeout while
-    // tapped out). ObservedHostile attackers are never ignored. Own behavior
-    // only; no value/danger label per type.
-    internal static bool IsIgnoredHere(
-        VisibleObjectProjection v, IReadOnlySet<string>? ignoredThisDwell, bool tappedOut)
-    {
-        if (!tappedOut) return false;
-        if (v.ObservedHostile) return false;
-        if (ignoredThisDwell is null || ignoredThisDwell.Count == 0) return false;
-        return CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name))
-                   is string k
-               && ignoredThisDwell.Contains(k);
-    }
-
-    // A goal whose presence (while tapped out) counts as the bot "ignoring" a
-    // visible monster: the social/stationary verbs egress may override. An
-    // Attack/Pickup/Wield (engaging/arming) or Explore (already leaving) is NOT
-    // ignoring, so it does not accrue ignored-kind exposure.
-    private static bool IsEgressIgnoreEligibleGoal(GoalKind kind)
-        => kind == GoalKind.Talk || kind == GoalKind.Give || kind == GoalKind.Use;
-
-    // Pure update of the per-kind eligible-exposure tracker. Mutates
-    // firstEligibleUtc in place and returns the set of kind-keys whose
-    // CONTINUOUS eligible exposure has reached `timeout` (the "ignored" set).
-    // When eligibleContext is false the tracker is cleared (no accrual). A kind
-    // that is hostile, is one the bot just chose to engage (engagedKinds), or
-    // is no longer visible is dropped — so a qualifying kind must be present,
-    // non-hostile, and unengaged the WHOLE window. Own-behavior bookkeeping
-    // only; assigns no value to any kind.
-    internal static IReadOnlySet<string> UpdateIgnoredKindExposure(
-        IDictionary<string, DateTimeOffset> firstEligibleUtc,
-        IReadOnlyCollection<(string Key, bool Hostile)> visibleMonsterKinds,
-        IReadOnlySet<string> engagedKinds,
-        bool eligibleContext,
-        DateTimeOffset now,
-        TimeSpan timeout)
-    {
-        if (!eligibleContext)
-        {
-            firstEligibleUtc.Clear();
-            return EmptyKindSet;
-        }
-        var eligibleNow = new HashSet<string>();
-        foreach (var (key, hostile) in visibleMonsterKinds)
-        {
-            if (hostile) continue;
-            if (engagedKinds.Contains(key)) continue;
-            eligibleNow.Add(key);
-        }
-        foreach (var stale in firstEligibleUtc.Keys.Where(k => !eligibleNow.Contains(k)).ToList())
-            firstEligibleUtc.Remove(stale);
-        var ignored = new HashSet<string>();
-        foreach (var key in eligibleNow)
-        {
-            if (!firstEligibleUtc.TryGetValue(key, out var first))
-            {
-                first = now;
-                firstEligibleUtc[key] = first;
-            }
-            if (now - first >= timeout)
-                ignored.Add(key);
-        }
-        return ignored.Count == 0 ? EmptyKindSet : ignored;
-    }
-
-    // Kind-keys of all currently-visible monsters paired with whether each is
-    // an active ObservedHostile attacker. Corpses excluded. Null kind-keys
-    // (no wcid and no name) dropped.
-    private static IReadOnlyCollection<(string Key, bool Hostile)> VisibleMonsterKindKeys(
-        WorldStateProjection world)
-    {
-        var list = new List<(string, bool)>();
-        foreach (var v in world.Visible)
-        {
-            if (!v.IsMonster || v.IsCorpse) continue;
-            if (CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name)) is string k)
-                list.Add((k, v.ObservedHostile));
-        }
-        return list;
-    }
-
-    // Kind-keys of the visible monsters a selector resolves to (the kinds the
-    // bot is choosing to engage this tick). Empty when nothing matches.
-    private static IReadOnlySet<string> VisibleKindKeysMatching(
-        Selector sel, WorldStateProjection world)
-    {
-        if (sel.IsEmpty) return EmptyKindSet;
-        var set = new HashSet<string>();
-        foreach (var v in world.Visible)
-        {
-            if (!v.IsMonster || v.IsCorpse) continue;
-            if (!VisibleMatchesSelector(sel, v)) continue;
-            if (CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name)) is string k)
-                set.Add(k);
-        }
-        return set.Count == 0 ? EmptyKindSet : set;
-    }
-
-    // Conservative projection-level selector match for the egress Attack
-    // override. Mirrors the positive identity predicates of
-    // Tactics.SelectorResolver (guid / exact name / name-substring / wcid)
-    // against a VisibleObjectProjection. Requires at least one identity field
-    // to be set so a loose/empty selector never matches-all.
+    // Conservative projection-level selector match. Mirrors the positive
+    // identity predicates of Tactics.SelectorResolver against a visible row.
     private static bool VisibleMatchesSelector(Selector sel, VisibleObjectProjection v)
     {
         var hasIdentity = sel.Guid is not null
@@ -2523,27 +1761,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
            && world.Self.AvailableExperience is long unspent
            && !ShouldSurfaceUnspentXp(unspent, minMeaningful);
 
-    // Pure "hunt tapped out" perception signal. Returns a raw self-progress
-    // fact string to surface to the LLM when the bot, combat-ready, has
-    // dwelled in its current landblock past the threshold WITHOUT gaining a
-    // level since it arrived. Returns null when not tapped out or when level
-    // is unknown. The string reports ONLY the bot's own data (its own level,
-    // its own dwell time, +0 levels gained); it encodes no monster type/level,
-    // name, wcid, landblock, conclusion, or action directive — audit-safe.
-    // The LLM owns the decision; the matching RULES bullet tells it how to act.
-    internal static string? HuntTappedOutFact(
-        bool combatReady, int? currentLevel, int? levelAtLandblockEntry,
-        double? dwellMinutes, double dwellThresholdMinutes)
-    {
-        if (!combatReady) return null;
-        if (currentLevel is not int lvl) return null;
-        if (levelAtLandblockEntry is not int entryLvl) return null;
-        if (dwellMinutes is not double dm || dm < dwellThresholdMinutes) return null;
-        // Gained at least one level here → the area is still productive.
-        if (lvl > entryLvl) return null;
-        return $"tapped out: level {lvl}, {dm:F0} min in this area with +0 levels gained since arriving";
-    }
-
     // Pure predicate for the stuck-timer suppression below. Returns true only when
     // currentGoal.Kind == Attack, currentFight is non-null with SwingsLanded > 0 or
     // DamageDealt > 0, and the fight's target matches the goal's selector: an exact
@@ -2664,8 +1881,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .TakeWhile(e => e.Sequence >= _lastEventConsideredSequence)
             .Any(e => e.Kind is EventKind.InventoryItemAdded or EventKind.InventoryItemRemoved);
 
-        if (currentGoal is not null && landblockChangedSinceLook
-            && currentGoal.Source != "override:hunt-egress")
+        if (currentGoal is not null && landblockChangedSinceLook)
         {
             Console.WriteLine(
                 $"[strategy] LlmGoalPolicy: landblock change detected → " +
@@ -3349,7 +2565,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "[llm-skip] sustained Explore travel: no attackable monster or other interaction in view " +
                 "and no new event since the last look — skipping the redundant " +
                 $"LLM call and continuing to Explore ({_emptyExploreSkips}/{MaxEmptyExploreSkips}).");
-            return MakeEgressExploreGoal(
+            return MakeUntargetedExploreGoal(
                 nowUtc, "skip:empty-explore",
                 "continuing an untargeted Explore through empty space without a redundant LLM call");
         }
@@ -4454,7 +3670,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 " avoid cooldown); substituting Explore{anywhere} to break the loop.");
             _training?.RecordParseError(decisionId,
                 "dropped-by-override: LLM Attack repeatedly deferred (low health / avoid cooldown)");
-            return MakeEgressExploreGoal(
+            return MakeUntargetedExploreGoal(
                 nowUtc, "override:low-health-attack-egress",
                 "mechanical deferred-attack egress: the Motor repeatedly refused this Attack (self-health " +
                 "below the re-engage threshold, or the target is on its brief post-disengage avoid cooldown); " +
@@ -5744,13 +4960,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return true;
         }
 
-        // cp-2359: a barren TOUR — many DISTINCT world objects Used in this
-        // landblock with no egress and no productive inventory change. Once
-        // latched, ANY bare world-object Use is deferred to Explore until the
-        // episode resets (egress or productive loot), so the bot stops working
-        // every container/door in a tapped-out zone and heads out to hunt. The
-        // latch is episode-wide (not per-key) because the tour is over DIFFERENT
-        // objects; the per-key Suppressed set above cannot catch it.
+        // cp-2359: repeated Uses across many distinct world objects with no
+        // landblock or inventory change. Once latched, defer further bare Uses
+        // until the episode resets. The latch is episode-wide because a
+        // per-key repeat set cannot detect a tour across different objects.
         if (ep.DistinctChurnLatched)
         {
             ep.FloorSequence = events.NextSequence;
@@ -7489,8 +6702,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (failedNames.Count == 0) return 0;
         var selfName = world.Self?.Name;
         var distinct = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Give is a social interaction whose TARGET is a world NPC (same class as Talk —
-        // see IsEgressOverridableVerb), so a Give whose target NAME binds no visible object
+        // Give is a social interaction whose TARGET is a world NPC, so a Give
+        // whose target NAME binds no visible object
         // is the same "not in view" miss a Talk/Use is. Give always carries a populated item
         // field, but itemFieldMode:false reads the NAME from the target= segment (the NPC),
         // not the item — a Give to an unresolvable target counts like a Talk. Own emission
@@ -8095,14 +7308,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _dwellEntryUtc = entry;
             // Snapshot the bot's own level at landblock entry (may be null
             // if not yet observed; lazily filled below). Reset per landblock
-            // so the "tapped out" signal is scoped to THIS area's farming and
-            // never carries stale stall state across a seam.
+            // so the raw comparison stays scoped to this dwell.
             _levelAtCurrentLandblockEntry = currentLevel;
         }
 
         // Lazy fill: if level was unknown at entry but is known now (still in
         // the same dwell landblock), anchor the entry level to the first known
-        // value so the tapped-out comparison has a baseline.
+        // value so the raw entry/current comparison has a baseline.
         if (_levelAtCurrentLandblockEntry is null && currentLevel is not null)
             _levelAtCurrentLandblockEntry = currentLevel;
     }
@@ -9262,7 +8474,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // contradict the note/capsule for a weaponless bot.
         var stuckUnarmedForSpend = WieldedMainWeapon(world) is null && HasNoUsableWeaponAnywhere(world);
         sb.AppendLine("- WIELD A WEAPON YOU ARE SKILLED WITH: every weapon is governed by a weapon SKILL, and a TRAINED weapon skill is the main driver of whether your swings LAND — an UNTRAINED weapon skill misses far more, so you cannot kill with it no matter how strong the weapon. If `Combat readiness` shows a `weapon skill MISMATCH` line (you are wielding a weapon whose skill you have NOT trained while a TRAINED-skill weapon sits in your bag), emit `Wield` for the listed bag weapon — prefer a weaker-looking weapon you ARE skilled with over a stronger one you are not." + (unspentSpendSurfaced ? " Then raise that trained weapon skill with spare XP (see SPEND XP)." : ""));
-        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first. TAPPED-OUT EXCEPTION (overrides the directive hold): when `Combat readiness` says `tapped out` (combat-ready, but no new level or quest item for several minutes in this `landblock`) AND a `monster` is in view, `Attack` it EVEN while a server/quest directive is active (unless you have an UNACTED quest step available — see OBJECTIVE-OVER-GRIND below). A directive you keep re-`Talk`/`Use`/`Pickup`-ing with no NEW dialog, item, or level is NOT progressing — re-emitting that social verb just loops. `Attack` the visible `monster` for XP (per COMBAT SAFETY — skip a KIND that has already beaten you), then resume the directive. If EVERY visible `monster` is a KIND that has already beaten you (none safe to fight), emit `Explore{target: {name: \"anywhere\"}}` to leave this area rather than re-loop the stalled directive. OBJECTIVE-OVER-GRIND: but if you have an UNACTED step toward a server/quest objective — a place you have not yet reached, an NPC you have not yet `Give`/`Talk`-ed for it, or a held quest item whose own text says to deliver or `Use` it — DO that untried step instead of `Attack`ing the same weak `monster` kind for marginal XP; an untried quest step advances you faster than farming a kind that is barely leveling you. (With NO unacted objective step, keep hunting per this exception.)");
+        sb.AppendLine("- LEVELING is core progress — be PROACTIVE, not reactive. When combat-ready (`Combat readiness` does NOT say `UNARMED`) AND not mid an explicit server/quest directive: if a `monster` is in view, `Attack` it (per COMBAT SAFETY below); if NO `monster` is in view, do NOT loiter among town `npc`s once their dialog is exhausted — emit `Explore{target: {name: \"anywhere\"}}` toward open areas where monsters live. Do not wait to be attacked first. AREA-PROGRESS CHECK: compare the raw `minutes in current landblock`, `level when this landblock was entered`, and `current level` lines. If many minutes have passed with the entry and current levels unchanged, decide whether local activity is still worthwhile. A directive you keep re-`Talk`/`Use`/`Pickup`-ing with no NEW dialog, item, or level is NOT progressing — re-emitting that social verb just loops. With a visible `monster`, weigh its raw combat record and either `Attack` it or leave; source will not reinterpret that evidence for you. OBJECTIVE-OVER-GRIND: if you have an UNACTED step toward a server/quest objective — a place you have not yet reached, an NPC you have not yet `Give`/`Talk`-ed for it, or a held quest item whose own text says to deliver or `Use` it — DO that untried step instead of optional grinding. With NO unacted objective step, choose the next objective from the raw progress and combat evidence.");
         // monsterInView is computed ABOVE (moved up so the Combat targets rule
         // can be gated on it too). The rules below reuse it.
         // The NON-HOSTILE rule references `nearest monster`/`monsters in view`
@@ -9286,7 +8498,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // LLM still decides.
         if (unspentSpendSurfaced)
         sb.AppendLine("- SPEND XP is a FIRST-CLASS action, not an afterthought: investing unspent XP permanently improves your character, so whenever `## Self` shows unspent XP and it is safe to deliberate (you are not mid a losing fight and no `HOSTILE` is on you), weigh investing some BEFORE choosing an OPTIONAL combat/explore action — do not let XP sit unspent run after run. `## Self` shows `experience: N total, M unspent`. Unspent XP is wasted until invested. Verbs: `RaiseAttribute{target: {name: \"<attribute>\"}, amount: <positive whole XP>}` (names: strength, endurance, quickness, coordination, focus, self), `RaiseVital{target: {name: \"<vital>\"}, amount: <XP>}` (names: health, stamina, mana), or `RaiseSkill{target: {name: \"<skill>\"}, amount: <XP>}` (the target MUST be a skill NAME from the `trained skills` list in `## Self` — NEVER a weapon ITEM's name such as the weapon you wield; if `## Self` shows NO `trained skills` list, do NOT use `RaiseSkill` at all, raise an attribute instead — the server rejects anything else). A positive `amount` is REQUIRED: invest in FEWER, LARGER raises. When you choose to invest in a target, commit a SUBSTANTIAL chunk — up to your full unspent balance — in that ONE raise, NOT the same small amount (e.g. 10) repeated across many turns, because EACH raise costs a full decision turn you need for combat and quests. This governs raise SIZE, not WHICH target: keep choosing the target by the bottleneck evidence below, and you may raise a DIFFERENT target next time. Attribute effects are MECHANICS; the allocation is YOUR call and there is NO fixed build: strength PRIMARILY drives DAMAGE — how HARD your swings hit, on a swing that already LANDS — and is NOT your main accuracy lever, while COORDINATION and the TRAINED WEAPON SKILL you fight with are your PRIMARY ACCURACY levers (how OFTEN your swings LAND), the trained weapon skill being the biggest (often bigger than the coordination attribute), raised via `RaiseSkill` using a name from `trained skills` in `## Self`; quickness aids defense and missile play; focus and self power magic; endurance and health raise MAX HEALTH." + (stuckUnarmedForSpend ? " UNARMED EXCEPTION: the coordination-vs-strength accuracy guidance in this rule is for a WIELDED weapon; when you fight UNARMED (no weapon — `Combat readiness` says `UNARMED`) your fist `UnarmedCombat` to-hit is half STRENGTH + half coordination, so STRENGTH raises accuracy AND damage — favor STRENGTH for unarmed misses (see the `unarmed accuracy` note)." : "") + " Do NOT pour every point into ONE attribute — spread XP across the attributes your actual skills depend on, and read the bottleneck from evidence: if you die too fast, survivability (endurance/health) is the limit; if `current fight` shows hits `evaded` (your swings keep MISSING), the limit is ACCURACY — PRIORITIZE coordination and your trained weapon skill (your accuracy levers; the weapon skill only when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) over strength, whose main effect is damage; if your swings LAND but deal 0/low `damage`, the limit is strength; if you fight with spells, raise magic attributes/skills. E.g. raise coordination (and your trained weapon skill) when melee swings MISS/evade; raise strength when swings LAND but barely hurt; raise endurance/health when low max HP is killing you. These are NOT co-equal defaults you pick by current HP: if you SURVIVE your fights but still cannot kill — your swings keep missing or barely hurt, racking up `ineffective`/`near-death` outcomes (NOT `deaths`) with no `kills` — the binding limit is OFFENSE, not max HP, and adding more endurance/health only lets you LOSE the same unwinnable fights more slowly. Raise coordination (and your trained weapon skill via `RaiseSkill` ONLY when it governs your WIELDED weapon — see the `wielded-weapon accuracy` note) when your swings MISS, and strength when they LAND but barely hurt — so do not pour XP only into attributes and leave the weapon skill you fight with neglected — until you can kill the weak monsters you meet. (But if instead you are DYING fast — taking `deaths`, dropping in a hit or two — then max HP survivability IS the limit, or the monsters here are simply too strong and you should Explore to a weaker area.)" + (recentOwnDeathCount >= DeathSpiralMinDeaths ? " DEATH-SPIRAL EXCEPTION: if you have died REPEATEDLY in quick succession (see `## Survival caution`), max HP is NOT the fix — repeated deaths stack a penalty that lowers effective max HP and RESET your recovery each time, so raising it will not dig you out while the deaths continue; retreat to safer content and earn XP WITHOUT dying until the penalty burns off." : ""));
-        sb.AppendLine("- TAPPED OUT means MOVE ON: a `tapped out` line in `Combat readiness` means you have NOT gained a level here for a while. Emit `Explore{target: {name: \"anywhere\"}}` to travel to a new area with monsters you can DEFEAT. Prefer a monster you can actually kill over a tougher one — XP comes from KILLS, and a monster that defeats you sets you back, so do NOT chase `tougher` monsters for more XP. (Looting a fresh corpse or an explicit server/quest directive still comes first.)");
+        sb.AppendLine("- AREA PROGRESS IS YOUR DECISION: use the raw `minutes in current landblock`, entry/current level, inventory changes, directives, and combat records. If the evidence shows no progress for many minutes, `Explore{target: {name: \"anywhere\"}}` is available to move on; if it shows an actionable objective or repeatable win, pursue that instead.");
         // cp-2369: the COMBAT SAFETY & PACE rule (~2KB, the single largest
         // bullet) is ENTIRELY about an in-progress or imminent fight — every
         // clause references the `monsters in view`/`nearest monster` count, the
@@ -9322,8 +8534,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (c) Use the SAME world object 3+ times. It is only actionable once such
         // a repeat is forming, so gate it on an observed Talk-OR-Use goal repeat
         // (cp-2400 helper, extended to both verbs). All three sub-cases are
-        // Motor-backstopped regardless of the prompt: cp-2344 talk-loop egress
-        // (a), the policy mechanically drops an unconsumed-inventory re-Use (b,
+        // Motor-backstopped regardless of the prompt: bounded same-target Talk
+        // break-contact (a), the policy mechanically drops an unconsumed-inventory re-Use (b,
         // stated in the rule itself), and the cp-2354/2359 world-object Use churn
         // guard (c) — so gating the ADVISORY rule is behaviour-preserving and
         // frees ~1.1KB in the common no-repeat case. cp-2368/69/92/2400 per-rule
@@ -10228,18 +9440,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(crHealthLine);
         if (FormatSelfStaminaWhenLow(world.Self.StaminaCurrent, world.Self.StaminaObservedPeak) is string crStaminaLine)
             sb.AppendLine(crStaminaLine);
-        // coldstart hunt discovery — surface a "tapped out" fact when the bot
-        // is combat-ready and has dwelled in this landblock past the
-        // threshold without leveling, so the LLM knows to travel for tougher
-        // monsters even while trivial mobs remain in view. Own-progress signal
-        // only (level + dwell), no monster-type judgement — see HuntTappedOutFact.
-        var armedForHunt = meleeWeaponWielded || missileWeaponWielded;
-        double? dwellMinForHunt = dwellEntryUtc is DateTimeOffset hutDwellEntry
-            ? Math.Max(0.0, (DateTimeOffset.UtcNow - hutDwellEntry).TotalMinutes)
+        // Raw dwell and level-at-entry evidence. Prompt rules, not source,
+        // decide whether those values mean the current area is productive.
+        double? dwellMinutesForPrompt = dwellEntryUtc is DateTimeOffset dwellEntry
+            ? Math.Max(0.0, (DateTimeOffset.UtcNow - dwellEntry).TotalMinutes)
             : (double?)null;
-        if (HuntTappedOutFact(armedForHunt, world.Self.Level, levelAtLandblockEntry,
-                dwellMinForHunt, EgressDwellMinutes) is string tappedOutFact)
-            sb.AppendLine($"- {tappedOutFact}");
+        if (levelAtLandblockEntry is int entryLevel)
+            sb.AppendLine(
+                $"- level when this landblock was entered: {entryLevel}; " +
+                $"current level: {(world.Self.Level?.ToString() ?? "(unknown)")}");
         if (bagWeapon is not null)
             sb.AppendLine($"- melee weapon in your inventory — `Wield` `{bagWeapon.Name}` to arm (use that exact `name`, NOT the words \"melee weapon\").");
         if (bagThrownWeapon is not null)
@@ -12609,8 +11818,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // no egress and no productive inventory change — surface that no-progress
         // activity (the bot's OWN distinct-Use count + outcomes) plus the guard's
         // mechanical state, so the LLM understands why a world-object Use was
-        // deferred and can apply its existing HUNT EXCURSION / tapped-out egress
-        // reasoning. Guard-state perception (mirrors the cp-2340 server-refused
+        // deferred and can choose another action. Guard-state perception
+        // (mirrors the cp-2340 server-refused
         // capsule); no priority, no game knowledge.
         if (localUseChurn is { Latched: true } luc)
         {
@@ -13576,16 +12785,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"- {capSkillAdvisory}");
             if (WieldedWeaponUntrainedAccuracyNote(world) is string capUntrainedNote)
                 sb.AppendLine($"- {capUntrainedNote}");
-            // The `tapped out` hunt-discovery fact (combat-ready + dwelled in this
-            // area past the dwell threshold with +0 levels) renders in the body
-            // `## Combat readiness` and is dropped by the same hard-cut — leaving
-            // the always-rendered TAPPED OUT rule with no fact to act on (inert).
-            // Re-surface it here (gated: HuntTappedOutFact returns null unless
-            // actually tapped out) so the rule can fire and the bot moves to a
-            // better hunting area. Same own-progress projection; no game knowledge.
-            if (HuntTappedOutFact(armedForHunt, world.Self.Level, levelAtLandblockEntry,
-                    dwellMinForHunt, EgressDwellMinutes) is string tappedOutCapsuleFact)
-                sb.AppendLine($"- {tappedOutCapsuleFact}");
             // How-to-arm affordances. Each variable is already null-computed for
             // its applicable case (bagWeapon/groundWeapon are null when armed;
             // bagAmmo is null unless a missile weapon is wielded with empty
@@ -13665,12 +12864,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // the value they reference (live: the bot canvassed a town's NPCs
         // indefinitely, `minutes in current landblock` invisible, never leaving
         // to hunt/level). Re-surface the raw dwell value here so the rules can
-        // evaluate "dwelled too long". Own-progress projection; no game knowledge.
-        if (dwellMinForHunt is double dwellMinTail)
+        // evaluate progress. Include entry/current level as separate raw values;
+        // source does not label the area productive or tapped out.
+        if (dwellMinutesForPrompt is not null || levelAtLandblockEntry is not null)
         {
             sb.AppendLine();
             sb.AppendLine("## Location (re-surfaced because `## Location & recency` above can be trimmed to fit the prompt)");
-            sb.AppendLine($"- minutes in current landblock: {dwellMinTail:F1}");
+            if (dwellMinutesForPrompt is double dwellMinTail)
+                sb.AppendLine($"- minutes in current landblock: {dwellMinTail:F1}");
+            if (levelAtLandblockEntry is int entryLevelTail)
+                sb.AppendLine(
+                    $"- level when this landblock was entered: {entryLevelTail}; " +
+                    $"current level: {(world.Self.Level?.ToString() ?? "(unknown)")}");
         }
 
         var assembled = sb.ToString();

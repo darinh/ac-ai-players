@@ -2824,76 +2824,6 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void EscapeHeadingForLandblock_DeterministicAndNullSafe()
-    {
-        Assert.Null(LlmGoalPolicy.EscapeHeadingForLandblock(null));
-        // Deterministic: same landblock -> same heading.
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
-                     LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u));
-        // A valid 8-way compass bearing.
-        Assert.Contains(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u),
-            new[] { "north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest" });
-    }
-
-    [Fact]
-    public void WithEscapeDirection_StampsUndirectedAnywhereExploreOnLongStallOnly()
-    {
-        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
-        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
-        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
-
-        // Long stall -> a committed compass Direction is stamped (matches the landblock bearing).
-        var stamped = LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, 0x0125u);
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), stamped.Direction);
-
-        // Below the threshold -> unchanged (undirected).
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, shortDwell, 0x0125u).Direction);
-
-        // An LLM-chosen Direction is NEVER overridden.
-        var directed = explore with { Direction = "north" };
-        Assert.Equal("north", LlmGoalPolicy.WithEscapeDirectionForTest(directed, longDwell, 0x0125u).Direction);
-
-        // A TARGETED Explore (a concrete place, not "anywhere") is not stamped.
-        var targeted = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "SomeNamedPlace" } };
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(targeted, longDwell, 0x0125u).Direction);
-
-        // A non-Explore goal passes through untouched.
-        var attack = new Goal { Kind = GoalKind.Attack, Target = new Selector { Name = "Chicken" } };
-        var afterAttack = LlmGoalPolicy.WithEscapeDirectionForTest(attack, longDwell, 0x0125u);
-        Assert.Equal(GoalKind.Attack, afterAttack.Kind);
-        Assert.Null(afterAttack.Direction);
-
-        // Unknown landblock -> no heading -> unchanged.
-        Assert.Null(LlmGoalPolicy.WithEscapeDirectionForTest(explore, longDwell, null).Direction);
-    }
-
-    [Fact]
-    public void NonEgressBarrenEscape_EscapesUnarmedWildernessStallButDefersToMonsterAndUse()
-    {
-        var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
-        var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
-
-        // No monster + long barren stall + undirected Explore -> directional escape
-        // stamped (the case the combat-ready egress latch cancels for an UNARMED bot).
-        var escaped = LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: false, longDwell, 0x0125u);
-        Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), escaped.Direction);
-
-        // Any attackable monster in view leaves Strategy's Explore unchanged.
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: true, longDwell, 0x0125u).Direction);
-
-        // No monster but a town `Use` goal (not Explore) -> untouched, so a bot can still Use a
-        // vendor to self-arm rather than being sent wandering.
-        var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Grocer" } };
-        var afterUse = LlmGoalPolicy.NonEgressBarrenEscape(use, monsterInView: false, longDwell, 0x0125u);
-        Assert.Equal(GoalKind.Use, afterUse.Kind);
-        Assert.Null(afterUse.Direction);
-
-        // Below the dwell threshold -> unchanged even with no monster.
-        var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: false, shortDwell, 0x0125u).Direction);
-    }
-
-    [Fact]
     public void BuyVendorNoPanel_PanelOpen_ReturnsNull()
     {
         // A panel IS open -> let the Buy run (no rewrite); this is the no-loop guard.
@@ -11527,7 +11457,7 @@ public class LlmGoalPolicyTests
             capsuleText);
     }
 
-    private static WorldStateProjection BuildTappedOutWorld(int level)
+    private static WorldStateProjection BuildLevelProgressWorld(int level)
     {
         var inv = new[]
         {
@@ -11539,27 +11469,25 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_RendersTappedOutFactInTail()
+    public void BuildUserPrompt_ProtectedLocationCapsule_RendersRawEntryAndCurrentLevels()
     {
-        // cp2917: the body `## Combat readiness` tapped-out fact (combat-ready +
-        // farmed this area with +0 levels) is dropped by the dense-scene body
-        // hard-cut, leaving the always-rendered TAPPED OUT rule with no fact to
-        // act on. Re-surface it in the protected capsule so the rule can fire.
-        var world = BuildTappedOutWorld(level: 9);
+        var world = BuildLevelProgressWorld(level: 9);
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             world, new EventStream(), null, null, null, null,
             dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
-            levelAtLandblockEntry: 9);
+            levelAtLandblockEntry: 5);
 
-        int capsule = prompt.IndexOf("## Combat readiness (re-surfaced", System.StringComparison.Ordinal);
+        int capsule = prompt.IndexOf("## Location (re-surfaced", System.StringComparison.Ordinal);
         Assert.True(capsule > 0);
-        Assert.Contains("tapped out: level 9", prompt.Substring(capsule));
+        var tail = prompt.Substring(capsule);
+        Assert.Contains("level when this landblock was entered: 5; current level: 9", tail);
+        Assert.DoesNotContain("tapped out:", prompt);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_TappedOutSurvivesBodyHardCut()
+    public void BuildUserPrompt_ProtectedLocationCapsule_RawLevelsSurviveBodyHardCut()
     {
-        var world = BuildTappedOutWorld(level: 9);
+        var world = BuildLevelProgressWorld(level: 9);
         var entry = System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10);
         var full = LlmGoalPolicy.BuildUserPrompt(
             world, new EventStream(), null, null, null, null,
@@ -11573,21 +11501,8 @@ public class LlmGoalPolicyTests
             dwellEntryUtc: entry, levelAtLandblockEntry: 9, promptCeiling: bodyIdx);
 
         Assert.True(tight.Length <= bodyIdx);
-        Assert.Contains("## Combat readiness (re-surfaced", tight);
-        Assert.Contains("tapped out: level 9", tight);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedCombatReadinessCapsule_OmitsTappedOutWhenLevelGained()
-    {
-        // Gained a level here (level 9 > entry 5) => the area is still
-        // productive => HuntTappedOutFact returns null => no tapped-out line.
-        var world = BuildTappedOutWorld(level: 9);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, null, null, null,
-            dwellEntryUtc: System.DateTimeOffset.UtcNow - System.TimeSpan.FromMinutes(10),
-            levelAtLandblockEntry: 5);
-        Assert.DoesNotContain("tapped out: level", prompt);
+        Assert.Contains("## Location (re-surfaced", tight);
+        Assert.Contains("level when this landblock was entered: 9; current level: 9", tight);
     }
 
     [Fact]
@@ -18012,6 +17927,85 @@ public class LlmGoalPolicyTests
         Assert.StartsWith("llm:", goal.Source);
     }
 
+    [Fact]
+    public async Task ProposeGoal_LongDwellTalk_IsReturnedUnchanged()
+    {
+        var policy = CannedGoalPolicy(
+            "{\"kind\":\"Talk\",\"target\":{\"name\":\"Npc 90000010\"},\"rationale\":\"continue dialog\",\"priority\":2}");
+        var world = BuildVisibleWorld(CivilianNpc(NpcGuid)) with
+        {
+            Inventory = ChainCombatLoadout(),
+        };
+        var events = LongDwellEvents(world.Self.Landblock);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal("Npc 90000010", goal.Target?.Name);
+        Assert.Equal("continue dialog", goal.Rationale);
+        Assert.StartsWith("llm:", goal.Source);
+    }
+
+    [Fact]
+    public async Task ProposeGoal_LongDwellStationaryUse_IsReturnedUnchanged()
+    {
+        var policy = CannedGoalPolicy(
+            "{\"kind\":\"Use\",\"target\":{\"name\":\"Test Mechanism\"},\"rationale\":\"try interaction\",\"priority\":2}");
+        var world = BuildVisibleWorld(new VisibleObjectProjection
+        {
+            Guid = 0x90000011u,
+            Name = "Test Mechanism",
+            Distance = 3f,
+        }) with
+        {
+            Inventory = ChainCombatLoadout(),
+        };
+        var events = LongDwellEvents(world.Self.Landblock);
+
+        Assert.Null(policy.ProposeGoal(world, events, null));
+        await policy.WaitForInFlightAsync();
+        var goal = policy.ProposeGoal(world, events, null);
+
+        Assert.NotNull(goal);
+        Assert.Equal(GoalKind.Use, goal!.Kind);
+        Assert.Equal("Test Mechanism", goal.Target?.Name);
+        Assert.Equal("try interaction", goal.Rationale);
+        Assert.StartsWith("llm:", goal.Source);
+    }
+
+    private static LlmGoalPolicy CannedGoalPolicy(string goalJson)
+    {
+        var canned = JsonSerializer.Serialize(new
+        {
+            choices = new[] { new { message = new { content = goalJson } } },
+        });
+        var http = new HttpClient(new StubHandler((_, _) =>
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(canned) }));
+        return new LlmGoalPolicy(
+            new LlmGoalClient(http, "https://test.example/chat", "test-model", "key"),
+            new NoQuestKnowledgePolicy(),
+            new InMemoryWeenieRepo())
+        {
+            MinCallInterval = TimeSpan.Zero,
+        };
+    }
+
+    private static EventStream LongDwellEvents(uint? landblock)
+    {
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = DateTimeOffset.UtcNow - TimeSpan.FromMinutes(10),
+            Kind = EventKind.LandblockChanged,
+            LandblockTo = landblock,
+        });
+        return events;
+    }
+
     // ---- Helpers ----
 
     private const uint SelfGuid = 0x50000005;
@@ -20008,153 +20002,11 @@ public class LlmGoalPolicyTests
         Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
         Assert.False(policy.IsStationaryInteractFixation(goal, world, es));
     }
-    //
-    // Pure decision behind the mechanical backstop: when the bot is
-    // demonstrably stuck in a tapped-out, monster-free safe zone the policy
-    // substitutes a targetless Explore for a social Talk/Give the LLM keeps
-    // emitting against the existing prompt rules. dwell threshold = 5min,
-    // no-progress grace = 2min. ComputeEgressActive is a sticky latch (stays
-    // engaged across landblock seams so the bot leaves the town cluster
-    // instead of ping-ponging); IsEgressOverridableVerb gates which goal
-    // kinds get substituted while the latch is engaged.
-
-    private static readonly TimeSpan StuckGrace = TimeSpan.FromMinutes(3);
-
-    [Fact]
-    public void HuntEgress_EngagesWhenStuckPastThreshold()
-    {
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Theory]
-    [InlineData((int)GoalKind.Talk, true)]
-    [InlineData((int)GoalKind.Give, true)]
-    [InlineData((int)GoalKind.Use, false)]
-    [InlineData((int)GoalKind.Pickup, false)]
-    [InlineData((int)GoalKind.Wield, false)]
-    [InlineData((int)GoalKind.Attack, false)]
-    [InlineData((int)GoalKind.Explore, false)]
-    public void HuntEgress_OnlyOverridesSocialVerbs(int kind, bool expected)
-    {
-        // Use can be a door/portal transition (the egress action itself);
-        // Pickup can be self-arming; Attack/Explore are already progress.
-        Assert.Equal(expected, LlmGoalPolicy.IsEgressOverridableVerb((GoalKind)kind));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhenUnarmed()
-    {
-        // A weaponless bot keeps its full town grace (not ready to hunt).
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: false, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhenMonsterInView()
-    {
-        // A monster is engageable here — do not flee the hunt.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 6.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    // --- stuck-loop egress gate (cp-2266) -----------------------------------
-    // When a fixation guard has detected a proven no-progress interaction loop,
-    // ShouldEscapeStuckLoop decides whether to send a tapped-out, combat-ready,
-    // unthreatened bot away with Explore instead of deferring to the fallback
-    // (which re-picks the same dead-end class of stationary object).
-
-    [Fact]
-    public void StuckLoop_EscapesWhenCombatReadyTappedOutAndNoMonster()
-    {
-        Assert.True(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedWhenUnarmed()
-    {
-        // An UNARMED bot may legitimately need to Use objects to progress —
-        // do not send it wandering off.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: false, tappedOut: true, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedBeforeTappedOut()
-    {
-        // Early in a zone a Use loop may be a genuine progress attempt.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: false, monsterInView: false));
-    }
-
-    [Fact]
-    public void StuckLoop_SuppressedWhenMonsterInView()
-    {
-        // A monster is in view (hostile OR non-hostile — the caller passes
-        // AnyAttackableMonsterInView): the egress exists to LEAVE and find
-        // monsters, so when one is already in view the bot should engage it
-        // (defend/flee a hostile, or fight a non-hostile XP target), never wander
-        // off to find a monster it can already see.
-        Assert.False(LlmGoalPolicy.ShouldEscapeStuckLoop(
-            combatReady: true, tappedOut: true, monsterInView: true));
-    }
-
-    // --- silent-NPC Talk-loop early egress (cp-2328) ------------------------
-    // A combat-ready bot in a monster-free safe zone Talk-loops a SILENT NPC
-    // (no dialog) for minutes because the actual Explore that physically moves
-    // it is gated behind a 5-min tapped-out clock. ShouldEarlyEscapeTalkLoop
-    // breaks the loop the instant the stationary fixation is proven (Talk loop
-    // kind only), and IsTalkLoopEgressActive keeps substituting the re-emitted
-    // Talk/Give with Explore until the bot actually leaves the landblock.
-
-    [Fact]
-    public void EarlyTalkLoopEgress_FiresForTalkLoopWhenSafe()
-    {
-        Assert.True(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedForOtherLoopKinds()
-    {
-        // The Talk-loop early-escape is Talk-only; a world-object Use loop has
-        // its OWN escape (ShouldEscapeWorldUseLoop, cp-2372), so this Talk
-        // predicate correctly does not fire for it.
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "Use", monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedWhenMonsterInView()
-    {
-        // A monster is in view (hostile OR non-hostile — the caller passes
-        // AnyAttackableMonsterInView): engage the visible XP target instead of
-        // wandering off to break the talk loop (cp-2378/cp-2379 principle).
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: true, freshDirective: false));
-    }
-
-    [Fact]
-    public void EarlyTalkLoopEgress_SuppressedWhenFreshDirective()
-    {
-        // The server is actively guiding the bot — let it follow the directive.
-        Assert.False(LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-            loopKind: "NPC Talk", monsterInView: false, freshDirective: true));
-    }
-
     // --- exhausted-NPC break-contact (cp070, hardened per council review) ----
     // A single-NPC Talk fixation PROVEN by the bot's own recent goal history (the
     // cp069 signal) means the bot is provably stuck: not advancing the directive
     // it re-greets, and not engaging any monster in view. ShouldBreakContact
-    // ExhaustedNpc fires UNCONDITIONALLY for the Talk loop kind once proven — it is
-    // deliberately NOT gated on freshDirective or monster-in-view, because the
-    // latched early egress AND the tapped-out stuck-loop egress are both
-    // monster-in-view-gated, so in a monster-present zone a proven fixation would
-    // otherwise wedge with no egress able to fire (livelock). The caller substitutes
+    // ExhaustedNpc fires for the Talk loop kind once proven. The caller substitutes
     // a target-less Explore and re-deliberates next tick.
 
     [Fact]
@@ -20168,8 +20020,7 @@ public class LlmGoalPolicyTests
     public void BreakContact_SuppressedWhenFixationNotProven()
     {
         // Below the history threshold (or a multi-NPC churn that no single name
-        // dominates): not a proven single-NPC fixation, so the other egresses /
-        // fallback handle it as before.
+        // dominates): not a proven single-NPC fixation, so fallback handles it.
         Assert.False(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
             loopKind: "NPC Talk", provenSingleNpcTalkFixation: false));
     }
@@ -20183,32 +20034,19 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BreakContact_FiresWhereEarlyEgressIsSuppressed()
+    public void BreakContact_DoesNotInterpretWorldContext()
     {
-        // The livelock fix: in EVERY case where the latched ShouldEarlyEscapeTalkLoop
-        // stands down for a Talk loop (a monster is in view, OR the server is freshly
-        // guiding the bot), a PROVEN fixation must STILL break contact — otherwise the
-        // bot wedges with no egress able to fire. So break-contact is true wherever a
-        // proven Talk fixation exists, independent of those two suppressors.
-        foreach (var monster in new[] { true, false })
-        foreach (var fresh in new[] { true, false })
-        {
-            var early = LlmGoalPolicy.ShouldEarlyEscapeTalkLoop(
-                loopKind: "NPC Talk", monsterInView: monster, freshDirective: fresh);
-            var breakContact = LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
-                loopKind: "NPC Talk", provenSingleNpcTalkFixation: true);
-            Assert.True(breakContact);
-            // Whenever the early egress is suppressed, break-contact still covers it.
-            if (!early)
-                Assert.True(breakContact);
-        }
+        // The bounded recovery consumes only the proven repeat signal and loop kind;
+        // it does not rank directives, combat targets, or area productivity.
+        Assert.True(LlmGoalPolicy.ShouldBreakContactExhaustedNpc(
+            loopKind: "NPC Talk", provenSingleNpcTalkFixation: true));
     }
 
     // --- world-object Use-loop egress (cp-2372) ----------------------------
     // A confirmed bare world-object Use churn (the cp-2354 churn guard already
     // fired) Explores to travel through/past the looped object instead of
-    // deferring to the fallback. NOT gated on freshDirective (re-Using one
-    // object cannot be "finishing guided training"); only a hostile suppresses.
+    // deferring to the fallback. A changed combat scene suppresses the recovery
+    // so the next deliberation sees it.
 
     [Fact]
     public void WorldUseLoopEgress_FiresForUseChurnWhenSafe()
@@ -20230,8 +20068,7 @@ public class LlmGoalPolicyTests
     [Fact]
     public void WorldUseLoopEgress_SuppressedForOtherLoopKinds()
     {
-        // Only the world-object Use churn kind uses this escape; a Talk loop has
-        // its own (freshDirective-gated) path.
+        // Only the world-object Use churn kind uses this escape.
         Assert.False(LlmGoalPolicy.ShouldEscapeWorldUseLoop(
             loopKind: "NPC Talk", monsterInView: false));
     }
@@ -20289,406 +20126,6 @@ public class LlmGoalPolicyTests
             Distance = 2f, IsMonster = false, ObservedHostile = false, IsCorpse = false,
         });
         Assert.False(LlmGoalPolicy.AnyAttackableMonsterInView(world));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_WhileInWindowAndSameLandblock()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.True(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveAfterTimeout()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(-1),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenLandblockChanged()
-    {
-        // Leaving the landblock means the loop is already broken — stop overriding.
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B2u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenMonsterOrDirective()
-    {
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: true, freshDirective: false));
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: now.AddSeconds(30),
-            latchLandblock: 0xA9B4u, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: true));
-    }
-
-    [Fact]
-    public void TalkLoopEgressActive_InactiveWhenNoLatchRecorded()
-    {
-        // Default state (no loop ever detected) never reports active.
-        var now = DateTimeOffset.UtcNow;
-        Assert.False(LlmGoalPolicy.IsTalkLoopEgressActive(
-            nowUtc: now, until: DateTimeOffset.MinValue,
-            latchLandblock: null, currentLandblock: 0xA9B4u,
-            monsterInView: false, freshDirective: false));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedBeforeDwellThreshold()
-    {
-        // Just arrived / brief visit — let the bot work the area first.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 4.9, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_SuppressedWhileMaterialProgressRecent()
-    {
-        // A quest actively handing over items keeps its grace.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 9.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
-    }
-
-    [Fact]
-    public void HuntEgress_EngagesExactlyAtThresholdBoundaries()
-    {
-        // dwell == 5min and sinceProgress == 2min are both "stuck enough".
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 5.0, sinceMaterialProgress: TimeSpan.FromMinutes(2)));
-    }
-
-    [Fact]
-    public void HuntEgress_StaysEngagedAcrossSeamDespiteDwellReset()
-    {
-        // Already egressing; bot just crossed a seam so dwell reset to 0.
-        // The sticky latch must keep egress engaged so it keeps leaving the
-        // town cluster instead of reverting to Talk and pathing back.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByMonster()
-    {
-        // Reached the hunt zone — disengage egress so the bot can fight.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: true,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByRecentProgress()
-    {
-        // Inventory changed mid-egress (looted / received item) — yield to
-        // whatever the LLM wants to do next.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(1)));
-    }
-
-    [Fact]
-    public void HuntEgress_StickyCancelledByDisarm()
-    {
-        // Lost the weapon mid-egress — no longer hunt-ready.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: false, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: StuckGrace));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_BypassesLootGrace()
-    {
-        // cp-2260 live regression: a tapped-out bot re-farming trivial mobs
-        // loots a corpse every <2min, so sinceMaterialProgress never reaches
-        // the 2min grace and egress would never engage. When tapped out, the
-        // grace is bypassed (the bot's own 0-levels signal is the authority),
-        // so egress engages despite very recent inventory churn.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    [Fact]
-    public void HuntEgress_NotTappedOut_LootGraceStillApplies()
-    {
-        // Same recent-loot churn but NOT tapped out (e.g. still leveling here)
-        // → the grace is preserved, egress defers.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: false));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_StillCancelledByMonster()
-    {
-        // Tapped-out bypasses only the loot grace — an engageable (unfarmed/
-        // hostile) monster still cancels egress so the bot fights it.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    [Fact]
-    public void HuntEgress_TappedOut_StillRequiresCombatReady()
-    {
-        // Tapped-out does not override the disarmed cancel.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: false, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.Zero, tappedOut: true));
-    }
-
-    // ---- Seam-independent barren-stall first-trigger (cp-2263 oscillation) ----
-    // A combat-ready bot oscillating between two adjacent safe landblocks resets
-    // per-landblock dwell at every seam, so dwellMinutes never reaches the
-    // threshold and the dwell first-trigger can never fire. sinceMaterialProgress
-    // does NOT reset at seams, so a long no-progress span ENGAGES egress even at
-    // dwell == 0. Threshold = 2x dwell (10min).
-
-    [Fact]
-    public void HuntEgress_BarrenStall_EngagesAtDwellZeroWhenNoProgressPastTimeout()
-    {
-        // The exact live loophole: dwell keeps resetting (0), not yet egressing,
-        // armed, monster-free, no material progress for 10min → engage.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
-    }
-
-    [Fact]
-    public void HuntEgress_BarrenStall_DefersJustBelowTimeout()
-    {
-        // 9.9min < 10min barren-stall timeout AND dwell below threshold → defer.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(9.9)));
-    }
-
-    [Fact]
-    public void HuntEgress_BarrenStall_CancelledByMonsterEvenPastTimeout()
-    {
-        // An engageable monster still cancels — the bot reached a hunt.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: true,
-            dwellMinutes: 0.0, sinceMaterialProgress: TimeSpan.FromMinutes(10)));
-    }
-
-    // ---- fresh-directive egress veto (cp-2285 academy-completion) ----------
-    // A low-level bot still being actively guided by the server (a fresh,
-    // DISTINCT tutorial PopupString it has not acted on) must finish that
-    // training before the dwell/stall egress fires it out to hunt. Wired as a
-    // top-tier ComputeEgressActive cancel fed by the RecentFreshDirective
-    // freshness gate (PopupString-only, distinct-text, ages out so it can't
-    // deadlock). Answers the user question "should it value the academy XP?".
-
-    [Fact]
-    public void HuntEgress_FreshDirective_VetoesEvenPastDwellAndTappedOut()
-    {
-        // The exact academy bailout case: combat-ready, no monster, dwell well
-        // past threshold, tappedOut (no level gained yet) — would normally
-        // ENGAGE — but a fresh server directive is active, so egress is vetoed.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
-            tappedOut: true, recentFreshDirective: true));
-    }
-
-    [Fact]
-    public void HuntEgress_FreshDirective_CancelsInProgressEgress()
-    {
-        // The veto is top-tier: it even cancels an egress already latched on.
-        Assert.False(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: true, combatReady: true, monsterInView: false,
-            dwellMinutes: 20.0, sinceMaterialProgress: TimeSpan.FromMinutes(20),
-            tappedOut: true, recentFreshDirective: true));
-    }
-
-    [Fact]
-    public void HuntEgress_NoFreshDirective_StillEngagesPastDwell()
-    {
-        // Regression guard: with no fresh directive, behaviour is unchanged —
-        // a tapped-out bot past the dwell threshold still egresses.
-        Assert.True(LlmGoalPolicy.ComputeEgressActive(
-            currentlyEgressing: false, combatReady: true, monsterInView: false,
-            dwellMinutes: 6.0, sinceMaterialProgress: TimeSpan.FromMinutes(10),
-            tappedOut: true, recentFreshDirective: false));
-    }
-
-    // ---- RecentFreshDirective freshness gate (cp-2285) ---------------------
-    // Distinct-text + ages-out semantics that keep the veto from deadlocking.
-
-    private static LlmGoalPolicy NewBarePolicy()
-    {
-        var http = new HttpClient(new StubHandler((_, _) =>
-            new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("x") }));
-        var llm = new LlmGoalClient(http, "https://test.example/chat", "test-model", "key");
-        return new LlmGoalPolicy(llm, new NoQuestKnowledgePolicy(), new InMemoryWeenieRepo());
-    }
-
-    [Fact]
-    public void RecentFreshDirective_FirstDistinctPopup_CreditsAndAgesOut()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Use the bow." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // Still held a minute later with no new events (within the 2min grace).
-        Assert.True(policy.RecentFreshDirective(es, t0.AddMinutes(1)));
-        // Ages out just past the grace — so it can never deadlock.
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_RepeatedIdenticalPopup_DoesNotReExtend()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // A REPEAT of the same text (the anti-idle loop) must NOT reset the grace,
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Talk to the trainer." });
-        // so by t0+2.01min the veto has aged out and egress is allowed again.
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(2.01)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_NewDistinctPopup_ReExtends()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Step one." });
-        Assert.True(policy.RecentFreshDirective(es, t0));
-        // A genuinely NEW instruction that ARRIVES later (its own Utc is t1)
-        // re-extends the grace from its own emit time.
-        var t1 = t0.AddMinutes(1.5);
-        es.Append(new StreamEvent { Sequence = -1, Utc = t1, Kind = EventKind.PopupString, Text = "Step two." });
-        Assert.True(policy.RecentFreshDirective(es, t1));
-        Assert.True(policy.RecentFreshDirective(es, t1.AddMinutes(1.0)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_StalePopup_DoesNotCredit()
-    {
-        // A popup whose OWN timestamp is older than the grace (e.g. an old
-        // login popup seen on the first whole-buffer scan, or one processed
-        // after a delay) must NOT grant a fresh veto — freshness is anchored to
-        // the directive's emit time, not the processing time.
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.PopupString, Text = "Old login popup." });
-        Assert.False(policy.RecentFreshDirective(es, t0.AddMinutes(3)));
-    }
-
-    [Fact]
-    public void RecentFreshDirective_NonPopupEvents_DoNotCredit()
-    {
-        var policy = NewBarePolicy();
-        var es = new EventStream();
-        var t0 = DateTimeOffset.UtcNow;
-        // NpcDialog is deliberately NOT credited (a town full of NPCs would
-        // otherwise pin the bot forever); ServerMessage broadcast is ignored too.
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.NpcDialog, Name = "Trainer", Text = "Welcome, adventurer." });
-        es.Append(new StreamEvent { Sequence = -1, Utc = t0, Kind = EventKind.ServerMessage, Text = "Someone says hi." });
-        Assert.False(policy.RecentFreshDirective(es, t0));
-    }
-
-    // ---- IsEgressOverridableStationaryUse (cp-2263 forge fixation) ----
-    // While egressing, a Use of a STATIONARY non-transit world object extends the
-    // dwell like Talk/Give and is substituted; transit/interactive affordances
-    // (door/portal/corpse/openable) are preserved so the bot can still leave/loot.
-
-    private static WorldStateProjection StationaryUseWorld(
-        params VisibleObjectProjection[] visible)
-        => new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0x8602u, CellId = 0x86020001u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-            },
-            Inventory = System.Array.Empty<InventoryItemProjection>(),
-            Visible = visible,
-        };
-
-    private static Goal UseGoal(string name)
-        => new Goal { Kind = GoalKind.Use, Target = new Selector { Name = name } };
-
-    [Fact]
-    public void StationaryUse_OverridesPlainStationaryObject()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        Assert.True(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Fletching Forge"), world));
-    }
-
-    [Theory]
-    [InlineData("door")]
-    [InlineData("portal")]
-    [InlineData("openable")]
-    [InlineData("corpse")]
-    public void StationaryUse_PreservesTransitAndInteractiveAffordances(string flag)
-    {
-        var v = new VisibleObjectProjection
-        {
-            Guid = 0x9u, Name = "Thing", Distance = 6f,
-            IsDoor = flag == "door",
-            IsPortal = flag == "portal",
-            IsOpenable = flag == "openable",
-            IsCorpse = flag == "corpse",
-        };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Thing"), StationaryUseWorld(v)));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideNonUseKind()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Fletching Forge" } };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(talk, world));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideUnresolvedTarget()
-    {
-        // Target not in view → conservative: pass through (could be a transit
-        // object the bot is walking toward).
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Something Else", Distance = 6f });
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(
-            UseGoal("Fletching Forge"), world));
-    }
-
-    [Fact]
-    public void StationaryUse_DoesNotOverrideEmptySelector()
-    {
-        var world = StationaryUseWorld(new VisibleObjectProjection
-        { Guid = 0x9u, Name = "Fletching Forge", Distance = 6f });
-        var goal = new Goal { Kind = GoalKind.Use, Target = new Selector() };
-        Assert.False(LlmGoalPolicy.IsEgressOverridableStationaryUse(goal, world));
     }
 
     [Fact]
@@ -24463,9 +23900,6 @@ public class LlmGoalPolicyTests
         Assert.Contains("double-click", p);
         // combat target discrimination + proactive leveling
         Assert.Contains("LEVELING is core progress", p);
-        // tapped-out bot attacks visible monsters even mid-directive (cp071)
-        Assert.Contains("TAPPED-OUT EXCEPTION", p);
-        Assert.Contains("monster", p);
         // proven-low-value grind: pursue an unacted objective step over farming
         Assert.Contains("OBJECTIVE-OVER-GRIND", p);
         // self-arming before optional combat
@@ -24505,9 +23939,6 @@ public class LlmGoalPolicyTests
         Assert.Contains("town-stuck", p);
         Assert.Contains("HUNT EXCURSION", p);
         Assert.Contains("KEEP emitting it", p);
-        // tapped-out: corrected leveling steer (cp-2270) — prefer beatable, no "tougher for XP"
-        Assert.Contains("monsters you can DEFEAT", p);
-        Assert.Contains("do NOT chase `tougher` monsters for more XP", p);
         // NOTE: the BLOCKED-targets rule is now conditional — cp-2402 gates it
         // on a recent ActionRejected `Blocked`/`Unreachable` (it only tells the
         // LLM how to react to one), which this fresh-EventStream world has none
@@ -26027,293 +25458,6 @@ public class LlmGoalPolicyTests
         policy.ProposeGoal(world, events, null);
         await policy.WaitForInFlightAsync();
         Assert.Equal(2, reqs.Count);    // intent-left-top → ended → real call
-    }
-
-    // ---- HuntTappedOutFact (coldstart hunt-zone discovery perception) ----
-
-    [Fact]
-    public void HuntTappedOutFact_NotCombatReady_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: false, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownLevel_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: null, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownEntryLevel_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: null,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_DwellBelowThreshold_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 4.9, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_UnknownDwell_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: null, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_LeveledHere_ReturnsNull()
-    {
-        Assert.Null(LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 4, levelAtLandblockEntry: 3,
-            dwellMinutes: 10.0, dwellThresholdMinutes: 5.0));
-    }
-
-    [Fact]
-    public void HuntTappedOutFact_TappedOut_ReturnsFact()
-    {
-        var fact = LlmGoalPolicy.HuntTappedOutFact(
-            combatReady: true, currentLevel: 3, levelAtLandblockEntry: 3,
-            dwellMinutes: 7.0, dwellThresholdMinutes: 5.0);
-        Assert.NotNull(fact);
-        Assert.Contains("tapped out", fact);
-        Assert.Contains("7 min", fact);
-        Assert.Contains("level", fact);
-        // Raw self-data only — no verb directive embedded (audit finding #1).
-        Assert.DoesNotContain("Explore", fact);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_TappedOut_SurfacesFactInCombatReadiness()
-    {
-        // Combat-ready (melee wielded), dwelled > threshold, no level gained
-        // since entry → the tapped-out fact must appear under Combat readiness.
-        var world = new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-                Level = 3,
-            },
-            Inventory = new[]
-            {
-                new InventoryItemProjection
-                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
-            },
-            Visible = System.Array.Empty<VisibleObjectProjection>(),
-        };
-        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, stack: null, pickerActivity: null,
-            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
-            levelAtLandblockEntry: 3);
-        Assert.Contains("tapped out: level", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_LeveledHere_OmitsTappedOutFact()
-    {
-        // Same dwell, but the bot gained a level here → fact suppressed.
-        var world = new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f,
-                Level = 4,
-            },
-            Inventory = new[]
-            {
-                new InventoryItemProjection
-                { Guid = 0x222u, Name = "Training Spadone", Wcid = 5104u, ItemType = 0x1u, WieldedAt = 0x100000u },
-            },
-            Visible = System.Array.Empty<VisibleObjectProjection>(),
-        };
-        var entry = DateTimeOffset.UtcNow.AddMinutes(-7);
-        var prompt = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, stack: null, pickerActivity: null,
-            explorationCandidates: null, dwellEntryUtc: entry, recentSightings: null,
-            levelAtLandblockEntry: 3);
-        Assert.DoesNotContain("tapped out: level", prompt);
-    }
-
-    // ---- cp-2260 cold-start trivial-farm egress override helpers ----
-
-    private static VisibleObjectProjection Mob(
-        uint guid, string name, uint? wcid, bool corpse = false, bool hostile = false)
-        => new VisibleObjectProjection
-        {
-            Guid = guid, Name = name, Wcid = wcid, ItemType = 0x10u, Distance = 2f,
-            IsCreature = true, IsMonster = true, IsCorpse = corpse, ObservedHostile = hostile,
-        };
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_VisibleMonster_True()
-    {
-        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_CorpseOnly_False()
-    {
-        var visible = new[] { Mob(0x1u, "Chicken", 10u, corpse: true) };
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_HostileMonster_True()
-    {
-        var visible = new[] { Mob(0x1u, "Chicken", 10u, hostile: true) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true));
-    }
-
-    // ---- ignored-kind liveness backstop (visible-but-unengaged) ----
-
-    [Fact]
-    public void IsIgnoredHere_NotTappedOut_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(
-            v, new HashSet<string> { "w:14" }, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_ObservedHostile_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u, hostile: true);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(
-            v, new HashSet<string> { "w:14" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_NullOrEmptySet_False()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, null, tappedOut: true));
-        Assert.False(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string>(), tappedOut: true));
-    }
-
-    [Fact]
-    public void IsIgnoredHere_KindInSet_True()
-    {
-        var v = Mob(0x1u, "Cow", 14u);
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        Assert.True(LlmGoalPolicy.IsIgnoredHere(v, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_IgnoredKind_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        var visible = new[] { Mob(0x1u, "Cow", 14u) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true));
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_IgnoredSetButHostile_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
-        var visible = new[] { Mob(0x1u, "Cow", 14u, hostile: true) };
-        Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
-    }
-
-    private static readonly System.Collections.Generic.IReadOnlySet<string> NoEngaged =
-        new HashSet<string>();
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_NotEligible_ClearsAndEmpty()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>
-        {
-            ["w:14"] = DateTimeOffset.UnixEpoch,
-        };
-        var now = DateTimeOffset.UnixEpoch.AddMinutes(10);
-        var result = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged,
-            eligibleContext: false, now, TimeSpan.FromMinutes(5));
-        Assert.Empty(result);
-        Assert.Empty(dict); // tracker cleared when not eligible
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_DefersBeforeTimeout_ThenIgnoresAtTimeout()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        // First eligible observation stamps the clock, not yet ignored.
-        var r1 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        Assert.Empty(r1);
-        // Just before timeout → still deferred.
-        var r2 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
-        Assert.Empty(r2);
-        // At/after timeout → ignored.
-        var r3 = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(5), TimeSpan.FromMinutes(5));
-        Assert.Contains("w:14", r3);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_AbsenceResetsContinuity()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        // Kind leaves PVS for a tick → dropped from tracker.
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, System.Array.Empty<(string, bool)>(), NoEngaged, true, t0.AddMinutes(4), TimeSpan.FromMinutes(5));
-        Assert.DoesNotContain("w:14", dict.Keys);
-        // Reappears → clock restarts; 4.9 min after FIRST sighting is < timeout from the restart.
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0.AddMinutes(4.9), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_HostileNeverAccrues()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", true) }, NoEngaged, true, t0.AddMinutes(100), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-        Assert.Empty(dict);
-    }
-
-    [Fact]
-    public void UpdateIgnoredKindExposure_EngagedKindDropped()
-    {
-        var dict = new Dictionary<string, DateTimeOffset>();
-        var t0 = DateTimeOffset.UnixEpoch;
-        LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, NoEngaged, true, t0, TimeSpan.FromMinutes(5));
-        // Bot now Attacks this kind → it is engaged, so dropped from the tracker.
-        var engaged = (System.Collections.Generic.IReadOnlySet<string>)new HashSet<string> { "w:14" };
-        var r = LlmGoalPolicy.UpdateIgnoredKindExposure(
-            dict, new[] { ("w:14", false) }, engaged, true, t0.AddMinutes(10), TimeSpan.FromMinutes(5));
-        Assert.Empty(r);
-        Assert.Empty(dict);
     }
 
     // ---- FitPromptToCeiling (request-size ceiling; prevents HTTP 413) ----
