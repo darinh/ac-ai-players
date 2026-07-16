@@ -9371,6 +9371,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         int recentOwnDeathCount = 0,
         string? routeBlockedTarget = null)
     {
+        // A named kill-count predicate is an LLM-authored commitment to one
+        // target kind. Extract it before rendering so both body and protected
+        // combat cues can defer to that strategic choice.
+        (KillCountSincePushAtLeastPredicate Predicate, string RequiredKind)?
+            activeNamedKillObjective = null;
+        if (stack?.Top is
+            {
+                Status: IntentLifecycle.Active,
+                Completion: KillCountSincePushAtLeastPredicate namedKill
+            }
+            && namedKill.Count > 0
+            && OneLine(namedKill.NameContains) is string requiredKind)
+            activeNamedKillObjective = (namedKill, requiredKind);
+
         var sb = new StringBuilder(2048);
         sb.AppendLine("# Asheron's Call bot — derive the next goal.");
         sb.AppendLine();
@@ -10592,7 +10606,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Surfaces the action affordance; the LLM still chooses the target and still
         // weighs the COMBAT SAFETY rule (a doomed/beaten engagement is vetoed
         // downstream). No specific monster, no priority — no game knowledge.
-        if (!armed && monstersInView > 0 && armVendor is null &&
+        if (!armed && monstersInView > 0 && activeNamedKillObjective is null &&
+            armVendor is null &&
             bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
             bagAmmo is null && bagLauncherAmmo is null)
             sb.AppendLine(
@@ -11727,23 +11742,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "NEW contract — a separate objective. Your call.");
         }
 
-        // A named kill-count predicate is an LLM-authored commitment to one
-        // target kind. The full stack body can be trimmed at the prompt ceiling,
-        // and the generic compiler rule otherwise permits unrelated optional
-        // combat. Re-surface the predicate's exact tactical consequence in the
-        // protected tail so an absent target produces search, not substitution.
-        // This reads only the bot's own typed intent; Strategy still decides.
-        (KillCountSincePushAtLeastPredicate Predicate, string RequiredKind)?
-            activeNamedKillObjective = null;
-        if (stack?.Top is
-            {
-                Status: IntentLifecycle.Active,
-                Completion: KillCountSincePushAtLeastPredicate namedKill
-            }
-            && namedKill.Count > 0
-            && OneLine(namedKill.NameContains) is string requiredKind)
-            activeNamedKillObjective = (namedKill, requiredKind);
-
+        // The full stack body can be trimmed at the prompt ceiling, so re-surface
+        // the named predicate's exact tactical consequence in the protected tail.
         if (activeNamedKillObjective is { } namedKillCue)
         {
             sb.AppendLine();
@@ -13418,13 +13418,28 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 && string.Equals(NormalizeEmittedTargetName(rbAtkName), loopedAttackName, StringComparison.OrdinalIgnoreCase);
             if (activeNamedKillObjective is { } namedKillForNameLoop)
             {
-                var routeStatus = loopedAttackRouteBlocked
-                    ? $"`{loopedAttackDisplay}` has no on-foot route from here"
-                    : $"no monster named `{loopedAttackDisplay}` is currently in view";
-                sb.AppendLine(
-                    $"- {routeStatus}, and TOP still requires kills whose shown name contains " +
-                    $"`{namedKillForNameLoop.RequiredKind}`. Do NOT switch to a different kind: use `Explore` to search " +
-                    "for the required kind, or use `MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+                var loopTargetsRequiredKind = loopedAttackDisplay.IndexOf(
+                    namedKillForNameLoop.RequiredKind,
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                if (loopTargetsRequiredKind && !loopedAttackRouteBlocked)
+                    sb.AppendLine(
+                        $"- no monster named `{loopedAttackDisplay}` is currently in view, and TOP still requires " +
+                        $"kills whose shown name contains `{namedKillForNameLoop.RequiredKind}`. If you are still " +
+                        $"TRAVELLING toward `{loopedAttackDisplay}` and closing in (your `landblock`/position is " +
+                        "changing as you go), keep going — `Attack` walks you to that matching target. If your " +
+                        "position is NOT changing, do NOT switch to a different kind: use `Explore` to search for " +
+                        "the required kind, or use `MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+                else
+                {
+                    var routeStatus = loopedAttackRouteBlocked
+                        ? $"`{loopedAttackDisplay}` has no on-foot route from here"
+                        : $"no monster named `{loopedAttackDisplay}` is currently in view";
+                    sb.AppendLine(
+                        $"- {routeStatus}, and TOP still requires kills whose shown name contains " +
+                        $"`{namedKillForNameLoop.RequiredKind}`. Do NOT switch to a different kind: use `Explore` to " +
+                        "search for the required kind, or use `MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely " +
+                        "impossible.");
+                }
             }
             else if (loopedAttackRouteBlocked)
                 sb.AppendLine(
@@ -13637,11 +13652,25 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine();
             sb.AppendLine("## Attack loop (repeated monster-description Attack)");
             if (activeNamedKillObjective is { } namedKillForDescriptorLoop)
-                sb.AppendLine(
-                    $"- no attackable target matching `{loopedAttackDescDisplay}` is in view, and TOP still requires " +
-                    $"kills whose shown name contains `{namedKillForDescriptorLoop.RequiredKind}`. Do NOT switch to a different " +
-                    "kind: use `Explore` to search for the required kind, or use " +
-                    "`MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+            {
+                var descriptorTargetsRequiredKind = loopedAttackDescDisplay.IndexOf(
+                    namedKillForDescriptorLoop.RequiredKind,
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                if (descriptorTargetsRequiredKind)
+                    sb.AppendLine(
+                        $"- no attackable target matching `{loopedAttackDescDisplay}` is in view, and TOP still " +
+                        $"requires kills whose shown name contains `{namedKillForDescriptorLoop.RequiredKind}`. If " +
+                        "you are TRAVELLING toward a matching target you saw earlier and closing in (your " +
+                        "`landblock`/position is changing as you go), keep going — it will come into view. If your " +
+                        "position is NOT changing, do NOT switch to a different kind: use `Explore` to search for " +
+                        "the required kind, or use `MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+                else
+                    sb.AppendLine(
+                        $"- no attackable target matching `{loopedAttackDescDisplay}` is in view, and TOP still " +
+                        $"requires kills whose shown name contains `{namedKillForDescriptorLoop.RequiredKind}`. Do " +
+                        "NOT switch to a different kind: use `Explore` to search for the required kind, or use " +
+                        "`MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+            }
             else
                 sb.AppendLine(
                     $"- you have tried several times to `Attack` a monster matching the description `{loopedAttackDescDisplay}`, " +

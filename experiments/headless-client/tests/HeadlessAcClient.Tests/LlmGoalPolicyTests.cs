@@ -26104,6 +26104,10 @@ public class LlmGoalPolicyTests
         Assert.Contains("`MARK_TOP_BLOCKED` or `REPLACE_TOP`", prompt);
         Assert.DoesNotContain("FIGHT NOW", prompt);
 
+        var untrimmedPrompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, stack, null, null, promptCeiling: 50_000);
+        Assert.DoesNotContain("FIGHT NOW", untrimmedPrompt);
+
         var sparsePrompt = LlmGoalPolicy.BuildUserPrompt(
             BuildExitTokenWorld(), events, null, stack);
         var nl = sparsePrompt.Contains("\r\n") ? "\r\n" : "\n";
@@ -26172,12 +26176,10 @@ public class LlmGoalPolicyTests
     public void BuildUserPrompt_ActiveNamedKillObjective_AttackLoopsDoNotSuggestSubstitution()
     {
         var now = System.DateTimeOffset.UtcNow;
-        var eventStreams = new[]
-        {
-            AttackEmissions("Required Beast", 3, now),
-            AttackDescriptorEmissions("name_contains=\"creature\"", 3, now),
-        };
-        foreach (var events in eventStreams)
+        var namedAttackEvents = AttackEmissions("Required Beast", 3, now);
+        var descriptorAttackEvents =
+            AttackDescriptorEmissions("name_contains=\"creature\"", 3, now);
+        foreach (var events in new[] { namedAttackEvents, descriptorAttackEvents })
         {
             var world = BuildWorldWithMonsters(new VisibleObjectProjection
             {
@@ -26194,10 +26196,41 @@ public class LlmGoalPolicyTests
                 stack: ActiveNamedKillStack(world, events));
 
             Assert.Contains("TOP still requires kills", prompt);
-            Assert.Contains("Do NOT switch to a different kind", prompt);
+            Assert.Contains("NOT switch to a different kind", prompt);
             Assert.DoesNotContain("Attack` a DIFFERENT monster", prompt);
             Assert.DoesNotContain("Attack` a monster that IS listed", prompt);
+
+            if (ReferenceEquals(events, namedAttackEvents))
+                Assert.Contains(
+                    "If you are still TRAVELLING toward `Required Beast` and closing in",
+                    prompt);
+            else
+                Assert.DoesNotContain(
+                    "If you are TRAVELLING toward a matching target you saw earlier",
+                    prompt);
         }
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActiveNamedKillObjective_RouteBlockedMatchDoesNotContinueChase()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var events = AttackEmissions("Required Beast", 3, now);
+        var world = BuildVisibleWorld();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world,
+            events,
+            currentGoal: null,
+            stack: ActiveNamedKillStack(world, events),
+            pickerActivity: null,
+            explorationCandidates: null,
+            routeBlockedTarget: "Required Beast");
+
+        Assert.Contains("`Required Beast` has no on-foot route from here", prompt);
+        Assert.DoesNotContain(
+            "If you are still TRAVELLING toward `Required Beast` and closing in",
+            prompt);
+        Assert.Contains("Do NOT switch to a different kind", prompt);
     }
 
     private static IntentStack ActiveNamedKillStack(
