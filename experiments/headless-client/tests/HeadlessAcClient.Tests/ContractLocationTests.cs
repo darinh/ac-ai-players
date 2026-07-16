@@ -296,6 +296,8 @@ public class ContractLocationTests
         Assert.Contains(
             "post-stage-3 goal history for Pathwarden Thorolf: Talk=4, Explore=0", cap);
         Assert.Contains("evidence only", cap);
+        Assert.Contains("STAGE-3 REPEAT CHECK", cap);
+        Assert.Contains("source will still execute a repeat you choose", cap);
         Assert.DoesNotContain("no separate hand-in", cap);
     }
 
@@ -316,6 +318,7 @@ public class ContractLocationTests
 
         Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
         Assert.DoesNotContain("post-stage-3 goal history", cap);
+        Assert.DoesNotContain("STAGE-3 REPEAT CHECK", cap);
     }
 
     [Fact]

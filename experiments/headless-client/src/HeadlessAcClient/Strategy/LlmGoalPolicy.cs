@@ -10587,6 +10587,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "3 done or pending repeat, 4+ in progress with a step counter):");
             var contractsShown = 0;
             var contractsChars = 0;
+            var anyRenderedPostStage3GoalHistory = false;
             // selfXY + per-row entry building are shared with AnyRenderedContractBearing
             // (see BuildContractEntry) so the rendered-bearing gate cannot drift from
             // what this capsule shows.
@@ -10605,12 +10606,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 // could leave the instruction referencing a bearing not shown.
                 if (hasBearingThisContract)
                     anyContractBearing = true;
+                if (c.Stage == 3u && c.Stage3SinceUtc is not null && OneLine(c.NpcEnd) is not null)
+                    anyRenderedPostStage3GoalHistory = true;
                 sb.Append(entry);
                 contractsChars += entry.Length;
                 contractsShown++;
             }
             if (contractsShown < world.Contracts.Count)
                 sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
+            if (anyRenderedPostStage3GoalHistory)
+                sb.AppendLine(
+                    "- STAGE-3 REPEAT CHECK: `post-stage-3 goal history` is YOUR emitted-goal count after " +
+                    "the shown transition. Before repeating the SAME verb to the SAME NPC, cite NEW raw " +
+                    "evidence in your `rationale` (changed stage/dialog/outcome or changed visibility/reach/location) " +
+                    "that makes the attempt different. If none is shown, an identical repeat is unsupported: " +
+                    "choose another directed action or use `stack_ops` to revise/retire the matching intent. " +
+                    "This is Strategy guidance; source will still execute a repeat you choose.");
             // Decision-proximate REFRESH cue: when EVERY tracked contract is DONE
             // (stage 3 — the batch is finished and earns no more), a `vendor` is
             // in `## Visible nearby`, AND no vendor panel is open yet (world.Vendor
