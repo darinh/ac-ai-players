@@ -13176,14 +13176,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         }
         // Preserve the bot's own post-transition evidence without classifying what it
         // means. Strategy decides whether another interaction is useful.
-        if (c.Stage == 3u && c.Stage3SinceUtc is { } since3 && npcEnd is not null)
+        if (c.Stage == 3u && c.Stage3SinceUtc is { } since3)
         {
-            var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
-            var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
-            entry.AppendLine(
-                $"      post-stage-3 goal history for {npcEnd}: Talk={talkTries}, " +
-                $"Explore={exploreTries} (wire stage 3 first observed at {since3:O}; " +
-                "raw emissions, evidence only)");
+            entry.AppendLine($"      wire stage 3 first observed at {since3:O}");
+            if (npcEnd is not null)
+            {
+                var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
+                var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
+                entry.AppendLine(
+                    $"      post-stage-3 goal history for {npcEnd}: Talk={talkTries}, " +
+                    $"Explore={exploreTries} (raw emissions, evidence only)");
+            }
         }
         return entry;
     }

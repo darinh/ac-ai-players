@@ -279,10 +279,8 @@ public class ContractLocationTests
     [Fact]
     public void Capsule_Stage3History_SurfacesRawTalkCount()
     {
-        // The live criterion-2 blocker: a stage-3 contract whose turn-in NPC is
-        // the located target, Talked repeatedly with no stage change. The capsule
-        // must surface the bot's OWN post-completion attempt count + the "no
-        // separate hand-in" fact so the LLM stops re-attempting it.
+        // Keep the bot's own post-transition emissions available without deriving
+        // a source-owned disposition from them.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -299,6 +297,25 @@ public class ContractLocationTests
             "post-stage-3 goal history for Pathwarden Thorolf: Talk=4, Explore=0", cap);
         Assert.Contains("evidence only", cap);
         Assert.DoesNotContain("no separate hand-in", cap);
+    }
+
+    [Fact]
+    public void Capsule_Stage3WithoutTurnInNpc_StillRendersTransitionTime()
+    {
+        var since = new DateTimeOffset(2026, 7, 16, 1, 2, 3, TimeSpan.Zero);
+        var contract = new ContractProjection
+        {
+            ContractId = 849u, Stage = 3u, Name = "Unattributed",
+            NpcEnd = null, Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), new EventStream(), null),
+            "## Contracts");
+
+        Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
+        Assert.DoesNotContain("post-stage-3 goal history", cap);
     }
 
     [Fact]
