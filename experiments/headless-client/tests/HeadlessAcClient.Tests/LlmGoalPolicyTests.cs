@@ -6590,8 +6590,11 @@ public class LlmGoalPolicyTests
         Assert.Contains("FINAL RESPONSE AUDIT", prompt);
         Assert.Contains("An item you merely assume exists, call a canonical name", prompt);
         Assert.Contains("`pop_top` may remove only a non-root frame", prompt);
-        Assert.Contains("FORMAT GATE: `goal.target` MUST contain a non-empty selector", prompt);
+        Assert.Contains(
+            "FORMAT GATE: `goal.target` MUST contain a non-empty selector for target-directed kinds",
+            prompt);
         Assert.Contains("Wait uses {\"name\":\"self\"}", prompt);
+        Assert.Contains("targetless self/social and item-only exceptions remain valid", prompt);
         Assert.Contains(
             "The final/root frame can never be popped",
             LlmGoalPolicy.DefaultSystemPrompt);

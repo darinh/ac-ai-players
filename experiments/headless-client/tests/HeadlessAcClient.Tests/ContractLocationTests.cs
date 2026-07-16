@@ -404,6 +404,8 @@ public class ContractLocationTests
         Assert.Contains("TOP status=Active and its matching raw `Talk=N` is 1 or more", audit);
         Assert.Contains("operation 1 MUST be `mark_top_blocked`", audit);
         Assert.Contains("push-only, and pop-first operations all FAIL", audit);
+        Assert.Contains("REQUIRED STACK SHAPE: when gate 3's Active-TOP condition holds", audit);
+        Assert.Contains("omits those fields or starts with `push` still FAILS", audit);
         Assert.Contains("Never pop the matching TOP or leave it Active under a new objective", audit);
     }
 

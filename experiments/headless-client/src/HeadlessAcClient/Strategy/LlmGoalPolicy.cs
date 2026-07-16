@@ -8056,7 +8056,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 {
   "goal_id": "<new uuid>",
   "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
-  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },   // REQUIRED non-empty selector for EVERY kind; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
+  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number } | null,
+              // non-empty REQUIRED for target-directed kinds; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
+              // null is valid for Recall, Say, FellowshipCreate/Quit/Accept, AllegianceApprove, and item-only Use/Wield/Dequip with a non-empty item
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
@@ -8076,7 +8078,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
   "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
-  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },   // REQUIRED non-empty selector for EVERY kind; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
+  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number } | null,
+              // non-empty REQUIRED for target-directed kinds; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
+              // null is valid for Recall, Say, FellowshipCreate/Quit/Accept, AllegianceApprove, and item-only Use/Wield/Dequip with a non-empty item
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
@@ -12649,11 +12653,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "NOT waive this operation: absent, null, empty, push-only, and pop-first operations all FAIL. Never " +
                 "pop the matching TOP or leave it Active under a new objective.");
             sb.AppendLine(
-                "  4. FORMAT GATE: `goal.target` MUST contain a non-empty selector for every kind. For `Wait`, use " +
-                "`{\"name\":\"self\"}`; for untargeted `Explore`, use `{\"name\":\"anywhere\"}`. Null, `{}`, and " +
-                "empty-string selectors FAIL.");
+                "  4. FORMAT GATE: `goal.target` MUST contain a non-empty selector for target-directed kinds. For " +
+                "`Wait`, use `{\"name\":\"self\"}`; for untargeted `Explore`, use `{\"name\":\"anywhere\"}`. Null, " +
+                "`{}`, and empty-string selectors FAIL for those kinds. The schema's targetless self/social and " +
+                "item-only exceptions remain valid.");
             sb.AppendLine(
-                "  5. If any gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
+                "  5. REQUIRED STACK SHAPE: when gate 3's Active-TOP condition holds, draft " +
+                "`\"stack_revision\": <shown revision>` and " +
+                "`\"stack_ops\": [{\"op\":\"mark_top_blocked\",...}, ...]` BEFORE drafting the goal. JSON that " +
+                "omits those fields or starts with `push` still FAILS even when its goal is valid.");
+            sb.AppendLine(
+                "  6. If any gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
                 "Revise the goal/stack operations, choose an action grounded in shown evidence, and run this audit " +
                 "again. Emit JSON only after all four gates pass.");
         }
