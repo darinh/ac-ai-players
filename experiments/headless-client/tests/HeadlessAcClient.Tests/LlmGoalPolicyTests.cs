@@ -6585,6 +6585,7 @@ public class LlmGoalPolicyTests
         Assert.Contains("Unchanged stage 3, NPC visibility, a matching TOP intent", prompt);
         Assert.Contains("another Talk to that same NPC is INVALID", prompt);
         Assert.Contains("All three are interactions; swapping verbs is not progress", prompt);
+        Assert.Contains("this FINAL check is authoritative over earlier generic", prompt);
         Assert.Contains("Source does not enforce this check or veto your goal", prompt);
         Assert.EndsWith(
             "- Source does not enforce this check or veto your goal; YOU must apply it.",

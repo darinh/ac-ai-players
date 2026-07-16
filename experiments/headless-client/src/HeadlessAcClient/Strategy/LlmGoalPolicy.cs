@@ -12597,6 +12597,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "`Use`, or `Give` for that NPC. All three are interactions; swapping verbs is not progress. " +
                 "Block/revise the matching intent and choose a directed action away from that NPC.");
             sb.AppendLine(
+                "- PRECEDENCE: for a stage-3 Talk decision, this FINAL check is authoritative over earlier generic " +
+                "\"Attempt that hand-in ONCE\" / `MARK_TOP_BLOCKED` guidance. A rejected or out-of-reach emission " +
+                "did not consume the successful attempt, and genuinely new evidence may warrant another; block the " +
+                "intent only when neither exception above exists.");
+            sb.AppendLine(
                 "- `Explore=1` or more is different: repeat it while raw location/visibility shows concrete " +
                 "approach progress; if position/reach stops changing, revise instead.");
             sb.AppendLine(

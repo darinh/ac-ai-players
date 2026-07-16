@@ -233,6 +233,39 @@ public class ContractLocationTests
         Assert.Contains("fixation, not progress", prompt);
     }
 
+    [Fact]
+    public void QuestCompiler_Stage3TalkFailure_DefersToFinalRetryException()
+    {
+        var since = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var contract = new ContractProjection
+        {
+            ContractId = 701u, Stage = 3u, Name = "Locate the Sergeant",
+            NpcEnd = "Sergeant", Stage3SinceUtc = since,
+        };
+        var events = WithTalkGoals("Sergeant", 1, since.AddSeconds(1));
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = since.AddSeconds(2),
+            Kind = EventKind.GoalFailed,
+            Name = "Sergeant",
+            Text = "Talk: interaction target out of reach",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWith(contract), events, null, new IntentStack());
+
+        Assert.Contains("Attempt that hand-in ONCE", prompt);
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("Talk: interaction target out of reach", prompt);
+        Assert.Contains(
+            "this FINAL check is authoritative over earlier generic", prompt);
+        Assert.Contains(
+            "A rejected or out-of-reach emission did not consume the successful attempt", prompt);
+        Assert.Contains(
+            "proves the earlier Talk never dispatched/reached", prompt);
+    }
+
     // Append N Talk goals aimed at npcName (stamped at `at`) to an EventStream,
     // in the exact "Talk target=name=\"X\" item= source=..." shape the executor
     // records, so the ## Contracts done-detector counts them.
