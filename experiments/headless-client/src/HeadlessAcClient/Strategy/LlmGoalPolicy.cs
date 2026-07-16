@@ -261,14 +261,13 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // Exposed for unit tests: the long-barren-stall dwell threshold (minutes).
     internal static double LongBarrenStallDwellMinutesForTest => LongBarrenStallDwellMinutes;
 
-    // The directional-escape gate applied on the NON-egressing path (combat-ready not required,
-    // so it also covers an unarmed bot the egress latch cancels). A winnable monster in view ->
-    // pass the goal through (fight it, never escape). Otherwise apply the long-barren-stall
-    // escape, which only stamps an UNDIRECTED Explore{anywhere} past the dwell threshold (any
-    // other goal — including a town `Use` of a vendor — passes through unchanged). Pure; tested.
+    // The directional-escape gate applied on the NON-egressing path (combat-ready
+    // not required). Any attackable monster in view leaves Strategy's Explore
+    // unchanged; source does not judge the matchup from combat history. Otherwise
+    // the long-stall escape may stamp an undirected Explore bearing.
     internal static Goal NonEgressBarrenEscape(
-        Goal goal, bool winnableMonsterInView, double dwellMin, uint? landblock)
-        => winnableMonsterInView ? goal : WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
+        Goal goal, bool monsterInView, double dwellMin, uint? landblock)
+        => monsterInView ? goal : WithEscapeDirectionIfLongStall(goal, dwellMin, landblock);
     // Fresh-directive egress veto window. A low-level bot still being actively
     // guided by the server (a NEW, distinct tutorial/instruction PopupString it
     // has not yet acted on) is making progress even with no inventory/level
@@ -303,10 +302,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // label; an ObservedHostile attacker is NEVER ignored, and the override it
     // unblocks can only redirect a social/stationary verb (Attack/Pickup/
     // Explore/transit-Use/corpse-loot stay preserved), so a false positive
-    // costs at most one redirected Talk. Mirrors the per-dwell killed-kind
-    // exclusion (IsFarmedHere). Without it, a single passive attackable
-    // creature (which legitimately passes IsMonster) pins a tapped-out bot in
-    // a starter zone forever via the monsterInView veto.
+    // costs at most one redirected Talk. Without it, a single passive
+    // attackable creature (which legitimately passes IsMonster) pins a
+    // tapped-out bot in one zone forever via the monsterInView veto.
     private static readonly TimeSpan IgnoredKindExposureTimeout =
         TimeSpan.FromMinutes(EgressDwellMinutes);
     private static readonly IReadOnlySet<string> EmptyKindSet =
@@ -392,9 +390,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // IgnoredKindExposureTimeout joins the per-dwell "ignored" set so it stops
     // vetoing egress (see ComputeEffectiveMonsterInView). Reset per kind on PVS
     // absence, on the LLM engaging the kind (Attack), and whenever the bot is
-    // not tapped-out-and-ignoring; cleared wholesale on a landblock change
-    // (the notion is per-dwell, like the killed set). Own observed behavior
-    // only — audit-safe.
+    // not tapped-out-and-ignoring; cleared wholesale on a landblock change.
+    // Own observed behavior only.
     private readonly Dictionary<string, DateTimeOffset> _ignoredKindFirstEligibleUtc = new();
     private uint? _ignoredExposureLandblock;
     // Kinds already logged as "ignored" this dwell, so the observability line
@@ -1181,25 +1178,18 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         // "Tapped out" = combat-ready, dwelled past the threshold here, and
         // gained 0 levels since arriving (the bot's OWN raw self-progress
-        // signal — see HuntTappedOutFact). Only when tapped out does an
-        // already-farmed-here kind stop counting as a reason to stay.
+        // signal — see HuntTappedOutFact).
         var tappedOut = HuntTappedOutFact(
             combatReady, world.Self.Level, _levelAtCurrentLandblockEntry,
             dwellMin, EgressDwellMinutes) is not null;
 
-        // A visible monster keeps the bot here (cancels egress) UNLESS it is
-        // a kind the bot has already farmed in THIS landblock while tapped
-        // out (and is not currently attacking the bot). A first-time/unknown
-        // kind or any ObservedHostile attacker still counts — the bot stays
-        // and the LLM engages it. This is the only change to the egress
-        // trigger; ComputeEgressActive itself stays pure.
-        //
-        // Liveness backstop: also drop a non-hostile kind the bot has kept
+        // A visible monster keeps the bot here (cancels egress). Liveness
+        // backstop: drop a non-hostile kind the bot has kept
         // visible-but-unengaged for a sustained tapped-out window (it keeps
         // choosing overridable goals rather than attacking it or leaving) so a
         // single passive attackable creature cannot pin a tapped-out bot here
-        // forever. Reset the tracker on a landblock change (per-dwell, like the
-        // killed set); accrue only while tapped out AND the goal this tick is
+        // forever. Reset the tracker on a landblock change; accrue only while
+        // tapped out AND the goal this tick is
         // overridable (Talk/Give/Use) — engaging (Attack/Pickup/Wield) or
         // leaving (Explore) is not "ignoring".
         if (_ignoredExposureLandblock != lb)
@@ -1227,7 +1217,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     $"no longer vetoes egress.");
 
         var effectiveMonsterInView = ComputeEffectiveMonsterInView(
-            world.Visible, world.KilledKindsThisDwell, tappedOut, ignoredKinds);
+            world.Visible, tappedOut, ignoredKinds);
 
         var sinceProgress = nowUtc - _egressLastProgressUtc;
         // A fresh, distinct server tutorial/instruction directive vetoes egress
@@ -1256,26 +1246,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // vendors/objects to self-arm rather than wander off. But an unarmed bot stuck in a
             // monster-free WILDERNESS landblock has no objects to Use and is just as barren-
             // stalled (it emits undirected `Explore{anywhere}` with nothing else to do). So when
-            // NOT egressing and NO winnable monster is in view, still apply the long-barren-stall
+            // NOT egressing and NO attackable monster is in view, still apply the long-barren-stall
             // directional escape: it only stamps an UNDIRECTED Explore{anywhere} past the dwell
             // threshold (a town bot Using a vendor emits `Use`, not Explore, so it is untouched),
             // letting an unarmed wilderness-stuck bot travel OUT instead of re-fanning local cells.
-            return NonEgressBarrenEscape(goal, HasWinnableMonsterInView(world), dwellMin, lb);
+            return NonEgressBarrenEscape(goal, AnyAttackableMonsterInView(world), dwellMin, lb);
 
         // Egress is engaged. Substitute the goals that would keep the bot
         // stuck in this tapped-out zone: the social dwell-extending verbs
-        // (Talk/Give) the LLM loops on, AND — only when tapped out — an
-        // Attack that merely re-kills a kind already farmed here (yields no
-        // levels). Everything else passes through untouched: an Explore/Use
-        // (door/portal) the LLM itself produced, a Pickup (self-arm), a
-        // first-time/unknown-kind Attack, a self-defense Attack on a HOSTILE,
-        // and corpse looting (Use/Pickup on a corpse).
+        // (Talk/Give) the LLM loops on. Everything else passes through
+        // untouched, including every LLM-authored Attack.
         string? overrideReason = null;
         if (IsEgressOverridableVerb(goal.Kind))
             overrideReason = "social-verb";
-        else if (goal.Kind == GoalKind.Attack &&
-                 IsTappedOutRepeatKillAttack(goal, world, tappedOut))
-            overrideReason = "repeat-farm-attack";
         else if (IsEgressOverridableStationaryUse(goal, world))
             overrideReason = "stationary-use";
 
@@ -1284,7 +1267,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         Console.WriteLine(
             $"[llm-override] town-stuck hunt-egress: dwell={dwellMin:F1}min, combat-ready, " +
-            $"reason={overrideReason}, no productive/hostile monster in view, no inventory " +
+            $"reason={overrideReason}, no effective monster in view, no inventory " +
             $"progress for {sinceProgress.TotalMinutes:F1}min — substituting {goal.Kind} " +
             $"target={goal.Target} with Explore{{anywhere}} to leave the tapped-out zone.");
 
@@ -1389,7 +1372,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // fixation would otherwise wedge with NO egress able to fire — re-prompting
         // the LLM every tick forever. This egress is UNLATCHED: it relocates the bot
         // one step and RE-DELIBERATES next tick, so a same-landblock next room is not
-        // overshot and, if a winnable monster is in view, the LLM can Attack it on
+        // overshot and, if a monster is in view, the LLM can Attack it on
         // the very next decision. Audit-clean: generic Explore{anywhere} — the Motor
         // selects NO target; the LLM picks the next interactable next decision.
         var provenSingleNpcTalkFixation =
@@ -1495,29 +1478,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return world.Visible.Any(v => v.Guid == ven.VendorGuid
             && VisibleMatchesSelector(goal.Target, v));
     }
-
-    // True iff at least one attackable monster is in view and every such monster
-    // matches the difficult-kind classification also surfaced in the protected
-    // combat-ledger capsule. Existing autonomous travel heuristics use this to
-    // characterize a scene after Strategy has already chosen travel. It does not
-    // inspect or rewrite an explicit LLM-authored Attack. An active hostile or a
-    // kind with recorded wins makes the classification false.
-    internal static bool OnlyBeatenMonstersInView(WorldStateProjection world)
-    {
-        var monsters = world.Visible
-            .Where(v => !v.IsCorpse && (v.IsMonster || v.ObservedHostile))
-            .ToList();
-        if (monsters.Count == 0) return false;
-        if (monsters.Any(v => v.ObservedHostile)) return false;
-        return monsters.All(v => IsAvoidBeatenKind(
-            world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
-    }
-
-    // Existing autonomous-travel predicate: an attackable monster exists and the
-    // whole visible set is not classified as difficult by the bot's own ledger.
-    // Explicit LLM-authored Attacks bypass this predicate.
-    internal static bool HasWinnableMonsterInView(WorldStateProjection world)
-        => AnyAttackableMonsterInView(world) && !OnlyBeatenMonstersInView(world);
 
     // A visible object is a dialog-NPC CANDIDATE only when it is a creature that is
     // neither a monster nor another PLAYER. Players share the IsCreature wire class
@@ -1635,7 +1595,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // proven fixation would wedge with no egress able to fire; and a bot that has
     // chosen Talk over Attack >= threshold times is provably not going to engage the
     // monster, so deferring to it just loops). The caller substitutes a target-less
-    // generic Explore and re-deliberates next tick, so a winnable monster can still
+    // generic Explore and re-deliberates next tick, so a visible monster can still
     // be Attacked on the following decision. Extracted for deterministic unit
     // testing; own-signal only (own emission history), no game content; the Motor
     // chooses no target.
@@ -1794,43 +1754,23 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             !v.IsPortal && !v.IsDoor && !v.IsOpenable && !v.IsCorpse);
     }
 
-    // cold-start egress: true when a visible monster is one the bot has
-    // already FARMED in the current landblock — i.e. the bot is tapped out
-    // (0 levels gained here), the monster is NOT currently attacking the bot,
-    // and its kind-key is in the per-dwell killed set. Such a monster no
-    // longer counts as a reason to stay. Uses ONLY the bot's own outcomes
-    // (its own kills here + its own level progress) and wire-derived
-    // hostility — no hardcoded names/wcids/landblocks, no value/danger label.
-    internal static bool IsFarmedHere(
-        VisibleObjectProjection v, IReadOnlySet<string>? killedThisDwell, bool tappedOut)
-    {
-        if (!tappedOut) return false;
-        if (v.ObservedHostile) return false;
-        if (killedThisDwell is null || killedThisDwell.Count == 0) return false;
-        return CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(v.Wcid, v.Name))
-                   is string k
-               && killedThisDwell.Contains(k);
-    }
-
-    // cold-start egress: like the plain "any monster in view" check, but a
-    // kind the bot has already farmed here (see IsFarmedHere) OR has kept
-    // visible-but-unengaged past the liveness timeout (see IsIgnoredHere) does
-    // not count while tapped out. A first-time/unknown kind or any
-    // ObservedHostile attacker still counts (cancels egress so the bot engages
-    // it). ignoredThisDwell is optional so existing callers are unaffected.
+    // Cold-start egress: like the plain "any monster in view" check, except a
+    // kind kept visible-but-unengaged past the liveness timeout (see
+    // IsIgnoredHere) does not count while tapped out. Combat outcomes do not
+    // alter this predicate. ignoredThisDwell is optional so existing callers
+    // are unaffected.
     internal static bool ComputeEffectiveMonsterInView(
         IReadOnlyList<VisibleObjectProjection> visible,
-        IReadOnlySet<string>? killedThisDwell, bool tappedOut,
+        bool tappedOut,
         IReadOnlySet<string>? ignoredThisDwell = null)
         => visible.Any(v => v.IsMonster && !v.IsCorpse
-                            && !IsFarmedHere(v, killedThisDwell, tappedOut)
                             && !IsIgnoredHere(v, ignoredThisDwell, tappedOut));
 
-    // Liveness backstop counterpart to IsFarmedHere: true when a visible
-    // non-hostile monster's kind-key is in the per-dwell "ignored" set (the
+    // Liveness backstop: true when a visible non-hostile monster's kind-key is
+    // in the per-dwell "ignored" set (the
     // bot kept it visible-but-unengaged past IgnoredKindExposureTimeout while
-    // tapped out). ObservedHostile attackers are never ignored. Same own-data
-    // basis as IsFarmedHere — no value/danger label per type.
+    // tapped out). ObservedHostile attackers are never ignored. Own behavior
+    // only; no value/danger label per type.
     internal static bool IsIgnoredHere(
         VisibleObjectProjection v, IReadOnlySet<string>? ignoredThisDwell, bool tappedOut)
     {
@@ -1924,37 +1864,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 set.Add(k);
         }
         return set.Count == 0 ? EmptyKindSet : set;
-    }
-
-    // cold-start egress: true only for a narrow, safe-to-substitute Attack —
-    // an Attack the LLM emitted, while tapped out, whose every matching
-    // visible monster is a non-hostile kind already farmed in this landblock.
-    // Guards (all must hold): tapped out; the goal is an Attack with a target
-    // selector; the bot has killed something here; NO visible monster is
-    // currently attacking the bot (self-defense outranks egress); the bot is
-    // not mid-fight (CurrentFight null — let the active swing resolve); the
-    // selector resolves to at least one visible monster and EVERY match is an
-    // already-farmed-here kind (so a name-collision with an unfarmed/tougher
-    // kind is never suppressed). Decision uses the bot's own learned futility
-    // only; the LLM still owns engaging anything new.
-    internal static bool IsTappedOutRepeatKillAttack(
-        Goal goal, WorldStateProjection world, bool tappedOut)
-    {
-        if (!tappedOut) return false;
-        if (goal.Kind != GoalKind.Attack) return false;
-        var sel = goal.Target;
-        if (sel.IsEmpty) return false;
-        var killedHere = world.KilledKindsThisDwell;
-        if (killedHere is null || killedHere.Count == 0) return false;
-        if (world.Visible.Any(v => v.IsMonster && !v.IsCorpse && v.ObservedHostile))
-            return false;
-        if (world.CurrentFight is not null) return false;
-
-        var matches = world.Visible
-            .Where(v => v.IsMonster && !v.IsCorpse && VisibleMatchesSelector(sel, v))
-            .ToList();
-        if (matches.Count == 0) return false;
-        return matches.All(m => IsFarmedHere(m, killedHere, tappedOut));
     }
 
     // Conservative projection-level selector match for the egress Attack
@@ -3209,7 +3118,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // is not made inert by its own kills). So a genuinely decision-worthy
         // event is never masked by one more autonomous Attack. If the stack top
         // is a kill-count commitment and a matching,
-        // in-perception, not-beaten hostile is visible, mint that Attack WITHOUT
+        // in-perception monster is visible, mint that Attack WITHOUT
         // the LLM round-trip (returning it as currentGoal so the Motor drives
         // it). Flee precedence is enforced downstream by the Motor's dispatch
         // self-preservation gate (it refuses the Attack while health is low /
@@ -3272,8 +3181,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var chainTarget = ChooseCombatChainTarget(
                 _stack?.Top,
                 world.Visible,
-                world.CombatHistoryFull,
-                world.Self.Level,
                 CombatChainEnabled,
                 _combatChainCount,
                 MaxCombatChainAttacks,
@@ -3408,15 +3315,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Reduce-llm-call-volume (default ON; opt OUT via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=0/false/off).
         // When the bot is on a sustained UNTARGETED Explore (its last emitted goal was
         // `Explore{anywhere}` — pure Motor-owned travel with nothing to interact with),
-        // with NOTHING WINNABLE in view to engage (no attackable monster, or only
-        // non-hostile kinds classified difficult by the bot's own ledger; no vendor;
-        // no un-talked NPC) and NO
+        // with NO attackable monster in view, no vendor, no un-talked NPC, and NO
         // decision-worthy change since the last LLM look, re-deliberating just
         // reproduces the SAME untargeted Explore — so skip the redundant call and continue
-        // traveling. The beaten-only arm reuses OnlyBeatenMonstersInView (the same
-        // lethal-beaten ledger predicate the stalemate egress uses): a winnable
-        // (not-beaten) monster OR an actively-hostile one in view makes it false, so the
-        // skip never hides a fresh XP target or a live threat (those re-wake the LLM). The freshness gates are a SUPERSET of the Talk-fixation skip's:
+        // traveling. Any attackable monster wakes Strategy; source does not use
+        // combat history to decide whether the visible matchup merits deliberation.
+        // The freshness gates are a SUPERSET of the Talk-fixation skip's:
         //   - !hasNonPickerExternal: a fresh dialog / inventory change / zone change /
         //     rejection / damage BLOCKS the skip (the LLM sees it);
         //   - !pickerArrived && !pickerStartWake: the autonomous picker discovering or
@@ -3434,7 +3338,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (SkipEmptyExploreCallEnabled
             && SkipGateFreshnessAllows(hasNonPickerExternal, pickerArrived, pickerStartWake, events)
             && _emptyExploreSkips < MaxEmptyExploreSkips
-            && (!AnyAttackableMonsterInView(world) || OnlyBeatenMonstersInView(world))
+            && !AnyAttackableMonsterInView(world)
             && !world.Visible.Any(v => v.IsVendor)
             && CountUntalkedNpcsInView(world, _talkedNpcGuids, _talkedNpcNames, excludeVendors: true) == 0
             && LastEmitWasUntargetedExplore(events))
@@ -3442,8 +3346,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _emptyExploreSkips++;
             _summarySkips++;
             Console.WriteLine(
-                "[llm-skip] sustained Explore travel: nothing winnable in view to engage (no monster, or " +
-                "only non-hostile beaten kinds) and no new event since the last look — skipping the redundant " +
+                "[llm-skip] sustained Explore travel: no attackable monster or other interaction in view " +
+                "and no new event since the last look — skipping the redundant " +
                 $"LLM call and continuing to Explore ({_emptyExploreSkips}/{MaxEmptyExploreSkips}).");
             return MakeEgressExploreGoal(
                 nowUtc, "skip:empty-explore",
@@ -4561,7 +4465,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // is NOT combat-capable (no wielded melee weapon, and no wielded missile
         // weapon WITH ammo) is a doomed swing — the server cancels every attack and
         // 0 damage lands. A model may still pick an OPTIONAL Attack on a passive
-        // winnable-looking kind despite the UNARMED combat-readiness line. Drop it
+        // target despite the UNARMED combat-readiness line. Drop it
         // and defer to the fallback (self-arm / explore / non-combat progress) so the
         // bot stops burning cycles on attacks it cannot land. SELF-DEFENSE exempt: if
         // the Attack's NAMED target is itself a live HOSTILE (the bot is fighting back
@@ -5557,87 +5461,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             .ToList();
         return fuzzy.Count == 1 && fuzzy[0].ObservedHostile;
     }
-
-    // The prompt/travel classification of a LETHAL-beaten kind: the bot's own
-    // aggregate ledger records an actual DEATH and IsBeatenKind still holds
-    // (0 kills, not out-levelled). An explicit LLM-authored Attack is not
-    // rewritten from this classification; Strategy sees the record and decides.
-    internal static bool IsLethalBeatenKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
-    {
-        var record = FindCombatRecord(history, wcid, name);
-        return record is { Deaths: > 0 }
-            && IsBeatenKind(history, wcid, name, currentLevel,
-                lethalRetestableWhenOutleveled: true);
-    }
-
-    // Aggregate-ledger threshold of INEFFECTIVE (no-kill, no-death) fights at which a
-    // SURVIVED-loss kind's deadlock-fix re-attempt allowance is exhausted: the bot has fought
-    // this kind this many times at its level and never landed a killing blow nor died, so it is
-    // effectively unbeatable here even though it never kills the bot. Above the handful the
-    // deadlock-fix wants to keep re-attemptable.
-    internal const int ExhaustedIneffectiveFightsThreshold = 6;
-
-    // A kind the bot has NEVER killed (0 kills) yet re-attempted INEFFECTIVELY so many times at its
-    // current level that another attempt is futile — the can't-DAMAGE-it wedge the lethal-only
-    // IsLethalBeatenKind (which requires a DEATH) never catches. Independent of the DEATH count: it
-    // covers both a never-lethal kind AND a kind the bot also DIED to ONCE, whose lethal first-death
-    // reprieve would otherwise leave it re-attemptable despite overwhelming can't-damage evidence (a
-    // kind DIED to 2+ times is already held by IsLethalBeatenKind). Re-testable once the bot
-    // OUT-LEVELS the level it kept failing at (mirrors IsBeatenKind's non-lethal out-level re-test),
-    // so a few more attempts are allowed after the bot grows stronger elsewhere — the deadlock-fix
-    // intent (do not bar a kind indefinitely) is preserved, just bounded. A record without that
-    // failing level (a loss recorded before the field existed, or before self level was known) is
-    // re-tested once so the re-attempt captures fresh leveled data.
-    // Aggregate own ledger + own level only; no game knowledge.
-    internal static bool IsExhaustedIneffectiveKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
-    {
-        var record = FindCombatRecord(history, wcid, name);
-        if (record is not { Kills: 0 }) return false;
-        if (record.Ineffective < ExhaustedIneffectiveFightsThreshold) return false;
-        if (record.MaxLossBotLevel is not int maxLoss) return false; // no failing level on record -> re-test once
-        if (currentLevel is int cur && cur > maxLoss) return false; // out-levelled the futile attempts -> re-testable
-        return true;
-    }
-
-    // Threshold of SWUNG-zero-damage fights (the bot landed/evaded >=1 swing yet dealt 0 total
-    // damage) at which a never-killed kind is treated as unwinnable with the bot's CURRENT
-    // offense. LOWER than ExhaustedIneffectiveFightsThreshold because a swung-zero-damage fight is
-    // the STRONGEST single signal that the kind out-defends/out-armors the bot — vs the broader
-    // Ineffective count, which ALSO includes no-swing can't-close abandons (a pathing miss against
-    // one individual, not the KIND) and slow-but-DAMAGING stalemates (winnable as the bot grows).
-    internal const int SwungZeroDamageUnwinnableThreshold = 4;
-
-    // A kind the bot has NEVER killed yet, against which it SWUNG repeatedly and dealt 0 total
-    // damage EVERY time — its current offense simply cannot hurt this kind. A tighter, EARLIER
-    // complement to IsExhaustedIneffectiveKind (which fires later, on the broader/noisier
-    // Ineffective count). Re-testable once the bot OUT-LEVELS the level it kept failing at (mirrors
-    // the other beaten verdicts' out-level re-test), so growing stronger re-opens the kind; a record
-    // with no failing level (pre-field or unknown-level loss) is re-tested once. Aggregate own
-    // ledger (own swing outcomes) + own level only; no game knowledge.
-    internal static bool IsOutDefendedUnwinnableKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
-    {
-        var record = FindCombatRecord(history, wcid, name);
-        if (record is not { Kills: 0 }) return false;
-        if (record.SwungZeroDamage < SwungZeroDamageUnwinnableThreshold) return false;
-        if (record.MaxLossBotLevel is not int maxLoss) return false; // no failing level on record -> re-test once
-        if (currentLevel is int cur && cur > maxLoss) return false; // out-levelled the futile attempts -> re-testable
-        return true;
-    }
-
-    // Combined own-ledger classification for a kind the bot has not beaten yet:
-    // a LETHAL-beaten kind (it died to it), an
-    // EXHAUSTED-INEFFECTIVE kind (it cannot damage it after many tries), OR an OUT-DEFENDED kind
-    // (it swung repeatedly for 0 damage). Used to surface evidence to Strategy
-    // and by existing autonomous travel heuristics, never to rewrite an explicit
-    // LLM-authored Attack.
-    internal static bool IsAvoidBeatenKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
-        => IsLethalBeatenKind(history, wcid, name, currentLevel)
-           || IsExhaustedIneffectiveKind(history, wcid, name, currentLevel)
-           || IsOutDefendedUnwinnableKind(history, wcid, name, currentLevel);
 
     /// <summary>
     /// True iff a <see cref="EventKind.PickerArrivedNoAction"/> event for
@@ -6938,7 +6761,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     // Gate for the SPEND-BEFORE-WANDER salience cue: meaningful unspent XP, NO recent death (the
     // recent-death case is owned by SURVIVABILITY-FIRST CHECK, so the two never double-fire), NO
-    // monster in view it can currently defeat (none attackable, or only lethal-beaten kinds), and
+    // attackable monster in view, and
     // the bot is WANDERING — either it has NO active objective, OR (even with an Active intent) it
     // is in a sustained UNTARGETED-Explore drift. That second path is the key fix: live, the bot
     // held an Active intent whose target was not actionable here, drifted on Explore "anywhere"
@@ -6960,7 +6783,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
            && recentOwnDeathCount < DeathSpiralMinDeaths
            && world.Self.AvailableExperience is long wxp
            && ShouldSurfaceUnspentXp(wxp, MinMeaningfulUnspentXp)
-           && (!AnyAttackableMonsterInView(world) || OnlyBeatenMonstersInView(world));
+           && !AnyAttackableMonsterInView(world);
 
     // Shared FRESHNESS guard for the reduce-llm-call-volume SKIP gates
     // (skip-fixated-talk and skip-empty-explore). Skipping the LLM call is safe
@@ -7204,11 +7027,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // self-preservation gate is the per-tick self-health suppression, which stops
     // a mint while the bot is already hurt but re-mints the moment health regens
     // between fights. When the bot is repeatedly DYING, that re-mint feeds the
-    // spiral: the committed kind may have a MIXED record (a kill or two, so
-    // IsBeatenKind — which only excludes ZERO-kill kinds — does not skip it) yet
-    // still be killing the bot faster than it kills, and each death stacks a
-    // penalty that lowers effective max HP, so blind continuation digs the hole
-    // deeper. Yielding routes control to the LLM, which owns the retreat decision
+    // spiral: an older commitment can outlive worsening outcomes, and each death
+    // stacks a penalty that lowers effective max HP. Yielding routes control to
+    // the LLM, which owns the retreat decision
     // (the survival-caution capsule + the spend-XP death-spiral exception already
     // tell it to withdraw to safer content until the penalty fades). This NEVER
     // originates combat and assigns no target urgency; it only DECLINES to
@@ -9613,7 +9434,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // name is copied from observed perception exactly like the
             // QUEST-DIALOG COMPILER copies a named target.
             if (monsterInView)
-                sb.AppendLine("- COMMIT A WINNING GRIND AS A KILL-COUNT INTENT: when you decide to keep `Attack`ing a monster KIND you are ALREADY winning against (its inline `[your record: ...]` or `combat history` shows `kills` and no fresh `deaths`/`ineffective`) and there is NO un-acted quest/server directive, PUSH an intent in the SAME response as your `Attack` — `kind`:\"hunt\", `target_name` the kind's name — and pick the completion that matches your aim: `{\"type\":\"kill_count_since_push_at_least\",\"count\":<a few>,\"name_contains\":\"<the kind's name>\"}` to commit to THAT kind (the bot then attacks only monsters whose name matches), OR `{\"type\":\"kill_count_total_at_least\",\"count\":<n>}` to count kills of ANY winnable kind toward a running session total (the bot attacks the nearest winnable monster of any kind). Set `deadline_seconds`. While that intent stays TOP the bot keeps `Attack`ing the nearest matching, in-view, not-`beaten` monster toward the count ON ITS OWN — you are NOT re-asked each kill, so you only re-decide when the count is met, the matching kind stops being winnable or leaves your view, a different decision-worthy event occurs (loot, dialog, danger), the bot re-checks on its own after a few autonomous attacks, or the deadline fires. Push this ONLY while you are winning — never for a kind whose record shows `deaths`/`ineffective` and no `kills`. A quest/server directive ALWAYS outranks a grind (compile it per the QUEST-DIALOG COMPILER rule first), and don't grind one spot forever — when a count completes, weigh moving on or seeking a kill-task.");
+                sb.AppendLine("- COMMIT A WINNING GRIND AS A KILL-COUNT INTENT: when you decide to keep `Attack`ing a monster KIND you are ALREADY winning against (its inline `[your record: ...]` or `combat history` shows `kills` and no fresh `deaths`/`ineffective`) and there is NO un-acted quest/server directive, PUSH an intent in the SAME response as your `Attack` — `kind`:\"hunt\", `target_name` the kind's name — and pick the completion that matches your aim: `{\"type\":\"kill_count_since_push_at_least\",\"count\":<a few>,\"name_contains\":\"<the kind's name>\"}` to commit to THAT kind (the bot then attacks only monsters whose name matches), OR `{\"type\":\"kill_count_total_at_least\",\"count\":<n>}` to count kills of ANY kind toward a running session total. Set `deadline_seconds`. While that intent stays TOP the bot keeps `Attack`ing the nearest matching, in-view monster toward the count ON ITS OWN — source does not reinterpret your combat-history evidence — so you only re-decide when the count is met, the matching kind leaves your view, a different decision-worthy event occurs (loot, dialog, danger), self-preservation suppresses combat, the bot re-checks on its own after a few autonomous attacks, or the deadline fires. Push this ONLY while you are winning — never for a kind whose record shows `deaths`/`ineffective` and no `kills`. A quest/server directive ALWAYS outranks a grind (compile it per the QUEST-DIALOG COMPILER rule first), and don't grind one spot forever — when a count completes, weigh moving on or seeking a kill-task.");
         }
         // The AUTONOMOUS PICKER rule only makes sense when the
         // `## Autonomous picker activity` section is present (same gate the
@@ -10408,7 +10229,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         if (FormatSelfStaminaWhenLow(world.Self.StaminaCurrent, world.Self.StaminaObservedPeak) is string crStaminaLine)
             sb.AppendLine(crStaminaLine);
         // coldstart hunt discovery — surface a "tapped out" fact when the bot
-        // is combat-ready and has farmed this landblock past the dwell
+        // is combat-ready and has dwelled in this landblock past the
         // threshold without leveling, so the LLM knows to travel for tougher
         // monsters even while trivial mobs remain in view. Own-progress signal
         // only (level + dwell), no monster-type judgement — see HuntTappedOutFact.
@@ -11448,25 +11269,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // ── ## Spend before wandering (XP-hoarding wander salience, protected tail) ─
         // Sibling of the body SURVIVABILITY-FIRST CHECK but for a DIFFERENT trigger and placed
         // in the PROTECTED TAIL so it survives the dense-scene body hard-cut: unspent XP, NO
-        // recent death (the death case is owned by SURVIVABILITY-FIRST — mutually exclusive), NO
-        // monster in view it can defeat (none here, or only kinds that have already beaten it),
-        // and the bot is WANDERING — either no active objective, OR a sustained untargeted
-        // `Explore` "anywhere" drift even under an Active-but-unactionable intent. A weak model
-        // defaults to that drift for ever-weaker foes while HOARDING the XP that would make nearby
-        // monsters winnable. Elevate the SPEND option as a salient pointer for that exact
-        // situation. Balance-preserving (spend OR travel-to-easier, but spend either way); names
-        // no stat build / monster / number; the LLM still decides.
+        // recent death (the death case is owned by SURVIVABILITY-FIRST — mutually
+        // exclusive), no attackable monster in view, and the bot is wandering.
+        // Elevate spending as a salient option before more untargeted travel; the
+        // LLM still chooses the stat or skill.
         if (ShouldSurfaceSpendBeforeWander(stack, world, secondsSinceLastDeath, recentOwnDeathCount, events))
         {
             sb.AppendLine();
             sb.AppendLine("## Spend before wandering");
             sb.AppendLine(
-                "- you have unspent XP and no monster in view you can currently defeat (none here, or only kinds " +
-                "that have already beaten you). Before falling back to wandering (`Explore` \"anywhere\") for " +
-                "ever-weaker foes, INVEST that unspent XP now (raise a stat or skill per the SPEND XP rule above, " +
-                "which explains what each does and how to choose by your bottleneck) so the monsters around you " +
-                "become winnable: getting stronger IS progress. (If this area is genuinely far above your level, " +
-                "traveling toward a known easier area is also valid — but spend your hoarded XP either way.)");
+                "- you have unspent XP and no attackable monster in view. Before falling back to wandering " +
+                "(`Explore` \"anywhere\"), INVEST that unspent XP now (raise a stat or skill per the SPEND XP rule " +
+                "above, which explains what each does and how to choose by your bottleneck) so you are stronger for " +
+                "the next fight. Getting stronger IS progress.");
         }
 
         // ── ## Attribute imbalance (survival-vs-offense salience, protected tail) ─
@@ -11741,41 +11556,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             if (world.Self.Attributes is { Count: > 0 } endcapAttrs)
                 spendFacts.Add(
                     $"your attributes are {string.Join(", ", endcapAttrs.Select(a => $"{a.Name} {a.Base}"))}");
-            // cp-2410/cp-2411: the OFFENSE side of the SAME survivability-vs-
-            // offense weighing. cp-2399 surfaced only the survival facts (max
-            // HP/deaths), so live the L9 bot poured XP into endurance yet stayed
-            // unable to KILL — it lands some hits but is out-damaged (0 kills).
-            // cp-2410 counted only kinds recorded `ineffective` (the no-progress
-            // stalemate), but live the kinds that WALL the bot record a `death`
-            // or `near-death`, NOT `ineffective`, so that narrow gate never fired
-            // and the offense signal stayed absent while the bot hoarded XP.
-            // cp-2411 broadens it to every kind in the bot's OWN combat history
-            // it has engaged but never killed (Kills == 0). Snapshot only keeps
-            // rows with kills/deaths/near-deaths/ineffective > 0, so Kills == 0
-            // here already means "fought it significantly, never beat it" — the
-            // full can't-win-fights signal the LLM weighs (with the survival
-            // facts above) when splitting XP between offense and endurance.
-            // Co-locate it beside the spend decision so the SPEND XP rule's
-            // accuracy-vs-damage mapping (coordination + weapon skill for
-            // swings that evade/miss, strength for swings that land but barely
-            // hurt) competes with the survival facts. RAW counts from the
-            // combat-feel ledger, on RAW PRESENCE (an unkilled kind exists), NO
-            // recommendation and NO magnitude gate; no game knowledge.
-            if (world.CombatHistory is { Count: > 0 } endcapHist)
-            {
-                // endcapHist is the recency-capped Snapshot (most-recently-active
-                // kinds), NOT the full ledger, so both counts are scoped to RECENT
-                // combat and the wording must not overclaim a session "total".
-                var endcapKills = endcapHist.Sum(h => h.Kills);
-                var endcapUnkilledKinds = endcapHist.Count(h => h.Kills == 0);
-                if (endcapUnkilledKinds > 0)
-                    spendFacts.Add(
-                        $"in recent combat you have {endcapKills} kill(s) and have fought " +
-                        $"{endcapUnkilledKinds} monster kind(s) you have not killed");
-            }
             // cp-2427: the offense-mechanism EVIDENCE that disambiguates the
-            // failure mode the facts above only hint at. Deaths + max HP + the
-            // "kinds not killed" count tell the LLM it is LOSING, but not WHY:
+            // failure mode the facts above only hint at. Deaths + max HP tell
+            // the LLM it is LOSING, but not WHY:
             // is its offense whiffing (swings evading) or is it connecting but
             // outlasted? Across models the bot poured XP into endurance while
             // its swings kept evading, because this capsule surfaced the
@@ -13793,7 +13576,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine($"- {capSkillAdvisory}");
             if (WieldedWeaponUntrainedAccuracyNote(world) is string capUntrainedNote)
                 sb.AppendLine($"- {capUntrainedNote}");
-            // The `tapped out` hunt-discovery fact (combat-ready + farmed this
+            // The `tapped out` hunt-discovery fact (combat-ready + dwelled in this
             // area past the dwell threshold with +0 levels) renders in the body
             // `## Combat readiness` and is dropped by the same hard-cut — leaving
             // the always-rendered TAPPED OUT rule with no fact to act on (inert).
@@ -13852,75 +13635,26 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
         }
 
-        // ── ## Beaten kinds capsule (protected-tail cut-proof) ──
-        // The body combat-history lines (the bot's own per-kind outcomes) render
-        // in the body and are dropped by the dense-scene body hard-cut. Live:
-        // with them gone, Strategy loses the evidence needed to judge whether a
-        // fight is worth retrying. Re-surface the difficult kinds from the same
-        // CombatHistoryFull ledger in the protected salience tail. These are raw
-        // own-ledger facts; the LLM owns whether to retry, prepare, or change plans.
+        // ── ## Combat history capsule (protected-tail cut-proof) ──
+        // The body copy can be cut in a dense scene. Preserve the ledger's six
+        // most-recent outcome rows without classifying them as desirable or
+        // undesirable; Snapshot orders CombatHistoryFull by outcome recency.
         if (world.CombatHistoryFull is { Count: > 0 } fullLedger)
         {
-            var beatenKinds = fullLedger
-                .Where(h => IsAvoidBeatenKind(
-                    world.CombatHistoryFull, h.Wcid, h.Name, world.Self.Level))
-                .ToList();
-            if (beatenKinds.Count > 0)
-            {
-                sb.AppendLine();
+            sb.AppendLine();
+            sb.AppendLine(
+                "## Combat history (your six most-recent raw outcome rows; evidence only — you decide whether to " +
+                "retry, prepare, commit to a repeatable win, or choose another objective)");
+            if (stack is not null)
                 sb.AppendLine(
-                    "## Beaten kinds (your own combat ledger — these kinds have 0 kills for you and repeated lethal " +
-                    "or ineffective outcomes. Use this evidence to decide whether to retry, prepare first, or choose " +
-                    "another objective.)");
-                foreach (var h in beatenKinds)
-                    sb.AppendLine(
-                        $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
-                        $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective} (last: {h.LastOutcome})");
-            }
-        }
-
-        // ── ## Winnable kinds capsule (protected-tail cut-proof) ──
-        // The body combat-history lines and the inline `[your record: ...]`
-        // annotations on visible monsters are dropped by the body hard-cut, so
-        // the LLM cannot see which kinds it is ALREADY winning against — the
-        // exact evidence the COMMIT A WINNING GRIND AS A KILL-COUNT INTENT rule
-        // needs to push a kill-count commitment that lets the Motor chain kills
-        // WITHOUT a per-monster LLM call (reduce-llm-call-volume). Live: that
-        // autonomous chain fired 0 times because this evidence never reached the
-        // LLM. Re-surface the clearly-winnable kinds (own ledger: kills recorded,
-        // no death) in the PROTECTED salience tail — the complement of the cp2916
-        // beaten-kinds capsule. Raw own-ledger counts; the existing rule owns the
-        // grind decision (and a quest/server directive outranks it); no new
-        // advice. Gated, so it costs nothing when no winnable kinds are recorded.
-        if (world.CombatHistoryFull is { Count: > 0 } winLedger)
-        {
-            var winnableKinds = winLedger
-                .Where(h => h.Kills > 0 && h.Deaths == 0)
-                .ToList();
-            if (winnableKinds.Count > 0)
-            {
-                sb.AppendLine();
+                    "- ACT ON THIS NOW only if these raw outcomes support a repeatable winning grind: add the `hunt` " +
+                    "kill-count push to `stack_ops` in the SAME response as Attack, per the COMMIT A WINNING GRIND " +
+                    "rule above. A quest/server directive still outranks a grind.");
+            foreach (var h in fullLedger.Take(6))
                 sb.AppendLine(
-                    "## Winnable kinds (your own combat ledger — kinds you have killed with no recorded death)");
-                // The commit nudge references `stack_ops`, which only exists in the
-                // decision schema when the IntentStack is enabled — gate it on the
-                // same `stack is not null` condition as the COMMIT A WINNING GRIND
-                // rule it points back to, so we never instruct the LLM to emit a
-                // field the schema omits.
-                if (stack is not null)
-                    sb.AppendLine(
-                        "- ACT ON THIS NOW, do not just read it: if you are about to Attack one of the kinds below and " +
-                        "have NO active kill-count intent on the stack for it, COMMIT A WINNING GRIND in the SAME " +
-                        "response — add a `hunt` kill-count push to `stack_ops` (per the COMMIT A WINNING GRIND AS A " +
-                        "KILL-COUNT INTENT rule above, which gives the exact shape) so the Motor repeats the kills " +
-                        "with NO per-kill LLM call. This is the reduce-llm-call-volume lever: while no such commitment " +
-                        "is on the stack EVERY kill costs a full decision and leveling stalls. A quest/server directive " +
-                        "still outranks this grind; push only for a kind you are genuinely winning against (listed below).");
-                foreach (var h in winnableKinds)
-                    sb.AppendLine(
-                        $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
-                        $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective} (last: {h.LastOutcome})");
-            }
+                    $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
+                    $"near-deaths {h.NearDeaths}, ineffective {h.Ineffective}, " +
+                    $"swung-zero-damage {h.SwungZeroDamage} (last: {h.LastOutcome})");
         }
 
         // ── ## Location capsule (protected-tail cut-proof) ──
@@ -14889,7 +14623,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var normName = CombatFeelLedger.NormalizeName(name);
 
         int fights = 0, kills = 0, deaths = 0, nearDeaths = 0, ineffective = 0, swungZeroDamage = 0;
-        int? maxLossBotLevel = null; // highest loss level across matched rows
         string? lastOutcome = null;   // history is recency-ordered: first match is newest
         string? displayName = null;   // representative name: first (newest) matched row
         var matched = false;
@@ -14907,8 +14640,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             nearDeaths += h.NearDeaths;
             ineffective += h.Ineffective;
             swungZeroDamage += h.SwungZeroDamage;
-            if (h.MaxLossBotLevel is int hl)
-                maxLossBotLevel = maxLossBotLevel is int cur ? (hl > cur ? hl : cur) : hl;
             lastOutcome ??= h.LastOutcome;
             displayName ??= h.Name;
         }
@@ -14922,68 +14653,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             Ineffective: ineffective,
             Fights: fights,
             LastOutcome: lastOutcome ?? "",
-            MaxLossBotLevel: maxLossBotLevel,
             SwungZeroDamage: swungZeroDamage);
-    }
-
-    /// <summary>
-    /// True iff the bot's OWN combat-feel <paramref name="history"/> marks the
-    /// kind (<paramref name="wcid"/>/<paramref name="name"/>) as a repeated loss
-    /// the bot has NOT out-leveled. "Beaten" = Kills==0 with a recorded loss
-    /// (death/near-death/ineffective) — UNLESS that loss was NON-LETHAL
-    /// (Deaths==0) and the bot's <paramref name="currentLevel"/> now exceeds the
-    /// highest level it lost at, in which case it is re-testable (the bot is
-    /// stronger now). Kinds that have EVER killed the bot (Deaths&gt;0) stay
-    /// beaten regardless of level for autonomous picks (protects the no-death
-    /// record); a caller acting on an explicit, deliberate order may set
-    /// <paramref name="lethalRetestableWhenOutleveled"/> to let a lethal kind be
-    /// re-tested too — once the bot out-levels the loss, OR (to break the
-    /// single-death death-spiral) after just ONE recorded lethal loss, since a
-    /// first-encounter death is not proof the kind is unbeatable and a permanent
-    /// lock wedges the bot when this is the only kind in view to fight. A SECOND
-    /// lethal loss (Deaths&gt;=2) restores the out-level requirement. Aggregates by
-    /// wcid OR normalized name via <see cref="FindCombatRecord"/>. Shared by the
-    /// fallback hunt-target skip AND the outdoor frontier mob-bias so both avoid
-    /// the SAME kinds. Bot-owned outcomes + own level only; no game knowledge.
-    /// Null/empty history or no matching record =&gt; not beaten.
-    /// </summary>
-    internal static bool IsBeatenKind(
-        IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel,
-        bool lethalRetestableWhenOutleveled = false)
-    {
-        var record = FindCombatRecord(history, wcid, name);
-        if (record is null) return false;
-        var lost = record.Kills == 0
-            && (record.Deaths > 0 || record.NearDeaths > 0 || record.Ineffective > 0);
-        if (!lost) return false;
-        // Re-testable once the bot has out-grown the level it last lost at.
-        // Non-lethal losses (Deaths==0) re-test this way by default; a lethal
-        // loss only re-tests when the caller opts in (explicit, deliberate
-        // order), otherwise it stays beaten to protect the no-death record.
-        var retestable = record.Deaths == 0 || lethalRetestableWhenOutleveled;
-        if (retestable
-            && currentLevel is int cur
-            && record.MaxLossBotLevel is int maxLossLevel
-            && cur > maxLossLevel)
-        {
-            return false;
-        }
-        // First-death re-test (explicit-order path only). A SINGLE recorded
-        // lethal loss is the bot's FIRST-encounter death to this kind: not
-        // conclusive that the kind is unbeatable, and a permanent lock here
-        // death-spirals the bot when this kind is the ONLY thing in view to fight
-        // (die once -> avoid the only XP source -> never level past
-        // MaxLossBotLevel -> never re-test -> wedged). A caller acting on a
-        // deliberate order (lethalRetestableWhenOutleveled) has CHOSEN to engage,
-        // so let it try again after one death. A SECOND lethal loss (Deaths>=2)
-        // restores the out-level gate above. Autonomous picks (flag=false) are
-        // unaffected: they still avoid every lethal kind to protect the no-death
-        // record. Own death count only; no game knowledge.
-        if (lethalRetestableWhenOutleveled && record.Deaths == 1)
-        {
-            return false;
-        }
-        return true;
     }
 
     /// <summary>
@@ -15002,8 +14672,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// SAME set the LLM-decided Hunt decomposition attacks, so a passive-monster
     /// grind chains too) or an actively-`ObservedHostile` creature (self-
     /// defense), that matches the LLM's authored name filter (when the
-    /// commitment carried one) and is not an <see cref="IsBeatenKind"/> the bot
-    /// keeps losing to. It assigns NO object-type urgency and names no
+    /// commitment carried one). Combat-history outcomes do not alter that
+    /// LLM-authored target set. It assigns NO object-type urgency and names no
     /// wcid/NPC/landblock. Flee precedence is NOT enforced here — the Motor's
     /// dispatch self-preservation gate refuses the Attack while health is low /
     /// the threat is on the avoid cooldown, and the CALLER only invokes this on
@@ -15022,8 +14692,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static VisibleObjectProjection? ChooseCombatChainTarget(
         Intent.Intent? top,
         IReadOnlyList<VisibleObjectProjection>? visible,
-        IReadOnlyList<CombatHistoryEntry>? history,
-        int? selfLevel,
         bool enabled,
         int chainCount,
         int maxChain,
@@ -15031,7 +14699,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         bool combatCapable = true,
         bool canUnarmedMelee = false)
         => ChooseCombatChainTarget(
-            top, visible, history, selfLevel, enabled, chainCount, maxChain,
+            top, visible, enabled, chainCount, maxChain,
             out _, perceptionRadius, combatCapable, canUnarmedMelee);
 
     /// <summary>
@@ -15046,8 +14714,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     internal static VisibleObjectProjection? ChooseCombatChainTarget(
         Intent.Intent? top,
         IReadOnlyList<VisibleObjectProjection>? visible,
-        IReadOnlyList<CombatHistoryEntry>? history,
-        int? selfLevel,
         bool enabled,
         int chainCount,
         int maxChain,
@@ -15084,10 +14750,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // (caller passes deathSpiralActive = RecentOwnDeathCount >= DeathSpiralMinDeaths).
         // The self-health gate above only stops a mint while the bot is CURRENTLY hurt;
         // it re-mints as soon as health regens between fights, so a bot that keeps
-        // DYING would otherwise chain right back into the same losing exchange. A kind
-        // with a MIXED record (a kill or two, so IsBeatenKind — which only excludes
-        // ZERO-kill kinds — does not skip it) can still be winning that exchange, and
-        // each death stacks a penalty that lowers effective max HP. Yield so the
+        // DYING would otherwise chain right back into the same losing exchange.
+        // Each death stacks a penalty that lowers effective max HP. Yield so the
         // LLM — which sees the survival-caution capsule — owns the retreat/relocate
         // decision instead of the Motor blindly continuing the commitment. Pure
         // self-outcome + timer gate; the LLM still chose WHAT to do.
@@ -15097,22 +14761,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
         var target = visible
             // Match the LLM-decided Hunt decomposition's target set
-            // (NoQuestKnowledgePolicy attacks any visible, non-corpse, non-beaten
-            // `IsMonster`) AND the self-defense set (anything actively
+            // (NoQuestKnowledgePolicy attacks any visible, non-corpse `IsMonster`)
+            // AND the self-defense set (anything actively
             // `ObservedHostile`) — NOT just `ObservedHostile`. The LLM committed
             // to "kill N [of X]", so executing that commitment means attacking the
             // next matching monster whether or not it is currently attacking the
             // bot; AC's weak grind kinds are PASSIVE, so requiring ObservedHostile
             // made the common passive-monster grind fall back to a per-kill LLM
             // call — defeating the reduce-llm-call-volume purpose. Bounds are
-            // unchanged (perception radius, name filter, beaten-skip, maxChain
-            // re-check, deadline, and the Motor's low-health dispatch gate).
+            // unchanged (perception radius, name filter, maxChain re-check,
+            // deadline, and the Motor's low-health dispatch gate).
             .Where(v => (v.IsMonster || v.ObservedHostile) && !v.IsCorpse)
             .Where(v => (v.Distance ?? float.MaxValue) <= perceptionRadius)
             .Where(v => nameFilter is null
                         || (v.Name is { Length: > 0 } n
                             && n.IndexOf(nameFilter, StringComparison.OrdinalIgnoreCase) >= 0))
-            .Where(v => !IsBeatenKind(history, v.Wcid, v.Name, selfLevel))
             .OrderBy(v => v.Distance ?? float.MaxValue)
             .FirstOrDefault();
         if (target is null) skipReason = "no-matching-monster";

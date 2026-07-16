@@ -2873,24 +2873,24 @@ public class LlmGoalPolicyTests
         var longDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest + 5.0;
         var explore = new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "anywhere" } };
 
-        // No winnable monster + long barren stall + undirected Explore -> directional escape
+        // No monster + long barren stall + undirected Explore -> directional escape
         // stamped (the case the combat-ready egress latch cancels for an UNARMED bot).
-        var escaped = LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, longDwell, 0x0125u);
+        var escaped = LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: false, longDwell, 0x0125u);
         Assert.Equal(LlmGoalPolicy.EscapeHeadingForLandblock(0x0125u), escaped.Direction);
 
-        // A WINNABLE monster in view -> pass through (fight it), even on a long stall.
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: true, longDwell, 0x0125u).Direction);
+        // Any attackable monster in view leaves Strategy's Explore unchanged.
+        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: true, longDwell, 0x0125u).Direction);
 
         // No monster but a town `Use` goal (not Explore) -> untouched, so a bot can still Use a
         // vendor to self-arm rather than being sent wandering.
         var use = new Goal { Kind = GoalKind.Use, Target = new Selector { Name = "Grocer" } };
-        var afterUse = LlmGoalPolicy.NonEgressBarrenEscape(use, winnableMonsterInView: false, longDwell, 0x0125u);
+        var afterUse = LlmGoalPolicy.NonEgressBarrenEscape(use, monsterInView: false, longDwell, 0x0125u);
         Assert.Equal(GoalKind.Use, afterUse.Kind);
         Assert.Null(afterUse.Direction);
 
         // Below the dwell threshold -> unchanged even with no monster.
         var shortDwell = LlmGoalPolicy.LongBarrenStallDwellMinutesForTest - 1.0;
-        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, winnableMonsterInView: false, shortDwell, 0x0125u).Direction);
+        Assert.Null(LlmGoalPolicy.NonEgressBarrenEscape(explore, monsterInView: false, shortDwell, 0x0125u).Direction);
     }
 
     [Fact]
@@ -8550,15 +8550,35 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void SpendBeforeWander_FalseWhenWinnableMonsterInView()
+    public void SpendBeforeWander_FalseWhenAnyAttackableMonsterInView()
     {
-        // A winnable (non-corpse) monster in view -> there IS a fight here -> not the no-fight
-        // wander situation (engage it per the NON-HOSTILE rule).
+        // Any attackable monster wakes Strategy; source does not judge the matchup.
         var world = BuildXpWorld(69296, 5475) with
         {
             Visible = new[] { new VisibleObjectProjection { Guid = 0x80001001u, Name = "Drudge", IsMonster = true } },
         };
         Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(new IntentStack(), world, secondsSinceLastDeath: null));
+    }
+
+    [Fact]
+    public void SpendBeforeWander_RepeatedDeathHistoryDoesNotHideVisibleMonster()
+    {
+        var world = BuildXpWorld(69296, 5475) with
+        {
+            CombatHistoryFull = new[]
+            {
+                new CombatHistoryEntry("Recorded Loss", 99u, Kills: 0, Deaths: 3,
+                    NearDeaths: 1, Fights: 4, LastOutcome: "death"),
+            },
+            Visible = new[]
+            {
+                new VisibleObjectProjection
+                    { Guid = 0x80001001u, Name = "Recorded Loss", Wcid = 99u, IsMonster = true },
+            },
+        };
+
+        Assert.False(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
+            new IntentStack(), world, secondsSinceLastDeath: null));
     }
 
     [Fact]
@@ -8709,7 +8729,7 @@ public class LlmGoalPolicyTests
     public void SpendBeforeWander_FiresViaWanderStreak_WithNoNoObjectiveTrigger()
     {
         // A NULL stack makes StackHasNoActiveObjective FALSE, so the gate can ONLY fire via the
-        // new wander-streak path: >=2 untargeted Explores + unspent XP + no winnable monster.
+        // new wander-streak path: >=2 untargeted Explores + unspent XP + no attackable monster.
         var es = WanderEventStream(
             UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
         Assert.True(LlmGoalPolicy.ShouldSurfaceSpendBeforeWander(
@@ -8748,9 +8768,9 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void SpendBeforeWander_WanderStreak_StillSuppressedByWinnableMonster()
+    public void SpendBeforeWander_WanderStreak_StillSuppressedByAnyAttackableMonster()
     {
-        // A winnable monster in view => there IS a fight here => engage it, not the no-fight wander.
+        // Any attackable monster wakes Strategy rather than this no-fight cue.
         var es = WanderEventStream(
             UntargetedExploreEmit("name=\"anywhere\""), UntargetedExploreEmit("name=\"anywhere\""));
         var world = BuildXpWorld(69296, 5475) with
@@ -11633,108 +11653,39 @@ public class LlmGoalPolicyTests
         BuildXpWorld(69296, 0) with { CombatHistoryFull = full };
 
     [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_RendersBeatenButNotWinnableKinds()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_RendersRawOutcomesWithoutClassification()
     {
-        // The body combat-history lines are dropped by the dense-scene hard cut,
-        // so preserve difficult-kind evidence in the protected tail. A kind with
-        // kills or only a survived loss must not appear in this focused capsule.
         var world = BuildBeatenLedgerWorld(
             new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
+                NearDeaths: 1, Fights: 2, LastOutcome: "death"),
             new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
             new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
                 NearDeaths: 3, Fights: 3, LastOutcome: "near-death"),
-            // A lethal loss the bot has since OUT-LEVELLED (loss at level 5, bot
-            // now level 9): it is re-testable and must not appear.
             new CombatHistoryEntry("Outlevelled Kind", 99u, Kills: 0, Deaths: 1,
-                NearDeaths: 0, Fights: 1, LastOutcome: "death", MaxLossBotLevel: 5));
+                NearDeaths: 0, Fights: 1, LastOutcome: "death"));
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
 
-        Assert.Contains("## Beaten kinds", prompt);
-        // Scope to the beaten-kinds SECTION only (up to the next `## ` header,
-        // now the sibling `## Winnable kinds` capsule) so winnable kinds listed
-        // later in the tail don't leak into this beaten-only assertion.
-        int beatenStart = prompt.IndexOf("## Beaten kinds", System.StringComparison.Ordinal);
-        int beatenEnd = prompt.IndexOf("## ", beatenStart + 3, System.StringComparison.Ordinal);
-        var capsuleText = beatenEnd > beatenStart
-            ? prompt.Substring(beatenStart, beatenEnd - beatenStart)
-            : prompt.Substring(beatenStart);
+        var capsuleText = prompt[prompt.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("evidence only", capsuleText);
         Assert.Contains("Drudge Slinker: fights 2, kills 0, deaths 2", capsuleText);
-        Assert.Contains("Use this evidence to decide whether to retry", capsuleText);
-        Assert.DoesNotContain("Motor DECLINES", capsuleText);
-        // Winnable (has kills) and survived-loss (Deaths==0) kinds are excluded.
-        Assert.DoesNotContain("Black Rabbit", capsuleText);
-        Assert.DoesNotContain("Mosswart", capsuleText);
-        // An out-levelled lethal kind is re-testable, so it is excluded too.
-        Assert.DoesNotContain("Outlevelled Kind", capsuleText);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_SurvivesBodyHardCut()
-    {
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
-        var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, null, null, null);
-        var nl = full.Contains("\r\n") ? "\r\n" : "\n";
-        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
-        Assert.True(bodyIdx > 0);
-
-        var tight = LlmGoalPolicy.BuildUserPrompt(
-            world, new EventStream(), null, null, null, null, promptCeiling: bodyIdx);
-
-        Assert.True(tight.Length <= bodyIdx);
-        // Body sections cut, but the beaten-kinds capsule survived in the tail.
-        Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
-        Assert.Contains("## Beaten kinds", tight);
-        Assert.Contains("Drudge Slinker", tight);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedBeatenKindsCapsule_OmittedWhenNoBeatenKinds()
-    {
-        // A ledger of only winnable / survived-loss kinds yields no capsule.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("## Beaten kinds", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_RendersOnlyClearlyWinnableKinds()
-    {
-        // cp2918 (reduce-llm-call-volume): the LLM needs to see which kinds it is
-        // ALREADY winning against to push a kill-count grind commitment (the
-        // evidence is otherwise truncated). Clearly-winnable = kills recorded AND
-        // no death. A beaten kind (no kills) and an ambiguous kind (kills BUT a
-        // death) must NOT appear — only a clean win qualifies.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"),
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9),
-            new CombatHistoryEntry("Mosswart", 8u, Kills: 3, Deaths: 1,
-                NearDeaths: 0, Fights: 4, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-
-        Assert.Contains("## Winnable kinds", prompt);
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
         Assert.Contains("Black Rabbit: fights 12, kills 12, deaths 0", capsuleText);
-        Assert.DoesNotContain("Drudge Slinker", capsuleText); // no kills
-        Assert.DoesNotContain("Mosswart", capsuleText);       // has a death
+        Assert.Contains("Mosswart: fights 3, kills 0, deaths 0", capsuleText);
+        Assert.Contains("Outlevelled Kind: fights 1, kills 0, deaths 1", capsuleText);
+        Assert.DoesNotContain("## Beaten kinds", capsuleText);
+        Assert.DoesNotContain("## Winnable kinds", capsuleText);
+        Assert.DoesNotContain("Motor DECLINES", capsuleText);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_SurvivesBodyHardCut()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_SurvivesBodyHardCut()
     {
         var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
+            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
+                NearDeaths: 1, Fights: 2, LastOutcome: "death"));
         var full = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack(), null, null);
         var nl = full.Contains("\r\n") ? "\r\n" : "\n";
-        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", System.StringComparison.Ordinal);
+        int bodyIdx = full.IndexOf(nl + "## Self" + nl + "- name:", StringComparison.Ordinal);
         Assert.True(bodyIdx > 0);
 
         var tight = LlmGoalPolicy.BuildUserPrompt(
@@ -11742,61 +11693,47 @@ public class LlmGoalPolicyTests
 
         Assert.True(tight.Length <= bodyIdx);
         Assert.DoesNotContain(nl + "## Self" + nl + "- name:", tight);
-        Assert.Contains("## Winnable kinds", tight);
-        Assert.Contains("Black Rabbit", tight);
-        // cp2920: the whole ## Winnable kinds capsule (header + the stack-gated
-        // commit-nudge bullet + the per-kind lines) lives in the protected
-        // salience tail, so the imperative nudge survives the body hard-cut.
+        Assert.Contains("## Combat history", tight);
+        Assert.Contains("Drudge Slinker", tight);
         Assert.Contains("ACT ON THIS NOW", tight);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_ReStatesCommitDirectiveImperatively()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_IsRecencyBounded()
     {
-        // cp2920 (salience): listing winnable kinds was not enough — live, the LLM
-        // pushed 0 kill-count commitments over 59 decisions, so the cp2918
-        // autonomous kill-chain never fired and every kill cost a full LLM cycle.
-        // The COMMIT A WINNING GRIND directive lives in the long preamble (reliably
-        // ignored per the cp-2336/2337 salience finding). Re-state it IMPERATIVELY
-        // in the decision-proximate tail capsule so the LLM acts on it (the cp-2387
-        // precedent), pointing back to the preamble rule for the exact shape. Gated
-        // on a non-null IntentStack (the nudge references `stack_ops`).
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
-                NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, new IntentStack());
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
-        Assert.Contains("ACT ON THIS NOW", capsuleText);
-        Assert.Contains("stack_ops", capsuleText);
-        Assert.Contains("kill-count", capsuleText);
+        var rows = Enumerable.Range(1, 7)
+            .Select(i => new CombatHistoryEntry(
+                $"Recent Kind {i}", (uint)i, Kills: i, Deaths: 0,
+                NearDeaths: 0, Fights: i, LastOutcome: "kill"))
+            .ToArray();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildBeatenLedgerWorld(rows), new EventStream(), null);
+        var capsuleText = prompt[prompt.IndexOf("## Combat history", StringComparison.Ordinal)..];
+
+        for (int i = 1; i <= 6; i++)
+            Assert.Contains($"Recent Kind {i}", capsuleText);
+        Assert.DoesNotContain("Recent Kind 7", capsuleText);
     }
 
     [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmitsCommitNudgeWhenStackDisabled()
+    public void BuildUserPrompt_ProtectedCombatHistoryCapsule_GatesStackNudge()
     {
-        // The commit nudge references `stack_ops`, which is absent from the schema
-        // when the IntentStack is disabled (stack == null). The capsule (and its
-        // kind list) still render, but the stack_ops nudge must NOT — otherwise we
-        // instruct the LLM to emit a field the schema omits.
         var world = BuildBeatenLedgerWorld(
             new CombatHistoryEntry("Black Rabbit", 2566u, Kills: 12, Deaths: 0,
                 NearDeaths: 0, Fights: 12, LastOutcome: "kill"));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, (IntentStack?)null);
-        Assert.Contains("## Winnable kinds", prompt);
-        var capsuleText = prompt.Substring(prompt.IndexOf("## Winnable kinds", System.StringComparison.Ordinal));
-        Assert.Contains("Black Rabbit", capsuleText);
-        Assert.DoesNotContain("ACT ON THIS NOW", capsuleText);
-    }
 
-    [Fact]
-    public void BuildUserPrompt_ProtectedWinnableKindsCapsule_OmittedWhenNoCleanWins()
-    {
-        // Only a beaten kind (no kills) → no winnable capsule.
-        var world = BuildBeatenLedgerWorld(
-            new CombatHistoryEntry("Drudge Slinker", 100u, Kills: 0, Deaths: 2,
-                NearDeaths: 1, Fights: 2, LastOutcome: "death", MaxLossBotLevel: 9));
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("## Winnable kinds", prompt);
+        var enabled = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, new IntentStack());
+        var enabledCapsule = enabled[enabled.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("ACT ON THIS NOW", enabledCapsule);
+        Assert.Contains("stack_ops", enabledCapsule);
+        Assert.Contains("kill-count", enabledCapsule);
+
+        var disabled = LlmGoalPolicy.BuildUserPrompt(
+            world, new EventStream(), null, (IntentStack?)null);
+        var disabledCapsule = disabled[disabled.IndexOf("## Combat history", StringComparison.Ordinal)..];
+        Assert.Contains("Black Rabbit", disabledCapsule);
+        Assert.DoesNotContain("ACT ON THIS NOW", disabledCapsule);
     }
 
 
@@ -17828,7 +17765,7 @@ public class LlmGoalPolicyTests
         Assert.DoesNotContain("door open", prompt[(prompt.IndexOf("wcid=9000", StringComparison.Ordinal))..]);
     }
 
-    // ---- Own-ledger difficult-kind classifiers ----
+    // ---- Explicit Attack ledger regression fixtures ----
 
     private static WorldStateProjection BuildWorldBeaten(
         IReadOnlyList<CombatHistoryEntry>? fullHistory, int? selfLevel,
@@ -17852,137 +17789,6 @@ public class LlmGoalPolicyTests
     private static CombatHistoryEntry[] LethalBeaten(string name, uint wcid)
         => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 3, NearDeaths: 2,
             Fights: 5, LastOutcome: "death", Ineffective: 0) };
-
-    // A kind the bot has 0 kills against but many INEFFECTIVE (no-damage) fights — the
-    // can't-DAMAGE-it wedge (live: 89 stuck-timeouts cycling 50s no-damage abandons).
-    // MaxLossBotLevel = the level the bot kept failing at (the runtime records it on every
-    // ineffective abandon); without it the classification re-tests once.
-    private static CombatHistoryEntry[] IneffectiveBeaten(
-        string name, uint wcid, int ineffective = 8, int? maxLossLevel = 15)
-        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: ineffective, LastOutcome: "ineffective", Ineffective: ineffective,
-            MaxLossBotLevel: maxLossLevel) };
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_FiresAtThreshold_NotBelow()
-    {
-        var below = IneffectiveBeaten("Gnawer Shreth", 99u,
-            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold - 1);
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(below, 99u, "Gnawer Shreth", 15));
-        var at = IneffectiveBeaten("Gnawer Shreth", 99u,
-            LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(at, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_NotWhenKindHasAKill()
-    {
-        // A kill -> the bot CAN damage/beat it, so it is not a can't-damage wedge.
-        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
-            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15) };
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hasKill, 99u, "X", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_CoversSingleDeathPlusManyIneffective()
-    {
-        // The Deaths==1 first-death reprieve makes IsLethalBeatenKind FALSE, but a kind the bot
-        // ALSO cannot DAMAGE (0 kills, many ineffective) must still be avoided — this branch
-        // covers it regardless of the single death.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
-            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, 99u, "Gnawer Shreth", 15)); // first-death reprieve
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
-        // ... and it re-tests once the bot out-levels the level it kept failing at.
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_NoFailingLevelRecorded_RetestsOnce()
-    {
-        // A loss recorded with no failing level (the field did not exist yet, or self level was
-        // momentarily unknown) deserializes null; re-test once so a fresh attempt
-        // records the missing level.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0,
-            NearDeaths: 0, Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: null) };
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsExhaustedIneffectiveKind_RetestableOnceOutLevelled()
-    {
-        // MaxLossBotLevel records the level the bot kept failing at; once it out-levels that,
-        // the kind is re-testable (the bot may now be strong enough).
-        var rec = new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: 8, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15);
-        var hist = new[] { rec };
-        Assert.True(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));  // same level
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
-    }
-
-    // A kind the bot SWUNG at repeatedly for 0 total damage (the precise out-defended signal,
-    // distinct from the broader Ineffective which also counts no-swing can't-close abandons).
-    private static CombatHistoryEntry[] OutDefended(
-        string name, uint wcid, int swungZeroDamage = 4, int? ineffective = null, int? maxLossLevel = 15)
-        => new[] { new CombatHistoryEntry(name, wcid, Kills: 0, Deaths: 0, NearDeaths: 0,
-            Fights: Math.Max(swungZeroDamage, ineffective ?? swungZeroDamage),
-            LastOutcome: "ineffective", Ineffective: ineffective ?? swungZeroDamage,
-            MaxLossBotLevel: maxLossLevel, SwungZeroDamage: swungZeroDamage) };
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_FiresAtThreshold_NotBelow()
-    {
-        var below = OutDefended("Gnawer Shreth", 99u,
-            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold - 1);
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(below, 99u, "Gnawer Shreth", 15));
-        var at = OutDefended("Gnawer Shreth", 99u,
-            LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold);
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(at, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_NotWhenKindHasAKill()
-    {
-        // A kill -> the bot CAN damage it, so it is not an out-defended wedge.
-        var hasKill = new[] { new CombatHistoryEntry("X", 99u, Kills: 1, Deaths: 0, NearDeaths: 0,
-            Fights: 10, LastOutcome: "ineffective", Ineffective: 9, MaxLossBotLevel: 15,
-            SwungZeroDamage: 8) };
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hasKill, 99u, "X", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_FiresEarlierThanIneffectiveThreshold()
-    {
-        // The whole point: a kind SWUNG at for 0 damage SwungZeroDamageUnwinnableThreshold times,
-        // but with Ineffective still BELOW ExhaustedIneffectiveFightsThreshold, is classified by
-        // the tighter swung-zero-damage verdict earlier.
-        Assert.True(LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold
-            < LlmGoalPolicy.ExhaustedIneffectiveFightsThreshold);
-        var hist = OutDefended("Gnawer Shreth", 99u,
-            swungZeroDamage: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold,
-            ineffective: LlmGoalPolicy.SwungZeroDamageUnwinnableThreshold); // < the ineffective threshold
-        Assert.False(LlmGoalPolicy.IsExhaustedIneffectiveKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
-        Assert.True(LlmGoalPolicy.IsAvoidBeatenKind(hist, 99u, "Gnawer Shreth", 15));
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_RetestableOnceOutLevelled()
-    {
-        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: 15);
-        Assert.True(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));  // same level
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 16)); // out-levelled
-    }
-
-    [Fact]
-    public void IsOutDefendedUnwinnableKind_NoFailingLevelRecorded_RetestsOnce()
-    {
-        // A loss recorded with no failing level deserializes null -> re-test once (mirrors the
-        // IsExhaustedIneffectiveKind re-test) rather than bar the kind forever.
-        var hist = OutDefended("Gnawer Shreth", 99u, maxLossLevel: null);
-        Assert.False(LlmGoalPolicy.IsOutDefendedUnwinnableKind(hist, 99u, "Gnawer Shreth", 15));
-    }
 
     [Fact]
     public void IsOptionalAttackWhileNotCombatCapable_TrulyUnarmed_AllowsUnarmedMelee()
@@ -18086,23 +17892,7 @@ public class LlmGoalPolicyTests
             new Goal { Kind = GoalKind.Explore, Target = new Selector { Name = "Chicken" } }, world));
     }
 
-    [Fact]
-    public void IsBeatenKind_LethalLoss_PermanentForAutonomousButRetestableForExplicit()
-    {
-        // Default (autonomous) keeps a lethal kind beaten even when out-leveled;
-        // the explicit opt-in re-tests it once the bot out-levels the loss.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 2, NearDeaths: 0, Fights: 2, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
-            currentLevel: 20));
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, wcid: null, "Drudge Skulker",
-            currentLevel: 20, lethalRetestableWhenOutleveled: true));
-    }
-
-    // ---- OnlyBeatenMonstersInView (existing autonomous travel classification) ----
-    // This classification remains available to travel/fallback behavior. It must
-    // not rewrite an explicit LLM-authored Attack.
+    // Shared ledger fixtures.
 
     private static CombatHistoryEntry Winnable(string name, uint wcid)
         => new(name, wcid, Kills: 4, Deaths: 0, NearDeaths: 0, Fights: 4,
@@ -18115,211 +17905,6 @@ public class LlmGoalPolicyTests
             Guid = guid, Name = name, Wcid = wcid, Distance = 6f,
             IsMonster = true, ObservedHostile = hostile, IsCorpse = corpse,
         };
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SingleLethalBeatenPassive_True()
-    {
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_AllLethalBeaten_True()
-    {
-        var hist = new[]
-        {
-            LethalBeaten("Drudge Skulker", 7u)[0],
-            LethalBeaten("Mosswart", 8u)[0],
-        };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Mosswart", 8u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SingleDeathIneffectiveExhausted_True()
-    {
-        // A Deaths==1 + ineffective-exhausted kind is avoid-beaten (NOT lethal-beaten), so a view
-        // of only that kind is classified consistently with the protected ledger capsule.
-        var hist = new[] { new CombatHistoryEntry("Gnawer Shreth", 99u, Kills: 0, Deaths: 1,
-            NearDeaths: 0, Fights: 10, LastOutcome: "ineffective", Ineffective: 8, MaxLossBotLevel: 15) };
-        var world = BuildWorldBeaten(hist, selfLevel: 15, Mob(MobGuid, "Gnawer Shreth", 99u));
-        Assert.True(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_WinnableAlsoInView_False()
-    {
-        // A winnable (not-beaten) monster in view means there IS something to
-        // engage — do not wander off. Pins the over-fire guard.
-        var hist = new[] { LethalBeaten("Drudge Skulker", 7u)[0], Winnable("Rabbit", 9u) };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Rabbit", 9u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SurvivedKindInView_False()
-    {
-        // A merely survived loss remains outside this classification.
-        var hist = new[]
-        {
-            LethalBeaten("Drudge Skulker", 7u)[0],
-            new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0, NearDeaths: 2,
-                Fights: 2, LastOutcome: "near-death", Ineffective: 0),
-        };
-        var world = BuildWorldBeaten(hist, selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u),
-            Mob(MobGuid + 1, "Mosswart", 8u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_HostileInView_False()
-    {
-        // A live hostile (even a beaten kind) is a threat the Motor's flee/defend
-        // reflexes own — never wander away from it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u, hostile: true));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_NoMonsterInView_False()
-    {
-        // Nothing in view -> the general stuck-loop egress / fallback owns it.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11);
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void HasWinnableMonsterInView_TrueOnlyWhenANonBeatenMonsterIsAttackable()
-    {
-        // A winnable (non-beaten) monster in view -> true (fight it; the barren-escape must DEFER).
-        Assert.True(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(new[] { Winnable("Rabbit", 9u) }, selfLevel: 11, Mob(MobGuid, "Rabbit", 9u))));
-        // ONLY a lethal-beaten kind in view -> false (no winnable target). This is the gpt-5.4 BLOCKING
-        // case ComputeEffectiveMonsterInView missed for an unarmed bot.
-        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11, Mob(MobGuid, "Drudge Skulker", 7u))));
-        // No monster in view -> false (nothing to fight here).
-        Assert.False(LlmGoalPolicy.HasWinnableMonsterInView(
-            BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11)));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_OutleveledLethalKind_False()
-    {
-        // Once the bot out-levels the death, the kind is no longer beaten (it may
-        // win now) -> defer the egress and let it engage.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        var world = BuildWorldBeaten(hist, selfLevel: 20,
-            Mob(MobGuid, "Drudge Skulker", 7u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_SingleDeathKind_False()
-    {
-        // First-death re-test propagation (gpt-5.4 review): a kind the bot died to
-        // exactly ONCE is no longer lethal-beaten on the shared verdict, so the
-        // stalemate egress must NOT classify the scene as "only beaten monsters" —
-        // the bot stays to re-engage rather than wandering off (the live wedge).
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        var world = BuildWorldBeaten(hist, selfLevel: 1,
-            Mob(MobGuid, "Sparring Golem", 12698u));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    [Fact]
-    public void OnlyBeatenMonstersInView_CorpseOnly_False()
-    {
-        // A corpse is not an attackable monster -> no stalemate.
-        var world = BuildWorldBeaten(LethalBeaten("Drudge Skulker", 7u), selfLevel: 11,
-            Mob(MobGuid, "Drudge Skulker", 7u, corpse: true));
-        Assert.False(LlmGoalPolicy.OnlyBeatenMonstersInView(world));
-    }
-
-    // ---- IsLethalBeatenKind (prompt and autonomous travel classification) ----
-
-    [Fact]
-    public void IsLethalBeatenKind_RecordedDeathNotOutleveled_True()
-    {
-        var hist = LethalBeaten("Drudge Skulker", 7u);
-        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 11));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SurvivedNoDeath_False()
-    {
-        // No death recorded -> not LETHAL-beaten (the deadlock-fix boundary): the
-        // bot may re-attempt it.
-        var hist = new[] { new CombatHistoryEntry("Mosswart", 8u, Kills: 0, Deaths: 0,
-            NearDeaths: 3, Fights: 3, LastOutcome: "near-death", Ineffective: 0) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 8u, "Mosswart", currentLevel: 11));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_OutleveledDeath_False()
-    {
-        // Once the bot out-levels the death the kind is re-testable -> not beaten.
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 7u, Kills: 0,
-            Deaths: 3, NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 5) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 7u, "Drudge Skulker", currentLevel: 20));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SingleDeathNotOutleveled_False()
-    {
-        // DEATH-SPIRAL FIX: a kind that killed the bot exactly ONCE is re-testable
-        // on the shared lethal verdict (which the travel classifier and the
-        // ## Beaten kinds capsule consult) even at the loss level. So the
-        // first-encounter death no longer wedges the bot when the kind is the only
-        // monster in view.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_SecondDeathNotOutleveled_True()
-    {
-        // A SECOND lethal loss restores the out-level lock on the shared verdict.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 2, NearDeaths: 1, Fights: 2, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.True(LlmGoalPolicy.IsLethalBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsBeatenKind_AutonomousPath_SingleDeath_StillBeaten()
-    {
-        // The first-death reprieve is EXPLICIT-ORDER ONLY. The autonomous picker
-        // path (lethalRetestableWhenOutleveled defaults to false) still treats a
-        // single death as beaten, protecting the no-death record: the Motor never
-        // suicides a target the bot has died to without the LLM deliberately
-        // ordering it.
-        var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, wcid: 12698u, "Sparring Golem", currentLevel: 1));
-    }
-
-    [Fact]
-    public void IsLethalBeatenKind_NoRecord_False()
-    {
-        Assert.False(LlmGoalPolicy.IsLethalBeatenKind(
-            new[] { Winnable("Rabbit", 9u) }, wcid: 7u, "Drudge Skulker", currentLevel: 11));
-    }
 
     [Fact]
     public async Task ProposeGoal_BeatenKindAttack_IsReturnedUnchanged()
@@ -18377,8 +17962,7 @@ public class LlmGoalPolicyTests
             MinCallInterval = TimeSpan.Zero,
         };
         var hist = new[] { new CombatHistoryEntry("Sparring Golem", 12698u, Kills: 0,
-            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0,
-            MaxLossBotLevel: 1) };
+            Deaths: 1, NearDeaths: 1, Fights: 1, LastOutcome: "death", Ineffective: 0) };
         var world = BuildWorldBeaten(hist, selfLevel: 1,
             Mob(MobGuid, "Sparring Golem", 12698u));
         var events = new EventStream();
@@ -23190,75 +22774,6 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenIneffectiveKindNoKill()
-    {
-        // cp-2410/cp-2411: a monster kind the bot fought but never killed is
-        // the can't-win-fights bottleneck — it renders beside the spend
-        // decision so the SPEND XP rule can weigh offense, not just survival.
-        // An `ineffective` stalemate (cp-2410's original case) still qualifies.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.Contains("monster kind(s) you have not killed", prompt);
-        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
-        // Exact full clause (guards the middle "and have fought N" half too).
-        Assert.Contains(
-            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
-            prompt);
-        var capsuleIdx = prompt.IndexOf("## Unspent XP", System.StringComparison.Ordinal);
-        var offenseIdx = prompt.IndexOf("monster kind(s) you have not killed", System.StringComparison.Ordinal);
-        Assert.True(offenseIdx > capsuleIdx, "offense fact should render within the ## Unspent XP capsule");
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_RendersWhenDiedToKindNoIneffective()
-    {
-        // cp-2411: the kinds that WALL the live bot record a `death` (or
-        // `near-death`), NOT `ineffective` — cp-2410's `Ineffective > 0` gate
-        // MISSED them. A died-to kind with 0 kills and 0 ineffective must now
-        // surface as the can't-win-fights bottleneck beside the spend decision.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Mite Scion", 22600u, Kills: 0, Deaths: 2,
-                    NearDeaths: 1, Fights: 4, LastOutcome: "death", Ineffective: 0),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.Contains("1 monster kind(s) you have not killed", prompt);
-        Assert.Contains("in recent combat you have 0 kill(s)", prompt);
-        Assert.Contains(
-            "in recent combat you have 0 kill(s) and have fought 1 monster kind(s) you have not killed",
-            prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenKindHasKills()
-    {
-        // A kind the bot HAS killed is not a bottleneck -> no can't-win fact.
-        var world = BuildXpWorld(69296, 5475) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Rabbit", 48u, Kills: 3, Deaths: 0,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "kill", Ineffective: 0),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.Contains("## Unspent XP", prompt);
-        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
-    }
-
-    [Fact]
     public void BuildUserPrompt_UnspentXpEndcap_InlinesAttributeValues()
     {
         // cp-2419: the bot's RAW attribute values render INSIDE the ## Unspent XP
@@ -23311,22 +22826,6 @@ public class LlmGoalPolicyTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
         Assert.DoesNotContain("## Unspent XP", prompt);
         Assert.DoesNotContain("your attributes are", prompt);
-    }
-
-    [Fact]
-    public void BuildUserPrompt_UnspentXpEndcap_OffenseFact_OmittedWhenNoUnspentXp()
-    {
-        // No unspent XP -> the whole capsule (incl. the can't-win fact) is omitted.
-        var world = BuildXpWorld(69296, 0) with
-        {
-            CombatHistory = new[]
-            {
-                new CombatHistoryEntry("Drudge Skulker", 19257u, Kills: 0, Deaths: 1,
-                    NearDeaths: 0, Fights: 3, LastOutcome: "death", Ineffective: 2),
-            },
-        };
-        var prompt = LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null);
-        Assert.DoesNotContain("monster kind(s) you have not killed", prompt);
     }
 
     [Fact]
@@ -24676,54 +24175,6 @@ public class LlmGoalPolicyTests
     {
         var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
         Assert.Equal("", LlmGoalPolicy.FormatCombatRecordFor(hist, 7u, "Drudge Skulker"));
-    }
-
-    // ---- IsBeatenKind shared verdict (fallback skip + frontier mob-bias) ----
-
-    [Fact]
-    public void IsBeatenKind_FalseWhenNoRecord()
-    {
-        Assert.False(LlmGoalPolicy.IsBeatenKind(null, 7u, "X", 5));
-        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 1, 0, 0, 1, "kill") };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 7u, "Drudge Skulker", 5)); // no match
-    }
-
-    [Fact]
-    public void IsBeatenKind_FalseWhenHasKill()
-    {
-        var hist = new[] { new CombatHistoryEntry("Cow", 14u, 3, 1, 0, 4, "kill") };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 14u, "Cow", 5)); // Kills>0 => not beaten
-    }
-
-    [Fact]
-    public void IsBeatenKind_TrueWhenLostNoKill_RegardlessOfLevelForDeath()
-    {
-        // A death loss stays beaten at any level (no MaxLossBotLevel re-test).
-        var hist = new[] { new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 1, 3, "death", MaxLossBotLevel: 3) };
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 99));
-    }
-
-    [Fact]
-    public void IsBeatenKind_NonLethalLoss_FalseAfterLevelUp_TrueBefore()
-    {
-        // Deaths==0, only near-death/ineffective, lost at level 3.
-        var hist = new[] { new CombatHistoryEntry("Mite Scion", 22600u, 0, 0, 3, 3, "near-death", MaxLossBotLevel: 3) };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 8)); // 8 > 3 -> re-test
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", 3));  // 3 not > 3 -> beaten
-        Assert.True(LlmGoalPolicy.IsBeatenKind(hist, 22600u, "Mite Scion", null)); // unknown level -> beaten
-    }
-
-    [Fact]
-    public void IsBeatenKind_AggregatesSameName_KillOnSiblingUnbeats()
-    {
-        // Same display name, different wcids: a loss on the visible wcid but a
-        // kill on a sibling -> aggregate Kills>0 -> not beaten.
-        var hist = new[]
-        {
-            new CombatHistoryEntry("Drudge Skulker", 19257u, 0, 2, 0, 2, "death", MaxLossBotLevel: 3),
-            new CombatHistoryEntry("Drudge Skulker", 7u, 5, 0, 0, 5, "kill"),
-        };
-        Assert.False(LlmGoalPolicy.IsBeatenKind(hist, 19257u, "Drudge Skulker", 3));
     }
 
     [Fact]
@@ -26708,83 +26159,27 @@ public class LlmGoalPolicyTests
         };
 
     [Fact]
-    public void IsFarmedHere_NotTappedOut_False()
+    public void ComputeEffectiveMonsterInView_VisibleMonster_True()
     {
-        var v = Mob(0x1u, "Chicken", 10u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsFarmedHere_ObservedHostile_False()
-    {
-        var v = Mob(0x1u, "Chicken", 10u, hostile: true);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_NullOrEmptyKilledSet_False()
-    {
-        var v = Mob(0x1u, "Chicken", 10u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(v, null, tappedOut: true));
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string>(), tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_KindInSet_True()
-    {
-        var v = Mob(0x1u, "Chicken", 10u);
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"));
-        Assert.NotNull(key);
-        Assert.True(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { key! }, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsFarmedHere_UnknownKind_False()
-    {
-        var v = Mob(0x1u, "Drudge", 99u);
-        Assert.False(LlmGoalPolicy.IsFarmedHere(
-            v, new HashSet<string> { "w:10" }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_AllFarmed_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
         var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) };
-        Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
-    }
-
-    [Fact]
-    public void ComputeEffectiveMonsterInView_UnknownKindPresent_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var visible = new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u) };
         Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
+            visible, tappedOut: true));
     }
 
     [Fact]
-    public void ComputeEffectiveMonsterInView_FarmedButCorpse_IgnoredAndNotEffective()
+    public void ComputeEffectiveMonsterInView_CorpseOnly_False()
     {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
         var visible = new[] { Mob(0x1u, "Chicken", 10u, corpse: true) };
         Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
+            visible, tappedOut: true));
     }
 
     [Fact]
-    public void ComputeEffectiveMonsterInView_FarmedKindAttackingBot_True()
+    public void ComputeEffectiveMonsterInView_HostileMonster_True()
     {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // Same farmed kind, but it's HOSTILE (attacking) → still counts.
         var visible = new[] { Mob(0x1u, "Chicken", 10u, hostile: true) };
         Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, new HashSet<string> { key }, tappedOut: true));
+            visible, tappedOut: true));
     }
 
     // ---- ignored-kind liveness backstop (visible-but-unengaged) ----
@@ -26826,11 +26221,10 @@ public class LlmGoalPolicyTests
     {
         var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
         var visible = new[] { Mob(0x1u, "Cow", 14u) };
-        // Not in the KILLED set, but in the IGNORED set → no longer effective.
         Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true));
+            visible, tappedOut: true));
         Assert.False(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
+            visible, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
     }
 
     [Fact]
@@ -26839,7 +26233,7 @@ public class LlmGoalPolicyTests
         var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(14u, "Cow"))!;
         var visible = new[] { Mob(0x1u, "Cow", 14u, hostile: true) };
         Assert.True(LlmGoalPolicy.ComputeEffectiveMonsterInView(
-            visible, null, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
+            visible, tappedOut: true, ignoredThisDwell: new HashSet<string> { key }));
     }
 
     private static readonly System.Collections.Generic.IReadOnlySet<string> NoEngaged =
@@ -26920,119 +26314,6 @@ public class LlmGoalPolicyTests
             dict, new[] { ("w:14", false) }, engaged, true, t0.AddMinutes(10), TimeSpan.FromMinutes(5));
         Assert.Empty(r);
         Assert.Empty(dict);
-    }
-
-    private static WorldStateProjection EgressWorld(
-        IReadOnlyList<VisibleObjectProjection> visible,
-        IReadOnlySet<string>? killed,
-        CombatFightStatus? fight = null)
-        => new WorldStateProjection
-        {
-            Self = new SelfProjection
-            {
-                Guid = SelfGuid, Name = "H", Landblock = 0xA8B4u, CellId = 0xA8B40006u,
-                PositionX = 0, PositionY = 0, PositionZ = 0, HealthFraction = 1.0f, Level = 3,
-            },
-            Inventory = System.Array.Empty<InventoryItemProjection>(),
-            Visible = visible,
-            KilledKindsThisDwell = killed,
-            CurrentFight = fight,
-        };
-
-    private static Goal AttackGoal(Selector target) => new Goal
-    {
-        Kind = GoalKind.Attack, Target = target, Source = "llm",
-    };
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NotTappedOut_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: false));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NonAttackGoal_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        var talk = new Goal { Kind = GoalKind.Talk, Target = new Selector { Name = "Chicken" }, Source = "llm" };
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(talk, world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_EmptySelector_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector()), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NoKillsHere_False()
-    {
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, null);
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_HostileInView_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // A different mob is attacking the bot → self-defense outranks egress.
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Drudge", 99u, hostile: true) },
-            new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_MidFight_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key },
-            fight: new CombatFightStatus(0x1u, "Chicken", 0, 0, 0));
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_AllMatchesFarmed_True()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Chicken", 10u), Mob(0x2u, "Chicken", 10u) },
-            new HashSet<string> { key });
-        Assert.True(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Chicken" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_NoVisibleMatch_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Chicken"))!;
-        // Killed a Chicken here, but the Attack selector names a Drudge not in view.
-        var world = EgressWorld(new[] { Mob(0x1u, "Chicken", 10u) }, new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Drudge" }), world, tappedOut: true));
-    }
-
-    [Fact]
-    public void IsTappedOutRepeatKillAttack_MixedMatchUnfarmed_False()
-    {
-        var key = CombatFeelLedger.KeyOf(new CombatFeelLedger.MobIdentity(10u, "Rat"))!;
-        // Two visible "Rat" by NAME selector: one farmed wcid 10, one fresh wcid 99.
-        var world = EgressWorld(
-            new[] { Mob(0x1u, "Rat", 10u), Mob(0x2u, "Rat", 99u) },
-            new HashSet<string> { key });
-        Assert.False(LlmGoalPolicy.IsTappedOutRepeatKillAttack(
-            AttackGoal(new Selector { Name = "Rat" }), world, tappedOut: true));
     }
 
     // ---- FitPromptToCeiling (request-size ceiling; prevents HTTP 413) ----

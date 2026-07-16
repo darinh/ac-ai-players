@@ -5,9 +5,9 @@
 // (the pure target selection), the kill-switch (ResolveCombatChainEnabled), and
 // the chain-interrupt routing classifier (IsChainInterruptingKind). The Motor
 // only DECOMPOSES an LLM-authored typed kill-count commitment — these pin that
-// it never fires on a generic hunt/visible_tag intent, never re-attacks a
-// beaten kind, honors the name filter, perception bound, corpse exclusion, and
-// chain cap, and that decision-worthy events (not combat noise) interrupt it.
+// it never fires on a generic hunt/visible_tag intent, does not reinterpret
+// combat history, honors the name filter, perception bound, corpse exclusion,
+// and chain cap, and that decision-worthy events (not combat noise) interrupt it.
 // Knowledge-free: domain-neutral placeholder names only.
 
 using System;
@@ -182,8 +182,7 @@ public class CombatChainTests
         };
         var top = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            top, visible, history: null, selfLevel: 5,
-            enabled: true, chainCount: 0, maxChain: 6);
+            top, visible, enabled: true, chainCount: 0, maxChain: 6);
         Assert.NotNull(chosen);
         Assert.Equal(0x8002u, chosen!.Guid); // nearest "Quarry"; the closer Bystander is filtered out
     }
@@ -198,8 +197,7 @@ public class CombatChainTests
         };
         var top = NewIntent(new KillCountTotalAtLeastPredicate(10));
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            top, visible, history: null, selfLevel: 5,
-            enabled: true, chainCount: 0, maxChain: 6);
+            top, visible, enabled: true, chainCount: 0, maxChain: 6);
         Assert.Equal(0x8003u, chosen!.Guid); // nearest hostile, no kind filter
     }
 
@@ -207,7 +205,7 @@ public class CombatChainTests
     public void ChooseChainTarget_Null_WhenDisabled()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3)), OneCloseMob,
-            null, 5, enabled: false, chainCount: 0, maxChain: 6));
+            enabled: false, chainCount: 0, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_ChainsPassiveMonster_NotJustHostile()
@@ -225,7 +223,7 @@ public class CombatChainTests
         };
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountTotalAtLeastPredicate(10)), new[] { passive },
-            history: null, selfLevel: 5, enabled: true, chainCount: 0, maxChain: 6);
+            enabled: true, chainCount: 0, maxChain: 6);
         Assert.NotNull(chosen);
         Assert.Equal(0x9001u, chosen!.Guid);
     }
@@ -234,53 +232,34 @@ public class CombatChainTests
     public void ChooseChainTarget_Null_WhenChainCapReached()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3)), OneCloseMob,
-            null, 5, enabled: true, chainCount: 6, maxChain: 6));
+            enabled: true, chainCount: 6, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_Null_WhenNoKillCommitment()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new VisibleTagPredicate("monster")), OneCloseMob,
-            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+            enabled: true, chainCount: 0, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_Null_WhenNoVisibleHostiles()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3)),
             new[] { Mob(0x8001, "Bystander", 5f, hostile: false) },
-            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+            enabled: true, chainCount: 0, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_ExcludesCorpses()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
             new[] { Mob(0x8001, "Quarry Alpha", 5f, corpse: true) },
-            null, 5, enabled: true, chainCount: 0, maxChain: 6));
+            enabled: true, chainCount: 0, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_ExcludesBeyondPerception()
         => Assert.Null(LlmGoalPolicy.ChooseCombatChainTarget(
             NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
             new[] { Mob(0x8001, "Quarry Alpha", 200f) },
-            null, 5, enabled: true, chainCount: 0, maxChain: 6));
-
-    [Fact]
-    public void ChooseChainTarget_ExcludesBeatenKind()
-    {
-        // The bot has lost to (and never killed) this kind, with a death -> stays
-        // beaten regardless of level: the chain must not re-engage it.
-        var history = new[]
-        {
-            new CombatHistoryEntry(
-                Name: "Quarry Alpha", Wcid: 0x4242, Kills: 0, Deaths: 2,
-                NearDeaths: 0, Fights: 2, LastOutcome: "death", Ineffective: 0),
-        };
-        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry")),
-            new[] { Mob(0x8001, "Quarry Alpha", 10f, wcid: 0x4242) },
-            history, selfLevel: 5,
-            enabled: true, chainCount: 0, maxChain: 6);
-        Assert.Null(chosen);
-    }
+            enabled: true, chainCount: 0, maxChain: 6));
 
     [Fact]
     public void ChooseChainTarget_SkipReason_ClassifiesEachNoMintCause()
@@ -291,24 +270,24 @@ public class CombatChainTests
         var commit = NewIntent(new KillCountSincePushAtLeastPredicate(3, "Quarry"));
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
-        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, enabled: false, 0, 6, out var r1);
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, enabled: false, 0, 6, out var r1);
         Assert.Equal("chain-disabled", r1);
 
-        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, true, chainCount: 6, maxChain: 6, out var r2);
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, true, chainCount: 6, maxChain: 6, out var r2);
         Assert.Equal("budget-exhausted", r2);
 
-        LlmGoalPolicy.ChooseCombatChainTarget(commit, System.Array.Empty<VisibleObjectProjection>(), null, 5, true, 0, 6, out var r3);
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, System.Array.Empty<VisibleObjectProjection>(), true, 0, 6, out var r3);
         Assert.Equal("no-visible", r3);
 
-        LlmGoalPolicy.ChooseCombatChainTarget(NewIntent(new VisibleTagPredicate("monster")), oneQuarry, null, 5, true, 0, 6, out var r4);
+        LlmGoalPolicy.ChooseCombatChainTarget(NewIntent(new VisibleTagPredicate("monster")), oneQuarry, true, 0, 6, out var r4);
         Assert.Equal("no-active-commitment", r4);
 
         // The committed kind ("Quarry") is not among the visible mobs.
-        LlmGoalPolicy.ChooseCombatChainTarget(commit, new[] { Mob(0x8002, "Bystander", 5f) }, null, 5, true, 0, 6, out var r5);
+        LlmGoalPolicy.ChooseCombatChainTarget(commit, new[] { Mob(0x8002, "Bystander", 5f) }, true, 0, 6, out var r5);
         Assert.Equal("no-matching-monster", r5);
 
         // A target IS found -> no skip reason.
-        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, null, 5, true, 0, 6, out var r6);
+        var chosen = LlmGoalPolicy.ChooseCombatChainTarget(commit, oneQuarry, true, 0, 6, out var r6);
         Assert.NotNull(chosen);
         Assert.Null(r6);
     }
@@ -326,13 +305,13 @@ public class CombatChainTests
         for (var chainCount = 0; chainCount < maxChain; chainCount++)
         {
             var minted = LlmGoalPolicy.ChooseCombatChainTarget(
-                commit, oneQuarry, null, 5, enabled: true, chainCount, maxChain, out var reason);
+                commit, oneQuarry, enabled: true, chainCount, maxChain, out var reason);
             Assert.NotNull(minted);
             Assert.Null(reason);
         }
 
         var exhausted = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, enabled: true, chainCount: maxChain, maxChain, out var exhaustedReason);
+            commit, oneQuarry, enabled: true, chainCount: maxChain, maxChain, out var exhaustedReason);
         Assert.Null(exhausted);
         Assert.Equal("budget-exhausted", exhaustedReason);
     }
@@ -347,7 +326,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason, combatCapable: false);
+            commit, oneQuarry, true, 0, 6, out var reason, combatCapable: false);
         Assert.Null(chosen);
         Assert.Equal("not-combat-capable", reason);
     }
@@ -361,7 +340,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason, combatCapable: true);
+            commit, oneQuarry, true, 0, 6, out var reason, combatCapable: true);
         Assert.NotNull(chosen);
         Assert.Null(reason);
     }
@@ -378,7 +357,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            commit, oneQuarry, true, 0, 6, out var reason,
             combatCapable: true, selfHealthSuppressed: true);
         Assert.Null(chosen);
         Assert.Equal("self-health-below-reengage", reason);
@@ -393,7 +372,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            commit, oneQuarry, true, 0, 6, out var reason,
             combatCapable: true, selfHealthSuppressed: false);
         Assert.NotNull(chosen);
         Assert.Null(reason);
@@ -412,7 +391,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            commit, oneQuarry, true, 0, 6, out var reason,
             combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: true);
         Assert.Null(chosen);
         Assert.Equal("death-spiral-retreat", reason);
@@ -427,7 +406,7 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            commit, oneQuarry, true, 0, 6, out var reason,
             combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: false);
         Assert.NotNull(chosen);
         Assert.Null(reason);
@@ -442,39 +421,30 @@ public class CombatChainTests
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f) };
 
         var chosen = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, null, 5, true, 0, 6, out var reason,
+            commit, oneQuarry, true, 0, 6, out var reason,
             combatCapable: true, selfHealthSuppressed: true, deathSpiralActive: true);
         Assert.Null(chosen);
         Assert.Equal("self-health-below-reengage", reason);
     }
 
     [Fact]
-    public void ChooseChainTarget_DeathSpiral_SuppressesMixedRecordKindThatIsBeatenKindAllows()
+    public void ChooseChainTarget_DeathSpiral_SuppressesAuthorizedTarget()
     {
-        // The wedge this gate closes: IsBeatenKind excludes only ZERO-kill kinds, so
-        // a MIXED record (some kills AND recent deaths) slips past its filter and the
-        // chain would keep feeding attacks into a kind that is winning the exchange.
-        // First prove the mixed-record kind is NOT beaten (chain mints it when not
-        // spiraling), then prove the death-spiral gate still suppresses it.
+        // The mechanical death-rate gate yields an otherwise-authorized target
+        // to Strategy during a spiral.
         var commit = NewIntent(new KillCountSincePushAtLeastPredicate(5, "Quarry"));
         var oneQuarry = new[] { Mob(0x8001, "Quarry Alpha", 10f, wcid: 0x4242) };
-        var mixedRecord = new List<CombatHistoryEntry>
-        {
-            new CombatHistoryEntry(
-                Name: "Quarry Alpha", Wcid: 0x4242, Kills: 2, Deaths: 3,
-                NearDeaths: 0, Fights: 5, LastOutcome: "death", Ineffective: 0),
-        };
 
-        // Not spiraling: the mixed-record kind is not an IsBeatenKind, so it mints.
+        // Not spiraling: the authored target is decomposed.
         var mint = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, mixedRecord, 5, true, 0, 6, out var mintReason,
+            commit, oneQuarry, true, 0, 6, out var mintReason,
             combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: false);
         Assert.NotNull(mint);
         Assert.Null(mintReason);
 
-        // Spiraling: the same mixed-record kind is now suppressed.
+        // Spiraling: the same target is suppressed.
         var suppressed = LlmGoalPolicy.ChooseCombatChainTarget(
-            commit, oneQuarry, mixedRecord, 5, true, 0, 6, out var suppressedReason,
+            commit, oneQuarry, true, 0, 6, out var suppressedReason,
             combatCapable: true, selfHealthSuppressed: false, deathSpiralActive: true);
         Assert.Null(suppressed);
         Assert.Equal("death-spiral-retreat", suppressedReason);

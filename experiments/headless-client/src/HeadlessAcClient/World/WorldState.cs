@@ -83,11 +83,11 @@ internal sealed record RecentInboundDamage(int Hits, uint TotalDamage, double Wi
 /// </summary>
 /// <param name="Name">Best-known display name of the monster kind.</param>
 /// <param name="Wcid">WeenieClassId of the monster kind, if observed.</param>
-/// <param name="Kills">Times the bot killed this kind this session.</param>
-/// <param name="Deaths">Times this kind killed the bot this session.</param>
+/// <param name="Kills">Recorded times the bot killed this kind.</param>
+/// <param name="Deaths">Recorded times this kind killed the bot.</param>
 /// <param name="NearDeaths">Times the bot disengaged this kind at critical health.</param>
-/// <param name="Fights">Times the bot engaged this kind this session.</param>
-/// <param name="LastOutcome">"kill" | "death" | "near-death" — the most recent outcome.</param>
+/// <param name="Fights">Recorded times the bot engaged this kind.</param>
+/// <param name="LastOutcome">"kill" | "death" | "near-death" | "ineffective" — the most recent outcome.</param>
 internal sealed record CombatHistoryEntry(
     string Name,
     uint? Wcid,
@@ -97,13 +97,9 @@ internal sealed record CombatHistoryEntry(
     int Fights,
     string LastOutcome,
     int Ineffective = 0,
-    // Highest bot level at which a LOSS to this kind was recorded (null when
-    // unknown — e.g. ledgers persisted before this field existed). Drives the
-    // fallback's adaptive beaten-kind re-test; never rendered to the LLM.
-    int? MaxLossBotLevel = null,
     // Subset of Ineffective in which the bot SWUNG (>=1 swing) yet dealt 0 total
     // damage — the kind out-defends/out-armors the bot's current offense.
-    // Excludes no-swing can't-close abandons. Drives the swung-zero-damage veto.
+    // Excludes no-swing can't-close abandons. Rendered as raw Strategy evidence.
     int SwungZeroDamage = 0);
 
 internal sealed class WorldState
@@ -464,20 +460,6 @@ internal sealed class WorldState
     /// when the bot has opened nothing recently.
     /// </summary>
     public IReadOnlySet<uint>? OpenedCorpseGuids { get; set; }
-
-    /// <summary>
-    /// cold-start egress: stable kind-keys (in <see
-    /// cref="HeadlessAcClient.Strategy.CombatFeelLedger.KeyOf"/> form —
-    /// <c>w:wcid</c> or <c>n:name</c>) of monster KINDS the bot has KILLED
-    /// since it entered the current landblock. Reset on landblock change and
-    /// published by HandshakeDriver before each projection build. The
-    /// mechanical hunt-egress override uses it to tell whether a visible
-    /// monster is a kind the bot has already farmed HERE (so, once the bot
-    /// is tapped out, that kind no longer keeps it in the zone) — RAW
-    /// bot-owned outcome data; it carries no danger/value/priority label.
-    /// Null when the bot has killed nothing in this landblock yet.
-    /// </summary>
-    public IReadOnlySet<string>? KilledKindsThisDwell { get; set; }
 
     /// <summary>
     /// immobile-stuck telemetry: how many consecutive full movement
