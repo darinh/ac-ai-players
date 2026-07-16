@@ -377,6 +377,37 @@ public class ContractLocationTests
     }
 
     [Fact]
+    public void Capsule_ExhaustedStage3Root_FinalAuditBlocksRootAndRejectsReturnExplore()
+    {
+        var since = DateTimeOffset.UtcNow;
+        var contract = new ContractProjection
+        {
+            ContractId = 812u, Stage = 3u, Name = "Locate",
+            NpcEnd = "Contact", Stage3SinceUtc = since,
+        };
+        var stack = StackWithFrame("return-to-contact", "Contact", IntentLifecycle.Active);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Contact", 1, since), null, stack);
+        var audit = Section(prompt, "## FINAL STAGE-3 VERB CHECK");
+
+        Assert.Contains("revision=1, depth=1/8", prompt);
+        Assert.Contains("TOP: kind=return-to-contact status=Active target=\"Contact\"", prompt);
+        Assert.Contains(
+            "CURRENT TOP RAW CROSS-CHECK (copy these exact values together): " +
+            "stack_revision=1; depth=1; TOP status=Active target=\"Contact\"; " +
+            "matching raw history: Talk=1, Explore=0",
+            audit);
+        Assert.Contains("a directed `Explore` back to that NPC is also INVALID", audit);
+        Assert.Contains("directed `Explore`, compare its target name against EVERY", audit);
+        Assert.Contains("`pop_top` may remove only a non-root frame", audit);
+        Assert.Contains("one failed op rejects the entire atomic batch", audit);
+        Assert.Contains("TOP status=Active and its matching raw `Talk=N` is 1 or more", audit);
+        Assert.Contains("operation 1 MUST be `mark_top_blocked`", audit);
+        Assert.Contains("push-only, and pop-first operations all FAIL", audit);
+        Assert.Contains("Never pop the matching TOP or leave it Active under a new objective", audit);
+    }
+
+    [Fact]
     public void Capsule_Stage3WithoutTurnInNpc_StillRendersTransitionTime()
     {
         var since = new DateTimeOffset(2026, 7, 16, 1, 2, 3, TimeSpan.Zero);

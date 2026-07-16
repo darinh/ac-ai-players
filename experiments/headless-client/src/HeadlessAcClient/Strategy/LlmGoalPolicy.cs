@@ -8056,7 +8056,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 {
   "goal_id": "<new uuid>",
   "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
-  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
+  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },   // REQUIRED non-empty selector for EVERY kind; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
@@ -8076,7 +8076,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
   //    executes this in the next few ticks) --
   "goal_id": "<new uuid>",
   "kind": "Give" | "Use" | "Attack" | "Pickup" | "Wield" | "Dequip" | "GoTo" | "Talk" | "Wait" | "Explore" | "RaiseAttribute" | "RaiseVital" | "RaiseSkill" | "Recall" | "Buy" | "Sell" | "FellowshipCreate" | "FellowshipQuit" | "FellowshipRecruit" | "SwearAllegiance" | "BreakAllegiance" | "Say" | "FellowshipAccept" | "AllegianceApprove",
-  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },
+  "target": { "name"?: string, "name_contains"?: string, "wcid"?: number, "item_type_mask"?: number, "short_desc_contains"?: string, "guid"?: number },   // REQUIRED non-empty selector for EVERY kind; Wait uses {"name":"self"}; undirected Explore uses {"name":"anywhere"}
   "item":   { ...same as target... } | null,
   "amount": number | null,   // Raise* only: whole positive XP; target.name = the attribute/vital/skill
   "direction": "north"|"northeast"|"east"|"southeast"|"south"|"southwest"|"west"|"northwest" | null,   // Explore only: OPTIONAL compass bearing the bot COMMITS to and travels (short forms n/ne/e/se/s/sw/w/nw also accepted); omit to wander undirected
@@ -8382,7 +8382,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 (nowUtc - e.Utc).TotalSeconds <= ServerTextActionableSeconds));
         if (stack is not null)
         {
-            sb.AppendLine("- STRATEGIC STACK: `## Intent stack` is the current plan; TOP is the active sub-goal, ancestors paused. Per-cycle goals advance TOP. PUSH on a discovered sub-task; POP_TOP when done and no predicate caught it (rare — predicates auto-pop); REPLACE_TOP when right-frame-wrong-target; MARK_TOP_BLOCKED when stuck. Always echo `stack_revision`.");
+            sb.AppendLine("- STRATEGIC STACK: `## Intent stack` is the current plan; TOP is the active sub-goal, ancestors paused. Per-cycle goals advance TOP. PUSH on a discovered sub-task; POP_TOP when done and no predicate caught it (rare — predicates auto-pop), but ONLY while depth > 1 because the final/root frame cannot be popped; at depth 1 use MARK_TOP_BLOCKED or REPLACE_TOP instead. REPLACE_TOP when right-frame-wrong-target; MARK_TOP_BLOCKED when stuck. Always echo `stack_revision`.");
             sb.AppendLine("- COMPLETION PREDICATES: pick the typed predicate matching your termination criterion (the discriminator field is `type`, e.g. `{\"type\":\"kill_count_total_at_least\",\"count\":3}`); prefer server-authoritative (num_deaths, coin_value). *_total_* for absolute thresholds, *_since_push_* for deltas. A hunt excursion completes when a monster is finally in view: `{\"type\":\"visible_tag\",\"tag\":\"monster\"}` (set `deadline_seconds` too, as a liveness backstop). If none fits, `{\"type\":\"always_false\"}` + `predicate_request`.");
             // PERSIST A HUNT EXCURSION is about STARTING/maintaining an excursion
             // to FIND monsters; it is moot once a monster is already in view (the
@@ -10579,6 +10579,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // first row is always emitted so at least one contract stays visible. A
         // `(+N more)` count note tells the LLM its view is partial.
         var anyRenderedPostStage3GoalHistory = false;
+        string? renderedTopStage3CrossCheck = null;
         if (world.Contracts.Count > 0)
         {
             sb.AppendLine();
@@ -10608,6 +10609,20 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     anyContractBearing = true;
                 if (c.Stage == 3u && c.Stage3SinceUtc is not null && OneLine(c.NpcEnd) is not null)
                     anyRenderedPostStage3GoalHistory = true;
+                if (stack?.Top is { } shownTop
+                    && c.Stage == 3u
+                    && c.Stage3SinceUtc is { } shownSince
+                    && OneLine(c.NpcEnd) is { } shownEnd
+                    && string.Equals(
+                        OneLine(shownTop.TargetName), shownEnd,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    renderedTopStage3CrossCheck =
+                        $"stack_revision={stack.Revision}; depth={stack.Depth}; " +
+                        $"TOP status={shownTop.Status} target=\"{shownEnd}\"; matching raw history: " +
+                        $"Talk={CountRecentTalkGoalsToName(events, shownEnd, shownSince)}, " +
+                        $"Explore={CountRecentExploreGoalsToName(events, shownEnd, shownSince)}";
+                }
                 sb.Append(entry);
                 contractsChars += entry.Length;
                 contractsShown++;
@@ -12579,6 +12594,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## FINAL STAGE-3 VERB CHECK (apply immediately before choosing the goal)");
+            if (renderedTopStage3CrossCheck is not null)
+                sb.AppendLine(
+                    $"- CURRENT TOP RAW CROSS-CHECK (copy these exact values together): " +
+                    $"{renderedTopStage3CrossCheck}. Keep this line in view while applying both the TARGET and " +
+                    "STACK gates, even when the drafted goal points somewhere else.");
             sb.AppendLine(
                 "- First COPY the exact integer from the proposed target's `post-stage-3 goal history` row in " +
                 "`## Contracts`. Never infer it from stage, visibility, process age, or the TOP intent, and never " +
@@ -12594,33 +12614,48 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "qualifying line.");
             sb.AppendLine(
                 "- EXHAUSTED TARGET: when `Talk=1` or more and no exception exists, goal.kind MUST NOT be `Talk`, " +
-                "`Use`, or `Give` for that NPC. All three are interactions; swapping verbs is not progress. " +
-                "Block/revise the matching intent and choose a directed action away from that NPC.");
+                "`Use`, or `Give` for that NPC, and a directed `Explore` back to that NPC is also INVALID because " +
+                "it only approaches an interaction you may not perform. Swapping verbs or walking back is not " +
+                "progress. Block/revise the matching intent and choose a directed action away from that NPC.");
             sb.AppendLine(
                 "- PRECEDENCE: for a stage-3 Talk decision, this FINAL check is authoritative over earlier generic " +
                 "\"Attempt that hand-in ONCE\" / `MARK_TOP_BLOCKED` guidance. A rejected or out-of-reach emission " +
                 "did not consume the successful attempt, and genuinely new evidence may warrant another; block the " +
                 "intent only when neither exception above exists.");
             sb.AppendLine(
-                "- `Explore=1` or more is different: repeat it while raw location/visibility shows concrete " +
-                "approach progress; if position/reach stops changing, revise instead.");
+                "- `Explore=1` or more is different ONLY while `Talk=0` (approaching for the unused attempt) or an " +
+                "exact retry exception above exists: repeat it while raw location/visibility shows concrete " +
+                "approach progress; if position/reach stops changing, revise instead. Once `Talk=1` or more with " +
+                "no exception, do NOT Explore toward that same NPC again.");
             sb.AppendLine(
                 "- Source does not enforce this check or veto your goal; YOU must apply it.");
             sb.AppendLine(
                 "- FINAL RESPONSE AUDIT (mandatory after drafting the goal, before emitting JSON):");
             sb.AppendLine(
-                "  1. INTERACTION GATE: for a candidate `Talk`, `Use`, or `Give`, compare its target name against " +
-                "EVERY `post-stage-3 goal history` row above. If any matching row has `Talk=1` or more and your " +
-                "rationale cannot quote the exact allowed exception line, the candidate FAILS. Changing the verb " +
-                "does not pass this gate.");
+                "  1. TARGET GATE: for a candidate `Talk`, `Use`, `Give`, or directed `Explore`, compare its target " +
+                "name against EVERY `post-stage-3 goal history` row above. If any matching row has `Talk=1` or " +
+                "more and your rationale cannot quote the exact allowed exception line, the candidate FAILS. " +
+                "Changing the verb or merely approaching the target does not pass this gate.");
             sb.AppendLine(
                 "  2. ITEM GATE: for a candidate `Give`, its item name MUST be copied exactly from a row in " +
                 "`## Held items` or `## Inventory`. A contract tracker id/name/objective is NOT held-item evidence. " +
                 "An item you merely assume exists, call a canonical name, or plan to acquire later FAILS.");
             sb.AppendLine(
-                "  3. If either gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
-                "Block/revise the unsupported intent, choose a different action grounded in shown evidence, and run " +
-                "this audit again. Emit JSON only after both gates pass.");
+                "  3. STACK GATE: read the shown stack `depth=N` and simulate `stack_ops` in order. `pop_top` may " +
+                "remove only a non-root frame: it FAILS whenever the simulated depth is 1, and one failed op rejects " +
+                "the entire atomic batch. If the cross-check says TOP status=Active and its matching raw `Talk=N` " +
+                "is 1 or more with no exact retry exception, `stack_ops` is MANDATORY and operation 1 MUST be " +
+                "`mark_top_blocked` with the shown `stack_revision`. An unrelated valid goal or a new `push` does " +
+                "NOT waive this operation: absent, null, empty, push-only, and pop-first operations all FAIL. Never " +
+                "pop the matching TOP or leave it Active under a new objective.");
+            sb.AppendLine(
+                "  4. FORMAT GATE: `goal.target` MUST contain a non-empty selector for every kind. For `Wait`, use " +
+                "`{\"name\":\"self\"}`; for untargeted `Explore`, use `{\"name\":\"anywhere\"}`. Null, `{}`, and " +
+                "empty-string selectors FAIL.");
+            sb.AppendLine(
+                "  5. If any gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
+                "Revise the goal/stack operations, choose an action grounded in shown evidence, and run this audit " +
+                "again. Emit JSON only after all four gates pass.");
         }
 
         var assembled = sb.ToString();
@@ -14651,7 +14686,10 @@ Intent stack — when `## Intent stack` is present in the prompt:
   top of the existing "do quest" root). Always include a typed
   COMPLETION predicate so the stack auto-pops when satisfied.
 - POP_TOP only when the predicate didn't fire but the intent is
-  truly done (rare).
+  truly done (rare) AND the shown stack depth is greater than one.
+  The final/root frame can never be popped; at depth one use
+  MARK_TOP_BLOCKED or REPLACE_TOP instead. Stack-op batches are atomic,
+  so one invalid root pop rejects every operation in that batch.
 - REPLACE_TOP when the same strategic frame applies but the specific
   target / parameters were wrong.
 - MARK_TOP_BLOCKED when you cannot advance and want to record why,

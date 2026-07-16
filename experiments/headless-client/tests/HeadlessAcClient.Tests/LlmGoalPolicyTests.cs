@@ -6584,13 +6584,19 @@ public class LlmGoalPolicyTests
         Assert.Contains("## FINAL STAGE-3 VERB CHECK", prompt);
         Assert.Contains("Unchanged stage 3, NPC visibility, a matching TOP intent", prompt);
         Assert.Contains("another Talk to that same NPC is INVALID", prompt);
-        Assert.Contains("All three are interactions; swapping verbs is not progress", prompt);
+        Assert.Contains("Swapping verbs or walking back is not progress", prompt);
         Assert.Contains("this FINAL check is authoritative over earlier generic", prompt);
         Assert.Contains("Source does not enforce this check or veto your goal", prompt);
         Assert.Contains("FINAL RESPONSE AUDIT", prompt);
         Assert.Contains("An item you merely assume exists, call a canonical name", prompt);
+        Assert.Contains("`pop_top` may remove only a non-root frame", prompt);
+        Assert.Contains("FORMAT GATE: `goal.target` MUST contain a non-empty selector", prompt);
+        Assert.Contains("Wait uses {\"name\":\"self\"}", prompt);
+        Assert.Contains(
+            "The final/root frame can never be popped",
+            LlmGoalPolicy.DefaultSystemPrompt);
         Assert.EndsWith(
-            "Emit JSON only after both gates pass.",
+            "Emit JSON only after all four gates pass.",
             prompt.TrimEnd());
         Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
     }
