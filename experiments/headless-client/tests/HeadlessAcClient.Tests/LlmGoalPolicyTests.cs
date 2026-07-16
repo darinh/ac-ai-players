@@ -26073,14 +26073,16 @@ public class LlmGoalPolicyTests
     [Fact]
     public void BuildUserPrompt_ActiveNamedKillObjective_SearchesInsteadOfSubstituting()
     {
-        var world = BuildWorldWithMonsters(new VisibleObjectProjection
+        var world = BuildInventoryWorld(
+            new[] { BagLauncher(0x501u, 7, "Ammoless Launcher") },
+            new[] { new VisibleObjectProjection
         {
             Guid = 0x601u,
             Name = "Distractor Beast",
             Wcid = 71u,
             Distance = 5f,
             IsMonster = true,
-        });
+        } });
         var events = new EventStream();
         var stack = new IntentStack();
         stack.TryPush(new Intent
@@ -26100,6 +26102,7 @@ public class LlmGoalPolicyTests
         Assert.Contains("Explore to search for that kind instead of substituting optional combat", prompt);
         Assert.Contains("immediate defense against a `HOSTILE` attacker", prompt);
         Assert.Contains("`MARK_TOP_BLOCKED` or `REPLACE_TOP`", prompt);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
 
         var sparsePrompt = LlmGoalPolicy.BuildUserPrompt(
             BuildExitTokenWorld(), events, null, stack);
@@ -26112,6 +26115,105 @@ public class LlmGoalPolicyTests
         Assert.True(tight.Length <= bodyIdx);
         Assert.Contains("## Active named kill objective", tight);
         Assert.Contains("kills_since_push \"Quarry Beast\">=3", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActiveNamedKillObjective_MatchingMonsterRemainsAttackable()
+    {
+        var world = BuildInventoryWorld(
+            new[] { BagLauncher(0x502u, 7, "Ammoless Launcher") },
+            new[] { new VisibleObjectProjection
+            {
+                Guid = 0x602u,
+                Name = "Required Beast",
+                Wcid = 72u,
+                Distance = 5f,
+                IsMonster = true,
+            } });
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world,
+            events,
+            currentGoal: null,
+            stack: ActiveNamedKillStack(world, events));
+
+        Assert.Contains("Attack a visible matching target", prompt);
+        Assert.Contains("`Required Beast`", prompt);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActiveNamedKillObjective_UnrelatedHostilePreservesSelfDefense()
+    {
+        var world = BuildInventoryWorld(
+            new[] { BagLauncher(0x503u, 7, "Ammoless Launcher") },
+            new[] { new VisibleObjectProjection
+            {
+                Guid = 0x603u,
+                Name = "Attacking Distractor",
+                Wcid = 73u,
+                Distance = 3f,
+                IsMonster = true,
+                ObservedHostile = true,
+            } });
+        var events = new EventStream();
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world,
+            events,
+            currentGoal: null,
+            stack: ActiveNamedKillStack(world, events));
+
+        Assert.Contains("HOSTILE", prompt);
+        Assert.Contains("immediate defense against a `HOSTILE` attacker remain valid", prompt);
+        Assert.DoesNotContain("FIGHT NOW", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActiveNamedKillObjective_AttackLoopsDoNotSuggestSubstitution()
+    {
+        var now = System.DateTimeOffset.UtcNow;
+        var eventStreams = new[]
+        {
+            AttackEmissions("Required Beast", 3, now),
+            AttackDescriptorEmissions("name_contains=\"creature\"", 3, now),
+        };
+        foreach (var events in eventStreams)
+        {
+            var world = BuildWorldWithMonsters(new VisibleObjectProjection
+            {
+                Guid = 0x604u,
+                Name = "Distractor Beast",
+                Wcid = 74u,
+                Distance = 5f,
+                IsMonster = true,
+            });
+            var prompt = LlmGoalPolicy.BuildUserPrompt(
+                world,
+                events,
+                currentGoal: null,
+                stack: ActiveNamedKillStack(world, events));
+
+            Assert.Contains("TOP still requires kills", prompt);
+            Assert.Contains("Do NOT switch to a different kind", prompt);
+            Assert.DoesNotContain("Attack` a DIFFERENT monster", prompt);
+            Assert.DoesNotContain("Attack` a monster that IS listed", prompt);
+        }
+    }
+
+    private static IntentStack ActiveNamedKillStack(
+        WorldStateProjection world,
+        EventStream events)
+    {
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-active-kill",
+            Kind = "quest:kill-task",
+            TargetName = "Required Beast",
+            Completion = new KillCountSincePushAtLeastPredicate(3, "Required Beast"),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        return stack;
     }
 
     [Fact]

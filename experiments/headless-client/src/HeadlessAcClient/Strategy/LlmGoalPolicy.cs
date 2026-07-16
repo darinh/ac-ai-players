@@ -11733,6 +11733,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // combat. Re-surface the predicate's exact tactical consequence in the
         // protected tail so an absent target produces search, not substitution.
         // This reads only the bot's own typed intent; Strategy still decides.
+        (KillCountSincePushAtLeastPredicate Predicate, string RequiredKind)?
+            activeNamedKillObjective = null;
         if (stack?.Top is
             {
                 Status: IntentLifecycle.Active,
@@ -11740,12 +11742,16 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             && namedKill.Count > 0
             && OneLine(namedKill.NameContains) is string requiredKind)
+            activeNamedKillObjective = (namedKill, requiredKind);
+
+        if (activeNamedKillObjective is { } namedKillCue)
         {
             sb.AppendLine();
             sb.AppendLine("## Active named kill objective");
             sb.AppendLine(
-                $"- TOP completion is `kills_since_push \"{requiredKind}\">={namedKill.Count}`; only kills " +
-                $"whose shown name contains `{requiredKind}` advance it.");
+                $"- TOP completion is `kills_since_push \"{namedKillCue.RequiredKind}\">=" +
+                $"{namedKillCue.Predicate.Count}`; only kills whose shown name contains " +
+                $"`{namedKillCue.RequiredKind}` advance it.");
             sb.AppendLine(
                 "- The compiler's generic \"unrelated monsters are optional fallback\" clause does NOT apply " +
                 "while this named predicate is TOP. Attack a visible matching target; if none is visible, " +
@@ -13410,7 +13416,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // decides what to do instead. Sibling of the Explore loop's route-blocked branch.
             var loopedAttackRouteBlocked = routeBlockedTarget is string rbAtkName
                 && string.Equals(NormalizeEmittedTargetName(rbAtkName), loopedAttackName, StringComparison.OrdinalIgnoreCase);
-            if (loopedAttackRouteBlocked)
+            if (activeNamedKillObjective is { } namedKillForNameLoop)
+            {
+                var routeStatus = loopedAttackRouteBlocked
+                    ? $"`{loopedAttackDisplay}` has no on-foot route from here"
+                    : $"no monster named `{loopedAttackDisplay}` is currently in view";
+                sb.AppendLine(
+                    $"- {routeStatus}, and TOP still requires kills whose shown name contains " +
+                    $"`{namedKillForNameLoop.RequiredKind}`. Do NOT switch to a different kind: use `Explore` to search " +
+                    "for the required kind, or use `MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+            }
+            else if (loopedAttackRouteBlocked)
                 sb.AppendLine(
                     $"- you have tried to `Attack` `{loopedAttackDisplay}` several times, but it is across a " +
                     "landblock boundary you have NO on-foot route across from your current area — walking will " +
@@ -13620,15 +13636,22 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         {
             sb.AppendLine();
             sb.AppendLine("## Attack loop (repeated monster-description Attack)");
-            sb.AppendLine(
-                $"- you have tried several times to `Attack` a monster matching the description `{loopedAttackDescDisplay}`, " +
-                "but NO attackable target matching it is in view in `## Nearest objects` — `Attack` targets a SPECIFIC " +
-                "monster named by its exact `name`, not a category word. If you are TRAVELLING toward a monster matching " +
-                $"`{loopedAttackDescDisplay}` that you saw earlier and closing in (your `landblock`/position is changing as " +
-                "you go), keep going — it will come into view. But if your position is NOT changing, re-emitting the same " +
-                "description makes no progress: `Attack` a monster that IS listed in `## Nearest objects` by its exact " +
-                "`name`, or emit `Explore{target: {name: \"anywhere\"}}` to travel toward new ground and find one, instead " +
-                "of re-`Attack`-ing a description nothing attackable in view matches.");
+            if (activeNamedKillObjective is { } namedKillForDescriptorLoop)
+                sb.AppendLine(
+                    $"- no attackable target matching `{loopedAttackDescDisplay}` is in view, and TOP still requires " +
+                    $"kills whose shown name contains `{namedKillForDescriptorLoop.RequiredKind}`. Do NOT switch to a different " +
+                    "kind: use `Explore` to search for the required kind, or use " +
+                    "`MARK_TOP_BLOCKED`/`REPLACE_TOP` if it is genuinely impossible.");
+            else
+                sb.AppendLine(
+                    $"- you have tried several times to `Attack` a monster matching the description `{loopedAttackDescDisplay}`, " +
+                    "but NO attackable target matching it is in view in `## Nearest objects` — `Attack` targets a SPECIFIC " +
+                    "monster named by its exact `name`, not a category word. If you are TRAVELLING toward a monster matching " +
+                    $"`{loopedAttackDescDisplay}` that you saw earlier and closing in (your `landblock`/position is changing as " +
+                    "you go), keep going — it will come into view. But if your position is NOT changing, re-emitting the same " +
+                    "description makes no progress: `Attack` a monster that IS listed in `## Nearest objects` by its exact " +
+                    "`name`, or emit `Explore{target: {name: \"anywhere\"}}` to travel toward new ground and find one, instead " +
+                    "of re-`Attack`-ing a description nothing attackable in view matches.");
         }
 
         // ── ## Wield loop (repeated weapon-description Wield) — descriptor sibling of the Wield cue ──
@@ -13919,7 +13942,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             // hard-cut, and `monstersInView > 0` is exactly the condition that triggers
             // that cut — so without this the weaponless-with-monster steer is lost in the
             // very scene it targets.
-            if (!armed && monstersInView > 0 && armVendor is null &&
+            if (!armed && monstersInView > 0 && activeNamedKillObjective is null &&
+                armVendor is null &&
                 bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
                 bagAmmo is null && bagLauncherAmmo is null)
                 sb.AppendLine(
