@@ -6587,8 +6587,10 @@ public class LlmGoalPolicyTests
         Assert.Contains("All three are interactions; swapping verbs is not progress", prompt);
         Assert.Contains("this FINAL check is authoritative over earlier generic", prompt);
         Assert.Contains("Source does not enforce this check or veto your goal", prompt);
+        Assert.Contains("FINAL RESPONSE AUDIT", prompt);
+        Assert.Contains("An item you merely assume exists, call a canonical name", prompt);
         Assert.EndsWith(
-            "- Source does not enforce this check or veto your goal; YOU must apply it.",
+            "Emit JSON only after both gates pass.",
             prompt.TrimEnd());
         Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
     }

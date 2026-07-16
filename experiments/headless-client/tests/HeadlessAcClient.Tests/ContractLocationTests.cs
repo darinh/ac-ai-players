@@ -337,6 +337,46 @@ public class ContractLocationTests
     }
 
     [Fact]
+    public void Capsule_MultipleStage3Histories_FinalAuditChecksEveryTargetAndGiveItem()
+    {
+        var since = DateTimeOffset.UtcNow;
+        var first = new ContractProjection
+        {
+            ContractId = 810u, Stage = 3u, Name = "First",
+            NpcEnd = "First Contact", Stage3SinceUtc = since,
+        };
+        var second = new ContractProjection
+        {
+            ContractId = 811u, Stage = 3u, Name = "Second",
+            NpcEnd = "Second Contact", Stage3SinceUtc = since,
+        };
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = since.AddSeconds(1), Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"First Contact\" item= source=llm:test",
+        });
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = since.AddSeconds(2), Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"Second Contact\" item= source=llm:test",
+        });
+
+        var world = WorldWithContracts(first, second);
+        Assert.Empty(world.Inventory);
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, null, new IntentStack());
+        var audit = Section(prompt, "## FINAL STAGE-3 VERB CHECK");
+
+        Assert.Contains("post-stage-3 goal history for First Contact: Talk=1", prompt);
+        Assert.Contains("post-stage-3 goal history for Second Contact: Talk=1", prompt);
+        Assert.Contains("FINAL RESPONSE AUDIT", audit);
+        Assert.Contains("compare its target name against EVERY", audit);
+        Assert.Contains("A contract tracker id/name/objective is NOT held-item evidence", audit);
+        Assert.Contains("DO NOT emit that candidate or invent an unobserved prerequisite intent", audit);
+    }
+
+    [Fact]
     public void Capsule_Stage3WithoutTurnInNpc_StillRendersTransitionTime()
     {
         var since = new DateTimeOffset(2026, 7, 16, 1, 2, 3, TimeSpan.Zero);
