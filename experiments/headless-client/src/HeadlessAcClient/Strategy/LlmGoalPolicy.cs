@@ -1496,23 +1496,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             && VisibleMatchesSelector(goal.Target, v));
     }
 
-    // True iff there IS at least one attackable monster in view AND every such
-    // monster is a kind the bot's own ledger marks LETHAL-beaten — the SAME
-    // definition the veto and the ## Beaten kinds capsule use (a recorded DEATH
-    // plus IsBeatenKind, lethal-retestable only once out-levelled) — i.e. there
-    // is nothing in view the bot can currently win against and nothing it should
-    // re-attempt. Used to break the beaten-kind STALEMATE: a beaten kind still
-    // counts as a monster-in-view, so the general stuck-loop egress (which
-    // requires NO monster in view) never fires and the bot stays parked; the LLM
-    // is then re-asked every decision and re-picks the SAME vetoed Attack, burning
-    // scarce LLM budget. Matching the veto's LETHAL-only definition is deliberate:
-    // a merely SURVIVED (non-lethal) beaten kind in view is one the bot MAY still
-    // re-attempt (the veto honors that), so its presence DEFERS this egress. An
-    // actively-hostile monster in view is a live threat the Motor's flee/defend
-    // reflexes must own, so its presence also DEFERS (return false). Likewise a
-    // winnable (not-beaten) monster in view DEFERS — engage that XP target, do not
-    // wander off. Own-perception wire flags + own combat ledger + own level only;
-    // no game content, no priority on object types.
+    // True iff at least one attackable monster is in view and every such monster
+    // matches the difficult-kind classification also surfaced in the protected
+    // combat-ledger capsule. Existing autonomous travel heuristics use this to
+    // characterize a scene after Strategy has already chosen travel. It does not
+    // inspect or rewrite an explicit LLM-authored Attack. An active hostile or a
+    // kind with recorded wins makes the classification false.
     internal static bool OnlyBeatenMonstersInView(WorldStateProjection world)
     {
         var monsters = world.Visible
@@ -1524,12 +1513,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CombatHistoryFull, v.Wcid, v.Name, world.Self.Level));
     }
 
-    // True when at least one WINNABLE monster is in view: an attackable (non-corpse) monster
-    // exists AND they are not ALL beaten kinds the veto would drop. The standard "engage here
-    // vs leave to find a fight" predicate (same composition the egress-defer + explore-skip
-    // beaten-only arms use), correct REGARDLESS of combat-ready/tapped-out — it reads the beaten
-    // ledger directly, unlike ComputeEffectiveMonsterInView whose killed-kinds exclusion is gated
-    // on tappedOut (false for an unarmed bot). Own perception + own combat ledger; no game knowledge.
+    // Existing autonomous-travel predicate: an attackable monster exists and the
+    // whole visible set is not classified as difficult by the bot's own ledger.
+    // Explicit LLM-authored Attacks bypass this predicate.
     internal static bool HasWinnableMonsterInView(WorldStateProjection world)
         => AnyAttackableMonsterInView(world) && !OnlyBeatenMonstersInView(world);
 
@@ -3422,9 +3408,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // Reduce-llm-call-volume (default ON; opt OUT via AC_BOTS_SKIP_EMPTY_EXPLORE_CALL=0/false/off).
         // When the bot is on a sustained UNTARGETED Explore (its last emitted goal was
         // `Explore{anywhere}` — pure Motor-owned travel with nothing to interact with),
-        // with NOTHING WINNABLE in view to engage (no attackable monster, OR only
-        // non-hostile beaten-kind monsters the Attack veto already rejects — re-asking
-        // re-picks the SAME vetoed Attack; no vendor; no un-talked NPC) and NO
+        // with NOTHING WINNABLE in view to engage (no attackable monster, or only
+        // non-hostile kinds classified difficult by the bot's own ledger; no vendor;
+        // no un-talked NPC) and NO
         // decision-worthy change since the last LLM look, re-deliberating just
         // reproduces the SAME untargeted Explore — so skip the redundant call and continue
         // traveling. The beaten-only arm reuses OnlyBeatenMonstersInView (the same
@@ -3573,13 +3559,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // observability; incremented at the chain mint site, never reset (cumulative like
     // the other run aggregates).
     private int _summaryChainMints;
-    // Count of LLM-emitted Attacks the beaten-kind veto DROPPED this run (the bot
-    // ordered combat on a KIND its own ledger marks beaten/un-out-leveled). The
-    // dominant open-world override when the bot is in territory too tough for it;
-    // read against kills= it shows how many combat decisions land on un-winnable
-    // targets vs actual kills. Surfaced as beaten-vetoes=N in [run-summary]. Pure
-    // observability.
-    private int _summaryBeatenVetoes;
     // Count of deferred-attack egresses this run: times the policy gave up an LLM Attack the
     // Motor REPEATEDLY deferred. The Motor emits the SAME deferral marker for BOTH causes —
     // self-health below the re-engage threshold AND a recently-disengaged target on its brief
@@ -3621,7 +3600,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             world.CumulativeSwingsLanded, world.CumulativeSwingsEvaded, deathsThisRun,
             IsCombatCapable(world.Inventory), world.Self.HealthObservedPeak, world.Self.CoinValue,
             world.Self.AvailableExperience, RecentGoalFailureCount(events),
-            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills, _summaryBeatenVetoes,
+            FormatCombatAttributes(world.Self.Attributes), world.CumulativeKills,
             world.CumulativeRaises, _summaryDeferredAttackEgresses, FormatTopIntent(_stack),
             world.Self.StaminaCurrent, world.Self.StaminaObservedPeak,
             world.CumulativeZeroDamageAbandons,
@@ -3726,7 +3705,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         string? topEmit = null, int skips = 0, string? contracts = null, int? intentDepth = null,
         int refreshOpps = 0, int swingsLanded = 0, int swingsEvaded = 0, int? deathsThisRun = null,
         bool armed = true, int? maxHpProxy = null, int? coin = null, long? unspent = null,
-        int recentFails = 0, string? combatAttrs = null, int kills = 0, int beatenVetoes = 0,
+        int recentFails = 0, string? combatAttrs = null, int kills = 0,
         int raises = 0, int attackEgresses = 0, string? topIntent = null,
         int? staminaCurrent = null, int? staminaPeak = null, int zeroDamageAbandons = 0,
         int untargetedExplores = 0, int chainMints = 0)
@@ -3841,13 +3820,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // behavior change, no game knowledge.
         if (kills > 0)
             line += $" kills={kills}";
-        // Beaten-kind veto count: LLM Attacks dropped this run because the target KIND
-        // is on the bot's own beaten ledger (too tough). Read against kills= it shows
-        // the combat-decision efficiency — a high beaten-vetoes with low kills means
-        // the bot is in territory too tough for it (choosing un-winnable targets) and
-        // should get stronger or relocate. Shown only when >0. Pure observability.
-        if (beatenVetoes > 0)
-            line += $" beaten-vetoes={beatenVetoes}";
         // Combat-effectiveness signal: surface the session swing-outcome counters
         // (CumulativeSwingsLanded / CumulativeSwingsEvaded) in [run-summary], shown
         // only when at least one has incremented. Pure observability; no behavior
@@ -4926,50 +4898,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return EscapeOrFallback(world, events, currentGoal, nowUtc, "wield no-weapon");
         }
 
-        // Beaten-kind Attack veto: an LLM Attack can name a KIND the bot's OWN
-        // ledger shows it keeps LOSING to (the IsBeatenKind verdict the
-        // autonomous picker and the COMBAT SAFETY prompt rule already apply). A
-        // weak model may misread its own record and re-pick such a kind;
-        // re-attacking just loses again (often near-0 hit-rate), and left
-        // unchecked the bot can die to the same kind repeatedly. Drop the
-        // OPTIONAL (non-self-defense) engagement and defer to the fallback — it
-        // Explores away or autonomously picks a NOT-beaten target. The veto is
-        // gated on the bot NOT having out-leveled the loss, so an explicit order
-        // can re-attempt the kind once the bot is demonstrably stronger. A
-        // self-defense Attack on an actively-hostile beaten kind is also exempt
-        // (predicate returns false). Bot-owned outcomes + own level only; no
-        // game knowledge.
-        if (IsOptionalAttackOnBeatenKind(goal, world))
-        {
-            _summaryBeatenVetoes++;
-            Console.WriteLine(
-                $"[llm-override] beaten-kind veto: dropping LLM Attack target={goal.Target}" +
-                " — own combat ledger marks this kind beaten (losses, no kills); deferring to fallback.");
-            _training?.RecordParseError(decisionId,
-                "dropped-by-override: LLM Attack on a beaten kind (own ledger: losses, no kills)");
-            // Beaten-kind STALEMATE egress: when EVERY attackable monster in view
-            // is a beaten kind (nothing winnable, no live threat), the plain
-            // fallback would keep the bot parked here (a beaten kind still counts
-            // as a monster-in-view, so the stuck-loop egress cannot fire), so the
-            // next no-current-goal decision re-presents the same scene and a weak
-            // model re-picks the SAME vetoed Attack — burning quota on a veto that
-            // can never pass. Explore OUT to find a winnable target instead of
-            // re-deferring. Self-limiting: as the bot moves, the beaten kinds leave
-            // view and a fresh scene unblocks normal play. (reduce-llm-call-volume)
-            if (OnlyBeatenMonstersInView(world))
-            {
-                Console.WriteLine(
-                    "[llm-override] beaten-kind egress: every attackable monster in view is a " +
-                    "beaten kind — substituting Explore{anywhere} to leave and find a winnable target.");
-                return MakeEgressExploreGoal(
-                    nowUtc, "override:beaten-kind-egress",
-                    "mechanical beaten-kind egress: every attackable monster in view is a kind the " +
-                    "bot's own ledger marks beaten; leaving to find a winnable target instead of " +
-                    "re-emitting a vetoed Attack");
-            }
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, "beaten-kind Attack");
-        }
-
         _training?.RecordEmittedGoal(decisionId, goal);
         // Sticky-objective bookkeeping: remember this LLM-authored goal
         // so ProposeGoal can re-drive it without another LLM call while
@@ -5569,68 +5497,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     /// <summary>
-    /// True iff an LLM <see cref="GoalKind.Attack"/> OPTIONALLY targets a KIND
-    /// the bot's OWN combat ledger marks <see cref="IsBeatenKind"/> — it has
-    /// died / near-died / been ineffective against that kind with no kills
-    /// (level-aware: a non-lethal loss is re-testable once the bot out-levels
-    /// it; a lethal loss stays beaten). This is the SAME verdict the autonomous
-    /// kill-commitment picker and the COMBAT SAFETY prompt rule already apply;
-    /// a weak model can still misread its own record and re-pick such a kind,
-    /// where re-attacking just loses again (often near-0 hit-rate).
-    ///
-    /// "OPTIONAL" excludes self-defense: when the named kind is currently an
-    /// ACTIVE HOSTILE in view (attacking the bot now) the Attack is left alone
-    /// — the Motor's losing-fight disengage and self-preservation reflexes own
-    /// that case (mirroring the town-egress rule that never overrides a
-    /// self-defense Attack). So only a CHOSEN, non-threatened engagement of a
-    /// kind that keeps beating the bot is vetoed.
-    ///
-    /// Pure; bot-owned outcomes + own level only — no wcid/NPC/landblock, no
-    /// game knowledge. Extracted for deterministic unit testing. The caller
-    /// drops the goal and defers to <see cref="EscapeOrFallback"/>, which
-    /// Explores away or lets the fallback autonomously pick a NOT-beaten target
-    /// — it never re-attacks this kind.
-    /// </summary>
-    internal static bool IsOptionalAttackOnBeatenKind(Goal goal, WorldStateProjection world)
-    {
-        if (goal.Kind != GoalKind.Attack) return false;
-        var target = goal.Target;
-        if (target is null) return false;
-        // Attack selectors are name-first; fall back to the substring hook, and
-        // keep any wcid so the ledger lookup can match by either identity (a
-        // name-only check would silently miss a wcid- or substring-only target).
-        var targetName = target.Name ?? target.NameContains;
-        if (string.IsNullOrWhiteSpace(targetName) && target.Wcid is null) return false;
-
-        // Self-defense exemption: a kind actively hostile in view is attacking
-        // the bot now; fighting back (and the Motor's flee reflexes) own that —
-        // do not veto. Only a non-threatened, chosen engagement is overridable.
-        // Uses the Motor's exact-then-unique-fuzzy name semantics so a partial-name
-        // Attack the Motor WILL resolve to a hostile in view is not wrongly vetoed.
-        if (TargetResolvesToHostileInViewLikeMotor(target, world))
-            return false;
-
-        // Override an explicit Attack order ONLY to prevent a FUTILE engagement:
-        // a kind whose own ledger records an actual DEATH, OR a survived-loss kind
-        // the bot has re-attempted INEFFECTIVELY past the deadlock-fix allowance (it
-        // cannot DAMAGE it after many tries). A survived loss within the allowance
-        // (few ineffective swings, no death) is still NOT vetoed. Survival during any
-        // re-attempt is enforced independently by the Motor's low-health flee /
-        // self-preservation gate, so this veto need not also block survivable kinds; and the
-        // out-level re-test gate (below) keys on the bot's level, which a
-        // survived loss does not raise, so vetoing here would bar re-engagement
-        // indefinitely. A FATAL-loss kind stays beaten, re-testable only once
-        // the bot out-levels the death. Bot-owned outcome counts + own level
-        // only; no game knowledge. The combined verdict — a FATAL-loss kind, OR a
-        // survived-loss kind re-attempted INEFFECTIVELY past the deadlock-fix allowance
-        // (IsExhaustedIneffectiveKind, the can't-DAMAGE-it wedge) — is the shared
-        // IsAvoidBeatenKind helper, so this veto and the stalemate egress gate
-        // (OnlyBeatenMonstersInView) can never disagree about which kinds count.
-        return IsAvoidBeatenKind(world.CombatHistoryFull, target.Wcid, targetName,
-            world.Self.Level);
-    }
-
-    /// <summary>
     /// True iff an LLM <see cref="GoalKind.Attack"/> should be dropped because the
     /// bot cannot land a hit — it is NOT combat-capable (no wielded melee weapon,
     /// and no wielded missile weapon WITH ammo; see <see cref="IsCombatCapable"/>)
@@ -5655,8 +5521,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // ANY hostile in view would be too broad — the Motor attacks the named
         // selector, NOT the hostile, so an Attack on a PASSIVE target while a
         // different hostile is elsewhere is still a doomed optional swing and must be
-        // dropped. Mirrors IsOptionalAttackOnBeatenKind's target-specific exemption,
-        // including the Motor's exact-then-unique-fuzzy name resolution.
+        // dropped. Match the Motor's exact-then-unique-fuzzy name resolution.
         if (goal.Target is { } t && TargetResolvesToHostileInViewLikeMotor(t, world))
             return false;
         return true;
@@ -5669,9 +5534,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     /// (incl. the quoted-role strip), <c>NameContains</c>, and <c>Wcid</c> matches
     /// are the primary path; if NONE match, a UNIQUE whole-word-subsequence name
     /// match is accepted. Keeps the Attack self-defense exemptions in agreement with
-    /// the target the Motor will actually attack, so a partial-name Attack on a
-    /// hostile-in-view is not wrongly vetoed/dropped by the policy. Bot-owned
-    /// perception only; no game knowledge.
+    /// the target the Motor will actually attack, so the mechanical
+    /// combat-capability guard preserves self-defense for a partial-name target.
+    /// Bot-owned perception only; no game knowledge.
     /// </summary>
     private static bool TargetResolvesToHostileInViewLikeMotor(Selector target, WorldStateProjection world)
     {
@@ -5693,15 +5558,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return fuzzy.Count == 1 && fuzzy[0].ObservedHostile;
     }
 
-    // The DECISION-path definition of a LETHAL-beaten kind: the bot's own
-    // AGGREGATE ledger for this kind records an actual DEATH (Deaths>0) AND
-    // IsBeatenKind still holds (0 kills, not out-levelled). Shared by the
-    // explicit-Attack veto (IsOptionalAttackOnBeatenKind) and the stalemate
-    // egress gate (OnlyBeatenMonstersInView) so the two NEVER drift — a kind the
-    // veto blocks is exactly a kind that counts toward the egress, and vice
-    // versa. A merely SURVIVED loss (Deaths==0) is NOT lethal-beaten, so both
-    // sites keep the deadlock-fix option to re-attempt it. Aggregate own ledger +
-    // own level only; no game knowledge.
+    // The prompt/travel classification of a LETHAL-beaten kind: the bot's own
+    // aggregate ledger records an actual DEATH and IsBeatenKind still holds
+    // (0 kills, not out-levelled). An explicit LLM-authored Attack is not
+    // rewritten from this classification; Strategy sees the record and decides.
     internal static bool IsLethalBeatenKind(
         IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
     {
@@ -5715,8 +5575,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // SURVIVED-loss kind's deadlock-fix re-attempt allowance is exhausted: the bot has fought
     // this kind this many times at its level and never landed a killing blow nor died, so it is
     // effectively unbeatable here even though it never kills the bot. Above the handful the
-    // deadlock-fix wants to keep re-attemptable. Live: a single kind cycled 89 stuck-timeouts of
-    // 50s no-damage abandons because the lethal-only veto never engaged a kind it cannot DAMAGE.
+    // deadlock-fix wants to keep re-attemptable.
     internal const int ExhaustedIneffectiveFightsThreshold = 6;
 
     // A kind the bot has NEVER killed (0 kills) yet re-attempted INEFFECTIVELY so many times at its
@@ -5729,7 +5588,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // so a few more attempts are allowed after the bot grows stronger elsewhere — the deadlock-fix
     // intent (do not bar a kind indefinitely) is preserved, just bounded. A record without that
     // failing level (a loss recorded before the field existed, or before self level was known) is
-    // re-tested once so the re-attempt captures fresh leveled data this veto can then bound.
+    // re-tested once so the re-attempt captures fresh leveled data.
     // Aggregate own ledger + own level only; no game knowledge.
     internal static bool IsExhaustedIneffectiveKind(
         IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
@@ -5768,11 +5627,12 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return true;
     }
 
-    // The combined "decline this OPTIONAL engagement" verdict: a kind the bot's own ledger shows
-    // it cannot win against right now — a LETHAL-beaten kind (it died to it), an
+    // Combined own-ledger classification for a kind the bot has not beaten yet:
+    // a LETHAL-beaten kind (it died to it), an
     // EXHAUSTED-INEFFECTIVE kind (it cannot damage it after many tries), OR an OUT-DEFENDED kind
-    // (it swung repeatedly for 0 damage). Shared by the explicit-Attack veto AND the stalemate
-    // egress gate so the two never disagree about which kinds count.
+    // (it swung repeatedly for 0 damage). Used to surface evidence to Strategy
+    // and by existing autonomous travel heuristics, never to rewrite an explicit
+    // LLM-authored Attack.
     internal static bool IsAvoidBeatenKind(
         IReadOnlyList<CombatHistoryEntry>? history, uint? wcid, string? name, int? currentLevel)
         => IsLethalBeatenKind(history, wcid, name, currentLevel)
@@ -10603,9 +10463,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // for the empty launcher instead of fighting. Unarmed melee (fists) is
         // always available, so direct the LLM to
         // ATTACK the visible monster NOW rather than re-attempting a useless wield.
-        // Surfaces the action affordance; the LLM still chooses the target and still
-        // weighs the COMBAT SAFETY rule (a doomed/beaten engagement is vetoed
-        // downstream). No specific monster, no priority — no game knowledge.
+        // Surfaces the action affordance; the LLM still chooses the target and
+        // weighs the COMBAT SAFETY evidence. Source does not replace an explicit
+        // Attack because of the combat ledger. No specific monster or priority.
         if (!armed && monstersInView > 0 && activeNamedKillObjective is null &&
             armVendor is null &&
             bagWeapon is null && bagThrownWeapon is null && groundWeapon is null &&
@@ -13995,14 +13855,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // ── ## Beaten kinds capsule (protected-tail cut-proof) ──
         // The body combat-history lines (the bot's own per-kind outcomes) render
         // in the body and are dropped by the dense-scene body hard-cut. Live:
-        // with them gone, the LLM repeatedly ordered Attack on a kind its own
-        // ledger marks beaten; the Motor's beaten-kind veto dropped each Attack
-        // ("deferring to fallback"), wasting the decision. Re-surface the kinds
-        // that veto would drop — the SAME source (CombatHistoryFull) and the SAME
-        // predicate it uses (a recorded death + IsBeatenKind, lethal-retestable
-        // only once out-levelled) — in the PROTECTED salience tail. Raw own-ledger
-        // counts + the mechanical veto consequence; no advice, the LLM owns the
-        // next action. Gated, so it costs nothing when there are no beaten kinds.
+        // with them gone, Strategy loses the evidence needed to judge whether a
+        // fight is worth retrying. Re-surface the difficult kinds from the same
+        // CombatHistoryFull ledger in the protected salience tail. These are raw
+        // own-ledger facts; the LLM owns whether to retry, prepare, or change plans.
         if (world.CombatHistoryFull is { Count: > 0 } fullLedger)
         {
             var beatenKinds = fullLedger
@@ -14013,10 +13869,9 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             {
                 sb.AppendLine();
                 sb.AppendLine(
-                    "## Beaten kinds (your own combat ledger; the Motor DECLINES an offensive Attack you order on a " +
-                    "kind below — your ledger shows you cannot defeat it: it has killed you, or you cannot damage it " +
-                    "after many tries, with 0 kills for you — and allows fighting back only when that " +
-                    "kind is attacking you now). Hunt a kind you CAN kill, or Explore to a winnable area.");
+                    "## Beaten kinds (your own combat ledger — these kinds have 0 kills for you and repeated lethal " +
+                    "or ineffective outcomes. Use this evidence to decide whether to retry, prepare first, or choose " +
+                    "another objective.)");
                 foreach (var h in beatenKinds)
                     sb.AppendLine(
                         $"- {h.Name}: fights {h.Fights}, kills {h.Kills}, deaths {h.Deaths}, " +
