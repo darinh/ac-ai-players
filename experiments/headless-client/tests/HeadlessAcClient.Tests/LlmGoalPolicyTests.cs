@@ -6581,6 +6581,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("post-stage-3 goal history for Contact: Talk=1, Explore=1", cap);
         Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
         Assert.Contains("raw emissions, evidence only", cap);
+        Assert.Contains("STAGE-3 REPEAT CHECK", cap);
+        Assert.Contains("Before repeating the SAME verb to the SAME NPC, cite NEW raw evidence", cap);
+        Assert.Contains("source will still execute a repeat you choose", cap);
         Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
     }
 
