@@ -6547,6 +6547,44 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ContractsCapsule_RawStage3HistorySurvivesBodyTrim()
+    {
+        var since = DateTimeOffset.UtcNow.AddMinutes(-2);
+        var world = BuildEnrichedContractWorld(
+            new ContractProjection
+            {
+                ContractId = 701u, Stage = 3u,
+                Name = "Locate the Contact",
+                Description = "Locate the contact and learn what happened.",
+                NpcEnd = "Contact",
+                Stage3SinceUtc = since,
+            });
+        var events = new EventStream();
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = since.AddSeconds(1), Kind = EventKind.GoalEmitted,
+            Text = "Talk target=name=\"Contact\" item= source=llm:test",
+        });
+        events.Append(new StreamEvent
+        {
+            Sequence = -1, Utc = since.AddSeconds(2), Kind = EventKind.GoalEmitted,
+            Text = "Explore target=name=\"Contact\" item= source=llm:test",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            world, events, currentGoal: null, stack: null,
+            pickerActivity: null, explorationCandidates: null,
+            talkedNpcGuids: new HashSet<uint>(), promptCeiling: 10000);
+
+        var cap = CapsuleSection(prompt, "## Contracts");
+        Assert.Contains("contract 701 \"Locate the Contact\": stage 3", cap);
+        Assert.Contains("post-stage-3 goal history for Contact: Talk=1, Explore=1", cap);
+        Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
+        Assert.Contains("raw emissions, evidence only", cap);
+        Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
+    }
+
+    [Fact]
     public void BuildUserPrompt_ContractsCapsule_CharBudgetCapsAndNotesOverflow()
     {
         // Many contracts with long objective text must not let the protected
@@ -6891,14 +6929,10 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public async Task LlmGoalPolicy_DropsTalkToSettledStage3TurnInNpc()
+    public async Task LlmGoalPolicy_KeepsTalkDespiteStage3History()
     {
-        // cp050 behavioral guard test (gpt-5.4 review): the ProposeGoal Talk guard
-        // must DROP an LLM Talk aimed at a SETTLED stage-3 turn-in NPC (the contract
-        // is done/pending-repeat with no hand-in and already pursued past threshold)
-        // and defer to the escape/fallback — not re-emit the doomed Talk. Proves the
-        // guard WIRING, which the predicate-only tests do not (a `&& false` mutation
-        // of the guard condition leaves those green).
+        // Contract stage and prior goal history are evidence for Strategy, not a
+        // source-owned reason to rewrite an otherwise executable Talk.
         var policy = SettledTurnInPolicy(SettledTurnInNpc, out _);
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3World(SettledTurnInNpc, since);
@@ -6909,17 +6943,14 @@ public class LlmGoalPolicyTests
         var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
-        Assert.False(goal!.Kind == GoalKind.Talk && goal.Target?.Name == SettledTurnInNpc,
-            "a re-Talk to a settled stage-3 turn-in NPC must be dropped");
+        Assert.Equal(GoalKind.Talk, goal!.Kind);
+        Assert.Equal(SettledTurnInNpc, goal.Target?.Name);
     }
 
     [Fact]
-    public async Task LlmGoalPolicy_KeepsTalkToStage3TurnIn_BeforeThreshold()
+    public async Task LlmGoalPolicy_KeepsTalkWithSingleStage3HistoryEmission()
     {
-        // cp050 control: a SINGLE post-completion hand-in attempt is preserved — the
-        // guard fires only PAST the done threshold (2 Talks), so a contract that
-        // really clears on a final Talk keeps its one real attempt. Differs from the
-        // drop test ONLY in the Talk count, isolating the guard's threshold.
+        // The same ownership rule holds with a shorter prior history.
         var policy = SettledTurnInPolicy(SettledTurnInNpc, out _);
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3World(SettledTurnInNpc, since);
@@ -7015,9 +7046,8 @@ public class LlmGoalPolicyTests
         };
     }
 
-    // A settled stage-3 turn-in world whose turn-in NPC is optionally VISIBLE far
-    // off (Distance 30u, well beyond ReachedExploreTargetDistanceUnits=5u, so the
-    // reached-Explore guard does NOT fire — isolating the cp051 in-view guard).
+    // A stage-3 contract world whose turn-in NPC is optionally visible 30u away,
+    // beyond the generic reached-target threshold.
     private static WorldStateProjection BuildSettledStage3WorldVisible(
         string turnInNpc, DateTimeOffset stage3Since, bool npcInView) => new()
     {
@@ -7047,34 +7077,29 @@ public class LlmGoalPolicyTests
     };
 
     [Fact]
-    public async Task LlmGoalPolicy_DropsExploreToSettledTurnInNpcInView()
+    public async Task LlmGoalPolicy_KeepsNotReachedExploreDespiteStage3History()
     {
-        // cp051: once cp050 suppresses re-Talking a settled turn-in NPC, the model
-        // re-routes to Explore (navigate-to) the SAME settled NPC. Exploring toward a
-        // settled turn-in NPC ALREADY IN VIEW (but farther than the reached threshold,
-        // so the reached-Explore guard does not catch it) is a no-op and must be
-        // dropped.
+        // The target is visible but still 30u away, so the generic reached-target
+        // guard does not apply. Contract stage does not make navigation impossible.
         var policy = SettledTurnInExplorePolicy(SettledTurnInNpc);
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3WorldVisible(SettledTurnInNpc, since, npcInView: true);
-        var events = WithExploreHistory(SettledTurnInNpc, 3, since); // settled via Explore threshold
+        var events = WithExploreHistory(SettledTurnInNpc, 3, since);
 
         Assert.Null(policy.ProposeGoal(world, events, null));
         await policy.WaitForInFlightAsync();
         var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
-        Assert.False(goal!.Kind == GoalKind.Explore && goal.Target?.Name == SettledTurnInNpc,
-            "an Explore to a settled stage-3 turn-in NPC in view must be dropped");
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.Equal(SettledTurnInNpc, goal.Target?.Name);
     }
 
     [Fact]
-    public async Task LlmGoalPolicy_KeepsExploreToSettledTurnInNpc_NotInView()
+    public async Task LlmGoalPolicy_KeepsStage3ExploreWhenTargetNotInView()
     {
-        // cp051 safety: when the settled turn-in NPC is NOT in view, the Explore is a
-        // legitimate TRAVEL-BACK toward a source area and must be preserved — the
-        // in-view gate is what distinguishes a no-op from real navigation. Differs
-        // from the drop test ONLY in whether the NPC is visible.
+        // A target outside the current view remains a mechanically valid navigation
+        // request regardless of contract stage.
         var policy = SettledTurnInExplorePolicy(SettledTurnInNpc);
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3WorldVisible(SettledTurnInNpc, since, npcInView: false);
@@ -7090,13 +7115,10 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public async Task LlmGoalPolicy_DropsExploreToSettledTurnInNpc_NameContainsSelector()
+    public async Task LlmGoalPolicy_KeepsNotReachedExploreNameContainsDespiteStage3History()
     {
-        // cp051 (gpt-5.4 review): an Explore selector can be `name_contains`-only,
-        // carrying no `name`. The guard recognizes the settled NPC from the matched
-        // VISIBLE object's name, so a partial-name Explore toward a settled turn-in
-        // NPC in view is still dropped (it would slip through if the recognition keyed
-        // on the raw selector text).
+        // Selector shape does not change ownership: stage history cannot rewrite a
+        // not-yet-reached LLM-authored Explore.
         var canned = JsonSerializer.Serialize(new
         {
             choices = new[] { new { message = new { content =
@@ -7120,8 +7142,8 @@ public class LlmGoalPolicyTests
         var goal = policy.ProposeGoal(world, events, null);
 
         Assert.NotNull(goal);
-        Assert.False(goal!.Kind == GoalKind.Explore && goal.Target?.NameContains == "Thorolf",
-            "a name_contains Explore to a settled stage-3 turn-in NPC in view must be dropped");
+        Assert.Equal(GoalKind.Explore, goal!.Kind);
+        Assert.Equal("Thorolf", goal.Target?.NameContains);
     }
 
     [Fact]
@@ -24558,8 +24580,9 @@ public class LlmGoalPolicyTests
         Assert.Contains("target=\"Warden\"", cap);
         Assert.Contains("the warden asked me to recover the heirloom", cap);
         Assert.Contains("TOP: kind=hunt", cap);
-        // Both frames are Active, so the actionable-directive prose fires.
-        Assert.Contains("do not treat the scene as having no directive", cap);
+        // Both frames are Active, so the raw persistent-objective prose fires.
+        Assert.Contains("these are your OWN persistent objectives", cap);
+        Assert.Contains("interpret them with `## Contracts` and your observed outcomes", cap);
     }
 
     [Fact]
@@ -24837,12 +24860,10 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_SettledTurnInCapsule_NudgesBlockWhenActiveIntentTargetsSettledNpc()
+    public void BuildUserPrompt_Stage3HistoryDoesNotPrescribeIntentDisposition()
     {
-        // cp053: an Active turn-in intent targeting a SETTLED stage-3 turn-in NPC
-        // (done contract, no hand-in, pursued past threshold) drives the LLM to
-        // re-Talk it every cycle. Re-surface the "MARK_TOP_BLOCKED it" rule in the
-        // decision-proximate tail so the model resolves the dead objective.
+        // Source reports the raw contract match and goal history, but does not tell
+        // Strategy to block the active intent.
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3World(SettledTurnInNpc, since);
         var events = WithTalkHistory(SettledTurnInNpc, 2, since);
@@ -24855,14 +24876,14 @@ public class LlmGoalPolicyTests
             Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
         });
         var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
-        Assert.Contains("## Settled turn-in", prompt);
-        var cap = prompt.Substring(prompt.IndexOf("## Settled turn-in", StringComparison.Ordinal));
-        Assert.Contains(SettledTurnInNpc, cap);
-        Assert.Contains("MARK_TOP_BLOCKED", cap);
+        Assert.DoesNotContain("## Settled turn-in", prompt);
+        Assert.Contains(
+            $"post-stage-3 goal history for {SettledTurnInNpc}: Talk=2, Explore=0", prompt);
+        Assert.Contains("raw contract match: id=950 wire-stage=3 relation=turn-in", prompt);
     }
 
     [Fact]
-    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenIntentAlreadyBlocked()
+    public void BuildUserPrompt_Stage3HistoryDoesNotPrescribeBlockedIntentDisposition()
     {
         // Already handled: a Blocked turn-in intent for the settled NPC needs no
         // nudge — the capsule must not fire (otherwise it would loop the advice).
@@ -24882,11 +24903,8 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenTargetNotSettled()
+    public void BuildUserPrompt_SingleStage3HistoryEmissionDoesNotRenderSettledCue()
     {
-        // The target's contract is stage-3 but the bot has made only ONE
-        // post-completion attempt (below the done threshold), so it is NOT yet a
-        // settled turn-in — the nudge must not fire and preempt a legitimate hand-in.
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3World(SettledTurnInNpc, since);
         var events = WithTalkHistory(SettledTurnInNpc, 1, since);
@@ -24902,13 +24920,8 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
-    public void BuildUserPrompt_SettledTurnInCapsule_OmittedWhenSettledIntentIsAncestorNotTop()
+    public void BuildUserPrompt_Stage3HistoryDoesNotPrescribeAncestorDisposition()
     {
-        // gpt-5.4 + claude review: MARK_TOP_BLOCKED acts on the TOP frame by identity,
-        // so the nudge must fire ONLY when the settled turn-in IS the TOP. A settled
-        // return-to-giver sitting as an ANCESTOR under an unrelated Active TOP must NOT
-        // trigger it — else the LLM, following the advice, would block the wrong (top)
-        // frame and silently destroy the live objective while the settled one persists.
         var since = DateTimeOffset.UtcNow;
         var world = BuildSettledStage3World(SettledTurnInNpc, since);
         var events = WithTalkHistory(SettledTurnInNpc, 2, since);

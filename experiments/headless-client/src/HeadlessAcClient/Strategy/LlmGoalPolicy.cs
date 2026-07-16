@@ -3355,39 +3355,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             return _fallback.ProposeGoal(world, events, currentGoal);
         }
 
-
-        // Settled stage-3 turn-in Explore no-op (cp051): once the cp050 Talk guard
-        // suppresses re-Talking a settled turn-in NPC, a model fixated on that NPC
-        // re-routes to Explore (navigate-to) the SAME settled NPC. Exploring toward a
-        // settled stage-3 turn-in NPC that is ALREADY IN VIEW is a no-op: the contract
-        // is done (nothing to hand in there) and the NPC is right here in the
-        // populated area, so walking to it changes nothing — a fresh contract source
-        // is reachable from here instead. Drop it and defer to the fallback. The
-        // IN-VIEW gate is the safety: when the settled NPC is NOT in view the Explore
-        // is left alone, so a legitimate TRAVEL-BACK toward a source area
-        // (RETURN-TO-A-CONTRACT-SOURCE) is never suppressed. The reached-Explore guard
-        // above only catches the WITHIN-REACH subset; this catches a settled NPC that
-        // is visible but farther (the bot having wandered off and now navigating back
-        // to it). The settled-NPC recognition is keyed on the RESOLVED visible
-        // object's name (NOT the raw selector text), so a `name_contains`- or
-        // `wcid`-only Explore selector — which carries no `name` — is still matched
-        // via its in-view object. Same settled-turn-in recognition as the cp050 Talk
-        // guard (which already counts Explore pursuits toward its threshold) + own
-        // perception; no game knowledge.
-        if (goal.Kind == GoalKind.Explore
-            && goal.Target is { } settledExploreTarget
-            && world.Visible.Any(v => VisibleMatchesSelector(settledExploreTarget, v)
-                && IsSettledStage3TurnInNpc(world, events, v.Name)))
-        {
-            Console.WriteLine(
-                $"[llm-dedup] dropping LLM Explore target={goal.Target}" +
-                " — navigating to a settled stage-3 turn-in NPC already in view is a no-op;" +
-                " deferring to fallback.");
-            _training?.RecordParseError(decisionId,
-                "dropped-by-dedup: Explore toward a settled stage-3 turn-in NPC in view");
-            return _fallback.ProposeGoal(world, events, currentGoal);
-        }
-
         // Inventory-USE dedup (2026-05-30): if the LLM emitted Use
         // against an inventory item we've already USE'd in the
         // recent event window, drop it. Motivating spike
@@ -3472,36 +3439,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             _training?.RecordParseError(decisionId,
                 "dropped-by-dedup: landblock world-object Use churn (no egress)");
             return EscapeOrFallback(world, events, currentGoal, nowUtc, WorldUseLoopKind);
-        }
-
-        // Settled stage-3 turn-in loop-break (cp050): a Talk re-emitted at the
-        // turn-in NPC of a contract already DONE (wire ContractStage 3,
-        // done/pending-repeat) past the post-completion attempt threshold is the
-        // fixation the `## Contracts` "DONE (stage 3)" note describes — such a
-        // contract has no separate hand-in (its reward is the issuer's to grant on
-        // its own terms), so re-Talking its settled turn-in NPC can never change the
-        // stage. The per-NPC / multi-NPC / roving Talk guards MISS this when the bot
-        // ROVES between two such turn-in NPCs (movement resets the stationary guards)
-        // and each NPC re-greets with fresh flavor text (dialog-novelty resets the
-        // churn guards). This guard is position- AND novelty-independent: it fires
-        // purely on the contract's wire stage + the bot's OWN post-stage-3 pursuit
-        // count (the SAME recognition that renders the prompt note, shared via
-        // IsSettledStage3TurnIn), so a model that ignores the note cannot keep
-        // marching back. It allows the legitimate attempts (one hand-in + a batch
-        // refresh) BEFORE the threshold, and stands down entirely if that NPC also
-        // has LIVE business (it starts/turns-in any non-done contract — e.g. a fresh
-        // batch just obtained from this same source). Own contract stage + own goal
-        // history; no NPC/quest names, no game knowledge.
-        if (goal.Kind == GoalKind.Talk
-            && IsSettledStage3TurnInNpc(world, events, goal.Target?.Name))
-        {
-            Console.WriteLine(
-                $"[llm-dedup] dropping LLM Talk target={goal.Target}" +
-                " — settled stage-3 contract turn-in NPC re-Talked past the done threshold;" +
-                " no separate hand-in, deferring to fallback.");
-            _training?.RecordParseError(decisionId,
-                "dropped-by-dedup: settled stage-3 contract turn-in re-Talk");
-            return EscapeOrFallback(world, events, currentGoal, nowUtc, NpcTalkLoopKind, goal.Target?.Name);
         }
 
         // NPC Talk loop-break (2026-06-05): a Talk re-emitted at the SAME
@@ -7600,7 +7537,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // Normalize a target NAME for goal-emission counting so the bot's OWN recorded
-    // emission matches the bare object/NPC name the fixation/refresh counters key
+    // emission matches the bare object/NPC name the history/refresh counters key
     // on. The prompt renders an object as `<Name> "<role>"` and a model frequently
     // copies that whole label into the target selector; the recorded
     // `name="<Name> "<role>""` truncates at the inner quote to `<Name> ` here (and a
@@ -7608,8 +7545,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // role-title and trim — the SAME normalization the Motor's
     // SelectorResolver.StripTrailingQuotedRoleTitle uses to RESOLVE such a target —
     // so a role-suffixed emission still counts against the bare name (otherwise the
-    // counters silently read 0 for a model that suffixes its targets, and the
-    // fixation/settled-turn-in/refresh guards keyed on them never fire). Pure string
+    // counters silently read 0 for a model that suffixes its targets). Pure string
     // normalization; no game knowledge.
     internal static string NormalizeEmittedTargetName(string? raw)
     {
@@ -7618,25 +7554,19 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     }
 
     // Count the bot's OWN recent Talk goals aimed at a given NPC NAME that were
-    // emitted at or after `since` (the time the contract became stage-3). A
+    // emitted at or after the caller's `since` cutoff. A
     // purely structural read of GoalEmitted history (the "VERB target=...
     // item=... source=..." text the executor records) — no server text, no game
-    // knowledge. Scoping to `since` keeps a pre-completion or other-contract
-    // Talk to the same NPC from mis-counting toward a done contract's hand-in
-    // attempts. Surfaced in ## Contracts so the LLM can SEE that a stage-3
-    // contract has already had repeated hand-in attempts with no stage change.
+    // knowledge. Surfaced as raw history in ## Contracts.
     internal static int CountRecentTalkGoalsToName(EventStream events, string npcName, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(npcName)) return 0;
         var target = NormalizeEmittedTargetName(npcName);
         var n = 0;
         // Read from the DEDICATED durable goal-emission window, NOT the
-        // perception-dominated ring: re-talks to a turn-in NPC spread across
-        // minutes (with heavy perception/motion traffic between) were evicted
-        // from the 256-event ring before this count could reach the hand-in
-        // threshold, so the "DONE (stage 3)" note silently never rendered for a
-        // genuinely re-talked NPC. The window is already bounded and is
-        // time-scoped here by `since`.
+        // perception-dominated ring, so goal history spread across minutes is not
+        // evicted by heavy perception/motion traffic. The window is already
+        // bounded and is time-scoped here by `since`.
         foreach (var ge in events.RecentGoalEmissions()
                      .Where(e => !string.IsNullOrEmpty(e.Text)))
         {
@@ -7720,12 +7650,10 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
 
     // Mirror of CountRecentTalkGoalsToName for Explore goals — counts the bot's
     // OWN recent Explore goals aimed at a given NAME emitted at/after `since`,
-    // reading the same DEDICATED durable goal-emission window (so re-Explores
-    // spread across minutes are not evicted by perception traffic). A stage-3
-    // contract whose objective is a "locate/reach" task is pursued via Explore
-    // (navigate-only), NOT Talk, so the turn-in hand-in count misses it; this is
-    // the Explore-pursuit equivalent. Purely structural read of the bot's own
-    // goal-emission history; no server text, no game knowledge.
+    // reading the same DEDICATED durable goal-emission window (so goals spread
+    // across minutes are not evicted by perception traffic). Purely structural
+    // read of the bot's own goal-emission history; no server text or game
+    // knowledge.
     internal static int CountRecentExploreGoalsToName(EventStream events, string name, DateTimeOffset since)
     {
         if (string.IsNullOrWhiteSpace(name)) return 0;
@@ -7776,164 +7704,15 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return n;
     }
 
-    // Throttle key for the stage-3 contract DONE-note diagnostic (log only when
-    // the per-contract decision inputs change).
+    // Throttle key for raw stage-3 contract diagnostics.
     private string? _lastContractStage3Diag;
-
-    // Post-stage-3 pursuit thresholds for the "DONE (stage 3)" recognition (the
-    // ## Contracts note + its diagnostic, kept in sync). A Talk is a discrete
-    // hand-in ATTEMPT, so 2 of them while STILL stage-3 means done. An Explore is
-    // NAVIGATION: the FIRST is legitimate travel-to-reach (not an attempt), so the
-    // equivalent "stuck/roving a done contract" signal needs 1 travel + 2 redundant
-    // re-navigations = 3 — high enough that ordinary travel to a far turn-in NPC
-    // (1-2 Explores) before the first hand-in Talk does NOT trip it.
-    private const int StageDoneTalkThreshold = 2;
-    private const int StageDoneExploreThreshold = 3;
 
     // Max times the refresh-a-finished-batch nudge re-engages the SAME source
     // before treating it as tapped. The source is re-engaged for a NEW batch, NOT a
     // hand-in; if the batch is still all-done after this many re-engages, re-engaging
     // again is futile (a tapped source, or a refresh mechanic the bot cannot drive),
-    // so the nudge self-limits and the bot moves on. Two attempts mirrors the
-    // stage-3 hand-in threshold — enough to actuate, low enough to avoid a loop.
+    // so the nudge self-limits and the bot moves on.
     private const int BatchRefreshAttemptThreshold = 2;
-
-    // Per-contract recognition of a SETTLED stage-3 turn-in (cp050): the contract
-    // is DONE (wire ContractStage 3, done/pending-repeat), recorded WHEN it became
-    // done, its turn-in NPC is UNIQUE among tracked contracts (a shared turn-in NPC
-    // makes per-contract attribution ambiguous), and the bot has already pursued
-    // that turn-in NPC past the post-stage-3 attempt threshold (Talk hand-in OR
-    // Explore locate) with no stage change. Such a contract has no separate hand-in.
-    // Yields the per-NPC attempt counts for the caller's message. Pure mechanical
-    // read: wire ContractStage + the bot's OWN goal-emission history; no game
-    // knowledge. SHARED by the `## Contracts` "DONE (stage 3)" note and the Motor's
-    // settled-turn-in Talk backstop so the recognition never drifts between them.
-    //
-    // `sinceOverride` lets a caller widen the attempt-count window's start past the
-    // contract's own Stage3SinceUtc. The render leaves it null (its "you have gone N
-    // times since THIS contract completed" message is per-contract). The Motor
-    // backstop passes the NPC's FULLY-SETTLED time (the max Stage3SinceUtc across
-    // every contract that NPC starts/turns-in) so Talks the bot made for a SIBLING
-    // contract of the SAME NPC while THAT one was still live business do not leak in
-    // as this contract's fixation once the sibling also settles.
-    internal static bool IsSettledStage3TurnIn(
-        WorldStateProjection world, EventStream events, ContractProjection c,
-        out int talkTries, out int exploreTries, DateTimeOffset? sinceOverride = null)
-    {
-        talkTries = 0;
-        exploreTries = 0;
-        if (c.Stage != 3u) return false;
-        var npcEnd = OneLine(c.NpcEnd);
-        if (npcEnd is null) return false;
-        if (c.Stage3SinceUtc is not { } since3) return false;
-        if (world.Contracts.Count(o =>
-                string.Equals(OneLine(o.NpcEnd), npcEnd, StringComparison.OrdinalIgnoreCase)) != 1)
-            return false;
-        var since = sinceOverride is { } ov && ov > since3 ? ov : since3;
-        talkTries = CountRecentTalkGoalsToName(events, npcEnd, since);
-        exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since);
-        return talkTries >= StageDoneTalkThreshold || exploreTries >= StageDoneExploreThreshold;
-    }
-
-    // Name-keyed wrapper for the Motor's settled-turn-in Talk backstop: is
-    // `npcName` the settled stage-3 turn-in NPC (per IsSettledStage3TurnIn) of some
-    // tracked contract, with NO remaining live business? An NPC that also starts or
-    // turns in any NON-terminal (stage != 3) tracked contract is EXCLUDED — the bot
-    // may legitimately Talk it to accept or progress that contract (e.g. a fresh
-    // batch just obtained from this same source), so only a purely settled NPC
-    // qualifies for suppression. The attempt-count window starts at the NPC's
-    // FULLY-SETTLED time — the latest Stage3SinceUtc among ALL contracts it
-    // starts/turns-in — so a re-Talk only counts as fixation once the NPC has no
-    // live business left (Talks made while a sibling contract of the same NPC was
-    // still live do not leak in). Own contract stage + own goal history; no game
-    // knowledge.
-    internal static bool IsSettledStage3TurnInNpc(
-        WorldStateProjection world, EventStream events, string? npcName)
-    {
-        var name = OneLine(npcName);
-        if (string.IsNullOrWhiteSpace(name)) return false;
-        bool Involves(ContractProjection o) =>
-            string.Equals(OneLine(o.NpcStart), name, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
-        if (world.Contracts.Any(o => o.Stage != 3u && Involves(o)))
-            return false;
-        DateTimeOffset? fullySettledSince = null;
-        foreach (var o in world.Contracts)
-            if (Involves(o) && o.Stage3SinceUtc is { } s
-                && (fullySettledSince is not { } cur || s > cur))
-                fullySettledSince = s;
-        foreach (var c in world.Contracts)
-            if (string.Equals(OneLine(c.NpcEnd), name, StringComparison.OrdinalIgnoreCase)
-                && IsSettledStage3TurnIn(world, events, c, out _, out _, fullySettledSince))
-                return true;
-        return false;
-    }
-
-    // Whether `npcName` is the turn-in NPC of a stage-3 DONE contract objective with no
-    // remaining live business — the INTENT-level staleness signal. Differs from
-    // IsSettledStage3TurnInNpc: it does NOT require a NAMED Talk/Explore re-targeting count,
-    // because an intent can pursue a done objective by decomposing into an UNNAMED Explore
-    // (so that count stays zero), yet the objective is already complete the moment its
-    // contract reaches stage 3. Gated on the SAME structural facts the goal-level recognition
-    // uses (unique stage-3 NpcEnd with the done-time recorded, and NO non-stage-3 contract
-    // involving the NPC — so an NPC with live business is never flagged). Own contract
-    // projection only; no game knowledge.
-    internal static bool IsDoneStage3ContractObjectiveNpc(WorldStateProjection world, string? npcName)
-    {
-        var name = OneLine(npcName);
-        if (string.IsNullOrWhiteSpace(name)) return false;
-        bool Involves(ContractProjection o) =>
-            string.Equals(OneLine(o.NpcStart), name, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
-        if (world.Contracts.Any(o => o.Stage != 3u && Involves(o)))
-            return false; // live (non-done) business with this NPC -> not a settled objective
-        bool IsEnd(ContractProjection o) =>
-            string.Equals(OneLine(o.NpcEnd), name, StringComparison.OrdinalIgnoreCase);
-        if (world.Contracts.Count(IsEnd) != 1)
-            return false; // ambiguous turn-in attribution -> do not flag
-        return world.Contracts.Any(c => IsEnd(c) && c.Stage == 3u && c.Stage3SinceUtc is not null);
-    }
-
-    // The NPC NAME of the bot's most-recent Talk or Explore goal emission (its live
-    // re-targeting target), normalized, or null. Anchors the settled-contract cue on
-    // the NPC the bot is ACTUALLY fixated on, so in the roving multi-contract case the
-    // cue never names the wrong settled NPC. Structural read of own emission history.
-    internal static string? LatestEmittedInteractionTargetName(EventStream events)
-    {
-        // RecentGoalEmissions() is newest-first, so the bot's CURRENT pursuit is the
-        // FIRST non-empty emission. The cue is about a LIVE re-targeting, so only the
-        // newest emission counts: if it is NOT a Talk/Explore (e.g. a newer Attack/Use
-        // after an earlier settled Talk), the bot has MOVED ON -> return null.
-        foreach (var ge in events.RecentGoalEmissions())
-        {
-            var txt = ge.Text;
-            if (string.IsNullOrEmpty(txt)) continue;
-            if (!(txt.StartsWith("Talk", StringComparison.Ordinal)
-                  || txt.StartsWith("Explore", StringComparison.Ordinal)))
-                return null;
-            var ti = txt.IndexOf("target=", StringComparison.Ordinal);
-            if (ti < 0) return null;
-            var nm = System.Text.RegularExpressions.Regex.Match(
-                txt.Substring(ti), "name=\"([^\"]+)\"");
-            return nm.Success ? NormalizeEmittedTargetName(nm.Groups[1].Value) : null;
-        }
-        return null;
-    }
-
-    // The NAME of a settled stage-3 turn-in NPC the bot is RE-TARGETING, or null.
-    // Anchors on the bot's LATEST Talk/Explore target (its live fixation) and confirms
-    // it is a settled turn-in NPC via IsSettledStage3TurnInNpc — the SAME recognition the
-    // Motor's settled-turn-in Talk/Explore DROPS use, so the cue fires exactly when the
-    // Motor is already dropping those goals. In the roving multi-contract case this names
-    // the NPC actually being re-targeted, not just the first settled one. Own contract
-    // stage + own goal-emission history; no game knowledge.
-    internal static string? FindReTargetedSettledTurnInNpc(WorldStateProjection world, EventStream events)
-    {
-        if (world.Contracts.Count == 0) return null;
-        var latest = LatestEmittedInteractionTargetName(events);
-        if (string.IsNullOrWhiteSpace(latest)) return null;
-        return IsSettledStage3TurnInNpc(world, events, latest) ? latest : null;
-    }
 
     // The NAMES of any done-batch issuing/turn-in NPCs (a done contract's
     // NpcStart/NpcEnd) currently in view as a creature/vendor. Shared by the
@@ -7992,17 +7771,8 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         return false;
     }
 
-    // Diagnostic (cp024 pattern, behavior-preserving): the "DONE (stage 3)" note
-    // in ## Contracts fires ONLY after >=2 Talk hand-ins to a UNIQUE turn-in NPC
-    // since stage-3 — so it never fires for a stage-3 contract pursued via Explore
-    // (a "locate/reach" objective) or one sharing a turn-in NPC, letting the bot
-    // rove between such already-done contracts (live cp029-validate.log: an
-    // Explore ping-pong between two stage-3 contract NPCs, broker present, 0 Buy).
-    // Surface, throttled, the exact inputs to that decision (per stage-3 contract:
-    // its end/start NPC, turn-in uniqueness, stage-3 timestamp presence, and the
-    // bot's OWN Talk/Explore pursuit counts since stage-3) so the follow-up
-    // behavior broadening is precise. Reads only the bot's own contract projection
-    // + goal-emission history; no server text, no game knowledge, no decision.
+    // Surface raw stage-3 contract and goal-emission evidence for live diagnosis.
+    // This log does not classify the evidence or choose an action.
     private void EmitContractStage3Diagnostic(WorldStateProjection world, EventStream events)
     {
         if (world.Contracts is not { Count: > 0 } contracts) return;
@@ -8026,13 +7796,11 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 if (npcStart is not null)
                     exploreStart = CountRecentExploreGoalsToName(events, npcStart, s3);
             }
-            var doneNoteFires = npcEnd is not null && c.Stage3SinceUtc is not null && uniqEnd
-                && (talkEnd >= StageDoneTalkThreshold || exploreEnd >= StageDoneExploreThreshold);
             line.Append(
                 $"id={c.ContractId} end=\"{npcEnd ?? "-"}\" start=\"{npcStart ?? "-"}\" " +
                 $"obj=\"{Truncate(objective ?? "-", 50)}\" " +
                 $"uniqEnd={uniqEnd} since3={(c.Stage3SinceUtc is not null)} " +
-                $"talkEnd={talkEnd} expEnd={exploreEnd} expStart={exploreStart} doneNote={doneNoteFires} | ");
+                $"talkEnd={talkEnd} expEnd={exploreEnd} expStart={exploreStart} | ");
         }
         if (line.Length == 0)
         {
@@ -10515,29 +10283,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "survivability, including the unarmed case) still governs WHICH lever your own evidence points to.");
         }
 
-        // ── ## Settled contract — no turn-in (salience, protected tail) ──
-        // Decision-proximate extraction of the buried "a settled stage-3 contract has
-        // no separate hand-in; re-attempting its turn-in is fixation, not progress"
-        // guidance (in the long QUEST-DIALOG COMPILER rule). Fires ONLY when the bot
-        // has PROVENLY re-targeted (Talk+Explore) a settled turn-in NPC past the
-        // threshold — not as a static render — so it points at the exact live mistake.
-        // Names the NPC from the runtime contract projection (not a hardcoded list);
-        // the LLM still decides what to do instead. Mirrors the salience-extraction
-        // pattern of SURVIVABILITY-FIRST / Spend before wandering.
-        var reTargetedSettledNpc = FindReTargetedSettledTurnInNpc(world, events);
-        if (reTargetedSettledNpc is { Length: > 0 })
-        {
-            sb.AppendLine();
-            sb.AppendLine("## Settled contract — no turn-in");
-            sb.AppendLine(
-                $"- you have repeatedly re-targeted `{reTargetedSettledNpc}` to turn in a DONE contract " +
-                "(stage 3). That contract is COMPLETE and has NO separate turn-in step — re-`Talk`ing or " +
-                "`Explore`-ing toward that NPC changes nothing and is NOT progress. STOP returning to it. " +
-                "Do something OTHER than re-targeting that done contract's NPC: hunt monsters for XP (this " +
-                "also works toward arming/leveling) — and, ONCE you can fight effectively, you MAY get a " +
-                "FRESH batch (Buy a new contract, or Use/Talk a contract source for new work) instead.");
-        }
-
         // ── ## Persistent objectives (intent stack re-surfaced, protected tail) ─
         // The full `## Intent stack` renders in the BODY (RenderStackForPrompt) and
         // is dropped by the dense-scene body hard-cut, so in a busy combat scene the
@@ -10556,10 +10301,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             sb.AppendLine(
                 "## Persistent objectives (re-surfaced because the full `## Intent stack` above can be trimmed " +
                 $"to fit; revision={stack.Revision}, depth={stack.Depth}/{stack.MaxDepth})");
-            var hasUnfinishedActiveObjective = false;
             var hasAnyActiveObjective = false;
-            var hasSettledActiveObjective = false;
-            var topFrameSettled = false;
             for (int i = 0; i < frames.Count; i++)
             {
                 var f = frames[i];
@@ -10567,63 +10309,42 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 var role = isTop ? "TOP" : $"ancestor[{i}]";
                 var tgt = string.IsNullOrEmpty(f.TargetName) ? "" : $" target=\"{f.TargetName}\"";
                 var rat = string.IsNullOrEmpty(f.Rationale) ? "" : $" — {Truncate(f.Rationale, 110)}";
-                // A frame whose target is the turn-in NPC of a stage-3 DONE contract is flagged
-                // with the raw contract-stage fact: if THAT frame's objective was to complete or
-                // locate that contract, the objective is already done. Unlike the goal-level
-                // ## Settled turn-in / ## Settled contract cues (which require NAMED Talk/Explore
-                // re-targeting past a threshold), an intent can pursue a done objective via an
-                // UNNAMED Explore ("anywhere" toward the area), so that count stays zero and those
-                // cues never fire. The tag is a non-prescriptive fact, NOT a "do not go there":
-                // the same NPC may also be a contract SOURCE for NEW work (a different objective),
-                // which the note below preserves.
-                var settled = f.Status == IntentLifecycle.Active
-                    && !string.IsNullOrEmpty(f.TargetName)
-                    && IsDoneStage3ContractObjectiveNpc(world, f.TargetName);
-                var settledTag = settled
-                    ? " — note: this NPC's contract is DONE (stage 3; see `## Contracts`)"
-                    : "";
-                sb.AppendLine($"- {role}: kind={f.Kind} status={f.Status}{tgt}{rat}{settledTag}");
-                if (f.Status == IntentLifecycle.Active)
+                var contractFacts = new List<string>();
+                if (!string.IsNullOrEmpty(f.TargetName))
                 {
-                    hasAnyActiveObjective = true;
-                    if (settled)
+                    foreach (var c in world.Contracts)
                     {
-                        hasSettledActiveObjective = true;
-                        if (isTop) topFrameSettled = true;
-                    }
-                    else
-                    {
-                        hasUnfinishedActiveObjective = true;
+                        var relations = new List<string>(2);
+                        if (string.Equals(OneLine(c.NpcStart), OneLine(f.TargetName),
+                                StringComparison.OrdinalIgnoreCase))
+                            relations.Add("start");
+                        if (string.Equals(OneLine(c.NpcEnd), OneLine(f.TargetName),
+                                StringComparison.OrdinalIgnoreCase))
+                            relations.Add("turn-in");
+                        if (relations.Count > 0)
+                            contractFacts.Add(
+                                $"id={c.ContractId} wire-stage={c.Stage} relation={string.Join("+", relations)}");
                     }
                 }
+                var contractTag = contractFacts.Count == 0
+                    ? ""
+                    : $" — raw contract match: {string.Join("; ", contractFacts)}";
+                sb.AppendLine($"- {role}: kind={f.Kind} status={f.Status}{tgt}{rat}{contractTag}");
+                if (f.Status == IntentLifecycle.Active)
+                    hasAnyActiveObjective = true;
             }
-            if (hasUnfinishedActiveObjective)
+            if (hasAnyActiveObjective)
                 sb.AppendLine(
                     "- raw fact, not a recommendation: these are your OWN persistent objectives. An `Active` " +
                     "ancestor resurfaces as TOP when the frames above it pop — an earlier compiled task is NOT " +
-                    "gone just because a newer frame sits on top, so do not treat the scene as having no directive " +
-                    "while an `Active` one is listed above. Whether to pursue an unfinished one now is your call.");
-            else if (!hasAnyActiveObjective)
+                    "gone just because a newer frame sits on top. Contract matches above report only the raw wire " +
+                    "stage and NPC relation; interpret them with `## Contracts` and your observed outcomes. Whether " +
+                    "to pursue, revise, or retire an objective is your call.");
+            else
                 sb.AppendLine(
                     "- raw fact, not a recommendation: every objective above has reached a terminal state " +
                     "(Blocked/Completed/Expired), so none is currently actionable; a `stack_ops` push or replace " +
                     "sets a new persistent objective if you want one. Your strategic call.");
-            // `MARK_TOP_BLOCKED` acts on the TOP frame by identity, so the block instruction only
-            // applies when the TOP objective is the settled one — recommending it while a settled
-            // frame is merely a buried ANCESTOR would block the (different, current) TOP task. A
-            // settled ancestor is noted factually instead, to be resolved when it resurfaces.
-            if (topFrameSettled)
-                sb.AppendLine(
-                    "- raw fact: your TOP objective targets the NPC of a DONE (stage 3) contract. If that " +
-                    "objective was to COMPLETE or LOCATE that contract, it is already satisfied — re-pursuing it " +
-                    "is not progress, so `MARK_TOP_BLOCKED` it and do other work. (That NPC can still be a SOURCE " +
-                    "for a NEW contract — a separate objective, not this one. Your call.)");
-            else if (hasSettledActiveObjective)
-                sb.AppendLine(
-                    "- raw fact: an ANCESTOR objective above targets the NPC of a DONE (stage 3) contract. If it " +
-                    "was to COMPLETE or LOCATE that contract it is already satisfied, so do not resume it as-is " +
-                    "when it resurfaces as TOP (replace or clear it then). That NPC can still be a SOURCE for a " +
-                    "NEW contract — a separate objective. Your call.");
         }
 
         // The full stack body can be trimmed at the prompt ceiling, so re-surface
@@ -10643,37 +10364,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "(arming, recovery, or spending XP) and immediate defense against a `HOSTILE` attacker remain " +
                 "valid, but an unrelated kill does not advance this objective. If the required kind is proven " +
                 "unwinnable or unreachable, `MARK_TOP_BLOCKED` or `REPLACE_TOP` rather than silently changing targets.");
-        }
-
-        // ── ## Settled turn-in (decision-proximate salience) ─────────────────
-        // Live (cp053-observe): a turn-in intent whose target NPC is a SETTLED
-        // stage-3 turn-in (the contract is DONE/pending-repeat with no hand-in — the
-        // SAME recognition the `## Contracts` "DONE (stage 3)" note and the cp050
-        // Motor Talk-drop share, via IsSettledStage3TurnInNpc) stays `Active` as the
-        // TOP objective, so a weak model re-emits a Talk to that NPC every cycle. The
-        // Motor drops each (cp050), but the LLM keeps burning a decision on the doomed
-        // turn-in. The QUEST-DIALOG COMPILER rule already says to MARK_TOP_BLOCKED such
-        // an intent, but that fact is buried far up the prompt; re-surface it in the
-        // decision-proximate tail (the same salience pattern as `## Unspent XP`) so
-        // the model resolves the dead objective and spends the turn on other progress.
-        // Restricted to the TOP frame (like `## Unseen objective target` below):
-        // MARK_TOP_BLOCKED acts on the TOP by identity, so nudging it while a settled
-        // turn-in sits as an ANCESTOR would block the wrong (top) frame. Own intent
-        // state + own contract stage + own goal history; no game knowledge, no
-        // recommendation beyond the mechanical "this objective is settled".
-        if (stack?.Top is { Status: IntentLifecycle.Active } settledTop
-            && !string.IsNullOrEmpty(settledTop.TargetName)
-            && IsSettledStage3TurnInNpc(world, events, settledTop.TargetName)
-            && OneLine(settledTop.TargetName) is string settledObjectiveNpc)
-        {
-            sb.AppendLine();
-            sb.AppendLine("## Settled turn-in");
-            sb.AppendLine(
-                $"- your TOP `Active` objective targets \"{settledObjectiveNpc}\", whose contract is " +
-                "already DONE (stage 3) with no separate hand-in (see `## Contracts`). Re-Talking it " +
-                "changes nothing. MARK_TOP_BLOCKED that turn-in intent (a durable marker) and spend the " +
-                "turn on OTHER directed progress — re-attempting a settled turn-in is fixation, not " +
-                "progress. Raw fact from your own stack + contract stage; your strategic call.");
         }
 
         // ── ## Unseen objective target (end-of-prompt salience capsule) ──────
@@ -10904,7 +10594,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             var anyContractBearing = false;
             foreach (var c in world.Contracts)
             {
-                var entry = BuildContractEntry(c, world, events, selfXY, out var hasBearingThisContract);
+                var entry = BuildContractEntry(c, events, selfXY, out var hasBearingThisContract);
                 // Always render the first contract; stop once the rows would
                 // exceed the capsule's char budget (the tail is non-trimmable,
                 // so it must self-limit).
@@ -13442,7 +13132,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
     // capsule actually shows. Pure projection of contract dat facts + the bot's own
     // goal history; no object-type priority, no source-side decision.
     private static StringBuilder BuildContractEntry(
-        ContractProjection c, WorldStateProjection world, EventStream events,
+        ContractProjection c, EventStream events,
         (float Gx, float Gy)? selfXY, out bool hasBearing)
     {
         var entry = new StringBuilder();
@@ -13453,18 +13143,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             : $"  - contract {c.ContractId} \"{name}\": stage {c.Stage}");
         var objective = OneLine(c.Description);
         if (objective is not null)
-            // A stage-3 (DoneOrPendingRepeat) contract's objective is ALREADY
-            // satisfied — mark the objective line complete immediately so the LLM
-            // does not pursue it as an active task. Mechanical: keys on the
-            // c.Stage==3u wire value; the objective text itself is server data
-            // rendered as-is. Kept short to limit its char cost against the
-            // capsule budget. (The separate DONE note below still fires once the
-            // bot has over-pursued the turn-in/locate NPC; this qualifier is the
-            // earlier, no-pursuit-needed signal so a satisfied objective is never
-            // chased even once.)
-            entry.AppendLine(c.Stage == 3u
-                ? $"      objective: {objective}  (stage 3 done; objective already satisfied, do not pursue it)"
-                : $"      objective: {objective}");
+            entry.AppendLine($"      objective: {objective}");
         var progress = OneLine(c.DescriptionProgress);
         if (progress is not null)
             entry.AppendLine($"      in progress: {progress}");
@@ -13495,22 +13174,17 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             entry.AppendLine($"      turn-in location: {turnInAt} from you");
             hasBearing = true;
         }
-        // A stage-3 contract is already complete. If the bot has ALREADY PURSUED its
-        // turn-in NPC past the post-completion attempt threshold (Talk hand-in OR
-        // navigate-only Explore locate) and it is STILL stage 3, that contract has no
-        // separate hand-in (its reward is the issuer's to grant on its own terms) —
-        // surface that mechanical fact + the bot's OWN attempt count so the LLM stops
-        // re-attempting a turn-in/locate that has had no effect. The recognition lives
-        // in IsSettledStage3TurnIn, SHARED with the Motor's settled-turn-in Talk
-        // backstop so the prompt note and the drop can never drift.
-        if (IsSettledStage3TurnIn(world, events, c, out var talkTries, out var exploreTries))
+        // Preserve the bot's own post-transition evidence without classifying what it
+        // means. Strategy decides whether another interaction is useful.
+        if (c.Stage == 3u && c.Stage3SinceUtc is { } since3 && npcEnd is not null)
+        {
+            var talkTries = CountRecentTalkGoalsToName(events, npcEnd, since3);
+            var exploreTries = CountRecentExploreGoalsToName(events, npcEnd, since3);
             entry.AppendLine(
-                $"      DONE (stage 3, complete): you have already gone to " +
-                $"{npcEnd} {talkTries + exploreTries}x (Talk/Explore) since this " +
-                $"contract completed and it is STILL stage 3 — it has no separate " +
-                $"hand-in, so further turn-in/locate attempts on {npcEnd} for it " +
-                $"will not change anything. Treat it as finished and spend your " +
-                $"turn on other progress (accept or complete another task).");
+                $"      post-stage-3 goal history for {npcEnd}: Talk={talkTries}, " +
+                $"Explore={exploreTries} (wire stage 3 first observed at {since3:O}; " +
+                "raw emissions, evidence only)");
+        }
         return entry;
     }
 
@@ -13528,7 +13202,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         var contractsChars = 0;
         foreach (var c in world.Contracts)
         {
-            var entry = BuildContractEntry(c, world, events, selfXY, out var hasBearing);
+            var entry = BuildContractEntry(c, events, selfXY, out var hasBearing);
             if (contractsShown > 0 && contractsChars + entry.Length > ContractsProtectedCharBudget)
                 break;
             if (hasBearing)
