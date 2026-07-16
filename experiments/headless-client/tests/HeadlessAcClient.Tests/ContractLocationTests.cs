@@ -233,6 +233,39 @@ public class ContractLocationTests
         Assert.Contains("fixation, not progress", prompt);
     }
 
+    [Fact]
+    public void QuestCompiler_Stage3TalkFailure_DefersToFinalRetryException()
+    {
+        var since = DateTimeOffset.UtcNow.AddMinutes(-1);
+        var contract = new ContractProjection
+        {
+            ContractId = 701u, Stage = 3u, Name = "Locate the Sergeant",
+            NpcEnd = "Sergeant", Stage3SinceUtc = since,
+        };
+        var events = WithTalkGoals("Sergeant", 1, since.AddSeconds(1));
+        events.Append(new StreamEvent
+        {
+            Sequence = -1,
+            Utc = since.AddSeconds(2),
+            Kind = EventKind.GoalFailed,
+            Name = "Sergeant",
+            Text = "Talk: interaction target out of reach",
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWith(contract), events, null, new IntentStack());
+
+        Assert.Contains("Attempt that hand-in ONCE", prompt);
+        Assert.Contains("## Recent goal outcomes", prompt);
+        Assert.Contains("Talk: interaction target out of reach", prompt);
+        Assert.Contains(
+            "this FINAL check is authoritative over earlier generic", prompt);
+        Assert.Contains(
+            "A rejected or out-of-reach emission did not consume the successful attempt", prompt);
+        Assert.Contains(
+            "proves the earlier Talk never dispatched/reached", prompt);
+    }
+
     // Append N Talk goals aimed at npcName (stamped at `at`) to an EventStream,
     // in the exact "Talk target=name=\"X\" item= source=..." shape the executor
     // records, so the ## Contracts done-detector counts them.
@@ -288,16 +321,18 @@ public class ContractLocationTests
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains(
             "post-stage-3 goal history for Pathwarden Thorolf: Talk=4, Explore=0", cap);
         Assert.Contains("evidence only", cap);
-        Assert.Contains("STAGE-3 REPEAT CHECK", cap);
-        Assert.Contains("source will still execute a repeat you choose", cap);
+        Assert.Contains("## FINAL STAGE-3 VERB CHECK", prompt);
+        Assert.Contains("If that row says `Talk=1` or more, another Talk to that same NPC is INVALID", prompt);
+        Assert.Contains("goal.kind MUST NOT be `Talk`, `Use`, or `Give` for that NPC", prompt);
+        Assert.Contains("the rationale MUST quote the observed `Talk=N`", prompt);
+        Assert.Contains("Source does not enforce this check or veto your goal", prompt);
         Assert.DoesNotContain("no separate hand-in", cap);
     }
 
@@ -311,14 +346,13 @@ public class ContractLocationTests
             NpcEnd = null, Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract), new EventStream(), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), new EventStream(), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
         Assert.DoesNotContain("post-stage-3 goal history", cap);
-        Assert.DoesNotContain("STAGE-3 REPEAT CHECK", cap);
+        Assert.DoesNotContain("## FINAL STAGE-3 VERB CHECK", prompt);
     }
 
     [Fact]
@@ -513,13 +547,13 @@ public class ContractLocationTests
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract),
-                WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract),
+            WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=0, Explore=0", cap);
+        Assert.Contains("If that row says `Talk=0`, one post-transition hand-in Talk may be tried", prompt);
     }
 
     [Fact]

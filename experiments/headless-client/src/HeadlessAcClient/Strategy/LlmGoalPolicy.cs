@@ -10578,6 +10578,7 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
         // never force the body hard-cut to eat the fixed rules preamble; the
         // first row is always emitted so at least one contract stays visible. A
         // `(+N more)` count note tells the LLM its view is partial.
+        var anyRenderedPostStage3GoalHistory = false;
         if (world.Contracts.Count > 0)
         {
             sb.AppendLine();
@@ -10587,7 +10588,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "3 done or pending repeat, 4+ in progress with a step counter):");
             var contractsShown = 0;
             var contractsChars = 0;
-            var anyRenderedPostStage3GoalHistory = false;
             // selfXY + per-row entry building are shared with AnyRenderedContractBearing
             // (see BuildContractEntry) so the rendered-bearing gate cannot drift from
             // what this capsule shows.
@@ -10614,14 +10614,6 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
             }
             if (contractsShown < world.Contracts.Count)
                 sb.AppendLine($"  - (+{world.Contracts.Count - contractsShown} more tracked, not shown)");
-            if (anyRenderedPostStage3GoalHistory)
-                sb.AppendLine(
-                    "- STAGE-3 REPEAT CHECK: `post-stage-3 goal history` is YOUR emitted-goal count after " +
-                    "the shown transition. Before repeating the SAME verb to the SAME NPC, cite NEW raw " +
-                    "evidence in your `rationale` (changed stage/dialog/outcome or changed visibility/reach/location) " +
-                    "that makes the attempt different. If none is shown, an identical repeat is unsupported: " +
-                    "choose another directed action or use `stack_ops` to revise/retire the matching intent. " +
-                    "This is Strategy guidance; source will still execute a repeat you choose.");
             // Decision-proximate REFRESH cue: when EVERY tracked contract is DONE
             // (stage 3 — the batch is finished and earns no more), a `vendor` is
             // in `## Visible nearby`, AND no vendor panel is open yet (world.Vendor
@@ -12577,6 +12569,43 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 sb.AppendLine(
                     $"- level when this landblock was entered: {entryLevelTail}; " +
                     $"current level: {(world.Self.Level?.ToString() ?? "(unknown)")}");
+        }
+
+        // Keep this decision check as the final prompt capsule so later visibility
+        // and TOP-intent evidence cannot displace it. The rule stays static and the
+        // contract row stays raw: Strategy reads and applies the count; source
+        // neither classifies nor vetoes a goal.
+        if (anyRenderedPostStage3GoalHistory)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## FINAL STAGE-3 VERB CHECK (apply immediately before choosing the goal)");
+            sb.AppendLine(
+                "- First COPY the exact integer from the proposed target's `post-stage-3 goal history` row in " +
+                "`## Contracts`. Never infer it from stage, visibility, process age, or the TOP intent, and never " +
+                "reset or pretend it is zero.");
+            sb.AppendLine(
+                "- If that row says `Talk=0`, one post-transition hand-in Talk may be tried.");
+            sb.AppendLine(
+                "- If that row says `Talk=1` or more, another Talk to that same NPC is INVALID unless raw " +
+                "`Recent goal outcomes` proves the earlier Talk never dispatched/reached (rejected or out of " +
+                "reach), OR a NEW server/dialog/contract-state line explicitly warrants another. Unchanged stage " +
+                "3, NPC visibility, a matching TOP intent, and \"needs turn-in\" are the SAME old facts and do NOT " +
+                "qualify. If you claim an exception, the rationale MUST quote the observed `Talk=N` and the exact " +
+                "qualifying line.");
+            sb.AppendLine(
+                "- EXHAUSTED TARGET: when `Talk=1` or more and no exception exists, goal.kind MUST NOT be `Talk`, " +
+                "`Use`, or `Give` for that NPC. All three are interactions; swapping verbs is not progress. " +
+                "Block/revise the matching intent and choose a directed action away from that NPC.");
+            sb.AppendLine(
+                "- PRECEDENCE: for a stage-3 Talk decision, this FINAL check is authoritative over earlier generic " +
+                "\"Attempt that hand-in ONCE\" / `MARK_TOP_BLOCKED` guidance. A rejected or out-of-reach emission " +
+                "did not consume the successful attempt, and genuinely new evidence may warrant another; block the " +
+                "intent only when neither exception above exists.");
+            sb.AppendLine(
+                "- `Explore=1` or more is different: repeat it while raw location/visibility shows concrete " +
+                "approach progress; if position/reach stops changing, revise instead.");
+            sb.AppendLine(
+                "- Source does not enforce this check or veto your goal; YOU must apply it.");
         }
 
         var assembled = sb.ToString();
