@@ -6581,9 +6581,14 @@ public class LlmGoalPolicyTests
         Assert.Contains("post-stage-3 goal history for Contact: Talk=1, Explore=1", cap);
         Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
         Assert.Contains("raw emissions, evidence only", cap);
-        Assert.Contains("STAGE-3 REPEAT CHECK", cap);
-        Assert.Contains("Before repeating the SAME verb to the SAME NPC, cite NEW raw evidence", cap);
-        Assert.Contains("source will still execute a repeat you choose", cap);
+        Assert.Contains("## FINAL STAGE-3 VERB CHECK", prompt);
+        Assert.Contains("Unchanged stage 3, NPC visibility, a matching TOP intent", prompt);
+        Assert.Contains("another Talk to that same NPC is INVALID", prompt);
+        Assert.Contains("All three are interactions; swapping verbs is not progress", prompt);
+        Assert.Contains("Source does not enforce this check or veto your goal", prompt);
+        Assert.EndsWith(
+            "- Source does not enforce this check or veto your goal; YOU must apply it.",
+            prompt.TrimEnd());
         Assert.True(prompt.Length <= 10000, $"prompt length {prompt.Length} exceeds ceiling 10000");
     }
 

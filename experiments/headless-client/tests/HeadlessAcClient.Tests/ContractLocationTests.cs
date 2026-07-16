@@ -288,16 +288,18 @@ public class ContractLocationTests
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains(
             "post-stage-3 goal history for Pathwarden Thorolf: Talk=4, Explore=0", cap);
         Assert.Contains("evidence only", cap);
-        Assert.Contains("STAGE-3 REPEAT CHECK", cap);
-        Assert.Contains("source will still execute a repeat you choose", cap);
+        Assert.Contains("## FINAL STAGE-3 VERB CHECK", prompt);
+        Assert.Contains("If that row says `Talk=1` or more, another Talk to that same NPC is INVALID", prompt);
+        Assert.Contains("goal.kind MUST NOT be `Talk`, `Use`, or `Give` for that NPC", prompt);
+        Assert.Contains("the rationale MUST quote the observed `Talk=N`", prompt);
+        Assert.Contains("Source does not enforce this check or veto your goal", prompt);
         Assert.DoesNotContain("no separate hand-in", cap);
     }
 
@@ -311,14 +313,13 @@ public class ContractLocationTests
             NpcEnd = null, Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract), new EventStream(), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), new EventStream(), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
         Assert.DoesNotContain("post-stage-3 goal history", cap);
-        Assert.DoesNotContain("STAGE-3 REPEAT CHECK", cap);
+        Assert.DoesNotContain("## FINAL STAGE-3 VERB CHECK", prompt);
     }
 
     [Fact]
@@ -513,13 +514,13 @@ public class ContractLocationTests
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
 
-        var cap = Section(
-            LlmGoalPolicy.BuildUserPrompt(
-                WorldWithContracts(contract),
-                WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null),
-            "## Contracts");
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract),
+            WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null);
+        var cap = Section(prompt, "## Contracts");
 
         Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=0, Explore=0", cap);
+        Assert.Contains("If that row says `Talk=0`, one post-transition hand-in Talk may be tried", prompt);
     }
 
     [Fact]
