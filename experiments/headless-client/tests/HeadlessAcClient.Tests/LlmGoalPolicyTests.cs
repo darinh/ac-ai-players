@@ -26071,6 +26071,117 @@ public class LlmGoalPolicyTests
     }
 
     [Fact]
+    public void BuildUserPrompt_ActiveNamedKillObjective_SearchesInsteadOfSubstituting()
+    {
+        var world = BuildWorldWithMonsters(new VisibleObjectProjection
+        {
+            Guid = 0x601u,
+            Name = "Distractor Beast",
+            Wcid = 71u,
+            Distance = 5f,
+            IsMonster = true,
+        });
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001",
+            Kind = "quest:kill-task",
+            TargetName = "Quarry Beast",
+            Completion = new KillCountSincePushAtLeastPredicate(3, "Quarry Beast"),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.Contains("## Active named kill objective", prompt);
+        Assert.Contains("kills_since_push \"Quarry Beast\">=3", prompt);
+        Assert.Contains("only kills whose shown name contains `Quarry Beast` advance it", prompt);
+        Assert.Contains("Explore to search for that kind instead of substituting optional combat", prompt);
+        Assert.Contains("immediate defense against a `HOSTILE` attacker", prompt);
+        Assert.Contains("`MARK_TOP_BLOCKED` or `REPLACE_TOP`", prompt);
+
+        var sparsePrompt = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), events, null, stack);
+        var nl = sparsePrompt.Contains("\r\n") ? "\r\n" : "\n";
+        var bodyIdx = sparsePrompt.IndexOf(
+            nl + "## Self" + nl + "- name:", StringComparison.Ordinal);
+        Assert.True(bodyIdx > 0);
+        var tight = LlmGoalPolicy.BuildUserPrompt(
+            BuildExitTokenWorld(), events, null, stack, null, null, promptCeiling: bodyIdx);
+        Assert.True(tight.Length <= bodyIdx);
+        Assert.Contains("## Active named kill objective", tight);
+        Assert.Contains("kills_since_push \"Quarry Beast\">=3", tight);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_ActiveUnnamedKillObjective_OmitsTargetAdherenceCue()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001",
+            Kind = "hunt",
+            Completion = new KillCountSincePushAtLeastPredicate(3),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Active named kill objective", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_NamedKillObjectiveAsAncestor_OmitsTargetAdherenceCue()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001",
+            Kind = "quest:kill-task",
+            TargetName = "Quarry Beast",
+            Completion = new KillCountSincePushAtLeastPredicate(3, "Quarry Beast"),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+        stack.TryPush(new Intent
+        {
+            Id = "i-002",
+            Kind = "recover",
+            Completion = new AlwaysFalsePredicate(),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Active named kill objective", prompt);
+    }
+
+    [Fact]
+    public void BuildUserPrompt_BlockedNamedKillObjective_OmitsTargetAdherenceCue()
+    {
+        var world = BuildExitTokenWorld();
+        var events = new EventStream();
+        var stack = new IntentStack();
+        stack.TryPush(new Intent
+        {
+            Id = "i-001",
+            Kind = "quest:kill-task",
+            TargetName = "Quarry Beast",
+            Status = IntentLifecycle.Blocked,
+            Completion = new KillCountSincePushAtLeastPredicate(3, "Quarry Beast"),
+            Baseline = IntentBaseline.Capture(world, events, DateTime.UtcNow),
+        });
+
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, events, null, stack);
+
+        Assert.DoesNotContain("## Active named kill objective", prompt);
+    }
+
+    [Fact]
     public void BuildUserPrompt_SettledTurnInCapsule_NudgesBlockWhenActiveIntentTargetsSettledNpc()
     {
         // cp053: an Active turn-in intent targeting a SETTLED stage-3 turn-in NPC

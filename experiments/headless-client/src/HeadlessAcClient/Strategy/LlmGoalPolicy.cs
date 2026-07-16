@@ -11727,6 +11727,34 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                     "NEW contract — a separate objective. Your call.");
         }
 
+        // A named kill-count predicate is an LLM-authored commitment to one
+        // target kind. The full stack body can be trimmed at the prompt ceiling,
+        // and the generic compiler rule otherwise permits unrelated optional
+        // combat. Re-surface the predicate's exact tactical consequence in the
+        // protected tail so an absent target produces search, not substitution.
+        // This reads only the bot's own typed intent; Strategy still decides.
+        if (stack?.Top is
+            {
+                Status: IntentLifecycle.Active,
+                Completion: KillCountSincePushAtLeastPredicate namedKill
+            }
+            && namedKill.Count > 0
+            && OneLine(namedKill.NameContains) is string requiredKind)
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Active named kill objective");
+            sb.AppendLine(
+                $"- TOP completion is `kills_since_push \"{requiredKind}\">={namedKill.Count}`; only kills " +
+                $"whose shown name contains `{requiredKind}` advance it.");
+            sb.AppendLine(
+                "- The compiler's generic \"unrelated monsters are optional fallback\" clause does NOT apply " +
+                "while this named predicate is TOP. Attack a visible matching target; if none is visible, " +
+                "Explore to search for that kind instead of substituting optional combat. Tactical preparation " +
+                "(arming, recovery, or spending XP) and immediate defense against a `HOSTILE` attacker remain " +
+                "valid, but an unrelated kill does not advance this objective. If the required kind is proven " +
+                "unwinnable or unreachable, `MARK_TOP_BLOCKED` or `REPLACE_TOP` rather than silently changing targets.");
+        }
+
         // ── ## Settled turn-in (decision-proximate salience) ─────────────────
         // Live (cp053-observe): a turn-in intent whose target NPC is a SETTLED
         // stage-3 turn-in (the contract is DONE/pending-repeat with no hand-in — the
