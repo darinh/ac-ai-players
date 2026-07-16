@@ -277,12 +277,10 @@ public class ContractLocationTests
     };
 
     [Fact]
-    public void Capsule_Stage3RepeatedTurnInAttempts_SurfacesDoneNoHandIn()
+    public void Capsule_Stage3History_SurfacesRawTalkCount()
     {
-        // The live criterion-2 blocker: a stage-3 contract whose turn-in NPC is
-        // the located target, Talked repeatedly with no stage change. The capsule
-        // must surface the bot's OWN post-completion attempt count + the "no
-        // separate hand-in" fact so the LLM stops re-attempting it.
+        // Keep the bot's own post-transition emissions available without deriving
+        // a source-owned disposition from them.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -295,17 +293,35 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 4, since), null),
             "## Contracts");
 
-        Assert.Contains("DONE (stage 3, complete)", cap);
-        Assert.Contains("gone to Pathwarden Thorolf 4x (Talk/Explore)", cap);
-        Assert.Contains("no separate hand-in", cap);
+        Assert.Contains(
+            "post-stage-3 goal history for Pathwarden Thorolf: Talk=4, Explore=0", cap);
+        Assert.Contains("evidence only", cap);
+        Assert.DoesNotContain("no separate hand-in", cap);
     }
 
     [Fact]
-    public void SettledContractCue_FiresWhenReTargetingSettledTurnInNpc()
+    public void Capsule_Stage3WithoutTurnInNpc_StillRendersTransitionTime()
     {
-        // The salience extraction: when the bot has re-targeted a settled stage-3
-        // turn-in NPC past the recognition threshold, the protected-tail cue fires
-        // and names that NPC, telling the LLM there is no turn-in and to do else.
+        var since = new DateTimeOffset(2026, 7, 16, 1, 2, 3, TimeSpan.Zero);
+        var contract = new ContractProjection
+        {
+            ContractId = 849u, Stage = 3u, Name = "Unattributed",
+            NpcEnd = null, Stage3SinceUtc = since,
+        };
+
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(contract), new EventStream(), null),
+            "## Contracts");
+
+        Assert.Contains($"wire stage 3 first observed at {since:O}", cap);
+        Assert.DoesNotContain("post-stage-3 goal history", cap);
+    }
+
+    [Fact]
+    public void Stage3History_TalksRenderRawEvidenceWithoutSettledCue()
+    {
+        // Repeated Talk emissions remain visible without a source-owned disposition.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -314,16 +330,13 @@ public class ContractLocationTests
         };
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             WorldWithContracts(contract), WithTalkGoals("Buckminster", 3, since), null);
-        Assert.Contains("## Settled contract — no turn-in", prompt);
-        Assert.Contains("Buckminster", prompt);
-        Assert.Contains("NO separate turn-in step", prompt);
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=3, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledContractCue_OmittedForSingleAttempt()
+    public void Stage3History_SingleTalkAlsoRendersRawEvidenceOnly()
     {
-        // One (legitimate) post-completion attempt is below the recognition threshold,
-        // so the NPC is not yet "settled" -> the cue must not fire.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -336,7 +349,7 @@ public class ContractLocationTests
     }
 
     [Fact]
-    public void SettledContractCue_OmittedWhenNoContracts()
+    public void Stage3History_OmittedWhenNoContracts()
     {
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             WorldWithContracts(), new EventStream(), null);
@@ -344,25 +357,20 @@ public class ContractLocationTests
     }
 
     [Fact]
-    public void SettledContractCue_FiresOnExploreReTargeting()
+    public void Stage3History_ExploresRenderRawEvidenceWithoutSettledCue()
     {
-        // The Explore branch: a LOCATE/REACH contract is pursued via navigate-only
-        // Explore (not Talk). The newest emission is Explore toward the settled NPC.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         { ContractId = 863u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster", Stage3SinceUtc = since };
         var prompt = LlmGoalPolicy.BuildUserPrompt(
             WorldWithContracts(contract), WithExploreGoals("Buckminster", 3, since), null);
-        Assert.Contains("## Settled contract — no turn-in", prompt);
-        Assert.Contains("Buckminster", prompt);
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=0, Explore=3", prompt);
     }
 
     [Fact]
-    public void SettledContractCue_RovingTwoSettled_NamesTheCurrentlyTargetedNpc()
+    public void Stage3History_MultipleContractsEachRenderRawEvidence()
     {
-        // Roving multi-contract case: TWO settled turn-in NPCs both qualify. The cue
-        // must name the one the bot is CURRENTLY re-targeting (its LATEST emission),
-        // not just the first settled contract.
         var since = DateTimeOffset.UtcNow;
         var c1 = new ContractProjection
         { ContractId = 860u, Stage = 3u, Name = "Find the Pathwarden", NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since };
@@ -374,11 +382,10 @@ public class ContractLocationTests
 
         var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(c1, c2), es, null);
 
-        Assert.Contains("## Settled contract — no turn-in", prompt);
-        var cueLine = prompt.Split('\n').FirstOrDefault(l => l.Contains("re-targeted") && l.Contains("DONE contract"));
-        Assert.NotNull(cueLine);
-        Assert.Contains("Buckminster", cueLine!);          // the live (latest) target
-        Assert.DoesNotContain("Pathwarden", cueLine!);     // not the other settled NPC
+        Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+        Assert.Contains(
+            "post-stage-3 goal history for Pathwarden Thorolf: Talk=3, Explore=0", prompt);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=3, Explore=0", prompt);
     }
 
     private static void AppendTalkGoals(EventStream es, string npcName, int times, DateTimeOffset at)
@@ -392,11 +399,8 @@ public class ContractLocationTests
     }
 
     [Fact]
-    public void SettledContractCue_OmittedWhenNewerGoalIsNotInteraction()
+    public void Stage3History_RemainsRawAfterNewerNonInteractionGoal()
     {
-        // The cue is about the bot's CURRENT pursuit: a newer Attack (or any non-
-        // Talk/Explore goal) AFTER the settled Talk/Explore means the bot has MOVED ON,
-        // so the cue must not fire stale during combat.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         { ContractId = 862u, Stage = 3u, Name = "Find the Barkeeper", NpcEnd = "Buckminster", Stage3SinceUtc = since };
@@ -411,17 +415,12 @@ public class ContractLocationTests
         var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), es, null);
 
         Assert.DoesNotContain("## Settled contract — no turn-in", prompt);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=3, Explore=0", prompt);
     }
 
     [Fact]
-    public void Capsule_Stage3RepeatedExplorePursuit_SurfacesDoneNoHandIn()
+    public void Capsule_Stage3ExploreHistory_SurfacesRawCount()
     {
-        // cp031: a stage-3 contract whose objective is a LOCATE/REACH task is
-        // pursued via navigate-only Explore (not Talk), so the Talk-only hand-in
-        // count never reached the threshold and the bot roved between two done
-        // contracts forever (live cp029/cp030). Explore-pursuits toward the turn-in
-        // NPC since stage-3 now count too — at a HIGHER threshold (3) than Talk (2),
-        // since the first Explore is ordinary travel-to-reach, not an attempt.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -434,19 +433,12 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithExploreGoals("Buckminster", 3, since), null),
             "## Contracts");
 
-        Assert.Contains("DONE (stage 3, complete)", cap);
-        Assert.Contains("gone to Buckminster 3x (Talk/Explore)", cap);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=0, Explore=3", cap);
     }
 
     [Fact]
-    public void Capsule_Stage3_TwoExploresZeroTalk_DoesNotFire()
+    public void Capsule_Stage3TwoExplores_SurfacesExactRawCount()
     {
-        // cp031 safety (gpt-5.4 review): ordinary travel to a far turn-in NPC can
-        // take a couple of Explore goals BEFORE the first hand-in Talk. Two
-        // Explores with zero Talk must NOT prematurely declare a turn-in contract
-        // "finished" — the Explore threshold is 3 (1 travel + 2 redundant
-        // re-navigations), above ordinary travel, so the contract keeps its real
-        // hand-in attempt.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -459,15 +451,12 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithExploreGoals("Pathwarden Thorolf", 2, since), null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=0, Explore=2", cap);
     }
 
     [Fact]
-    public void Capsule_Stage3SingleAttempt_PreservesTurnIn()
+    public void Capsule_Stage3SingleTalk_SurfacesExactRawCount()
     {
-        // One (legitimate) post-completion hand-in attempt must NOT trigger the
-        // done/no-hand-in note — a contract that really clears on a final Talk
-        // keeps its one real attempt.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -480,19 +469,13 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 1, since), null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=1, Explore=0", cap);
         Assert.Contains("turn-in NPC: Pathwarden Thorolf", cap);
     }
 
     [Fact]
-    public void Capsule_Stage3_OneTalkPlusOneExplore_DoesNotFire()
+    public void Capsule_Stage3TalkAndExplore_SurfacesSeparateRawCounts()
     {
-        // cp031 safety: the gate fires on the Talk threshold (2) OR the (higher)
-        // Explore threshold (3) independently, NOT on their SUM — a single real
-        // hand-in Talk plus a single navigate-toward Explore (1+1) reaches NEITHER
-        // threshold, so a contract that genuinely clears on a final hand-in keeps
-        // its one real attempt. Otherwise a turn-in contract would be declared done
-        // after just one Talk (plus the Explore to reach the NPC).
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
@@ -511,11 +494,11 @@ public class ContractLocationTests
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), es, null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=1, Explore=1", cap);
     }
 
     [Fact]
-    public void Capsule_Stage3_PreStage3TalksExcluded()
+    public void Capsule_Stage3History_ExcludesGoalsBeforeTransition()
     {
         // Talks made BEFORE the contract became stage 3 (acceptance/locating the
         // NPC) must NOT count toward hand-in attempts — only post-completion
@@ -533,11 +516,11 @@ public class ContractLocationTests
                 WithTalkGoals("Pathwarden Thorolf", 4, since.AddMinutes(-5)), null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Contains("post-stage-3 goal history for Pathwarden Thorolf: Talk=0, Explore=0", cap);
     }
 
     [Fact]
-    public void Capsule_Stage3_SharedTurnInNpc_NoDoneNote()
+    public void Capsule_Stage3SharedTurnIn_RendersRawHistoryForEachRow()
     {
         // Two stage-3 contracts sharing one turn-in NPC make per-contract Talk
         // attribution ambiguous, so the done note must not fire for either.
@@ -556,7 +539,8 @@ public class ContractLocationTests
                 WorldWithContracts(a, b), WithTalkGoals("Hub Giver", 5, since), null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+            cap, "post-stage-3 goal history for Hub Giver: Talk=5, Explore=0").Count);
     }
 
     [Fact]
@@ -577,12 +561,11 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithTalkGoals(oddName, 3, since), null),
             "## Contracts");
 
-        Assert.Contains("DONE (stage 3, complete)", cap);
-        Assert.Contains($"gone to {oddName} 3x (Talk/Explore)", cap);
+        Assert.Contains($"post-stage-3 goal history for {oddName}: Talk=3, Explore=0", cap);
     }
 
     [Fact]
-    public void Capsule_InProgressContract_NoDoneNoteEvenWithRepeatedTalks()
+    public void Capsule_InProgressContract_OmitsPostStage3History()
     {
         // The done-note is for stage-3 contracts ONLY: an in-progress (stage 2)
         // contract must never be marked done regardless of Talk history.
@@ -597,55 +580,44 @@ public class ContractLocationTests
                 WorldWithContracts(contract), WithTalkGoals("Sergeant", 5, since), null),
             "## Contracts");
 
-        Assert.DoesNotContain("DONE (stage 3, complete)", cap);
+        Assert.DoesNotContain("post-stage-3 goal history", cap);
     }
 
-    // ---- cp050: Motor settled-stage-3-turn-in Talk backstop ----
-    // The prompt already SURFACES a settled stage-3 turn-in ("DONE (stage 3)"); these
-    // cover the MECHANICAL backstop (IsSettledStage3TurnInNpc) that DROPS a further
-    // Talk to such an NPC when a weak model ignores the note, sharing the exact
-    // recognition (IsSettledStage3TurnIn) with the render so the two never drift.
+    // ---- raw stage-3 contract evidence ----
 
     [Fact]
-    public void SettledStage3TurnInNpc_PastThreshold_Suppresses()
+    public void Stage3History_TwoTalksRenderRawCount()
     {
-        // A stage-3 (done) contract's turn-in NPC Talked past the post-completion
-        // threshold (2) is a settled turn-in with no hand-in — drop a further Talk.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
             ContractId = 900u, Stage = 3u, Name = "Find the Pathwarden",
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
-        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(
-            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 2, since),
-            "Pathwarden Thorolf"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 2, since), null);
+        Assert.Contains(
+            "post-stage-3 goal history for Pathwarden Thorolf: Talk=2, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_SingleAttempt_DoesNotSuppress()
+    public void Stage3History_OneTalkRendersRawCount()
     {
-        // One legitimate post-completion hand-in attempt is preserved — a contract
-        // that really clears on a final Talk gets its one real attempt.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
             ContractId = 901u, Stage = 3u, Name = "Find the Pathwarden",
             NpcEnd = "Pathwarden Thorolf", Stage3SinceUtc = since,
         };
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
-            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 1, since),
-            "Pathwarden Thorolf"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Pathwarden Thorolf", 1, since), null);
+        Assert.Contains(
+            "post-stage-3 goal history for Pathwarden Thorolf: Talk=1, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_RovingTwoSettledNpcs_BothSuppressed()
+    public void Stage3History_RovingTargetsRenderBothRawCounts()
     {
-        // The exact observed loop: two stage-3 contracts whose turn-in NPCs the bot
-        // ROVES between, each Talked past the threshold. The stationary/novelty Talk
-        // guards MISS this (movement + fresh flavor dialog reset them); this contract-
-        // stage backstop is position- AND novelty-independent, so BOTH settled NPCs
-        // are suppressed.
         var since = DateTimeOffset.UtcNow;
         var pathwarden = new ContractProjection
         {
@@ -665,16 +637,15 @@ public class ContractLocationTests
                 Text = $"Talk target=name=\"{n}\" item= source=llm:test",
             });
         var world = WorldWithContracts(pathwarden, barkeeper);
-        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, es, "Pathwarden Thorolf"));
-        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, es, "Buckminster"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(world, es, null);
+        Assert.Contains(
+            "post-stage-3 goal history for Pathwarden Thorolf: Talk=2, Explore=0", prompt);
+        Assert.Contains("post-stage-3 goal history for Buckminster: Talk=2, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_NpcWithLiveBusiness_NotSuppressed()
+    public void Stage3History_RendersAlongsideLiveContract()
     {
-        // An NPC that is ALSO the start/turn-in of a NON-terminal contract has live
-        // business (e.g. a fresh batch just obtained from this same source), so its
-        // Talk must NOT be suppressed even though it settled an earlier contract.
         var since = DateTimeOffset.UtcNow;
         var settled = new ContractProjection
         {
@@ -684,30 +655,27 @@ public class ContractLocationTests
         {
             ContractId = 905u, Stage = 1u, Name = "New", NpcStart = "Broker",
         };
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
-            WorldWithContracts(settled, fresh), WithTalkGoals("Broker", 5, since), "Broker"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(settled, fresh), WithTalkGoals("Broker", 5, since), null);
+        Assert.Contains("post-stage-3 goal history for Broker: Talk=5, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_InProgressContract_NotSuppressed()
+    public void InProgressContract_DoesNotRenderStage3History()
     {
-        // A stage-2 (in-progress) contract is never settled — Talking its NPC is
-        // legitimate progress, never suppressed regardless of Talk count.
         var since = DateTimeOffset.UtcNow;
         var contract = new ContractProjection
         {
             ContractId = 906u, Stage = 2u, Name = "Hunt", NpcEnd = "Sergeant",
         };
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
-            WorldWithContracts(contract), WithTalkGoals("Sergeant", 5, since), "Sergeant"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(contract), WithTalkGoals("Sergeant", 5, since), null);
+        Assert.DoesNotContain("post-stage-3 goal history", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_SharedTurnInNpc_NotRecognized()
+    public void Stage3History_SharedTurnInRendersEachRawRow()
     {
-        // Mirror of the render's shared-turn-in ambiguity guard at the predicate
-        // level: two stage-3 contracts sharing one turn-in NPC make per-contract
-        // attribution ambiguous, so neither is recognized as a settled turn-in.
         var since = DateTimeOffset.UtcNow;
         var a = new ContractProjection
         {
@@ -717,20 +685,15 @@ public class ContractLocationTests
         {
             ContractId = 908u, Stage = 3u, Name = "B", NpcEnd = "Hub Giver", Stage3SinceUtc = since,
         };
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(
-            WorldWithContracts(a, b), WithTalkGoals("Hub Giver", 5, since), "Hub Giver"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(
+            WorldWithContracts(a, b), WithTalkGoals("Hub Giver", 5, since), null);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(
+            prompt, "post-stage-3 goal history for Hub Giver: Talk=5, Explore=0").Count);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_SequentialBatchSettlement_NoTalkLeak()
+    public void Stage3History_UsesEachContractTransitionTime()
     {
-        // claude review: an NPC that is the turn-in (NpcEnd) of one contract AND the
-        // task-giver (NpcStart) of ANOTHER must not have the Talks it received while
-        // the SECOND contract was still live business leak into the first's settled
-        // count once the second also settles. The backstop's count window starts at
-        // the NPC's FULLY-SETTLED time (max Stage3SinceUtc over the NPC's contracts),
-        // not the earlier per-contract time, so those pre-full-settle Talks are
-        // excluded and a legitimate batch-refresh Talk is not wrongly suppressed.
         var t0 = DateTimeOffset.UtcNow.AddMinutes(-5);
         var t1 = DateTimeOffset.UtcNow;
         var a = new ContractProjection
@@ -744,15 +707,13 @@ public class ContractLocationTests
         };
         // Two Talks to Broker made WHILE b was still live business (between t0 and t1).
         var es = WithTalkGoals("Broker", 2, t0.AddMinutes(1));
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(WorldWithContracts(a, b), es, "Broker"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(a, b), es, null);
+        Assert.Contains("post-stage-3 goal history for Broker: Talk=2, Explore=0", prompt);
     }
 
     [Fact]
-    public void SettledStage3TurnInNpc_SequentialBatchSettlement_SuppressesAfterFullSettle()
+    public void Stage3History_CountsGoalsAfterTransition()
     {
-        // The companion to the no-leak case: once the NPC is FULLY settled (its last
-        // contract done at t1), re-Talks made AFTER t1 past the threshold ARE the
-        // fixation the backstop suppresses.
         var t0 = DateTimeOffset.UtcNow.AddMinutes(-5);
         var t1 = DateTimeOffset.UtcNow.AddMinutes(-2);
         var a = new ContractProjection
@@ -765,13 +726,14 @@ public class ContractLocationTests
             Stage3SinceUtc = t1,
         };
         var es = WithTalkGoals("Broker", 2, t1.AddMinutes(1)); // 2 Talks AFTER full settle
-        Assert.True(LlmGoalPolicy.IsSettledStage3TurnInNpc(WorldWithContracts(a, b), es, "Broker"));
+        var prompt = LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(a, b), es, null);
+        Assert.Contains("post-stage-3 goal history for Broker: Talk=2, Explore=0", prompt);
     }
 
-    // ── stage-3 objective is rendered ALREADY-SATISFIED immediately ───────
+    // ── stage-3 objective remains raw evidence ─────────────────────────────
 
     [Fact]
-    public void Capsule_Stage3Objective_MarkedAlreadySatisfied_WithoutPriorPursuit()
+    public void Capsule_Stage3Objective_RendersWithoutSourceDisposition()
     {
         // A stage-3 (DoneOrPendingRepeat) contract's objective is complete the
         // moment it reaches stage 3 — the qualifier must appear even in a fresh
@@ -787,8 +749,8 @@ public class ContractLocationTests
             "## Contracts");
 
         Assert.Contains("objective: Locate the contact in the tavern.", cap);
-        Assert.Contains("objective already satisfied", cap);
-        Assert.Contains("do not pursue it", cap);
+        Assert.DoesNotContain("objective already satisfied", cap);
+        Assert.DoesNotContain("do not pursue it", cap);
     }
 
     [Fact]
@@ -839,13 +801,12 @@ public class ContractLocationTests
             LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null),
             "## Contracts");
 
-        // Both done rows carry the qualifier; the active row survives and is unmarked.
-        Assert.Contains("objective: Locate the contact in the tavern.  (stage 3 done", cap);
+        Assert.Contains("objective: Locate the contact in the tavern.", cap);
+        Assert.DoesNotContain("stage 3 done", cap);
         Assert.Contains("objective: Slay six marauders in the lowlands.", cap);
-        Assert.DoesNotContain("Slay six marauders in the lowlands.  (stage 3 done", cap);
     }
 
-    // ── ## Persistent objectives: a done-stage-3-contract intent is flagged satisfied ──
+    // ── ## Persistent objectives: raw contract associations ────────────────
 
     private static IntentStack StackWithFrame(string kind, string targetName, IntentLifecycle status)
     {
@@ -860,14 +821,10 @@ public class ContractLocationTests
     }
 
     [Fact]
-    public void PersistentObjectives_DoneContractIntent_FlaggedContractDone()
+    public void PersistentObjectives_Stage3ContractIntent_ReportsRawAssociation()
     {
-        // The live wedge: the bot compiled a quest intent toward a contract NPC whose contract is
-        // now stage-3 DONE, and pursued it by decomposing into an UNNAMED Explore ("anywhere") — so
-        // no NAMED Talk/Explore goal exists and the goal-level ## Settled turn-in cue never fires,
-        // yet the intent is stale. The re-surfaced persistent objective is flagged with the raw
-        // contract-DONE fact + a MARK_TOP_BLOCKED note, while explicitly preserving the option to
-        // use that NPC as a SOURCE for a NEW contract (a different objective).
+        // The intent remains active. Its matching contract row is shown without a
+        // source-owned instruction to block or replace it.
         var contract = new ContractProjection
         {
             ContractId = 880u, Stage = 3u, Name = "Find the Barkeeper",
@@ -877,18 +834,13 @@ public class ContractLocationTests
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.Contains("contract is DONE", cap);
-        Assert.Contains("MARK_TOP_BLOCKED", cap);
-        // The fresh-work path is preserved — the cue must NOT categorically forbid the NPC.
-        Assert.Contains("SOURCE for a NEW contract", cap);
+        Assert.Contains("raw contract match: id=880 wire-stage=3 relation=turn-in", cap);
+        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);
     }
 
     [Fact]
-    public void PersistentObjectives_OnlySettledActive_OmitsPursueUnfinishedLine()
+    public void PersistentObjectives_ActiveStage3Match_RemainsActionableForStrategy()
     {
-        // Coherence: when the ONLY Active frame is a settled-contract objective, the section must
-        // NOT also say "pursue an unfinished one is your call" (that would re-introduce the very
-        // contradiction this slice removes), and must NOT falsely claim every objective is terminal.
         var contract = new ContractProjection
         {
             ContractId = 887u, Stage = 3u, Name = "Find the Barkeeper",
@@ -898,18 +850,15 @@ public class ContractLocationTests
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.Contains("contract is DONE", cap);
-        Assert.DoesNotContain("pursue an unfinished one", cap);
+        Assert.Contains("raw contract match: id=887 wire-stage=3 relation=turn-in", cap);
+        Assert.Contains("these are your OWN persistent objectives", cap);
         Assert.DoesNotContain("every objective above has reached a terminal state", cap);
     }
 
     [Fact]
     public void PersistentObjectives_FreshWorkIntentSameNpc_NotForbidden()
     {
-        // gpt-5.4 case: in the live data the done contract's start == end (the NPC is BOTH a
-        // turn-in AND a contract SOURCE). A separate intent to get NEW work from that same NPC
-        // must not be categorically forbidden — the cue surfaces the contract-DONE fact but the
-        // note explicitly keeps the fresh-contract SOURCE option open.
+        // Both raw NPC relations are preserved without inferring the intent's purpose.
         var contract = new ContractProjection
         {
             ContractId = 888u, Stage = 3u, Name = "Find the Barkeeper",
@@ -919,16 +868,13 @@ public class ContractLocationTests
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.Contains("SOURCE for a NEW contract", cap);
-        Assert.DoesNotContain("do NOT pursue", cap);
+        Assert.Contains("raw contract match: id=888 wire-stage=3 relation=start+turn-in", cap);
+        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);
     }
 
     [Fact]
-    public void PersistentObjectives_BothAncestorAndTopSettled_TopPrecedence()
+    public void PersistentObjectives_AncestorAndTopEachReportRawContractMatch()
     {
-        // Both an ANCESTOR and the TOP target a done-contract NPC. topFrameSettled wins: the
-        // MARK_TOP_BLOCKED note fires (for the TOP), each settled frame keeps its inline DONE tag,
-        // and the ancestor-only note does NOT also render (no double-message).
         var contract = new ContractProjection
         { ContractId = 893u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
         var baseline = IntentBaseline.Capture(WorldWithContracts(), new EventStream(), DateTime.UtcNow);
@@ -937,29 +883,25 @@ public class ContractLocationTests
         {
             Id = "i-001", Kind = "quest:locate", TargetName = "Buckminster",
             Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
-        }); // ancestor (settled)
+        });
         stack.TryPush(new Intent
         {
             Id = "i-002", Kind = "quest:find-barkeeper", TargetName = "Buckminster",
             Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
-        }); // TOP (settled)
+        });
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.Contains("MARK_TOP_BLOCKED", cap);             // TOP precedence -> the block note fires
-        Assert.DoesNotContain("ANCESTOR objective above", cap); // the ancestor-only note does NOT also render
-        // Both settled frames carry the inline DONE tag.
-        var doneTags = System.Text.RegularExpressions.Regex.Matches(cap, "this NPC's contract is DONE").Count;
-        Assert.True(doneTags >= 2, $"expected both frames inline-tagged DONE, got {doneTags}");
+        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);
+        Assert.DoesNotContain("ANCESTOR objective above", cap);
+        var rawTags = System.Text.RegularExpressions.Regex.Matches(
+            cap, "raw contract match: id=893 wire-stage=3 relation=turn-in").Count;
+        Assert.Equal(2, rawTags);
     }
 
     [Fact]
-    public void PersistentObjectives_SettledAncestorUnfinishedTop_NoMarkTopBlocked()
+    public void PersistentObjectives_ContractMatchedAncestor_DoesNotPrescribeTopMutation()
     {
-        // gpt-5.4 case: a settled done-contract objective as a buried ANCESTOR with a DIFFERENT
-        // unfinished active TOP must NOT trigger a MARK_TOP_BLOCKED instruction — that op acts on
-        // TOP by identity, so it would block the (current, unfinished) TOP task. The ancestor is
-        // noted factually; the unfinished-objective line still renders for the live TOP.
         var contract = new ContractProjection
         { ContractId = 892u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
         var baseline = IntentBaseline.Capture(WorldWithContracts(), new EventStream(), DateTime.UtcNow);
@@ -968,19 +910,19 @@ public class ContractLocationTests
         {
             Id = "i-001", Kind = "quest:find-barkeeper", TargetName = "Buckminster",
             Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
-        }); // ancestor (settled)
+        });
         stack.TryPush(new Intent
         {
             Id = "i-002", Kind = "hunt", TargetName = "Drudge",
             Status = IntentLifecycle.Active, Completion = new AlwaysFalsePredicate(), Baseline = baseline,
-        }); // TOP (unfinished, non-contract)
+        });
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.Contains("contract is DONE", cap);            // the ancestor is tagged with the fact
-        Assert.Contains("pursue an unfinished one", cap);    // the live unfinished TOP keeps the line
-        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);      // but NO top-block (would hit the wrong frame)
-        Assert.Contains("ANCESTOR objective above", cap);    // the ancestor-only factual note
+        Assert.Contains("raw contract match: id=892 wire-stage=3 relation=turn-in", cap);
+        Assert.Contains("these are your OWN persistent objectives", cap);
+        Assert.DoesNotContain("MARK_TOP_BLOCKED", cap);
+        Assert.DoesNotContain("ANCESTOR objective above", cap);
     }
 
     [Fact]
@@ -996,8 +938,8 @@ public class ContractLocationTests
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.DoesNotContain("contract is DONE", cap);
-        Assert.Contains("pursue an unfinished one", cap);
+        Assert.Contains("raw contract match: id=881 wire-stage=2 relation=turn-in", cap);
+        Assert.Contains("these are your OWN persistent objectives", cap);
     }
 
     [Fact]
@@ -1013,54 +955,77 @@ public class ContractLocationTests
         var cap = Section(
             LlmGoalPolicy.BuildUserPrompt(WorldWithContracts(contract), new EventStream(), null, stack),
             "## Persistent objectives");
-        Assert.DoesNotContain("contract is DONE", cap);
+        Assert.DoesNotContain("raw contract match:", cap);
     }
 
     [Fact]
-    public void IsDoneStage3ContractObjectiveNpc_NoNamedPursuitRequired()
+    public void PersistentObjectives_Stage3MatchReportsRawWireStage()
     {
-        // The intent-level recognition fires on the contract stage ALONE — no NAMED Talk/Explore
-        // re-targeting (unlike IsSettledStage3TurnInNpc), because the intent can pursue the
-        // objective via an unnamed Explore so that count stays zero.
+        // Raw association does not depend on prior goal emissions.
         var contract = new ContractProjection
         { ContractId = 883u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
         var world = WorldWithContracts(contract);
-        Assert.True(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(world, "Buckminster"));
-        Assert.False(LlmGoalPolicy.IsSettledStage3TurnInNpc(world, new EventStream(), "Buckminster"));
+        var stack = StackWithFrame("quest:locate", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(world, new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("raw contract match: id=883 wire-stage=3 relation=turn-in", cap);
     }
 
     [Fact]
-    public void IsDoneStage3ContractObjectiveNpc_LiveBusinessOrInProgress_False()
+    public void PersistentObjectives_MultipleContractMatchesReportEachRawStage()
     {
-        // An NPC with any non-stage-3 contract (live business) is NOT a settled objective.
+        // Every matching row is reported independently.
         var done = new ContractProjection
         { ContractId = 884u, Stage = 3u, Name = "Locate", NpcEnd = "Broker", Stage3SinceUtc = DateTimeOffset.UtcNow };
         var live = new ContractProjection
         { ContractId = 885u, Stage = 2u, Name = "Kill", NpcStart = "Broker", NpcEnd = "Sergeant" };
-        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(done, live), "Broker"));
-        // An in-progress-only contract NPC is not done.
+        var brokerStack = StackWithFrame("quest:broker", "Broker", IntentLifecycle.Active);
+        var brokerCap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(done, live), new EventStream(), null, brokerStack),
+            "## Persistent objectives");
+        Assert.Contains("id=884 wire-stage=3 relation=turn-in", brokerCap);
+        Assert.Contains("id=885 wire-stage=2 relation=start", brokerCap);
+
         var liveOnly = new ContractProjection
         { ContractId = 886u, Stage = 2u, Name = "Kill", NpcEnd = "Sergeant" };
-        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(liveOnly), "Sergeant"));
+        var sergeantStack = StackWithFrame("quest:kill", "Sergeant", IntentLifecycle.Active);
+        var sergeantCap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(liveOnly), new EventStream(), null, sergeantStack),
+            "## Persistent objectives");
+        Assert.Contains("id=886 wire-stage=2 relation=turn-in", sergeantCap);
     }
 
     [Fact]
-    public void IsDoneStage3ContractObjectiveNpc_Stage3WithoutDoneTime_False()
+    public void PersistentObjectives_RawStageDoesNotDependOnTransitionTime()
     {
-        // A stage-3 row without the done-time recorded is not treated as a settled objective.
+        // The wire stage is independent of whether a local transition time was recorded.
         var c = new ContractProjection
         { ContractId = 889u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = null };
-        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(c), "Buckminster"));
+        var stack = StackWithFrame("quest:locate", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(c), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("id=889 wire-stage=3 relation=turn-in", cap);
     }
 
     [Fact]
-    public void IsDoneStage3ContractObjectiveNpc_AmbiguousTurnIn_False()
+    public void PersistentObjectives_SharedTurnInReportsBothRawRows()
     {
         // Two done contracts share the same NpcEnd -> attribution ambiguous -> not flagged.
         var a = new ContractProjection
         { ContractId = 890u, Stage = 3u, Name = "Locate", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
         var b = new ContractProjection
         { ContractId = 891u, Stage = 3u, Name = "Deliver", NpcEnd = "Buckminster", Stage3SinceUtc = DateTimeOffset.UtcNow };
-        Assert.False(LlmGoalPolicy.IsDoneStage3ContractObjectiveNpc(WorldWithContracts(a, b), "Buckminster"));
+        var stack = StackWithFrame("quest:locate", "Buckminster", IntentLifecycle.Active);
+        var cap = Section(
+            LlmGoalPolicy.BuildUserPrompt(
+                WorldWithContracts(a, b), new EventStream(), null, stack),
+            "## Persistent objectives");
+        Assert.Contains("id=890 wire-stage=3 relation=turn-in", cap);
+        Assert.Contains("id=891 wire-stage=3 relation=turn-in", cap);
     }
 }

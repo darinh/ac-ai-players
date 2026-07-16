@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The "DONE (stage 3, complete)" contract note counts hand-in Talk goals via
-// CountRecentTalkGoalsToName. That count read the perception/motion-dominated
-// 256-event ring, so re-talks to a turn-in NPC spread across minutes were
-// evicted before the count reached the hand-in threshold and the note silently
-// never rendered for a genuinely re-talked NPC. The fix reads a DEDICATED
-// durable goal-emission window that outlives the ring. These tests lock that
-// goal history survives heavy perception traffic and that the count finds
-// re-talks across it.
+// Contract prompt evidence counts Talk and Explore goals via the durable
+// goal-emission window rather than the perception/motion-dominated event ring.
+// These tests lock that raw history survives heavy perception traffic.
 
 using System;
 using System.Linq;
@@ -62,7 +57,7 @@ public class DurableGoalEmissionTests
         es.Append(TalkGoal("Npc", T0.AddSeconds(3)));
 
         // Ring-based counting would now see only ONE Talk (the other evicted);
-        // the durable-window read finds BOTH, so the hand-in threshold is met.
+        // the durable-window read finds BOTH for the prompt's raw history.
         Assert.Equal(2, LlmGoalPolicy.CountRecentTalkGoalsToName(es, "Npc", since));
     }
 
@@ -170,7 +165,7 @@ public class DurableGoalEmissionTests
     // --- Role-title-suffix normalization (the prompt renders objects as
     // `Name "role"`, and a model frequently copies that whole label into the
     // target selector; the Motor RESOLVES such a target by stripping the suffix,
-    // but the fixation/settled-turn-in/refresh counters read the bot's OWN
+    // but the prompt-history/refresh counters read the bot's OWN
     // emission text and previously matched only an EXACT bare name, so a
     // role-suffixed emission silently counted 0 and the guards keyed on it never
     // fired). These pin that the counters now match a role-suffixed emission
@@ -179,10 +174,7 @@ public class DurableGoalEmissionTests
     [Fact]
     public void CountRecentExploreGoalsToName_CountsRoleSuffixedTargetAsBareName()
     {
-        // Live wedge: a model emitted Explore target=name="Buckminster "Bartender
-        // Greeter"" repeatedly; the settled-stage-3 turn-in guard counts Explore
-        // pursuits to the bare contract NPC name, so the suffixed emissions must
-        // count against "Buckminster".
+        // A role-suffixed target must count against the bare contract NPC name.
         var es = new EventStream();
         es.Append(ExploreGoal("Buckminster \"Bartender Greeter\"", T0.AddSeconds(1)));
         es.Append(ExploreGoal("Buckminster \"Bartender Greeter\"", T0.AddSeconds(2)));
