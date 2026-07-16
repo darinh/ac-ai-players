@@ -12606,6 +12606,21 @@ internal sealed class LlmGoalPolicy : IGoalPolicy
                 "approach progress; if position/reach stops changing, revise instead.");
             sb.AppendLine(
                 "- Source does not enforce this check or veto your goal; YOU must apply it.");
+            sb.AppendLine(
+                "- FINAL RESPONSE AUDIT (mandatory after drafting the goal, before emitting JSON):");
+            sb.AppendLine(
+                "  1. INTERACTION GATE: for a candidate `Talk`, `Use`, or `Give`, compare its target name against " +
+                "EVERY `post-stage-3 goal history` row above. If any matching row has `Talk=1` or more and your " +
+                "rationale cannot quote the exact allowed exception line, the candidate FAILS. Changing the verb " +
+                "does not pass this gate.");
+            sb.AppendLine(
+                "  2. ITEM GATE: for a candidate `Give`, its item name MUST be copied exactly from a row in " +
+                "`## Held items` or `## Inventory`. A contract tracker id/name/objective is NOT held-item evidence. " +
+                "An item you merely assume exists, call a canonical name, or plan to acquire later FAILS.");
+            sb.AppendLine(
+                "  3. If either gate fails, DO NOT emit that candidate or invent an unobserved prerequisite intent. " +
+                "Block/revise the unsupported intent, choose a different action grounded in shown evidence, and run " +
+                "this audit again. Emit JSON only after both gates pass.");
         }
 
         var assembled = sb.ToString();
