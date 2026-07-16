@@ -187,6 +187,14 @@ internal enum GoalKind
     /// approve (Strategy owns that). Fails cleanly when no request is pending.
     /// </summary>
     AllegianceApprove = 23,
+
+    /// <summary>
+    /// Remove an equipped item and return it to the bot's pack. The LLM names
+    /// the currently wielded item in <see cref="Goal.Item"/>; the motor resolves
+    /// that selector and sends the inventory move. The motor makes no decision
+    /// about which item to remove or whether removing it is desirable.
+    /// </summary>
+    Dequip = 24,
 }
 
 /// <summary>
@@ -276,7 +284,7 @@ internal sealed record Goal
 
     /// <summary>
     /// Secondary object for two-actor goals: the item to GIVE,
-    /// the item to PICKUP, the item to WIELD. Null otherwise.
+    /// the item to PICKUP, WIELD, or DEQUIP. Null otherwise.
     /// </summary>
     [JsonPropertyName("item")]
     public Selector? Item { get; init; }

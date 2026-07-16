@@ -8,7 +8,6 @@
 // What it WILL do (illustrating the schema-only behavior):
 //   - If a nearby creature is observed-hostile -> Attack goal
 //     (priority high)
-//   - If inventory contains a wearable not yet wielded -> Wield
 //   - If a nearby pickup-eligible item is on the ground -> Pickup
 //   - If inventory contains a "newly-acquired" item (added since
 //     last goal) -> Use goal targeting the item itself (so the
@@ -22,8 +21,8 @@
 //   - Use a specific portal/door to make academy progress
 //
 // Therefore: with this policy alone the bot will explore, pick up
-// loot, equip armor, attack hostiles — but it will NOT exit the
-// academy on its own. That's the LLM's job (LlmGoalPolicy).
+// loot, and attack hostiles, but it will not choose equipment or
+// complete directed progress. Those decisions belong to the LLM.
 //
 // We KEEP this policy in production because:
 //   1) Pure-LLM mode would stall if the LLM endpoint is offline
@@ -228,86 +227,6 @@ internal sealed class NoQuestKnowledgePolicy : IGoalPolicy
                 new Selector { Guid = hostile.Guid, Name = hostile.Name },
                 null, priority: 7,
                 rationale: $"observed-hostile {hostile.Name} at d={hostile.Distance:F1}");
-
-        // 3) Wield: any inventory item with ValidLocations set and not yet wielded.
-        //
-        // Symmetric dedup with steps 4/5b/5c/5d/6/6b: filter out guids
-        // already proposed in the recent window, and remember each new
-        // proposal. Without this, a Wield that the driver silently
-        // no-ops (Wield is NOT in the action-dispatch allowlist; the
-        // pickup→equip pipeline owns the only working wield path) AND
-        // that the server failed to actuate (e.g. PHASE6L
-        // GetAndWieldItem race losing to the slot-filled check) gets
-        // re-proposed every tick forever — starving steps 4/5b/5c/5d/6
-        // of CPU and blocking all downstream behaviour. portal02 spike
-        // smoking gun: Leather Cap 0x80000483 picked up at L2892,
-        // PHASE6L sent L2942, InventoryServerSaveFailed err=0 at L2950,
-        // NO WieldObject ever. From L3023 onward fallback re-proposed
-        // Wield{Cap} on every one of 24+ ticks; step 5d (Use Portal)
-        // never executed despite portal visible at d=12.6u.
-        // Mechanical weapon-collision facts for the whole inventory, used
-        // to skip a self-disarming auto-wield below. Mirrors the PHASE7F.4
-        // auto-equip collision skip (HandshakeDriver) and the server's
-        // CheckWeaponCollision precondition.
-        var nqpInventoryFacts = world.Inventory
-            .Select(i => new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt))
-            .ToList();
-        // Does the bot have loaded ammo (an item wielded in the missile-ammo
-        // slot)? A missile LAUNCHER (a MissileWeapon carrying an AmmoType — vs a
-        // self-firing THROWN weapon, whose AmmoType is null) cannot fire without
-        // loaded ammo (the server cancels the attack) and, once wielded, forces
-        // Missile combat mode + blocks an unarmed-melee strike.
-        var nqpHasLoadedAmmo = world.Inventory.Any(
-            i => i.WieldedAt is uint aw && aw == ItemTypeMasks.MissileAmmoSlot);
-        var unwielded = world.Inventory
-            .Where(i => i.ValidLocations is uint vl && vl != 0 && (i.WieldedAt is null || i.WieldedAt == 0))
-            .Where(i => !recentlyRejectedGuids.Contains(i.Guid))
-            .Where(i => !_recentProposedGuids.Contains(i.Guid))
-            // Do NOT auto-wield a missile LAUNCHER with no loaded ammo — it can
-            // never attack yet displaces a usable weapon and blocks unarmed melee
-            // (the observed armed=False regression). See WeaponSwap.IsAmmolessLauncher
-            // for the full rationale (incl. why the main-weapon-slot check is needed
-            // to avoid mis-skipping loadable bag ammo). The LLM may still explicitly
-            // wield a launcher (e.g. when it plans to load ammo).
-            .Where(i => !WeaponSwap.IsAmmolessLauncher(
-                i.ItemType, i.AmmoType, i.ValidLocations, nqpHasLoadedAmmo))
-            // Do NOT auto-wield gear whose wield would dequip a currently-
-            // wielded WEAPON — a loadout DOWNGRADE the LLM owns, not the
-            // mechanical fallback. The earlier guard only caught a redundant
-            // second WEAPON (self-disarm: e.g. auto-wielding a second ranged
-            // weapon while a melee weapon is wielded). But the dequip-before-
-            // wield swap now also frees the off-hand for a two-handed weapon,
-            // so auto-wielding an off-hand SHIELD would dequip the bot's
-            // (possibly trained-skill) two-handed weapon. Skip any gear whose
-            // blocking set includes a wielded weapon; gear that displaces only
-            // non-weapons (armor) or nothing is fine. Pure server-precondition
-            // mirror (WeaponSwap mirrors the server's CheckWeaponCollision) —
-            // no weapon preference, no game knowledge; the first weapon into an
-            // empty slot is unaffected.
-            .Where(i =>
-            {
-                var blockers = WeaponSwap.FindBlockingWieldedItems(
-                    new WeaponSwap.ItemFacts(i.Guid, i.ItemType, i.ValidLocations, i.WieldedAt),
-                    nqpInventoryFacts);
-                return !blockers.Any(bg =>
-                    nqpInventoryFacts.Any(f => f.Guid == bg && WeaponSwap.IsWieldedWeapon(f)));
-            })
-            // No source-side gear-class ordering: ranking inventory by
-            // "weapons/armor first" is a game-knowledge rule-of-thumb the
-            // LLM owns, not the mechanical fallback. The fallback wields
-            // every equippable item across successive ticks regardless of
-            // order, so the end state is identical; we just take whatever
-            // the server's inventory iteration yields first.
-            .FirstOrDefault();
-        if (unwielded is not null)
-        {
-            RememberProposed(unwielded.Guid);
-            return MakeGoal(GoalKind.Wield,
-                new Selector { Name = "self" }, // wield target is the bot
-                new Selector { Guid = unwielded.Guid, Name = unwielded.Name, Wcid = unwielded.Wcid },
-                priority: 6,
-                rationale: $"unwielded gear in inventory: {unwielded.Name}");
-        }
 
         // cp-2360/cp-2361/cp-2373: reset the per-landblock town-tour memory on
         // egress (landblock change) or a productive inventory-add (loot/quest
